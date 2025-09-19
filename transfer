@@ -1,21 +1,129 @@
-print("=== DIAGNOSTIC COLONNES ===")
-print("Colonnes dans df_ti_dept_sans_idf :")
-print(list(df_ti_dept_sans_idf.columns))
-print("\nColonnes dans df_dept :")
-print(list(df_dept.columns))
+####################### Graphique de province ############################ 
 
-# Identifier les colonnes communes (sauf les clés de jointure)
-colonnes_communes = set(df_ti_dept_sans_idf.columns).intersection(set(df_dept.columns))
-colonnes_communes.discard('DEPT')  # Garder la clé de jointure
-colonnes_communes.discard('num_dpt')  # Garder la clé de jointure
+df_dept = pd.read_excel(r"", header=3)
+df_dept = df_dept.rename(columns={'Numéro': 'num_dpt'})
+df_dept = df_dept.rename(columns={'Département': 'nom_dpt'})
+df_dept = df_dept.rename(columns={'2025 (p)': 'population'})
 
-print(f"Colonnes communes qui posent problème : {colonnes_communes}")
+df_ti_dept['DEPT'] = df_ti_dept['DEPT'].astype(str)
+df_dept['num_dpt'] = df_dept['num_dpt'].astype(str)
 
-# Supprimer les colonnes dupliquées d'un des DataFrames
-if colonnes_communes:
-    print(f"Suppression des colonnes dupliquées : {list(colonnes_communes)}")
-    df_dept = df_dept.drop(columns=list(colonnes_communes))
+# Ajoutez un '0' devant les numéros de départements de longueur 1 dans df_dept
+df_dept['num_dpt'] = df_dept['num_dpt'].apply(lambda x: '0' + x if len(x) == 1 else x)
 
-# Merge sans problème
-df_ti_dept_sans_idf = pd.merge(df_ti_dept_sans_idf, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
-print(f"Lignes finales : {len(df_ti_dept_sans_idf)}")
+
+liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
+
+df_ti_dept = pd.merge(df_ti_dept, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
+
+df_ti_dept['Year'] = df_ti_dept['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
+
+
+df_ti_dept['TAUX_INFL'] =df_ti_dept['TAUX_INFL'].astype(float)
+df_ti_dept['population'] =df_ti_dept['population'].astype(float)
+df_ti_dept['TAUX_INFL_POP'] = df_ti_dept.apply(lambda row: row['TAUX_INFL'] * row['population'], axis=1)
+
+df_ti_dept_grouped = df_ti_dept.groupby('Year').agg({'TAUX_INFL_POP': 'sum', 'population': 'sum'}).reset_index()
+df_ti_dept_grouped['TAUX_INFL'] = df_ti_dept_grouped['TAUX_INFL_POP'] / df_ti_dept_grouped['population']
+df_ti_dept_grouped = df_ti_dept_grouped.drop(columns=['TAUX_INFL_POP'])
+
+
+new_data = pd.DataFrame([{'Year': current_year, 'TAUX_INFL': 0}])
+df_ti_dept_grouped = pd.concat([df_ti_dept_grouped, new_data], ignore_index=True)
+
+df_ti_dept_grouped['Year'] = pd.to_datetime(df_ti_dept_grouped['Year'].astype(str), format='%Y')
+
+df_ti_dept_grouped['TAUX_INFL_TRANSFO'] = (100/(1+df_ti_dept_grouped['TAUX_INFL']))
+
+taux_infl_2015_2014 = df_ti_dept_grouped[df_ti_dept_grouped['Year'].dt.year.isin([2015, 2014])]['TAUX_INFL_TRANSFO'].mean()
+
+df_ti_dept_grouped['TAUX_INFL_BASE_2015'] = (df_ti_dept_grouped['TAUX_INFL_TRANSFO']/taux_infl_2015_2014)*100
+
+
+# Tracer le graphique
+plt.figure(figsize=(10, 5))
+plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'])
+plt.xlabel('Year')
+plt.ylabel('(1+TAUX_INFL)*100')
+plt.title('Graphique de (1+TAUX_INFL)*100 en fonction de l\'année')
+plt.grid(True)
+plt.show()
+
+
+df= pd.read_csv(rf'N:', sep = ';')
+df=df[4:]
+df = df.rename(columns={df.columns[1]: 'taux_infl'})
+df['taux_infl'] = df['taux_infl'].astype(float)
+df['Year'] = df['Libellé'].apply(lambda x: int(x.split('-')[0]))
+df['Quarter'] = df['Libellé'].apply(lambda x: int(x.split('T')[-1]))
+
+
+df['Month'] = df['Quarter'] * 3
+
+df['Période'] = pd.to_datetime(df[['Year', 'Month']].assign(DAY=1))
+
+df['Moyenne Glissante'] = df['taux_infl'].rolling(window=4, min_periods=1).mean()
+
+
+plt.figure(figsize=(10, 6))
+plt.plot(df['Période'], df['Moyenne Glissante'], label="Moyenne Glissante par trimestre de l'INSEE")
+plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'], label='Taux Inflation par année de CL')
+
+plt.xlabel('Année')
+plt.ylabel('Valeur')
+plt.legend()
+
+
+
+{
+	"name": "KeyError",
+	"message": "'population'",
+	"stack": "---------------------------------------------------------------------------
+KeyError                                  Traceback (most recent call last)
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3812, in Index.get_loc(self, key)
+   3811 try:
+-> 3812     return self._engine.get_loc(casted_key)
+   3813 except KeyError as err:
+
+File pandas/_libs/index.pyx:167, in pandas._libs.index.IndexEngine.get_loc()
+
+File pandas/_libs/index.pyx:196, in pandas._libs.index.IndexEngine.get_loc()
+
+File pandas/_libs/hashtable_class_helper.pxi:7088, in pandas._libs.hashtable.PyObjectHashTable.get_item()
+
+File pandas/_libs/hashtable_class_helper.pxi:7096, in pandas._libs.hashtable.PyObjectHashTable.get_item()
+
+KeyError: 'population'
+
+The above exception was the direct cause of the following exception:
+
+KeyError                                  Traceback (most recent call last)
+Cell In[162], line 23
+     19 df_ti_dept['Year'] = df_ti_dept['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
+     22 df_ti_dept['TAUX_INFL'] =df_ti_dept['TAUX_INFL'].astype(float)
+---> 23 df_ti_dept['population'] =df_ti_dept['population'].astype(float)
+     24 df_ti_dept['TAUX_INFL_POP'] = df_ti_dept.apply(lambda row: row['TAUX_INFL'] * row['population'], axis=1)
+     26 df_ti_dept_grouped = df_ti_dept.groupby('Year').agg({'TAUX_INFL_POP': 'sum', 'population': 'sum'}).reset_index()
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\frame.py:4107, in DataFrame.__getitem__(self, key)
+   4105 if self.columns.nlevels > 1:
+   4106     return self._getitem_multilevel(key)
+-> 4107 indexer = self.columns.get_loc(key)
+   4108 if is_integer(indexer):
+   4109     indexer = [indexer]
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3819, in Index.get_loc(self, key)
+   3814     if isinstance(casted_key, slice) or (
+   3815         isinstance(casted_key, abc.Iterable)
+   3816         and any(isinstance(x, slice) for x in casted_key)
+   3817     ):
+   3818         raise InvalidIndexError(key)
+-> 3819     raise KeyError(key) from err
+   3820 except TypeError:
+   3821     # If we have a listlike key, _check_indexing_error will raise
+   3822     #  InvalidIndexError. Otherwise we fall through and re-raise
+   3823     #  the TypeError.
+   3824     self._check_indexing_error(key)
+
+KeyError: 'population'"
+}
