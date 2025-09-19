@@ -1,0 +1,18 @@
+df_dept = pd.read_excel(r"N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\departements francais.xlsx", header=3)
+df_dept = df_dept.rename(columns={'Numéro': 'num_dpt'})
+df_dept = df_dept.rename(columns={'Département': 'nom_dpt'})
+df_dept = df_dept.rename(columns={'2025 (p)': 'population'})
+
+df_ti_dept['DEPT'] = df_ti_dept['DEPT'].astype(str)
+df_dept['num_dpt'] = df_dept['num_dpt'].astype(str)
+
+# Ajoutez un '0' devant les numéros de départements de longueur 1 dans df_dept
+df_dept['num_dpt'] = df_dept['num_dpt'].apply(lambda x: '0' + x if len(x) == 1 else x)
+
+
+liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
+
+df_ti_dept = pd.merge(df_ti_dept, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
+
+df_ti_dept_sans_idf = df_ti_dept[~df_ti_dept["DEPT"].isin(liste_depts_idf)].copy()
+df_ti_dept_sans_idf.info()
