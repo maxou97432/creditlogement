@@ -1,3 +1,1 @@
-final_df_idf.to_csv('evolution_idf.csv', index=False, path_or_buf= "N:\uflumth\indicateur_marche\V2\resultats")
-                                                                                                                  ^
-SyntaxError: (unicode error) 'unicodeescape' codec can't decode bytes in position 2-4: truncated \uXXXX escape
+final_df_idf.to_csv(r"N:\uflumth\indicateur_marche\V2\resultats\evolution_idf.csv", index=False)
