@@ -1,35 +1,45 @@
-####################### Graphique de province ############################ 
-df_dept = pd.read_excel(r"chemin", header=3)
+####################### Graphique de province ############################
+# SOLUTION : Toujours repartir d'une copie fraîche
+df_ti_dept_work = df_ti_dept.copy()  # Copie de travail
+
+df_dept = pd.read_excel(r"", header=3)
 df_dept = df_dept.rename(columns={'Numéro': 'num_dpt'})
 df_dept = df_dept.rename(columns={'Département': 'nom_dpt'})
 df_dept = df_dept.rename(columns={'2025 (p)': 'population'})
 
-print("=== DIAGNOSTIC DU MERGE ===")
-print(f"Colonnes df_dept : {list(df_dept.columns)}")
-print(f"Échantillon df_dept :")
-print(df_dept[['num_dpt', 'nom_dpt', 'population']].head())
-
-df_ti_dept['DEPT'] = df_ti_dept['DEPT'].astype(str)
+df_ti_dept_work['DEPT'] = df_ti_dept_work['DEPT'].astype(str)
 df_dept['num_dpt'] = df_dept['num_dpt'].astype(str)
 df_dept['num_dpt'] = df_dept['num_dpt'].apply(lambda x: '0' + x if len(x) == 1 else x)
 
-print(f"\nAvant merge - lignes df_ti_dept : {len(df_ti_dept)}")
-print(f"Départements uniques df_ti_dept : {sorted(df_ti_dept['DEPT'].unique())}")
-print(f"Départements uniques df_dept : {sorted(df_dept['num_dpt'].unique())}")
+liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
 
-# Vérifier les correspondances possibles
-correspondances = set(df_ti_dept['DEPT'].unique()).intersection(set(df_dept['num_dpt'].unique()))
-print(f"Départements en correspondance : {sorted(correspondances)}")
+# Merge sur la copie de travail
+df_ti_dept_work = pd.merge(df_ti_dept_work, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
 
-# Merge avec diagnostic
-df_ti_dept_merged = pd.merge(df_ti_dept, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
+df_ti_dept_work['Year'] = df_ti_dept_work['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
+df_ti_dept_work['TAUX_INFL'] = df_ti_dept_work['TAUX_INFL'].astype(float)
+df_ti_dept_work['population'] = df_ti_dept_work['population'].astype(float)
+df_ti_dept_work['TAUX_INFL_POP'] = df_ti_dept_work.apply(lambda row: row['TAUX_INFL'] * row['population'], axis=1)
 
-print(f"\nAprès merge - lignes : {len(df_ti_dept_merged)}")
-print(f"Colonnes après merge : {list(df_ti_dept_merged.columns)}")
+df_ti_dept_grouped = df_ti_dept_work.groupby('Year').agg({'TAUX_INFL_POP': 'sum', 'population': 'sum'}).reset_index()
+df_ti_dept_grouped['TAUX_INFL'] = df_ti_dept_grouped['TAUX_INFL_POP'] / df_ti_dept_grouped['population']
+df_ti_dept_grouped = df_ti_dept_grouped.drop(columns=['TAUX_INFL_POP'])
 
-if len(df_ti_dept_merged) == 0:
-    print("❌ ERREUR : Aucune ligne après merge !")
-    print("Vérifiez la correspondance des départements")
-else:
-    print("✅ Merge réussi")
-    df_ti_dept = df_ti_dept_merged  # Réassigner seulement si le merge a fonctionné
+new_data = pd.DataFrame([{'Year': current_year, 'TAUX_INFL': 0}])
+df_ti_dept_grouped = pd.concat([df_ti_dept_grouped, new_data], ignore_index=True)
+df_ti_dept_grouped['Year'] = pd.to_datetime(df_ti_dept_grouped['Year'].astype(str), format='%Y')
+df_ti_dept_grouped['TAUX_INFL_TRANSFO'] = (100/(1+df_ti_dept_grouped['TAUX_INFL']))
+
+taux_infl_2015_2014 = df_ti_dept_grouped[df_ti_dept_grouped['Year'].dt.year.isin([2015, 2014])]['TAUX_INFL_TRANSFO'].mean()
+df_ti_dept_grouped['TAUX_INFL_BASE_2015'] = (df_ti_dept_grouped['TAUX_INFL_TRANSFO']/taux_infl_2015_2014)*100
+
+# Graphique
+plt.figure(figsize=(10, 5))
+plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'])
+plt.xlabel('Year')
+plt.ylabel('(1+TAUX_INFL)*100')
+plt.title('Graphique de (1+TAUX_INFL)*100 en fonction de l\'année')
+plt.grid(True)
+plt.show()
+
+print(f"✅ Graphique généré - {len(df_ti_dept_grouped)} points")
