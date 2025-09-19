@@ -1,19 +1,24 @@
 ####################### Graphique de province ############################
-# SOLUTION : Toujours repartir d'une copie fraîche
-df_ti_dept_work = df_ti_dept.copy()  # Copie de travail
 
-df_dept = pd.read_excel(r"", header=3)
+df_ti_dept_work = df_ti_dept.copy()  
+
+df_dept = pd.read_excel(r"N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\departements francais.xlsx", header=3)
 df_dept = df_dept.rename(columns={'Numéro': 'num_dpt'})
 df_dept = df_dept.rename(columns={'Département': 'nom_dpt'})
 df_dept = df_dept.rename(columns={'2025 (p)': 'population'})
+
+#On exclu l'IDF
+liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
+df_ti_dept['DEPT'] = df_ti_dept['DEPT'].astype(str)
+df_ti_province = df_ti_dept[~df_ti_dept["DEPT"].isin(liste_depts_idf)].copy()
+
 
 df_ti_dept_work['DEPT'] = df_ti_dept_work['DEPT'].astype(str)
 df_dept['num_dpt'] = df_dept['num_dpt'].astype(str)
 df_dept['num_dpt'] = df_dept['num_dpt'].apply(lambda x: '0' + x if len(x) == 1 else x)
 
-liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
 
-# Merge sur la copie de travail
+
 df_ti_dept_work = pd.merge(df_ti_dept_work, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
 
 df_ti_dept_work['Year'] = df_ti_dept_work['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
@@ -42,4 +47,25 @@ plt.title('Graphique de (1+TAUX_INFL)*100 en fonction de l\'année')
 plt.grid(True)
 plt.show()
 
-print(f"✅ Graphique généré - {len(df_ti_dept_grouped)} points")
+df= pd.read_csv(rf'N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\valeurs_trimestrielles_PROVINCE_APP.csv', sep = ';')
+df=df[4:]
+df = df.rename(columns={df.columns[1]: 'taux_infl'})
+df['taux_infl'] = df['taux_infl'].astype(float)
+df['Year'] = df['Libellé'].apply(lambda x: int(x.split('-')[0]))
+df['Quarter'] = df['Libellé'].apply(lambda x: int(x.split('T')[-1]))
+
+
+df['Month'] = df['Quarter'] * 3
+
+df['Période'] = pd.to_datetime(df[['Year', 'Month']].assign(DAY=1))
+
+df['Moyenne Glissante'] = df['taux_infl'].rolling(window=4, min_periods=1).mean()
+
+
+plt.figure(figsize=(10, 6))
+plt.plot(df['Période'], df['Moyenne Glissante'], label="Moyenne Glissante par trimestre de l'INSEE")
+plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'], label='Taux Inflation par année de CL')
+
+plt.xlabel('Année')
+plt.ylabel('Valeur')
+plt.legend()
