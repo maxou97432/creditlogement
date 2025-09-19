@@ -1,36 +1,3 @@
-# TODO : Évolution de l'indice des prix selon INSEE pour les villes: df_resultat_villes
-
- #Choisir entre APP (appartememnt), MAISON (maison) en fonction de la bdd de l'INSEE
-
-villes = {"PARIS":"APP","MARSEILLE":"APP","LYON":"APP","LILLE":"MAISON"}
-
-def get_percentage_changes(file_name):
-    
-    chemin = rf"N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\valeurs_trimestrielles_{file_name}.csv"
-    df = pd.read_csv(chemin, sep=';')
-    df = df.rename(columns={df.columns[0]: 'Période', df.columns[1]: 'Valeur'})
-    df = df.iloc[3:, :]
-    df['Valeur'] = pd.to_numeric(df['Valeur'], errors='coerce')
-    année_actuelle = int(df.iloc[0]['Période'].split('-')[0])
-
-    un_an = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-1}-T1', 'Valeur'].values[0] - 1).round(4)
-    cinq_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-5}-T1', 'Valeur'].values[0] - 1).round(4)
-    huit_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-8}-T1', 'Valeur'].values[0] - 1).round(4)
-    dix_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-10}-T1', 'Valeur'].values[0] - 1).round(4)
-    
-    return [dix_ans * 100, huit_ans * 100, cinq_ans * 100, un_an * 100]
-
-resultat = {'Ville': [], '10 ans': [], '8 ans': [], '5 ans': [], '1 an': []}
-
-for ville,type_bien in villes:
-    file_name = f"{ville}_{type_bien}"
-    changes = get_percentage_changes(file_name)
-    resultat['Ville'].append(ville.capitalize())
-    resultat['10 ans'].append(format_change(changes[0]))
-    resultat['8 ans'].append(format_change(changes[1]))
-    resultat['5 ans'].append(format_change(changes[2]))
-    resultat['1 an'].append(format_change(changes[3]))
-
-
-df_resultat_villes = pd.DataFrame(resultat)
-df_resultat_villes
+final_df_idf.to_csv('evolution_idf.csv', index=False, path_or_buf= "N:\uflumth\indicateur_marche\V2\resultats")
+                                                                                                                  ^
+SyntaxError: (unicode error) 'unicodeescape' codec can't decode bytes in position 2-4: truncated \uXXXX escape
