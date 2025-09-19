@@ -1,95 +1,36 @@
-{
-	"name": "KeyError",
-	"message": "'TAUX_INFL'",
-	"stack": "---------------------------------------------------------------------------
-KeyError                                  Traceback (most recent call last)
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3812, in Index.get_loc(self, key)
-   3811 try:
--> 3812     return self._engine.get_loc(casted_key)
-   3813 except KeyError as err:
+# TODO : Évolution de l'indice des prix selon INSEE pour les villes: df_resultat_villes
 
-File pandas/_libs/index.pyx:167, in pandas._libs.index.IndexEngine.get_loc()
+ #Choisir entre APP (appartememnt), MAISON (maison) en fonction de la bdd de l'INSEE
 
-File pandas/_libs/index.pyx:196, in pandas._libs.index.IndexEngine.get_loc()
+villes = {"PARIS":"APP","MARSEILLE":"APP","LYON":"APP","LILLE":"MAISON"}
 
-File pandas/_libs/hashtable_class_helper.pxi:7088, in pandas._libs.hashtable.PyObjectHashTable.get_item()
+def get_percentage_changes(file_name):
+    
+    chemin = rf"N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\valeurs_trimestrielles_{file_name}.csv"
+    df = pd.read_csv(chemin, sep=';')
+    df = df.rename(columns={df.columns[0]: 'Période', df.columns[1]: 'Valeur'})
+    df = df.iloc[3:, :]
+    df['Valeur'] = pd.to_numeric(df['Valeur'], errors='coerce')
+    année_actuelle = int(df.iloc[0]['Période'].split('-')[0])
 
-File pandas/_libs/hashtable_class_helper.pxi:7096, in pandas._libs.hashtable.PyObjectHashTable.get_item()
+    un_an = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-1}-T1', 'Valeur'].values[0] - 1).round(4)
+    cinq_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-5}-T1', 'Valeur'].values[0] - 1).round(4)
+    huit_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-8}-T1', 'Valeur'].values[0] - 1).round(4)
+    dix_ans = (df.loc[df['Période'] == f'{année_actuelle}-T1', 'Valeur'].values[0] / df.loc[df['Période'] == f'{année_actuelle-10}-T1', 'Valeur'].values[0] - 1).round(4)
+    
+    return [dix_ans * 100, huit_ans * 100, cinq_ans * 100, un_an * 100]
 
-KeyError: 'TAUX_INFL'
+resultat = {'Ville': [], '10 ans': [], '8 ans': [], '5 ans': [], '1 an': []}
 
-The above exception was the direct cause of the following exception:
+for ville,type_bien in villes:
+    file_name = f"{ville}_{type_bien}"
+    changes = get_percentage_changes(file_name)
+    resultat['Ville'].append(ville.capitalize())
+    resultat['10 ans'].append(format_change(changes[0]))
+    resultat['8 ans'].append(format_change(changes[1]))
+    resultat['5 ans'].append(format_change(changes[2]))
+    resultat['1 an'].append(format_change(changes[3]))
 
-KeyError                                  Traceback (most recent call last)
-Cell In[193], line 37
-     32     df_ti_dept['TAUX_INFL_FINAL'] = ((taux_infl_current_year/df_ti_dept['TAUX_INFL_2015'])-1)*100
-     34     df_resultats = pd.concat([df_resultats, df_ti_dept[['Year', 'TAUX_INFL_FINAL']]], ignore_index=True)
----> 37 moyenne_par_annee = df_resultats.groupby(df_resultats['Year'].dt.year).apply(moyenne_ponderee).reset_index(name = 'TAUX_INFL_FINAL')
-     39 dix_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 10, current_year)]['TAUX_INFL_FINAL'].mean()
-     40 huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
 
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\groupby.py:1825, in GroupBy.apply(self, func, include_groups, *args, **kwargs)
-   1823 with option_context(\"mode.chained_assignment\", None):
-   1824     try:
--> 1825         result = self._python_apply_general(f, self._selected_obj)
-   1826         if (
-   1827             not isinstance(self.obj, Series)
-   1828             and self._selection is None
-   1829             and self._selected_obj.shape != self._obj_with_exclusions.shape
-   1830         ):
-   1831             warnings.warn(
-   1832                 message=_apply_groupings_depr.format(
-   1833                     type(self).__name__, \"apply\"
-   (...)   1836                 stacklevel=find_stack_level(),
-   1837             )
-
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\groupby.py:1886, in GroupBy._python_apply_general(self, f, data, not_indexed_same, is_transform, is_agg)
-   1851 @final
-   1852 def _python_apply_general(
-   1853     self,
-   (...)   1858     is_agg: bool = False,
-   1859 ) -> NDFrameT:
-   1860     \"\"\"
-   1861     Apply function f in python space
-   1862 
-   (...)   1884         data after applying f
-   1885     \"\"\"
--> 1886     values, mutated = self._grouper.apply_groupwise(f, data, self.axis)
-   1887     if not_indexed_same is None:
-   1888         not_indexed_same = mutated
-
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\ops.py:919, in BaseGrouper.apply_groupwise(self, f, data, axis)
-    917 # group might be modified
-    918 group_axes = group.axes
---> 919 res = f(group)
-    920 if not mutated and not _is_indexed_like(res, group_axes, axis):
-    921     mutated = True
-
-Cell In[193], line 5, in moyenne_ponderee(group)
-      4 def moyenne_ponderee(group):
-----> 5     taux = pd.to_numeric(group['TAUX_INFL'], errors = 'coerce')
-      6     poids = pd.to_numeric(group['EFFECTIF'], errors = 'coerce')
-      7     return np.average(taux, weights = poids)
-
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\frame.py:4107, in DataFrame.__getitem__(self, key)
-   4105 if self.columns.nlevels > 1:
-   4106     return self._getitem_multilevel(key)
--> 4107 indexer = self.columns.get_loc(key)
-   4108 if is_integer(indexer):
-   4109     indexer = [indexer]
-
-File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3819, in Index.get_loc(self, key)
-   3814     if isinstance(casted_key, slice) or (
-   3815         isinstance(casted_key, abc.Iterable)
-   3816         and any(isinstance(x, slice) for x in casted_key)
-   3817     ):
-   3818         raise InvalidIndexError(key)
--> 3819     raise KeyError(key) from err
-   3820 except TypeError:
-   3821     # If we have a listlike key, _check_indexing_error will raise
-   3822     #  InvalidIndexError. Otherwise we fall through and re-raise
-   3823     #  the TypeError.
-   3824     self._check_indexing_error(key)
-
-KeyError: 'TAUX_INFL'"
-}
+df_resultat_villes = pd.DataFrame(resultat)
+df_resultat_villes
