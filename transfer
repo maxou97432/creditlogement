@@ -1,58 +1,95 @@
+{
+	"name": "KeyError",
+	"message": "'TAUX_INFL'",
+	"stack": "---------------------------------------------------------------------------
+KeyError                                  Traceback (most recent call last)
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3812, in Index.get_loc(self, key)
+   3811 try:
+-> 3812     return self._engine.get_loc(casted_key)
+   3813 except KeyError as err:
 
-ID	REF	TAUX_INFL	EFFECTIF	TAUX_INFL_DIFF	PERIODE	CD_TYP_BIEN	DEPT	PERIODE_REF_MIN	PERIODE_REF_MAX
-0	1	0001_APT_01	-0.0016	1095	0.0312	P-1	APT	01	2024-09-01	2025-09-01
-1	2	0001_APT_02	0.0830	293	0.0493	P-1	APT	02	2024-09-01	2025-09-01
-2	3	0001_APT_03	0.0833	474	0.0543	P-1	APT	03	2024-09-01	2025-09-01
-3	4	0001_APT_04	0.0154	556	0.0819	P-1	APT	04	2024-09-01	2025-09-01
-4	5	0001_APT_05	0.0128	924	0.0315	P-1	APT	05	2024-09-01	2025-09-01
+File pandas/_libs/index.pyx:167, in pandas._libs.index.IndexEngine.get_loc()
 
-         Département  10 ans   8 ans  5 ans   1 an
-0           Yvelines  +15.51  +16.56  +6.98  +5.04
-1     Seine-et-Marne  +13.52  +15.51  +4.88  +2.64
-2            Essonne    +8.9   +9.06  +1.53  +0.19
-3     Hauts-de-Seine  +18.44  +12.76  -3.66  -2.32
-4  Seine-Saint-Denis  +21.43  +21.43  +6.25  +4.91
-5       Val-de-Marne  +20.85  +15.38  -0.66  +1.19
-6         Val-d'Oise  +13.27  +15.33  +4.99  +3.14
-<matplotlib.legend.Legend at 0x1bf4ef27190>
-<Figure size 1000x500 with 1 Axes>
-<Figure size 1000x600 with 1 Axes>
+File pandas/_libs/index.pyx:196, in pandas._libs.index.IndexEngine.get_loc()
 
-      Villes  10 ans   8 ans   5 ans   1 an
-0      PARIS  +20.89  +11.96   -8.76  -1.19
-1      LILLE  +27.63  +24.48   +9.99  +0.96
-2  MARSEILLE  +31.73  +32.88  +25.76  +5.04
-3       LYON  +34.87  +23.88   -4.45  -1.53
-<Figure size 1000x500 with 1 Axes>
-<matplotlib.legend.Legend at 0x1bf4f685a50>
-<Figure size 1000x600 with 1 Axes>
+File pandas/_libs/hashtable_class_helper.pxi:7088, in pandas._libs.hashtable.PyObjectHashTable.get_item()
 
-         Département  10 ans   8 ans  5 ans   1 an
-0           Yvelines  +10.27   +9.18  +1.94  -0.63
-1     Seine-et-Marne   +7.92   +6.63  +2.38  -0.28
-2            Essonne   +9.11   +8.35  +3.12  -0.27
-3     Hauts-de-Seine  +14.27  +11.27   -4.5  -0.52
-4  Seine-Saint-Denis   +17.9  +15.93  -0.67  -0.17
-5       Val-de-Marne   +15.4  +12.59  -0.69  -0.17
-6         Val-d'Oise   +9.89    +8.8  +3.38    0.0
-[['59', '62'], ['04', '05', '06', '13', '83', '84'], ['01', '07', '26', '38', '42', '69', '73', '74']]
----------------------------------------------------------------------------
-AttributeError                            Traceback (most recent call last)
-~\AppData\Local\Temp\9\ipykernel_44420\517427394.py in ?()
-     35     huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
-     36     cinq_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 5, current_year)]['TAUX_INFL_FINAL'].mean()
-     37     un_an = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 1, current_year)]['TAUX_INFL_FINAL'].mean()
-     38 
----> 39     resultats_finaux = resultats_finaux.append({
-     40         'Région': region,
-     41         '10 ans': f'+{dix_ans:.2f}',
-     42         '8 ans': f'+{huit_ans:.2f}',
+File pandas/_libs/hashtable_class_helper.pxi:7096, in pandas._libs.hashtable.PyObjectHashTable.get_item()
 
-~\AppData\Roaming\Python\Python311\site-packages\pandas\core\generic.py in ?(self, name)
-   6314             and name not in self._accessors
-   6315             and self._info_axis._can_hold_identifiers_and_holds_name(name)
-   6316         ):
-   6317             return self[name]
--> 6318         return object.__getattribute__(self, name)
+KeyError: 'TAUX_INFL'
 
-AttributeError: 'DataFrame' object has no attribute 'append'
+The above exception was the direct cause of the following exception:
+
+KeyError                                  Traceback (most recent call last)
+Cell In[193], line 37
+     32     df_ti_dept['TAUX_INFL_FINAL'] = ((taux_infl_current_year/df_ti_dept['TAUX_INFL_2015'])-1)*100
+     34     df_resultats = pd.concat([df_resultats, df_ti_dept[['Year', 'TAUX_INFL_FINAL']]], ignore_index=True)
+---> 37 moyenne_par_annee = df_resultats.groupby(df_resultats['Year'].dt.year).apply(moyenne_ponderee).reset_index(name = 'TAUX_INFL_FINAL')
+     39 dix_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 10, current_year)]['TAUX_INFL_FINAL'].mean()
+     40 huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\groupby.py:1825, in GroupBy.apply(self, func, include_groups, *args, **kwargs)
+   1823 with option_context(\"mode.chained_assignment\", None):
+   1824     try:
+-> 1825         result = self._python_apply_general(f, self._selected_obj)
+   1826         if (
+   1827             not isinstance(self.obj, Series)
+   1828             and self._selection is None
+   1829             and self._selected_obj.shape != self._obj_with_exclusions.shape
+   1830         ):
+   1831             warnings.warn(
+   1832                 message=_apply_groupings_depr.format(
+   1833                     type(self).__name__, \"apply\"
+   (...)   1836                 stacklevel=find_stack_level(),
+   1837             )
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\groupby.py:1886, in GroupBy._python_apply_general(self, f, data, not_indexed_same, is_transform, is_agg)
+   1851 @final
+   1852 def _python_apply_general(
+   1853     self,
+   (...)   1858     is_agg: bool = False,
+   1859 ) -> NDFrameT:
+   1860     \"\"\"
+   1861     Apply function f in python space
+   1862 
+   (...)   1884         data after applying f
+   1885     \"\"\"
+-> 1886     values, mutated = self._grouper.apply_groupwise(f, data, self.axis)
+   1887     if not_indexed_same is None:
+   1888         not_indexed_same = mutated
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\groupby\\ops.py:919, in BaseGrouper.apply_groupwise(self, f, data, axis)
+    917 # group might be modified
+    918 group_axes = group.axes
+--> 919 res = f(group)
+    920 if not mutated and not _is_indexed_like(res, group_axes, axis):
+    921     mutated = True
+
+Cell In[193], line 5, in moyenne_ponderee(group)
+      4 def moyenne_ponderee(group):
+----> 5     taux = pd.to_numeric(group['TAUX_INFL'], errors = 'coerce')
+      6     poids = pd.to_numeric(group['EFFECTIF'], errors = 'coerce')
+      7     return np.average(taux, weights = poids)
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\frame.py:4107, in DataFrame.__getitem__(self, key)
+   4105 if self.columns.nlevels > 1:
+   4106     return self._getitem_multilevel(key)
+-> 4107 indexer = self.columns.get_loc(key)
+   4108 if is_integer(indexer):
+   4109     indexer = [indexer]
+
+File ~\\AppData\\Roaming\\Python\\Python311\\site-packages\\pandas\\core\\indexes\\base.py:3819, in Index.get_loc(self, key)
+   3814     if isinstance(casted_key, slice) or (
+   3815         isinstance(casted_key, abc.Iterable)
+   3816         and any(isinstance(x, slice) for x in casted_key)
+   3817     ):
+   3818         raise InvalidIndexError(key)
+-> 3819     raise KeyError(key) from err
+   3820 except TypeError:
+   3821     # If we have a listlike key, _check_indexing_error will raise
+   3822     #  InvalidIndexError. Otherwise we fall through and re-raise
+   3823     #  the TypeError.
+   3824     self._check_indexing_error(key)
+
+KeyError: 'TAUX_INFL'"
+}
