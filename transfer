@@ -1,71 +1,47 @@
-####################### Graphique de province ############################
+cd_type = 'APT'
+resultats_finaux = pd.DataFrame(columns=['Région', '10 ans', '8 ans', '5 ans', '1 an'])
 
-df_ti_dept_work = df_ti_dept.copy()  
+# Itérer sur chaque région et ses départements
+for region, liste_departements in zip(regions_interested, final_result):
 
-df_dept = pd.read_excel(r"N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\departements francais.xlsx", header=3)
-df_dept = df_dept.rename(columns={'Numéro': 'num_dpt'})
-df_dept = df_dept.rename(columns={'Département': 'nom_dpt'})
-df_dept = df_dept.rename(columns={'2025 (p)': 'population'})
+    df_resultats = pd.DataFrame()
 
-#On exclu l'IDF
-liste_depts_idf = ['92', '93', '94', '95', '91', '78', '77','75']
-df_ti_dept['DEPT'] = df_ti_dept['DEPT'].astype(str)
-df_ti_province = df_ti_dept[~df_ti_dept["DEPT"].isin(liste_depts_idf)].copy()
+    for num_dept in liste_departements:
+        requete_sql = f"""
+        SELECT DISTINCT *
+        FROM df_ti_dept_all
+        WHERE DEPT = {num_dept} AND CD_TYP_BIEN = '{cd_type}'"""
+        df_ti_dept = ps.sqldf(requete_sql, locals())
 
+        df_ti_dept['Year'] = df_ti_dept['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
 
-df_ti_dept_work['DEPT'] = df_ti_dept_work['DEPT'].astype(str)
-df_dept['num_dpt'] = df_dept['num_dpt'].astype(str)
-df_dept['num_dpt'] = df_dept['num_dpt'].apply(lambda x: '0' + x if len(x) == 1 else x)
+        new_data = pd.DataFrame([{'Year': current_year, 'TAUX_INFL': 0}])
+        df_ti_dept = pd.concat([new_data, df_ti_dept], ignore_index=True)
+        df_ti_dept['Year'] = pd.to_datetime(df_ti_dept['Year'].astype(str), format='%Y')
+        df_ti_dept['TAUX_INFL_TRANSFO'] = 100/(1+df_ti_dept['TAUX_INFL'])
 
+        taux_infl_2015_2014 = df_ti_dept[df_ti_dept['Year'].dt.year.isin([2015, 2014])]['TAUX_INFL_TRANSFO'].mean()
+        df_ti_dept['TAUX_INFL_2015'] = (df_ti_dept['TAUX_INFL_TRANSFO']/taux_infl_2015_2014)*100
 
+        taux_infl_current_year = df_ti_dept[df_ti_dept['Year'].dt.year.isin([current_year])]['TAUX_INFL_2015'].iloc[0]
+        df_ti_dept['TAUX_INFL_FINAL'] = ((taux_infl_current_year/df_ti_dept['TAUX_INFL_2015'])-1)*100
 
-df_ti_dept_work = pd.merge(df_ti_dept_work, df_dept, left_on='DEPT', right_on='num_dpt', how='inner')
-
-df_ti_dept_work['Year'] = df_ti_dept_work['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
-df_ti_dept_work['TAUX_INFL'] = df_ti_dept_work['TAUX_INFL'].astype(float)
-df_ti_dept_work['population'] = df_ti_dept_work['population'].astype(float)
-df_ti_dept_work['TAUX_INFL_POP'] = df_ti_dept_work.apply(lambda row: row['TAUX_INFL'] * row['population'], axis=1)
-
-df_ti_dept_grouped = df_ti_dept_work.groupby('Year').agg({'TAUX_INFL_POP': 'sum', 'population': 'sum'}).reset_index()
-df_ti_dept_grouped['TAUX_INFL'] = df_ti_dept_grouped['TAUX_INFL_POP'] / df_ti_dept_grouped['population']
-df_ti_dept_grouped = df_ti_dept_grouped.drop(columns=['TAUX_INFL_POP'])
-
-new_data = pd.DataFrame([{'Year': current_year, 'TAUX_INFL': 0}])
-df_ti_dept_grouped = pd.concat([df_ti_dept_grouped, new_data], ignore_index=True)
-df_ti_dept_grouped['Year'] = pd.to_datetime(df_ti_dept_grouped['Year'].astype(str), format='%Y')
-df_ti_dept_grouped['TAUX_INFL_TRANSFO'] = (100/(1+df_ti_dept_grouped['TAUX_INFL']))
-
-taux_infl_2015_2014 = df_ti_dept_grouped[df_ti_dept_grouped['Year'].dt.year.isin([2015, 2014])]['TAUX_INFL_TRANSFO'].mean()
-df_ti_dept_grouped['TAUX_INFL_BASE_2015'] = (df_ti_dept_grouped['TAUX_INFL_TRANSFO']/taux_infl_2015_2014)*100
-
-# Graphique
-plt.figure(figsize=(10, 5))
-plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'])
-plt.xlabel('Year')
-plt.ylabel('(1+TAUX_INFL)*100')
-plt.title('Graphique de (1+TAUX_INFL)*100 en fonction de l\'année')
-plt.grid(True)
-plt.show()
-
-df= pd.read_csv(rf'N:\uflumth\indicateur_marche\V2\données indice de prix\table_rapport (2025)\valeurs_trimestrielles_PROVINCE_APP.csv', sep = ';')
-df=df[4:]
-df = df.rename(columns={df.columns[1]: 'taux_infl'})
-df['taux_infl'] = df['taux_infl'].astype(float)
-df['Year'] = df['Libellé'].apply(lambda x: int(x.split('-')[0]))
-df['Quarter'] = df['Libellé'].apply(lambda x: int(x.split('T')[-1]))
+        df_resultats = pd.concat([df_resultats, df_ti_dept[['Year', 'TAUX_INFL_FINAL']]], ignore_index=True)
 
 
-df['Month'] = df['Quarter'] * 3
+    moyenne_par_annee = df_resultats.groupby(df_resultats['Year'].dt.year)['TAUX_INFL_FINAL'].mean().reset_index()
 
-df['Période'] = pd.to_datetime(df[['Year', 'Month']].assign(DAY=1))
+    dix_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 10, current_year)]['TAUX_INFL_FINAL'].mean()
+    huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
+    cinq_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 5, current_year)]['TAUX_INFL_FINAL'].mean()
+    un_an = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 1, current_year)]['TAUX_INFL_FINAL'].mean()
 
-df['Moyenne Glissante'] = df['taux_infl'].rolling(window=4, min_periods=1).mean()
+    resultats_finaux = resultats_finaux.append({
+        'Région': region,
+        '10 ans': f'+{dix_ans:.2f}',
+        '8 ans': f'+{huit_ans:.2f}',
+        '5 ans': f'+{cinq_ans:.2f}',
+        '1 an': f'+{un_an:.2f}'}, ignore_index=True)
 
+resultats_finaux
 
-plt.figure(figsize=(10, 6))
-plt.plot(df['Période'], df['Moyenne Glissante'], label="Moyenne Glissante par trimestre de l'INSEE")
-plt.plot(df_ti_dept_grouped['Year'], df_ti_dept_grouped['TAUX_INFL_BASE_2015'], label='Taux Inflation par année de CL')
-
-plt.xlabel('Année')
-plt.ylabel('Valeur')
-plt.legend()
