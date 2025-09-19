@@ -1,47 +1,58 @@
-cd_type = 'APT'
-resultats_finaux = pd.DataFrame(columns=['Région', '10 ans', '8 ans', '5 ans', '1 an'])
 
-# Itérer sur chaque région et ses départements
-for region, liste_departements in zip(regions_interested, final_result):
+ID	REF	TAUX_INFL	EFFECTIF	TAUX_INFL_DIFF	PERIODE	CD_TYP_BIEN	DEPT	PERIODE_REF_MIN	PERIODE_REF_MAX
+0	1	0001_APT_01	-0.0016	1095	0.0312	P-1	APT	01	2024-09-01	2025-09-01
+1	2	0001_APT_02	0.0830	293	0.0493	P-1	APT	02	2024-09-01	2025-09-01
+2	3	0001_APT_03	0.0833	474	0.0543	P-1	APT	03	2024-09-01	2025-09-01
+3	4	0001_APT_04	0.0154	556	0.0819	P-1	APT	04	2024-09-01	2025-09-01
+4	5	0001_APT_05	0.0128	924	0.0315	P-1	APT	05	2024-09-01	2025-09-01
 
-    df_resultats = pd.DataFrame()
+         Département  10 ans   8 ans  5 ans   1 an
+0           Yvelines  +15.51  +16.56  +6.98  +5.04
+1     Seine-et-Marne  +13.52  +15.51  +4.88  +2.64
+2            Essonne    +8.9   +9.06  +1.53  +0.19
+3     Hauts-de-Seine  +18.44  +12.76  -3.66  -2.32
+4  Seine-Saint-Denis  +21.43  +21.43  +6.25  +4.91
+5       Val-de-Marne  +20.85  +15.38  -0.66  +1.19
+6         Val-d'Oise  +13.27  +15.33  +4.99  +3.14
+<matplotlib.legend.Legend at 0x1bf4ef27190>
+<Figure size 1000x500 with 1 Axes>
+<Figure size 1000x600 with 1 Axes>
 
-    for num_dept in liste_departements:
-        requete_sql = f"""
-        SELECT DISTINCT *
-        FROM df_ti_dept_all
-        WHERE DEPT = {num_dept} AND CD_TYP_BIEN = '{cd_type}'"""
-        df_ti_dept = ps.sqldf(requete_sql, locals())
+      Villes  10 ans   8 ans   5 ans   1 an
+0      PARIS  +20.89  +11.96   -8.76  -1.19
+1      LILLE  +27.63  +24.48   +9.99  +0.96
+2  MARSEILLE  +31.73  +32.88  +25.76  +5.04
+3       LYON  +34.87  +23.88   -4.45  -1.53
+<Figure size 1000x500 with 1 Axes>
+<matplotlib.legend.Legend at 0x1bf4f685a50>
+<Figure size 1000x600 with 1 Axes>
 
-        df_ti_dept['Year'] = df_ti_dept['PERIODE'].apply(lambda x: current_year - int(x.split('-')[1]))
+         Département  10 ans   8 ans  5 ans   1 an
+0           Yvelines  +10.27   +9.18  +1.94  -0.63
+1     Seine-et-Marne   +7.92   +6.63  +2.38  -0.28
+2            Essonne   +9.11   +8.35  +3.12  -0.27
+3     Hauts-de-Seine  +14.27  +11.27   -4.5  -0.52
+4  Seine-Saint-Denis   +17.9  +15.93  -0.67  -0.17
+5       Val-de-Marne   +15.4  +12.59  -0.69  -0.17
+6         Val-d'Oise   +9.89    +8.8  +3.38    0.0
+[['59', '62'], ['04', '05', '06', '13', '83', '84'], ['01', '07', '26', '38', '42', '69', '73', '74']]
+---------------------------------------------------------------------------
+AttributeError                            Traceback (most recent call last)
+~\AppData\Local\Temp\9\ipykernel_44420\517427394.py in ?()
+     35     huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
+     36     cinq_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 5, current_year)]['TAUX_INFL_FINAL'].mean()
+     37     un_an = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 1, current_year)]['TAUX_INFL_FINAL'].mean()
+     38 
+---> 39     resultats_finaux = resultats_finaux.append({
+     40         'Région': region,
+     41         '10 ans': f'+{dix_ans:.2f}',
+     42         '8 ans': f'+{huit_ans:.2f}',
 
-        new_data = pd.DataFrame([{'Year': current_year, 'TAUX_INFL': 0}])
-        df_ti_dept = pd.concat([new_data, df_ti_dept], ignore_index=True)
-        df_ti_dept['Year'] = pd.to_datetime(df_ti_dept['Year'].astype(str), format='%Y')
-        df_ti_dept['TAUX_INFL_TRANSFO'] = 100/(1+df_ti_dept['TAUX_INFL'])
+~\AppData\Roaming\Python\Python311\site-packages\pandas\core\generic.py in ?(self, name)
+   6314             and name not in self._accessors
+   6315             and self._info_axis._can_hold_identifiers_and_holds_name(name)
+   6316         ):
+   6317             return self[name]
+-> 6318         return object.__getattribute__(self, name)
 
-        taux_infl_2015_2014 = df_ti_dept[df_ti_dept['Year'].dt.year.isin([2015, 2014])]['TAUX_INFL_TRANSFO'].mean()
-        df_ti_dept['TAUX_INFL_2015'] = (df_ti_dept['TAUX_INFL_TRANSFO']/taux_infl_2015_2014)*100
-
-        taux_infl_current_year = df_ti_dept[df_ti_dept['Year'].dt.year.isin([current_year])]['TAUX_INFL_2015'].iloc[0]
-        df_ti_dept['TAUX_INFL_FINAL'] = ((taux_infl_current_year/df_ti_dept['TAUX_INFL_2015'])-1)*100
-
-        df_resultats = pd.concat([df_resultats, df_ti_dept[['Year', 'TAUX_INFL_FINAL']]], ignore_index=True)
-
-
-    moyenne_par_annee = df_resultats.groupby(df_resultats['Year'].dt.year)['TAUX_INFL_FINAL'].mean().reset_index()
-
-    dix_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 10, current_year)]['TAUX_INFL_FINAL'].mean()
-    huit_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 8, current_year)]['TAUX_INFL_FINAL'].mean()
-    cinq_ans = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 5, current_year)]['TAUX_INFL_FINAL'].mean()
-    un_an = moyenne_par_annee[moyenne_par_annee['Year'].between(current_year - 1, current_year)]['TAUX_INFL_FINAL'].mean()
-
-    resultats_finaux = resultats_finaux.append({
-        'Région': region,
-        '10 ans': f'+{dix_ans:.2f}',
-        '8 ans': f'+{huit_ans:.2f}',
-        '5 ans': f'+{cinq_ans:.2f}',
-        '1 an': f'+{un_an:.2f}'}, ignore_index=True)
-
-resultats_finaux
-
+AttributeError: 'DataFrame' object has no attribute 'append'
