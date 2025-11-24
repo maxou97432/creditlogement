@@ -1,100 +1,88 @@
-import sys
-import os
-
-
+import plotly.express as px
 import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-from fonctions import (DateOffset,
-                         ImportRecentData,
-                         CalcMetaNum,
-                         EffectifsParMailleGeo,
-                         DefMailleGeoCITY,
-                         DetectAno
+import numpy as np # Importé pour np.nan
+
+# Supposons que 'df' est votre DataFrame final après le merge et le nettoyage
+# Pour l'exemple, nous allons créer les colonnes nécessaires (si elles n'existent pas encore)
+# df = df[['label', 'latitude', 'longitude', 'prix_mm_value', 'TAUX_INFL_12M']].copy()
+
+# Nettoyage des NaN pour l'affichage (remplacer par une chaîne vide ou 'N/A')
+df['Evolution'] = df['TAUX_INFL_12M'].fillna(np.nan)
+
+# Création du texte de l'étiquette
+def create_label_text(row):
+    ville = row['label'].capitalize()
+    prix = f"{round(row['prix_mm_value']):,} €".replace(',', ' ')
+    
+    # Formatage de l'évolution (exemple: +0,4% ou -1,5%)
+    # On utilise 12M ici car l'image affiche souvent des données annuelles ou trimestrielles
+    evo_12m = row['TAUX_INFL_12M']
+    
+    # Ajoutez ici l'autre évolution si vous l'avez (Evol. Affichée / Evol. Signée)
+    # Dans l'exemple, nous simplifions en prenant seulement le Taux 12M
+    
+    evo_text = ""
+    if pd.notna(evo_12m):
+        # Utilisation d'une virgule pour le séparateur décimal (si vous le souhaitez)
+        evo_text = f"\\n({evo_12m * 100:+.1f} %)"
+    
+    # Texte final sur plusieurs lignes
+    return f"**{ville}**\\n{prix}{evo_text}"
+
+df['Text_Label'] = df.apply(create_label_text, axis=1)
+
+# Créer une colonne pour la taille/couleur (ici, basée sur le prix)
+df['Prix_Size'] = df['prix_mm_value'] / 1000 # Pour avoir une taille de bulle raisonnable
+
+# Crée le graphique de dispersion géographique
+fig = px.scatter_geo(
+    df,
+    lat='latitude',
+    lon='longitude',
+    hover_name='label', # Nom affiché au survol
+    text='Text_Label',   # Le texte principal que vous voulez voir sur la carte
+    scope='europe',      # Limiter la vue à l'Europe (pour avoir la France au centre)
+    size='Prix_Size',    # Taille des marqueurs proportionnelle au prix
+    color='TAUX_INFL_12M', # Couleur des marqueurs basée sur l'évolution
+    color_continuous_scale=px.colors.sequential.RdBu, # Palette de couleurs (rouge/bleu)
+    projection="mercator" # Type de projection cartographique
 )
-from fonctions import detect_ano_ml as detect_ano_ml_fct
-import numpy as np
 
-import pandas as pd
-import time
-from fonctions import Connector
-import param_general as params
-import os
-import folium
+# Mise en forme pour ressembler davantage à l'image
+fig.update_geos(
+    visible=True,
+    resolution=50,
+    showcountries=True, 
+    countrycolor="Gray",
+    # Limiter la vue spécifiquement à la France pour une apparence plus nette
+    lataxis_range=[41, 51], 
+    lonaxis_range=[-6, 10], 
+    # Optionnel: supprimer les annotations de pays (comme dans l'image)
+    # showsubunits=False
+)
 
+# Mise en forme des annotations (texte)
+fig.update_traces(
+    mode='markers+text', # Afficher à la fois les marqueurs et le texte
+    textfont_size=12,
+    textposition='top center',
+    marker=dict(line_width=1, opacity=0.8, sizemin=5)
+)
 
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-sys.path.append(parent_dir)
+# Configuration finale (fond blanc, titre, etc.)
+fig.update_layout(
+    title_text="Les Prix des Appartements - France",
+    geo = dict(
+        bgcolor='rgb(255, 255, 255)', # Fond blanc
+        showland=True,
+        landcolor='rgb(255, 223, 110)' # Couleur de la terre (jaune/ocre comme dans l'image)
+    )
+)
 
-# Dossier de sortie
-output_dir = os.path.join(os.path.dirname(__file__), "results")
-os.makedirs(output_dir, exist_ok=True)
+# Exportation en image statique (nécessite l'installation de 'kaleido')
+# fig.write_image("carte_prix_m2_plotly.png") 
 
+# Exportation en fichier HTML interactif (plus facile)
+# fig.write_html(os.path.join(output_dir, f"carte_prix_m2_plotly_{type_bien}.html"))
 
-
-prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_complet_CITY.csv")
-prix_m2_univ_elem_MAJ_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
-
-
-prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
-df = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
-
-df['Commune'] = df['Commune'].apply(lambda x: x.upper())
-df_prix_m2 = df.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
-
-# =============================================================================
-# CARTE PRIX M2 - VILLE
-# =============================================================================
-
-
-
-
-types_bien = ['APT', 'MAI']
-
-for type_bien in types_bien:
-    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] ==  type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
-
-
-    df_geo = pd.read_csv(r'N:\uflujek\commune_france_gps.csv',sep=';')
-    df_geo['label'] = df_geo['label'].apply(lambda x: x.upper())
-    df= df_geo.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
-    df = df[['label','latitude','longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']]
-    df = df.dropna(subset=['latitude', 'longitude'])
-    df = df.drop_duplicates(subset='label', keep='first')
-
-    # Initialisez la carte centrée sur Paris
-    m = folium.Map(location=[48.8566, 2.3522], zoom_start=12)
-
-    # Ajout des villes sur la carte
-    for i in range(0, len(df)):
-        data = df.iloc[i]
-
-        ville = str(data['label']).capitalize()
-        prix = data["prix_mm_value"]
-        ti_3m = data["TAUX_INFL_3M"]
-        ti_12m = data["TAUX_INFL_12M"]
-        prix_formate = f"{round(prix):,} €".replace(',',' ')
-        ti_3m_formate = f"{ti_3m: .1%}" if pd.notna(ti_3m) else "N/A"
-        ti_12m_formate = f"{ti_12m: .1%}" if pd.notna(ti_12m) else "N/A"
-
-        popup_html = (
-            f'Ville: **{ville}**<br>'
-            f'Prix au m²: **{prix_formate}**<br>'
-            f'---<br>'
-            f'TI 3M: **{ti_3m_formate}**<br>'
-            f'TI 12M: **{ti_12m_formate}**'
-
-        )
-        folium.Marker([data['latitude'], data['longitude']], 
-                      popup=folium.Popup(popup_html, max_width = 250),
-                      icon = folium.Icon(color='blue',icon = 'home')).add_to(m)
-
-    output_file = os.path.join(output_dir, f"carte_prix_m2_villes_{type_bien}.html")
-    m.save(output_file)
-    print(f"Carte enregistrée : {output_file}")
+fig.show()
