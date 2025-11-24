@@ -1,88 +1,131 @@
-import plotly.express as px
+import sys
+import os
 import pandas as pd
-import numpy as np # Importé pour np.nan
+import numpy as np
+import plotly.express as px
+# Les autres imports sont conservés...
+# ...
+# from dateutil.relativedelta import relativedelta
+# from fonctions import (...)
+# ...
 
-# Supposons que 'df' est votre DataFrame final après le merge et le nettoyage
-# Pour l'exemple, nous allons créer les colonnes nécessaires (si elles n'existent pas encore)
-# df = df[['label', 'latitude', 'longitude', 'prix_mm_value', 'TAUX_INFL_12M']].copy()
+# Le reste des imports et des chemins d'accès est conservé
+# ...
 
-# Nettoyage des NaN pour l'affichage (remplacer par une chaîne vide ou 'N/A')
-df['Evolution'] = df['TAUX_INFL_12M'].fillna(np.nan)
+# Dossier de sortie (ajusté pour Plotly)
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
 
-# Création du texte de l'étiquette
-def create_label_text(row):
-    ville = row['label'].capitalize()
-    prix = f"{round(row['prix_mm_value']):,} €".replace(',', ' ')
+# Chargement des données (conservé)
+prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_complet_CITY.csv")
+prix_m2_univ_elem_MAJ_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
+
+prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
+df = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
+
+df['Commune'] = df['Commune'].apply(lambda x: x.upper())
+df_prix_m2 = df.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
+
+# =============================================================================
+# CARTE PRIX M2 - VILLE (PLOTLY EXPRESS)
+# =============================================================================
+
+types_bien = ['APT', 'MAI']
+
+for type_bien in types_bien:
+    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
+
+    df_geo = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
+    df_geo['label'] = df_geo['label'].apply(lambda x: x.upper())
+    df_plot = df_geo.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
     
-    # Formatage de l'évolution (exemple: +0,4% ou -1,5%)
-    # On utilise 12M ici car l'image affiche souvent des données annuelles ou trimestrielles
-    evo_12m = row['TAUX_INFL_12M']
+    # Sélection et nettoyage des colonnes
+    df_plot = df_plot[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']]
+    df_plot = df_plot.dropna(subset=['latitude', 'longitude'])
+    df_plot = df_plot.drop_duplicates(subset='label', keep='first').copy() # Utilisation de copy() pour éviter SettingWithCopyWarning
     
-    # Ajoutez ici l'autre évolution si vous l'avez (Evol. Affichée / Evol. Signée)
-    # Dans l'exemple, nous simplifions en prenant seulement le Taux 12M
+    # Remplacer les NaN par 0 pour le calcul de la taille (ou filtrer)
+    df_plot["prix_mm_value"] = df_plot["prix_mm_value"].fillna(0)
     
-    evo_text = ""
-    if pd.notna(evo_12m):
-        # Utilisation d'une virgule pour le séparateur décimal (si vous le souhaitez)
-        evo_text = f"\\n({evo_12m * 100:+.1f} %)"
+    # --- PRÉPARATION DES ÉTIQUETTES TEXTUELLES POUR PLOTLY ---
     
-    # Texte final sur plusieurs lignes
-    return f"**{ville}**\\n{prix}{evo_text}"
+    def create_label_text(row):
+        ville = str(row['label']).capitalize()
+        prix_formate = f"{round(row['prix_mm_value']):,} €".replace(',', ' ')
+        
+        # Utilisez le Taux 12M pour la couleur du marqueur
+        # Utilisez le Taux 3M ou 12M (ou les deux, séparés par '/') pour le texte
+        ti_12m = row["TAUX_INFL_12M"]
+        ti_3m = row["TAUX_INFL_3M"]
+        
+        ti_12m_formate = f"{ti_12m:+.1%}" if pd.notna(ti_12m) else "N/A"
+        ti_3m_formate = f"{ti_3m:+.1%}" if pd.notna(ti_3m) else "N/A"
+        
+        # Création de l'étiquette sur plusieurs lignes (utilisation de <br> en HTML/Plotly)
+        return (
+            f"<b>{ville}</b><br>"
+            f"{prix_formate}<br>"
+            f"({ti_3m_formate} / {ti_12m_formate})"
+        )
 
-df['Text_Label'] = df.apply(create_label_text, axis=1)
-
-# Créer une colonne pour la taille/couleur (ici, basée sur le prix)
-df['Prix_Size'] = df['prix_mm_value'] / 1000 # Pour avoir une taille de bulle raisonnable
-
-# Crée le graphique de dispersion géographique
-fig = px.scatter_geo(
-    df,
-    lat='latitude',
-    lon='longitude',
-    hover_name='label', # Nom affiché au survol
-    text='Text_Label',   # Le texte principal que vous voulez voir sur la carte
-    scope='europe',      # Limiter la vue à l'Europe (pour avoir la France au centre)
-    size='Prix_Size',    # Taille des marqueurs proportionnelle au prix
-    color='TAUX_INFL_12M', # Couleur des marqueurs basée sur l'évolution
-    color_continuous_scale=px.colors.sequential.RdBu, # Palette de couleurs (rouge/bleu)
-    projection="mercator" # Type de projection cartographique
-)
-
-# Mise en forme pour ressembler davantage à l'image
-fig.update_geos(
-    visible=True,
-    resolution=50,
-    showcountries=True, 
-    countrycolor="Gray",
-    # Limiter la vue spécifiquement à la France pour une apparence plus nette
-    lataxis_range=[41, 51], 
-    lonaxis_range=[-6, 10], 
-    # Optionnel: supprimer les annotations de pays (comme dans l'image)
-    # showsubunits=False
-)
-
-# Mise en forme des annotations (texte)
-fig.update_traces(
-    mode='markers+text', # Afficher à la fois les marqueurs et le texte
-    textfont_size=12,
-    textposition='top center',
-    marker=dict(line_width=1, opacity=0.8, sizemin=5)
-)
-
-# Configuration finale (fond blanc, titre, etc.)
-fig.update_layout(
-    title_text="Les Prix des Appartements - France",
-    geo = dict(
-        bgcolor='rgb(255, 255, 255)', # Fond blanc
-        showland=True,
-        landcolor='rgb(255, 223, 110)' # Couleur de la terre (jaune/ocre comme dans l'image)
+    df_plot['Text_Label'] = df_plot.apply(create_label_text, axis=1)
+    
+    # Créer une colonne pour la taille/couleur (si la taille est liée au prix)
+    # Le prix est très variable, une division ou un log peut être utile pour la taille.
+    df_plot['Prix_Size_Scale'] = df_plot['prix_mm_value'].apply(lambda x: np.sqrt(x) if x > 0 else 0) 
+    
+    # --- CRÉATION DE LA CARTE PLOTLY ---
+    
+    fig = px.scatter_geo(
+        df_plot,
+        lat='latitude',
+        lon='longitude',
+        hover_name='label',
+        text='Text_Label',  # Utilise l'étiquette formatée
+        scope='europe',
+        # Couleur basée sur l'évolution annuelle (pour visualiser les tendances)
+        color='TAUX_INFL_12M', 
+        # Taille basée sur la racine carrée du prix (ou des transactions, si disponible)
+        size='Prix_Size_Scale', 
+        color_continuous_scale=px.colors.diverging.RdYlGn, # Rouge/Vert pour l'inflation
+        projection="mercator"
     )
-)
 
-# Exportation en image statique (nécessite l'installation de 'kaleido')
-# fig.write_image("carte_prix_m2_plotly.png") 
+    # Configuration du fond de carte (similaire à un cartogramme thématique)
+    fig.update_geos(
+        visible=False, # Cache le fond de carte Plotly par défaut
+        resolution=50,
+        showcountries=True, 
+        countrycolor="Gray",
+        # Limite la vue à la France
+        lataxis_range=[42, 51], 
+        lonaxis_range=[-6, 10], 
+        landcolor='rgb(255, 230, 160)', # Couleur de la France (similaire à l'image)
+        subunitcolor='rgb(200, 200, 200)', # Contour des régions
+    )
+    
+    # Configuration des marqueurs et des étiquettes
+    fig.update_traces(
+        mode='markers+text', # Affiche les marqueurs (bulles) ET le texte
+        textposition='top center',
+        textfont=dict(size=10, color='black'),
+        marker=dict(line_width=1, sizemode='area', sizemin=5, opacity=0.8)
+    )
 
-# Exportation en fichier HTML interactif (plus facile)
-# fig.write_html(os.path.join(output_dir, f"carte_prix_m2_plotly_{type_bien}.html"))
-
-fig.show()
+    fig.update_layout(
+        title_text=f"Prix au m² {type_bien} (Moyenne Mobile 12M)",
+        height=700,
+        margin={"r":0,"t":50,"l":0,"b":0},
+        showlegend=False,
+    )
+    
+    # --- EXPORTATION ---
+    output_file = os.path.join(output_dir, f"carte_prix_m2_plotly_villes_{type_bien}.html")
+    
+    # Le fichier HTML Plotly est interactif
+    fig.write_html(output_file) 
+    
+    # Optionnel : pour l'exporter en PNG statique comme votre image, vous devez installer 'kaleido'
+    # fig.write_image(os.path.join(output_dir, f"carte_prix_m2_plotly_villes_{type_bien}.png"))
+    
+    print(f"Carte Plotly enregistrée : {output_file}")
