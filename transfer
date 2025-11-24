@@ -1,11 +1,100 @@
-✓ Indicatrices calculées
-Calcul des moyennes mobiles par maille et type de bien
-✓ Maille DEPT traitée
-Durée : 0:01:03.869341
-n:\uflumth\indicateur_marche\univers_elementaire\TI\calc_prix_m2_univ_elem.py:451: FutureWarning:
+import sys
+import os
 
-The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
 
-n:\uflumth\indicateur_marche\univers_elementaire\TI\calc_prix_m2_univ_elem.py:452: FutureWarning:
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+from datetime import datetime
+import logging
+import math
+from datetime import timedelta, datetime
+from dateutil.relativedelta import relativedelta
+from fonctions import (DateOffset,
+                         ImportRecentData,
+                         CalcMetaNum,
+                         EffectifsParMailleGeo,
+                         DefMailleGeoCITY,
+                         DetectAno
+)
+from fonctions import detect_ano_ml as detect_ano_ml_fct
+import numpy as np
 
-The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
+import pandas as pd
+import time
+from fonctions import Connector
+import param_general as params
+import os
+import folium
+
+
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(parent_dir)
+
+# Dossier de sortie
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
+
+
+
+prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_complet_CITY.csv")
+prix_m2_univ_elem_MAJ_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
+
+
+prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
+df = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
+
+df['Commune'] = df['Commune'].apply(lambda x: x.upper())
+df_prix_m2 = df.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
+
+# =============================================================================
+# CARTE PRIX M2 - VILLE
+# =============================================================================
+
+
+
+
+types_bien = ['APT', 'MAI']
+
+for type_bien in types_bien:
+    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] ==  type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
+
+
+    df_geo = pd.read_csv(r'N:\uflujek\commune_france_gps.csv',sep=';')
+    df_geo['label'] = df_geo['label'].apply(lambda x: x.upper())
+    df= df_geo.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
+    df = df[['label','latitude','longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']]
+    df = df.dropna(subset=['latitude', 'longitude'])
+    df = df.drop_duplicates(subset='label', keep='first')
+
+    # Initialisez la carte centrée sur Paris
+    m = folium.Map(location=[48.8566, 2.3522], zoom_start=12)
+
+    # Ajout des villes sur la carte
+    for i in range(0, len(df)):
+        data = df.iloc[i]
+
+        ville = str(data['label']).capitalize()
+        prix = data["prix_mm_value"]
+        ti_3m = data["TAUX_INFL_3M"]
+        ti_12m = data["TAUX_INFL_12M"]
+        prix_formate = f"{round(prix):,} €".replace(',',' ')
+        ti_3m_formate = f"{ti_3m: .1%}" if pd.notna(ti_3m) else "N/A"
+        ti_12m_formate = f"{ti_12m: .1%}" if pd.notna(ti_12m) else "N/A"
+
+        popup_html = (
+            f'Ville: **{ville}**<br>'
+            f'Prix au m²: **{prix_formate}**<br>'
+            f'---<br>'
+            f'TI 3M: **{ti_3m_formate}**<br>'
+            f'TI 12M: **{ti_12m_formate}**'
+
+        )
+        folium.Marker([data['latitude'], data['longitude']], 
+                      popup=folium.Popup(popup_html, max_width = 250),
+                      icon = folium.Icon(color='blue',icon = 'home')).add_to(m)
+
+    output_file = os.path.join(output_dir, f"carte_prix_m2_villes_{type_bien}.html")
+    m.save(output_file)
+    print(f"Carte enregistrée : {output_file}")
