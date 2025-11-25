@@ -1,4 +1,3 @@
-
 import sys
 import os
 import pandas as pd
@@ -8,20 +7,18 @@ import geopandas as gpd
 from shapely.geometry import Point
 import math
 
-# Imports fonctionnels (conservés)
+# Imports fonctionnels
 from fonctions import (DateOffset, ImportRecentData, CalcMetaNum, EffectifsParMailleGeo, DefMailleGeoCITY, DetectAno)
 from fonctions import detect_ano_ml as detect_ano_ml_fct
 from fonctions import Connector
 import param_general as params
 import time
-
 import matplotlib.font_manager as fm
-
 
 # Le chemin est conservé tel quel
 geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole.geojson" 
 
-# Chemins des données (vérifiez l'accessibilité)
+# Chemins des données
 prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
 df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
 df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
@@ -33,15 +30,14 @@ CL_TURQUOISE = '#00A79E'
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
-CL_RED_EVOLUTION = '#E4002B' # Rouge pour la baisse
-CL_GREEN_EVOLUTION = CL_TURQUOISE # Turquoise pour la hausse/stable
+CL_RED_EVOLUTION = '#E4002B' 
+CL_GREEN_EVOLUTION = CL_TURQUOISE 
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
 plt.rcParams['font.family'] = 'sans-serif' 
 plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
 plt.rcParams['font.weight'] = 'medium' 
-
 TITRE_FONT_WEIGHT = 'heavy' 
 
 # =============================================================================
@@ -50,30 +46,18 @@ TITRE_FONT_WEIGHT = 'heavy'
 
 # 1. Nettoyage et Fusion
 prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
-
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (Ville, Prix et Taux 3M/12M)
+# 2. Fonction de formatage du texte (sert surtout pour calculer la taille de la boîte blanche)
 def format_text_label(row):
-    # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
-    
-    # Ligne 2 : Prix
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    # Ligne 3 : Taux d'inflation 3M et 12M (combinés sur une ligne)
-    ti_3m = row['TAUX_INFL_3M']
-    ti_12m = row['TAUX_INFL_12M']
-    
-    ti_3m_formatted = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
-    ti_12m_formatted = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
-
-    # Le séparateur est important pour la BBOX mais sera ignoré pour l'affichage ligne par ligne
-    # On retourne trois lignes : Ville, Prix, Taux 3M (espace) Taux 12M
-    return f"{ville}\n{prix}\n{ti_3m_formatted}/{ti_12m_formatted}"
-
+    # On ajoute des lignes vides ou du texte factice pour réserver l'espace
+    # Cela aide Matplotlib à faire une boite blanche assez grande
+    return f"{ville}\n{prix}\n3M: +0.0% 12M: +0.0%" 
 
 # =============================================================================
 # --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
@@ -88,35 +72,18 @@ except Exception as e:
     print(f"!!! Échec critique du chargement du GeoJSON: {e}")
     sys.exit(1)
 
-
 # =============================================================================
 # --- CRÉATION DE LA CARTE MATPLOTLIB ---
 # =============================================================================
 
 print("Configuration de police 'Century Gothic' appliquée.")
 
-
 types_bien = ['APT', 'MAI']
 
 # --- DEFINITION DES OFFSETS SPÉCIFIQUES ---
 CUSTOM_LABEL_OFFSETS = {
-    # Déplace le label de Toulon vers le bas/droite 
-    'TOULON': {'x': 0.1, 'y': -0.05} ,
-    # Décalages pour que l'étiquette se développe vers le bas/droite (va='top')
-    'PARIS': {'x': 0.08, 'y': 0.08},
-    'REIMS': {'x': 0.08, 'y': 0.08},
-    'LILLE': {'x': 0.08, 'y': 0.08},
-    'BORDEAUX': {'x': 0.08, 'y': 0.08},
-    'NANTES': {'x': 0.08, 'y': 0.08},
-    'RENNES': {'x': 0.08, 'y': 0.08},
-    'TOULOUSE': {'x': 0.08, 'y': 0.08},
-    'MONTPELLIER': {'x': 0.08, 'y': 0.08},
-    'MARSEILLE': {'x': 0.08, 'y': 0.08},
-    'NICE': {'x': 0.08, 'y': 0.08},
-    'LYON': {'x': 0.08, 'y': 0.08},
-    'GRENOBLE': {'x': 0.08, 'y': 0.08},
+    'TOULON': {'x': 0.1, 'y': -0.05} 
 }
-
 
 for type_bien in types_bien:
     print(f"\n--- Génération de la carte pour le type de bien : {type_bien} ---")
@@ -130,7 +97,7 @@ for type_bien in types_bien:
     df_map = df_map.drop_duplicates(subset='label', keep='first')
     
     if df_map.empty:
-        print("Aucune donnée géographique valide trouvée pour ce type de bien.")
+        print("Aucune donnée géographique valide.")
         continue
         
     df_map['Formatted_Label'] = df_map.apply(format_text_label, axis=1)
@@ -141,187 +108,126 @@ for type_bien in types_bien:
     fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
     fig.set_facecolor(CL_TURQUOISE) 
     
-    # --- DESSIN DU CONTOUR DE LA FRANCE ---
+    # --- DESSIN DU CONTOUR ---
     geometries_to_plot = [france_outline_geometry]
     if france_outline_geometry.geom_type == 'MultiPolygon':
         geometries_to_plot = list(france_outline_geometry.geoms)
 
     for geom in geometries_to_plot:
-        # Remplissage de la France
-        ax.fill(geom.exterior.xy[0], geom.exterior.xy[1], 
-                color=CL_LIGHT_GREY, 
-                zorder=1) 
-                
-        # Contour noir
-        ax.plot(geom.exterior.xy[0], geom.exterior.xy[1], 
-                color=CL_BLACK, 
-                linewidth=1.0, 
-                zorder=2)
+        ax.fill(geom.exterior.xy[0], geom.exterior.xy[1], color=CL_LIGHT_GREY, zorder=1) 
+        ax.plot(geom.exterior.xy[0], geom.exterior.xy[1], color=CL_BLACK, linewidth=1.0, zorder=2)
     
-    # Définir les limites de la vue (zoom sur la France)
     xmin, ymin, xmax, ymax = france_outline_geometry.bounds
     ax.set_xlim(xmin - 0.7, xmax + 0.7) 
     ax.set_ylim(ymin - 0.7, ymax + 0.7)
 
     # --- AJOUT DES ÉTIQUETTES ---
     
-    # Variables d'Offset par DÉFAUT des Étiquettes
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # Espacement vertical entre les lignes
-    LINE_SPACING = 0.07 
+    # --- PARAMÈTRES D'ESPACEMENT CRITIQUES ---
+    # Espacement vertical entre les lignes (en degrés de latitude)
+    # Doit être négatif ou soustrait car on dessine du haut vers le bas
+    LINE_SPACING = 0.13 
+    
+    # Espacement horizontal entre le taux 3M et 12M
+    RATE_SPACING_X = 0.60 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
         lat = row['latitude']
         city_label = row['label'] 
         
-        # --- LOGIQUE D'OFFSET SPÉCIFIQUE ---
         if city_label in CUSTOM_LABEL_OFFSETS:
             x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
             y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
         else:
             x_offset_city = DEFAULT_X_OFFSET
             y_offset_city = DEFAULT_Y_OFFSET
-        # ---------------------------------------------
 
-        # Séparation du texte
-        full_text = row['Formatted_Label']
-        formatted_parts = full_text.split('\n')
-        ville = formatted_parts[0] 
-        prix = formatted_parts[1]
-        ti_text_3m_12m = formatted_parts[2] # Contient "3M: X% 12M: Y%"
+        # Préparation des textes
+        ville = str(row['label']).upper()
+        prix_val = row['prix_mm_value']
+        prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
         
-        # Récupérer les valeurs séparées
-        ti_3m_value = row['TAUX_INFL_3M']
-        ti_12m_value = row['TAUX_INFL_12M']
+        ti_3m = row['TAUX_INFL_3M']
+        ti_12m = row['TAUX_INFL_12M']
         
-        # Position de départ pour l'étiquette
+        # --- DESSIN DE L'ÉTIQUETTE ---
+        
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
         ha_align = 'right' if x_offset_city < 0 else 'left'
-        va_align_box = 'top' # L'étiquette se développe vers le bas à partir de l'ancre Y
+        va_align_box = 'top' 
         
-        # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
-        bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
+        # 1. Boîte blanche de fond (BBOX)
+        # On utilise un texte "parapluie" invisible avec des retours à la ligne pour créer la bonne taille de boîte
+        dummy_text = f"{ville}\n{prix}\n3M: +0.0% 12M: +0.0%" 
+        bbox_props = dict(boxstyle="round,pad=0.3", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
 
-        ax.text(
-            anchor_x, 
-            anchor_y, 
-            full_text,
-            fontsize=10, 
-            ha=ha_align, 
-            va=va_align_box,
-            color='none', 
-            zorder=3,
-            bbox=bbox_props
-        )
+        ax.text(anchor_x, anchor_y, dummy_text, fontsize=10, ha=ha_align, va=va_align_box,
+                color='none', zorder=3, bbox=bbox_props)
         
-        # 2. Dessiner le Nom de la Ville (Ligne 1, en gras)
-        ax.text(
-            anchor_x, 
-            anchor_y, # Position Y de la première ligne
-            ville, 
-            fontsize=10, 
-            ha=ha_align, 
-            va=va_align_box,
-            color=CL_BLACK,
-            weight='bold', 
-            zorder=4 
-        )
+        # 2. Nom de la Ville (Ligne 1) - Position Y = anchor_y
+        ax.text(anchor_x, anchor_y, ville, fontsize=10, ha=ha_align, va=va_align_box,
+                color=CL_BLACK, weight='bold', zorder=4)
         
-        # 3. Dessiner le Prix M2 (Ligne 2, en normal)
-        # Décalage d'un espacement
-        prix_y = anchor_y + LINE_SPACING 
-            
-        ax.text(
-            anchor_x, 
-            prix_y, 
-            prix, 
-            fontsize=10, 
-            ha=ha_align, 
-            va=va_align_box,
-            color=CL_BLACK,
-            weight='normal', 
-            zorder=4
-        )
+        # 3. Prix M2 (Ligne 2) - Position Y = anchor_y - LINE_SPACING
+        # ATTENTION : On SOUSTRAIT pour descendre (car axe Y monte vers le Nord)
+        prix_y = anchor_y - LINE_SPACING 
+        ax.text(anchor_x, prix_y, prix, fontsize=10, ha=ha_align, va=va_align_box,
+                color=CL_BLACK, weight='normal', zorder=4)
         
-        # 4. Dessiner la ligne Taux (Ligne 3)
-        ti_y = prix_y + LINE_SPACING # Décalage d'un deuxième espacement
+        # 4. Taux d'inflation (Ligne 3) - Position Y = prix_y - LINE_SPACING
+        ti_y = prix_y - LINE_SPACING 
         
-        # --- LOGIQUE D'AFFICHAGE DU TAUX EN COULEUR ---
-        
-        # Ligne de base pour l'alignement (décalée vers le bas)
-        
-        # Affichage du Taux 3M
-        ti_3m_color = CL_RED_EVOLUTION if pd.notna(ti_3m_value) and ti_3m_value < 0 else CL_GREEN_EVOLUTION
-        ti_3m_text_part = f"{ti_3m_value:+.1%}".replace('.', ',') if pd.notna(ti_3m_value) else "N/A"
+        # Taux 3M
+        if pd.notna(ti_3m):
+            color_3m = CL_RED_EVOLUTION if ti_3m < 0 else CL_GREEN_EVOLUTION
+            text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
+        else:
+            color_3m = CL_BLACK
+            text_3m = "3M: N/A"
 
-        ax.text(
-            anchor_x,
-            ti_y,
-            ti_3m_text_part,
-            fontsize=10,
-            ha=ha_align,
-            va=va_align_box,
-            color=ti_3m_color,
-            weight='normal',
-            zorder=4
-        )
+        ax.text(anchor_x, ti_y, text_3m, fontsize=10, ha=ha_align, va=va_align_box,
+                color=color_3m, weight='normal', zorder=4)
         
-        # Calculer la position X pour le Taux 12M pour qu'il soit à droite du 3M
-        # Ceci est une approximation, mais devrait fonctionner si les textes ne sont pas trop longs
+        # Taux 12M (décalé à droite ou à gauche selon l'alignement)
+        if pd.notna(ti_12m):
+            color_12m = CL_RED_EVOLUTION if ti_12m < 0 else CL_GREEN_EVOLUTION
+            text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
+        else:
+            color_12m = CL_BLACK
+            text_12m = "12M: N/A"
+
+        # Calcul de la position X du 12M
         if ha_align == 'left':
-            # Si aligné à gauche, le texte 12M sera dessiné AVANT la position x (car va='top', ha='right' temporaire)
-            # On utilise une taille de pas fixe (estimée) ou une largeur de texte mesurée (plus complexe)
-            # Prenons une position X relative pour le second taux (estimée pour une police de taille 10)
-            x_offset_12m = anchor_x + 0.15 # Décalage visuel à droite
-            
-            # Affichage du Taux 12M
-            ti_12m_color = CL_RED_EVOLUTION if pd.notna(ti_12m_value) and ti_12m_value < 0 else CL_GREEN_EVOLUTION
-            ti_12m_text_part = f"{ti_12m_value:+.1%}".replace('.', ',') if pd.notna(ti_12m_value) else "N/A"
+            x_12m = anchor_x + RATE_SPACING_X
+            align_12m = 'left'
+        else:
+            x_12m = anchor_x - RATE_SPACING_X
+            align_12m = 'right'
 
-            ax.text(
-                x_offset_12m,
-                ti_y,
-                ti_12m_text_part,
-                fontsize=10,
-                ha='left', # Alignement à gauche pour qu'il se développe vers la droite
-                va=va_align_box,
-                color=ti_12m_color,
-                weight='normal',
-                zorder=4
-            )
-        # Si aligné à droite, la logique serait inversée, mais pour simplifier on reste sur l'alignement à gauche pour les deux taux pour le moment.
-        # Vous devrez ajuster le 'x_offset_12m' en fonction de la police si le résultat n'est pas parfait.
+        ax.text(x_12m, ti_y, text_12m, fontsize=10, ha=align_12m, va=va_align_box,
+                color=color_12m, weight='normal', zorder=4)
 
-
-        # 5. Ajout du point de ville d'origine (petit cercle noir)
+        # 5. Point Ville
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-    
-    # --- FINALISATION DE L'IMAGE ---
+    # --- FINALISATION ---
     ax.axis('off') 
-    
-    # Titre principal (noir sur turquoise)
     title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
     ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
-    
-    # Sous-titre et sources (noir sur turquoise)
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # Ajout de la source et de la légende
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
-    
     fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.08, "Turquoise: Hausse/Stable", ha='left', va='bottom', fontsize=8, color=CL_GREEN_EVOLUTION)
+    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_GREEN_EVOLUTION)
     fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color=CL_RED_EVOLUTION)
 
-    # --- AFFICHAGE SEUL ---
     plt.show() 
     plt.close(fig) 
-
-    print(f"Génération de la carte pour {type_bien} terminée.")
+    print(f"Génération terminée pour {type_bien}")
