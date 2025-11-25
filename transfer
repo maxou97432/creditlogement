@@ -28,10 +28,10 @@ df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 # =============================================================================
 # --- PALETTE DE COULEURS CRÉDIT LOGEMENT & POLICE ---
 # =============================================================================
-CL_TURQUOISE = '#00A79E' # Couleur principale du logo Crédit Logement
-CL_BLACK = '#000000' # Noir pour le texte
-CL_LIGHT_GREY = '#F0F0F0' # Un gris très clair pour les fonds ou bordures discrètes
-CL_MEDIUM_GREY = '#CCCCCC' # Gris moyen
+CL_TURQUOISE = '#00A79E' 
+CL_BLACK = '#000000' 
+CL_LIGHT_GREY = '#F0F0F0' 
+CL_MEDIUM_GREY = '#CCCCCC' 
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -39,7 +39,7 @@ plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
 plt.rcParams['font.weight'] = 'medium' 
 
-TITRE_FONT_WEIGHT = 'heavy' # Poids forcé pour le titre principal
+TITRE_FONT_WEIGHT = 'heavy' 
 
 # =============================================================================
 # --- PRÉPARATION DES DONNÉES ---
@@ -51,7 +51,7 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (mise à jour pour Ville/Prix/Évolution)
+# 2. Fonction de formatage du texte pour l'affichage (SIMPLIFIÉE)
 def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
@@ -60,22 +60,10 @@ def format_text_label(row):
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    ti_3m = row["TAUX_INFL_3M"]
-    ti_12m = row["TAUX_INFL_12M"]
+    # On supprime la ligne d'évolution pour éviter la duplication et garder le style CL
     
-    ti_3m_str = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else ""
-    ti_12m_str = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else ""
-    
-    # Ligne 3 : L'évolution (Taux 3M / Taux 12M)
-    evolution_line = ""
-    if ti_3m_str or ti_12m_str:
-        evolution_line = f"({ti_3m_str} / {ti_12m_str})".replace(" / ", "/").replace(" ()", "")
-        if evolution_line.startswith('(/'): evolution_line = evolution_line.replace('(/', '(')
-        if evolution_line.endswith('/)'): evolution_line = evolution_line.replace('/)', ')')
-        if evolution_line == '(/)': evolution_line = ''
-    
-    # Retourne les trois lignes : Ville, Prix, (Taux 3M/Taux 12M)
-    return f"{ville}\n{prix}\n{evolution_line}"
+    # Retourne deux lignes : Ville, Prix
+    return f"{ville}\n{prix}"
 
 
 # =============================================================================
@@ -103,7 +91,7 @@ types_bien = ['APT', 'MAI']
 
 # --- DEFINITION DES OFFSETS SPÉCIFIQUES ---
 CUSTOM_LABEL_OFFSETS = {
-    # Déplace le label de Toulon vers le bas pour le séparer de Marseille
+    # Déplace le label de Toulon vers le bas/droite (inchangé)
     'TOULON': {'x': 0.1, 'y': -0.05} 
 }
 
@@ -159,9 +147,11 @@ for type_bien in types_bien:
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # Variables d'Offset des Bulles (relatifs à l'ancre de l'étiquette)
-    BUBBLE_X_SHIFT = 0.38 
-    BUBBLE_Y_SHIFT = -0.05 # Décalage vers le bas pour aligner la bulle sur la ligne du prix
+    # Variables d'Offset des Bulles 
+    # X_SHIFT est réduit car l'étiquette est plus courte (2 lignes vs 3)
+    BUBBLE_X_SHIFT = 0.30 
+    # Y_SHIFT est ajusté pour aligner la bulle sur la LIGNE DU PRIX
+    BUBBLE_Y_SHIFT = 0.02 
     BUBBLE_RADIUS = 0.12 
     
     for idx, row in gdf.iterrows():
@@ -226,6 +216,7 @@ for type_bien in types_bien:
         # 4. Ajout de la 'Bulle d'Évolution'
         ti_12m = row['TAUX_INFL_12M']
         if pd.notna(ti_12m):
+            # Utilisation de la bulle pour la variation sur 12M
             color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
             
             # Coordonnées du centre de la bulle
@@ -267,7 +258,7 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # Ajout de la source et de la légende
+    # Ajout de la source et de la légende (simplifiée pour correspondre au style)
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
     
     fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
