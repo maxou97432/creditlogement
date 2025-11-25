@@ -1,21 +1,26 @@
-import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import os
 
-# --- Configuration de la police de secours (Fallback) ---
+# 1. Obtenir la liste de tous les fichiers de police trouvés par Matplotlib
+all_font_files = fm.findSystemFonts(fontpaths=None, fontext='ttf')
 
-# 1. Utiliser 'sans-serif', le choix le plus compatible.
-plt.rcParams['font.family'] = 'sans-serif' 
+# 2. Extraire les noms de famille de police lisibles (en éliminant les doublons)
+available_fonts = set()
+for font_file in all_font_files:
+    try:
+        # Tenter d'obtenir les propriétés de la police
+        prop = fm.FontProperties(fname=font_file)
+        # Ajouter le nom de la famille de police
+        available_fonts.add(prop.get_name())
+    except Exception:
+        # Ignorer les fichiers qui ne sont pas des polices valides pour Matplotlib
+        continue
 
-# 2. Forcer le style en sélectionnant une police de secours commune (ex: Arial)
-# Cette liste est lue de gauche à droite, Matplotlib utilise le premier qu'il trouve.
-plt.rcParams['font.sans-serif'] = ['Arial', 'Verdana', 'DejaVu Sans', 'sans-serif'] 
+# 3. Afficher les noms des polices triées
+print("--- POLICES DISPONIBLES SUR VOTRE SYSTÈME POUR MATPLOTLIB ---")
+for font_name in sorted(list(available_fonts)):
+    print(font_name)
+print("-------------------------------------------------------------")
 
-# 3. Augmenter le poids par défaut pour simuler l'aspect 'Bold' du logo CL
-# Cela affectera la plupart des textes, y compris les labels.
-plt.rcParams['font.weight'] = 'medium' 
-
-# 4. Définir explicitement les titres en gras (Black/Heavy)
-# C'est important pour les éléments principaux (titres et prix).
-TITRE_FONT_WEIGHT = 'heavy' # Matplotlib utilise 'heavy' ou 'black' pour très gras.
-
-print("Configuration de police remplacée par 'sans-serif' forcé en gras.")
+# Facultatif : Vider le cache des polices si la liste semble incomplète
+# fm._rebuild()
