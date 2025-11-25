@@ -42,7 +42,7 @@ plt.rcParams['font.weight'] = 'medium'
 TITRE_FONT_WEIGHT = 'heavy' # Poids forcé pour le titre principal
 
 # =============================================================================
-# --- PRÉPARATION DES DONNÉES (Non modifiée) ---
+# --- PRÉPARATION DES DONNÉES ---
 # =============================================================================
 
 # 1. Nettoyage et Fusion
@@ -51,10 +51,12 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage
+# 2. Fonction de formatage du texte pour l'affichage (mise à jour pour Ville/Prix/Évolution)
 def format_text_label(row):
-    ville = str(row['label']).capitalize()
+    # Ligne 1 : Nom de la ville en MAJUSCULES
+    ville = str(row['label']).upper() 
     
+    # Ligne 2 : Prix
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
@@ -64,15 +66,20 @@ def format_text_label(row):
     ti_3m_str = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else ""
     ti_12m_str = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else ""
     
+    # Ligne 3 : L'évolution (Taux 3M / Taux 12M)
     evolution_line = ""
     if ti_3m_str or ti_12m_str:
-        evolution_line = f"({ti_3m_str} / {ti_12m_str})".replace(" / ", "").replace(" ()", "")
-        
+        evolution_line = f"({ti_3m_str} / {ti_12m_str})".replace(" / ", "/").replace(" ()", "")
+        if evolution_line.startswith('(/'): evolution_line = evolution_line.replace('(/', '(')
+        if evolution_line.endswith('/)'): evolution_line = evolution_line.replace('/)', ')')
+        if evolution_line == '(/)': evolution_line = ''
+    
+    # Retourne les trois lignes : Ville, Prix, (Taux 3M/Taux 12M)
     return f"{ville}\n{prix}\n{evolution_line}"
 
 
 # =============================================================================
-# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE (Non modifiée) ---
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
 # =============================================================================
 
 try:
@@ -154,13 +161,13 @@ for type_bien in types_bien:
     
     # Variables d'Offset des Bulles (relatifs à l'ancre de l'étiquette)
     BUBBLE_X_SHIFT = 0.38 
-    BUBBLE_Y_SHIFT = 0.1 
+    BUBBLE_Y_SHIFT = -0.05 # Décalage vers le bas pour aligner la bulle sur la ligne du prix
     BUBBLE_RADIUS = 0.12 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
         lat = row['latitude']
-        city_label = row['label'] # Nom de la ville en MAJUSCULES
+        city_label = row['label'] 
         
         # --- LOGIQUE D'OFFSET SPÉCIFIQUE ---
         if city_label in CUSTOM_LABEL_OFFSETS:
@@ -171,30 +178,59 @@ for type_bien in types_bien:
             y_offset_city = DEFAULT_Y_OFFSET
         # ---------------------------------------------
 
-        # 1. Dessiner le fond blanc de l'étiquette et le texte
+        # Séparation du texte
+        full_text = row['Formatted_Label']
+        formatted_parts = full_text.split('\n')
+        ville = formatted_parts[0] 
+        
+        # Position de départ pour l'étiquette
+        anchor_x = lon + x_offset_city
+        anchor_y = lat + y_offset_city
+        
+        ha_align = 'right' if x_offset_city < 0 else 'left'
+        va_align = 'top' if y_offset_city < 0 else 'bottom'
+        
+        
+        # 1. Dessiner le fond blanc de l'étiquette et tout le texte
+        bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
+        
         ax.text(
-            lon + x_offset_city, 
-            lat + y_offset_city, 
-            row['Formatted_Label'],
+            anchor_x, 
+            anchor_y, 
+            full_text,
             fontsize=10, 
-            ha='right' if x_offset_city < 0 else 'left', 
-            va='top' if y_offset_city < 0 else 'bottom', 
+            ha=ha_align, 
+            va=va_align,
             color=CL_BLACK,
             zorder=3,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95) 
+            bbox=bbox_props
+        )
+        
+        # 2. Mise en gras du nom de la ville (sur la première ligne)
+        ax.text(
+            anchor_x, 
+            anchor_y, 
+            ville, # Uniquement le nom de la ville
+            fontsize=10, 
+            ha=ha_align, 
+            va=va_align,
+            color=CL_BLACK,
+            weight='bold', # Ceci met le nom de la ville en gras
+            zorder=4 
         )
 
-        # 2. Ajout du point de ville d'origine (petit cercle noir)
+
+        # 3. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # 3. Ajout de la 'Bulle d'Évolution'
+        # 4. Ajout de la 'Bulle d'Évolution'
         ti_12m = row['TAUX_INFL_12M']
         if pd.notna(ti_12m):
             color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
             
             # Coordonnées du centre de la bulle
             bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
-            bubble_center_y = lat + y_offset_city + BUBBLE_Y_SHIFT
+            bubble_center_y = lat + y_offset_city + BUBBLE_Y_SHIFT 
             
             # a. Dessin de la bulle (Cercle avec contour noir)
             ax.add_patch(plt.Circle(
@@ -240,6 +276,6 @@ for type_bien in types_bien:
 
     # --- AFFICHAGE SEUL ---
     plt.show() 
-    plt.close(fig) # Fermer la figure après l'affichage
+    plt.close(fig) 
 
     print(f"Génération de la carte pour {type_bien} terminée.")
