@@ -32,6 +32,7 @@ CL_TURQUOISE = '#00A79E'
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
+CL_RED = '#E4002B' # Rouge pour les baisses
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -51,7 +52,7 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (Ville et Prix seulement)
+# 2. Fonction de formatage du texte pour l'affichage (Ville, Prix, et Taux d'évolution)
 def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
@@ -60,8 +61,24 @@ def format_text_label(row):
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    # Retourne deux lignes : Ville, Prix (séparées par '\n')
-    return f"{ville}\n{prix}"
+    # Ligne 3 : Taux d'inflation 3M et 12M
+    ti_3m = row["TAUX_INFL_3M"]
+    ti_12m = row["TAUX_INFL_12M"]
+    
+    ti_3m_str = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else ""
+    ti_12m_str = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else ""
+    
+    # Formatage de la ligne d'évolution
+    evolution_line = ""
+    if ti_3m_str or ti_12m_str:
+        evolution_line = f"({ti_3m_str} / {ti_12m_str})".replace(" / ", "/").replace(" ()", "")
+        # Nettoyage si un seul des deux taux est présent
+        if evolution_line.startswith('(/'): evolution_line = evolution_line.replace('(/', '(')
+        if evolution_line.endswith('/)'): evolution_line = evolution_line.replace('/)', ')')
+        if evolution_line == '(/)': evolution_line = ''
+    
+    # Retourne les trois lignes
+    return f"{ville}\n{prix}\n{evolution_line}"
 
 
 # =============================================================================
@@ -87,14 +104,26 @@ print("Configuration de police 'Century Gothic' appliquée.")
 
 types_bien = ['APT', 'MAI']
 
-# --- DEFINITION DES OFFSETS SPÉCIFQUES ---
+# --- DEFINITION DES OFFSETS SPÉCIFIQUES ---
 CUSTOM_LABEL_OFFSETS = {
-    # Déplace le label de Toulon vers le bas/droite (inchangé)
+    # Déplace le label de Toulon vers le bas/droite
     'TOULON': {'x': 0.1, 'y': -0.05} ,
-    # Ajoutez un décalage vertical pour PARIS et REIMS pour que l'étiquette se développe bien vers le bas
+    # Décalages pour que les étiquettes se déroulent vers le bas, loin du point
     'PARIS': {'x': 0.08, 'y': 0.08},
     'REIMS': {'x': 0.08, 'y': 0.08},
     'LILLE': {'x': 0.08, 'y': 0.08},
+    'MARSEILLE': {'x': 0.08, 'y': 0.08},
+    'GRENOBLE': {'x': 0.08, 'y': 0.08},
+    'LYON': {'x': 0.08, 'y': 0.08},
+    'NICE': {'x': 0.08, 'y': 0.08},
+    'MONTPELLIER': {'x': 0.08, 'y': 0.08},
+    'BORDEAUX': {'x': 0.08, 'y': 0.08},
+    'TOULOUSE': {'x': 0.08, 'y': 0.08},
+    'RENNES': {'x': 0.08, 'y': 0.08},
+    'NANTES': {'x': 0.08, 'y': 0.08},
+
+    # Exemple pour une étiquette qui devrait se développer vers le haut
+    # 'AUTREVILLE': {'x': 0.08, 'y': -0.08}, # Si nécessaire, on inversera les y pour les lignes
 }
 
 
@@ -149,13 +178,8 @@ for type_bien in types_bien:
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # Variables d'Offset des Bulles 
-    BUBBLE_X_SHIFT = 0.30 
-    BUBBLE_Y_SHIFT = 0.02 
-    BUBBLE_RADIUS = 0.12 
-    
-    # Espacement vertical entre Ligne 1 (Ville) et Ligne 2 (Prix) (CORRIGÉ)
-    LINE_SPACING = 0.07 
+    # Espacement vertical entre les lignes (CORRIGÉ pour 3 lignes)
+    LINE_SPACING = 0.05 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
@@ -171,43 +195,50 @@ for type_bien in types_bien:
             y_offset_city = DEFAULT_Y_OFFSET
         # ---------------------------------------------
 
-        # Séparation du texte
-        full_text = row['Formatted_Label']
-        formatted_parts = full_text.split('\n')
+        # Séparation du texte en ses trois parties
+        full_text_label = row['Formatted_Label']
+        formatted_parts = full_text_label.split('\n')
+        
         ville = formatted_parts[0] 
         prix = formatted_parts[1]
+        evolution_text = formatted_parts[2] if len(formatted_parts) > 2 else ""
         
-        # Position de départ pour l'étiquette
+        # Ancre de départ pour l'étiquette
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
         ha_align = 'right' if x_offset_city < 0 else 'left'
         
-        # Pour que l'étiquette se déroule vers le bas (comme sur l'image)
-        # on utilise va='top' (l'ancre est le coin supérieur du texte)
+        # Pour que l'étiquette se déroule vers le bas depuis l'ancre
         va_align_box = 'top' 
         
-        # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
-        # Ceci permet à Matplotlib de calculer la zone de la bbox pour les deux lignes
+        # Détermination de la couleur de la ligne d'évolution (en fonction de ti_12m)
+        ti_12m_val = row['TAUX_INFL_12M']
+        color_evolution_line = CL_BLACK # Couleur par défaut
+        if pd.notna(ti_12m_val):
+            color_evolution_line = CL_RED if ti_12m_val < 0 else CL_TURQUOISE
+        
+        # Paramètres pour la BBOX (fond blanc)
         bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
-
+        
+        # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
+        # Ceci permet à Matplotlib de calculer la zone de la bbox correctement pour englober les TROIS lignes
         ax.text(
             anchor_x, 
             anchor_y, 
-            full_text,
+            full_text_label, # Utilise le texte complet pour la taille de la bbox
             fontsize=10, 
             ha=ha_align, 
             va=va_align_box,
-            color='none', 
+            color='none', # Rendre le texte invisible
             zorder=3,
             bbox=bbox_props
         )
         
         # 2. Dessiner le Nom de la Ville (Ligne 1, en gras)
-        # Le va='top' signifie que le texte commence à anchor_y
         ax.text(
             anchor_x, 
-            anchor_y, 
+            anchor_y, # Position initiale
             ville, 
             fontsize=10, 
             ha=ha_align, 
@@ -218,9 +249,7 @@ for type_bien in types_bien:
         )
         
         # 3. Dessiner le Prix M2 (Ligne 2, en normal)
-        # Nous ajoutons LINE_SPACING à l'ancre pour décaler vers le bas (car va='top')
-        prix_y = anchor_y + LINE_SPACING 
-            
+        prix_y = anchor_y + LINE_SPACING # Décalage vers le bas
         ax.text(
             anchor_x, 
             prix_y, 
@@ -233,43 +262,23 @@ for type_bien in types_bien:
             zorder=4
         )
         
-        # 4. Ajout du point de ville d'origine (petit cercle noir)
+        # 4. Dessiner la ligne d'évolution (Ligne 3, colorée)
+        evolution_y = anchor_y + (2 * LINE_SPACING) # Deuxième décalage vers le bas
+        ax.text(
+            anchor_x, 
+            evolution_y, 
+            evolution_text, 
+            fontsize=8, # Taille de police légèrement plus petite pour cette ligne
+            ha=ha_align, 
+            va=va_align_box,
+            color=color_evolution_line, # Couleur dynamique
+            weight='bold', # Mettre en gras pour que la couleur ressorte
+            zorder=4
+        )
+        
+        # 5. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # 5. Ajout de la 'Bulle d'Évolution'
-        ti_12m = row['TAUX_INFL_12M']
-        if pd.notna(ti_12m):
-            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
-            
-            # Coordonnées du centre de la bulle
-            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
-            # On aligne la bulle sur la ligne du prix (prix_y)
-            bubble_center_y = prix_y + BUBBLE_Y_SHIFT 
-            
-            # a. Dessin de la bulle (Cercle avec contour noir)
-            ax.add_patch(plt.Circle(
-                (bubble_center_x, bubble_center_y), 
-                radius=BUBBLE_RADIUS, 
-                color=color_evolution, 
-                alpha=0.9,
-                ec='black', 
-                lw=1.0, 
-                zorder=5
-            ))
-            
-            # b. Texte dans la bulle (en gras)
-            ax.text(
-                bubble_center_x, 
-                bubble_center_y, 
-                f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=7, 
-                color='white', 
-                ha='center', 
-                va='center',
-                weight='bold', 
-                zorder=6
-            )
-    
     # --- FINALISATION DE L'IMAGE ---
     ax.axis('off') 
     
