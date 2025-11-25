@@ -297,4 +297,3 @@ for type_bien in types_bien:
     plt.close(fig) 
 
     print(f"Génération de la carte pour {type_bien} terminée.")
-```http://googleusercontent.com/image_generation_content/1
