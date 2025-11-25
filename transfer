@@ -1,15 +1,14 @@
-
 import sys
 import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe # IMPORT CRUCIAL POUR LE HALO BLANC
+import matplotlib.patheffects as pe 
 import geopandas as gpd
 from shapely.geometry import Point
 import math
 
-# Imports fonctionnels
+# Imports fonctionnels (conservés)
 from fonctions import (DateOffset, ImportRecentData, CalcMetaNum, EffectifsParMailleGeo, DefMailleGeoCITY, DetectAno)
 from fonctions import detect_ano_ml as detect_ano_ml_fct
 from fonctions import Connector
@@ -20,7 +19,7 @@ import matplotlib.font_manager as fm
 # Le chemin est conservé tel quel
 geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole.geojson" 
 
-# Chemins des données
+# Chemins des données (conservés)
 prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
 df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
 df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
@@ -31,16 +30,17 @@ df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 CL_TURQUOISE = '#00A79E' 
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
-CL_MEDIUM_GREY = '#CCCCCC' 
 CL_BLUE_3M = '#004B9B' 
 CL_RED_12M = '#E4002B' 
 
-# --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
 plt.rcParams['font.family'] = 'sans-serif' 
 plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
 plt.rcParams['font.weight'] = 'medium' 
 TITRE_FONT_WEIGHT = 'heavy' 
+
+TAUX_FONT_SIZE = 9
+DEFAULT_FONT_SIZE = 10 
 
 # =============================================================================
 # --- PRÉPARATION DES DONNÉES ---
@@ -50,12 +50,6 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-def format_text_label(row):
-    ville = str(row['label']).upper() 
-    prix_val = row['prix_mm_value']
-    prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
-    return f"{ville}\n{prix}"
-
 # =============================================================================
 # --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
 # =============================================================================
@@ -64,7 +58,6 @@ try:
     france_gdf = gpd.read_file(geojson_path)
     dissolved_france = france_gdf.dissolve(by=None)
     france_outline_geometry = dissolved_france.geometry.iloc[0] 
-    print("Contour de la France chargé.")
 except Exception as e:
     print(f"!!! Échec critique: {e}")
     sys.exit(1)
@@ -73,32 +66,29 @@ except Exception as e:
 # --- CRÉATION DE LA CARTE MATPLOTLIB ---
 # =============================================================================
 
-print("Configuration de police 'Century Gothic' appliquée.")
-
 types_bien = ['APT', 'MAI']
 
-# --- DEFINITION DES OFFSETS ULTRA-PRÉCIS (Le "Tuning") ---
-# x positif : vers la droite / x négatif : vers la gauche
-# y positif : vers le haut / y négatif : vers le bas
+# --- NOUVELLE DEFINITION DES OFFSETS RÉDUITS ---
+# Les valeurs absolues sont divisées par environ 1.5 à 2
 CUSTOM_LABEL_OFFSETS = {
-    # SUD-EST (La zone encombrée)
-    'MONTPELLIER': {'x': -0.15, 'y': 0.10}, # Poussé vers la gauche (Ouest) et haut
-    'MARSEILLE':   {'x': -0.15,  'y': -0.15}, # Poussé un peu à droite et haut
-    'TOULON':      {'x': 0.10,  'y': -0.20}, # Poussé vers le bas (dans la mer)
-    'NICE':        {'x': -0.15, 'y': 0.05}, # Poussé vers la gauche (terre) pour éviter l'Italie/Mer
-    'GRENOBLE':    {'x': 0.15, 'y': 0.0},   # Poussé à droite
+    # SUD-EST (Zone encombrée)
+    'MONTPELLIER': {'x': -0.08, 'y': 0.05}, # Réduit de -0.15, 0.10
+    'MARSEILLE':   {'x': -0.08,  'y': -0.08}, # Réduit de -0.15, -0.15
+    'TOULON':      {'x': 0.05,  'y': -0.10}, # Réduit de 0.10, -0.20
+    'NICE':        {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
+    'GRENOBLE':    {'x': 0.08, 'y': 0.0},   # Réduit de 0.15, 0.0
 
-    # FRONTIÈRES & CÔTES (Pour rentrer dans les terres)
-    'BORDEAUX':    {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
-    'NANTES':      {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
-    'RENNES':      {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
-    'LILLE':       {'x': 0.0,   'y': -0.25}, # Poussé vers le bas (terre) pour éviter la Belgique
-    'STRASBOURG':  {'x': -0.15, 'y': 0.0},  # Poussé vers la gauche (terre) pour éviter l'Allemagne
+    # FRONTIÈRES & CÔTES 
+    'BORDEAUX':    {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
+    'NANTES':      {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
+    'RENNES':      {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
+    'LILLE':       {'x': 0.0,   'y': -0.15}, # Réduit de 0.0, -0.25
+    'STRASBOURG':  {'x': -0.08, 'y': 0.0},  # Réduit de -0.15, 0.0
     
     # CENTRE / AUTRES
-    'PARIS':       {'x': 0.15, 'y': 0.05},
-    'LYON':        {'x': -0.15, 'y': 0.05}, # Poussé à gauche pour s'éloigner de Grenoble
-    'TOULOUSE':    {'x': -0.15, 'y': 0.05}, # Poussé à gauche
+    'PARIS':       {'x': 0.08, 'y': 0.03}, # Réduit de 0.15, 0.05
+    'LYON':        {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
+    'TOULOUSE':    {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
 }
 
 for type_bien in types_bien:
@@ -114,15 +104,13 @@ for type_bien in types_bien:
     
     if df_map.empty: continue
         
-    df_map['Formatted_Label'] = df_map.apply(format_text_label, axis=1)
     geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
     gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
     
-    # --- DESSIN ---
+    # --- DESSIN DE LA CARTE ---
     fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
     fig.set_facecolor(CL_TURQUOISE) 
     
-    # --- DESSIN DU CONTOUR ---
     geometries_to_plot = [france_outline_geometry]
     if france_outline_geometry.geom_type == 'MultiPolygon':
         geometries_to_plot = list(france_outline_geometry.geoms)
@@ -137,12 +125,13 @@ for type_bien in types_bien:
 
     # --- AJOUT DES ÉTIQUETTES ---
     
-    DEFAULT_X_OFFSET = 0.08 
-    DEFAULT_Y_OFFSET = 0.08 
+    # Décalages généraux
+    DEFAULT_X_OFFSET = 0.04 # Réduit de 0.08
+    DEFAULT_Y_OFFSET = 0.04 # Réduit de 0.08
     LINE_SPACING = 0.13 
-    RATE_SPACING_X = 0.60 
+    # Espacement entre les deux taux (réduit pour compenser la taille de police plus petite)
+    RATE_INNER_SPACING_X = 0.8 
     
-    # DEFINITION DU HALO BLANC (Contour autour du texte)
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
     for idx, row in gdf.iterrows():
@@ -163,58 +152,62 @@ for type_bien in types_bien:
         ti_3m = row['TAUX_INFL_3M']
         ti_12m = row['TAUX_INFL_12M']
         
+        # Ancrage du texte
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
-        # Alignement dynamique : si offset X négatif, on aligne à droite pour que le texte "pousse" vers la gauche
-        ha_align = 'right' if x_offset_city < 0 else 'left'
-        va_align_box = 'top' 
+        ha_box_align = 'right' if x_offset_city < 0 else 'left'
+        va_align = 'top' 
         
-        # 1. Nom de la Ville (Ligne 1)
-        ax.text(anchor_x, anchor_y, ville, fontsize=10, ha=ha_align, va=va_align_box,
+        # 1. Nom de la Ville (Ligne 1) 
+        ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
                 color=CL_BLACK, weight='bold', zorder=4, 
-                path_effects=halo_effect) # Ajout du halo
+                path_effects=halo_effect) 
         
-        # 2. Prix M2 (Ligne 2)
+        # 2. Prix M2 (Ligne 2) 
         prix_y = anchor_y - LINE_SPACING 
-        ax.text(anchor_x, prix_y, prix, fontsize=10, ha=ha_align, va=va_align_box,
+        ax.text(anchor_x, prix_y, prix, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
                 color=CL_BLACK, weight='normal', zorder=4,
-                path_effects=halo_effect) # Ajout du halo
+                path_effects=halo_effect) 
         
-        # 3. Taux d'inflation (Ligne 3)
+        # 3. Taux d'inflation (Ligne 3) - Taille réduite (9)
         ti_y = prix_y - LINE_SPACING 
         
-        # Taux 3M (BLEU)
+        # Taux 3M (BLEU) - Toujours en premier
         if pd.notna(ti_3m):
-            text_3m = f"{ti_3m:+.1%}".replace('.', ',')
+            text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
         else:
-            text_3m = "N/A"
+            text_3m = "3M: N/A"
 
-        ax.text(anchor_x, ti_y, text_3m, fontsize=10, ha=ha_align, va=va_align_box,
-                color=CL_BLUE_3M, weight='bold', zorder=4, # Mis en gras pour lisibilité
-                path_effects=halo_effect) # Ajout du halo
+        # Dessin du 3M (BLEU)
+        ax.text(anchor_x, ti_y, text_3m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLUE_3M, weight='bold', zorder=4, 
+                path_effects=halo_effect) 
         
-        # Taux 12M (ROUGE)
+        # Taux 12M (ROUGE) - Toujours en second
         if pd.notna(ti_12m):
-            text_12m = f"{ti_12m:+.1%}".replace('.', ',')
+            text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
         else:
-            text_12m = "N/A"
+            text_12m = "12M: N/A"
 
-        # Calcul position 12M
-        if ha_align == 'left':
-            x_12m = anchor_x + RATE_SPACING_X
-            align_12m = 'left'
-        else:
-            x_12m = anchor_x - RATE_SPACING_X
-            align_12m = 'right'
+        # --- LOGIQUE DE POSITIONNEMENT FIXE (3M puis 12M) ---
+        if ha_box_align == 'left':
+            x_12m = anchor_x + RATE_INNER_SPACING_X
+            align_12m = 'left' 
+        else: # ha_box_align == 'right'
+            x_12m = anchor_x - RATE_INNER_SPACING_X
+            align_12m = 'right' 
+        # -----------------------------------------------------
 
-        ax.text(x_12m, ti_y, text_12m, fontsize=10, ha=align_12m, va=va_align_box,
-                color=CL_RED_12M, weight='bold', zorder=4, # Mis en gras pour lisibilité
-                path_effects=halo_effect) # Ajout du halo
+        # Dessin du 12M (ROUGE)
+        ax.text(x_12m, ti_y, text_12m, fontsize=TAUX_FONT_SIZE, ha=align_12m, va=va_align,
+                color=CL_RED_12M, weight='bold', zorder=4, 
+                path_effects=halo_effect)
 
         # 4. Point Ville
+        # Le point reste sur les coordonnées GPS d'origine (lon, lat)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
-                markeredgecolor='white', markeredgewidth=0.5) # Petit contour blanc sur le point aussi
+                markeredgecolor='white', markeredgewidth=0.5) 
 
     # --- FINALISATION ---
     ax.axis('off') 
@@ -223,6 +216,7 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
+    # LÉGENDE
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
     fig.text(0.05, 0.1, "LÉGENDE TAUX:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
     fig.text(0.05, 0.08, "Bleu: Taux 3 mois", ha='left', va='bottom', fontsize=8, color=CL_BLUE_3M)
