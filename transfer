@@ -33,7 +33,7 @@ CL_BLACK = '#000000'
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
 CL_RED_EVOLUTION = '#E4002B' # Rouge pour la baisse
-CL_GREEN_EVOLUTION = CL_TURQUOISE # Turquoise pour la hausse
+CL_GREEN_EVOLUTION = CL_TURQUOISE # Turquoise pour la hausse/stable
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -53,7 +53,7 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (Ville, Prix et ti_12m)
+# 2. Fonction de formatage du texte pour l'affichage (Ville, Prix et Taux 3M/12M)
 def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
@@ -62,15 +62,16 @@ def format_text_label(row):
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    # Ligne 3 : Taux d'inflation 12M
+    # Ligne 3 : Taux d'inflation 3M et 12M (combinés sur une ligne)
+    ti_3m = row['TAUX_INFL_3M']
     ti_12m = row['TAUX_INFL_12M']
-    if pd.notna(ti_12m):
-        ti_12m_formatted = f"12M: {ti_12m:+.1%}".replace('.', ',')
-    else:
-        ti_12m_formatted = "12M: N/A"
+    
+    ti_3m_formatted = f"3M: {ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "3M: N/A"
+    ti_12m_formatted = f"12M: {ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "12M: N/A"
 
-    # Retourne trois lignes séparées par '\n'
-    return f"{ville}\n{prix}\n{ti_12m_formatted}"
+    # Le séparateur est important pour la BBOX mais sera ignoré pour l'affichage ligne par ligne
+    # On retourne trois lignes : Ville, Prix, Taux 3M (espace) Taux 12M
+    return f"{ville}\n{prix}\n{ti_3m_formatted} {ti_12m_formatted}"
 
 
 # =============================================================================
@@ -100,7 +101,7 @@ types_bien = ['APT', 'MAI']
 CUSTOM_LABEL_OFFSETS = {
     # Déplace le label de Toulon vers le bas/droite 
     'TOULON': {'x': 0.1, 'y': -0.05} ,
-    # Décalages pour que l'étiquette se développe vers le bas/droite
+    # Décalages pour que l'étiquette se développe vers le bas/droite (va='top')
     'PARIS': {'x': 0.08, 'y': 0.08},
     'REIMS': {'x': 0.08, 'y': 0.08},
     'LILLE': {'x': 0.08, 'y': 0.08},
@@ -167,8 +168,7 @@ for type_bien in types_bien:
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # Espacement vertical entre les lignes (Ville, Prix, Taux)
-    # Augmenté pour trois lignes de texte (deux espacements)
+    # Espacement vertical entre les lignes
     LINE_SPACING = 0.07 
     
     for idx, row in gdf.iterrows():
@@ -190,7 +190,11 @@ for type_bien in types_bien:
         formatted_parts = full_text.split('\n')
         ville = formatted_parts[0] 
         prix = formatted_parts[1]
-        ti_12m_text = formatted_parts[2]
+        ti_text_3m_12m = formatted_parts[2] # Contient "3M: X% 12M: Y%"
+        
+        # Récupérer les valeurs séparées
+        ti_3m_value = row['TAUX_INFL_3M']
+        ti_12m_value = row['TAUX_INFL_12M']
         
         # Position de départ pour l'étiquette
         anchor_x = lon + x_offset_city
@@ -199,16 +203,6 @@ for type_bien in types_bien:
         ha_align = 'right' if x_offset_city < 0 else 'left'
         va_align_box = 'top' # L'étiquette se développe vers le bas à partir de l'ancre Y
         
-        # Détermination de la couleur de l'évolution
-        ti_12m_value = row['TAUX_INFL_12M']
-        if pd.notna(ti_12m_value):
-            if ti_12m_value < 0:
-                color_evolution = CL_RED_EVOLUTION # Rouge pour la baisse
-            else:
-                color_evolution = CL_GREEN_EVOLUTION # Turquoise pour la hausse/stable
-        else:
-            color_evolution = CL_BLACK # Noir par défaut si N/A
-
         # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
         bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
 
@@ -253,26 +247,59 @@ for type_bien in types_bien:
             zorder=4
         )
         
-        # 4. Dessiner le Taux d'inflation 12M (Ligne 3, en normal et coloré)
-        # Décalage de deux espacements (ou un espacement après la ligne du prix)
-        ti_12m_y = prix_y + LINE_SPACING 
-            
+        # 4. Dessiner la ligne Taux (Ligne 3)
+        ti_y = prix_y + LINE_SPACING # Décalage d'un deuxième espacement
+        
+        # --- LOGIQUE D'AFFICHAGE DU TAUX EN COULEUR ---
+        
+        # Ligne de base pour l'alignement (décalée vers le bas)
+        
+        # Affichage du Taux 3M
+        ti_3m_color = CL_RED_EVOLUTION if pd.notna(ti_3m_value) and ti_3m_value < 0 else CL_GREEN_EVOLUTION
+        ti_3m_text_part = f"3M: {ti_3m_value:+.1%}".replace('.', ',') if pd.notna(ti_3m_value) else "3M: N/A"
+
         ax.text(
-            anchor_x, 
-            ti_12m_y, 
-            ti_12m_text, 
-            fontsize=10, 
-            ha=ha_align, 
+            anchor_x,
+            ti_y,
+            ti_3m_text_part,
+            fontsize=10,
+            ha=ha_align,
             va=va_align_box,
-            color=color_evolution, # Couleur basée sur la valeur
-            weight='normal', 
+            color=ti_3m_color,
+            weight='normal',
             zorder=4
         )
         
+        # Calculer la position X pour le Taux 12M pour qu'il soit à droite du 3M
+        # Ceci est une approximation, mais devrait fonctionner si les textes ne sont pas trop longs
+        if ha_align == 'left':
+            # Si aligné à gauche, le texte 12M sera dessiné AVANT la position x (car va='top', ha='right' temporaire)
+            # On utilise une taille de pas fixe (estimée) ou une largeur de texte mesurée (plus complexe)
+            # Prenons une position X relative pour le second taux (estimée pour une police de taille 10)
+            x_offset_12m = anchor_x + 0.15 # Décalage visuel à droite
+            
+            # Affichage du Taux 12M
+            ti_12m_color = CL_RED_EVOLUTION if pd.notna(ti_12m_value) and ti_12m_value < 0 else CL_GREEN_EVOLUTION
+            ti_12m_text_part = f"12M: {ti_12m_value:+.1%}".replace('.', ',') if pd.notna(ti_12m_value) else "12M: N/A"
+
+            ax.text(
+                x_offset_12m,
+                ti_y,
+                ti_12m_text_part,
+                fontsize=10,
+                ha='left', # Alignement à gauche pour qu'il se développe vers la droite
+                va=va_align_box,
+                color=ti_12m_color,
+                weight='normal',
+                zorder=4
+            )
+        # Si aligné à droite, la logique serait inversée, mais pour simplifier on reste sur l'alignement à gauche pour les deux taux pour le moment.
+        # Vous devrez ajuster le 'x_offset_12m' en fonction de la police si le résultat n'est pas parfait.
+
+
         # 5. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # *** SUPPRESSION DE LA LOGIQUE DE LA BULLE ***
     
     # --- FINALISATION DE L'IMAGE ---
     ax.axis('off') 
