@@ -42,6 +42,9 @@ TITRE_FONT_WEIGHT = 'heavy'
 TAUX_FONT_SIZE = 9
 DEFAULT_FONT_SIZE = 10 
 
+# DÉFINITION DU SYSTÈME DE COORDONNÉES CIBLE (Lambert 93)
+TARGET_CRS = "EPSG:2154"
+
 # =============================================================================
 # --- PRÉPARATION DES DONNÉES ---
 # =============================================================================
@@ -51,15 +54,17 @@ df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
 # =============================================================================
-# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION ---
 # =============================================================================
 
 try:
+    # 1. Charger et projeter le contour
     france_gdf = gpd.read_file(geojson_path)
     dissolved_france = france_gdf.dissolve(by=None)
-    france_outline_geometry = dissolved_france.geometry.iloc[0] 
+    france_outline_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] # PROJECTION ICI
+    print(f"Contour de la France chargé et projeté en {TARGET_CRS}.")
 except Exception as e:
-    print(f"!!! Échec critique: {e}")
+    print(f"!!! Échec critique lors du chargement ou de la projection du GeoJSON: {e}")
     sys.exit(1)
 
 # =============================================================================
@@ -68,27 +73,32 @@ except Exception as e:
 
 types_bien = ['APT', 'MAI']
 
-# --- NOUVELLE DEFINITION DES OFFSETS RÉDUITS ---
-# Les valeurs absolues sont divisées par environ 1.5 à 2
-CUSTOM_LABEL_OFFSETS = {
-    # SUD-EST (Zone encombrée)
-    'MONTPELLIER': {'x': -0.08, 'y': 0.05}, # Réduit de -0.15, 0.10
-    'MARSEILLE':   {'x': -0.08,  'y': -0.08}, # Réduit de -0.15, -0.15
-    'TOULON':      {'x': 0.05,  'y': -0.10}, # Réduit de 0.10, -0.20
-    'NICE':        {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
-    'GRENOBLE':    {'x': 0.08, 'y': 0.0},   # Réduit de 0.15, 0.0
+# --- NOUVELLE DEFINITION DES OFFSETS EN MÈTRES (m) ---
+# 10000 mètres = 10 km. Les offsets sont beaucoup plus petits.
+METER_OFFSET = 1000 # 1 km.
+X_OFFSET_DEFAULT = 3500 # 3.5 km
+Y_OFFSET_DEFAULT = 3500 # 3.5 km
 
-    # FRONTIÈRES & CÔTES 
-    'BORDEAUX':    {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
-    'NANTES':      {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
-    'RENNES':      {'x': 0.08,  'y': 0.0},  # Réduit de 0.15, 0.0
-    'LILLE':       {'x': 0.0,   'y': -0.15}, # Réduit de 0.0, -0.25
-    'STRASBOURG':  {'x': -0.08, 'y': 0.0},  # Réduit de -0.15, 0.0
+CUSTOM_LABEL_OFFSETS = {
+    # Offsets en mètres (facteur 1000 = 1km)
+    # SUD-EST (Zone encombrée)
+    'MONTPELLIER': {'x': -8000, 'y': 5000}, 
+    'MARSEILLE':   {'x': -8000,  'y': -8000}, # Gauche, Bas
+    'TOULON':      {'x': 5000,  'y': -10000},
+    'NICE':        {'x': -8000, 'y': 3000}, 
+    'GRENOBLE':    {'x': 8000, 'y': 0},   
+
+    # FRONTIÈRES & CÔTES (Pour rentrer dans les terres)
+    'BORDEAUX':    {'x': 8000,  'y': 0},  
+    'NANTES':      {'x': 8000,  'y': 0},  
+    'RENNES':      {'x': 8000,  'y': 0},  
+    'LILLE':       {'x': 0,   'y': -15000}, # 15 km vers le bas
+    'STRASBOURG':  {'x': -8000, 'y': 0},  
     
     # CENTRE / AUTRES
-    'PARIS':       {'x': 0.08, 'y': 0.03}, # Réduit de 0.15, 0.05
-    'LYON':        {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
-    'TOULOUSE':    {'x': -0.08, 'y': 0.03}, # Réduit de -0.15, 0.05
+    'PARIS':       {'x': 8000, 'y': 3000},
+    'LYON':        {'x': -8000, 'y': 3000}, 
+    'TOULOUSE':    {'x': -8000, 'y': 3000}, 
 }
 
 for type_bien in types_bien:
@@ -104,47 +114,52 @@ for type_bien in types_bien:
     
     if df_map.empty: continue
         
+    # 2. Créer et projeter les points des villes
     geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
+    # Les coordonnées sont en WGS 84 (EPSG:4326) dans le CSV
     gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
+    # PROJECTION ICI
+    gdf = gdf.to_crs(TARGET_CRS) 
     
     # --- DESSIN DE LA CARTE ---
     fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
     fig.set_facecolor(CL_TURQUOISE) 
     
+    # 3. Dessin du contour (déjà projeté)
     geometries_to_plot = [france_outline_geometry]
     if france_outline_geometry.geom_type == 'MultiPolygon':
         geometries_to_plot = list(france_outline_geometry.geoms)
 
     for geom in geometries_to_plot:
-        ax.fill(geom.exterior.xy[0], geom.exterior.xy[1], color=CL_LIGHT_GREY, zorder=1) 
-        ax.plot(geom.exterior.xy[0], geom.exterior.xy[1], color=CL_BLACK, linewidth=1.0, zorder=2)
+        x, y = geom.exterior.xy
+        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
+        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
     
     xmin, ymin, xmax, ymax = france_outline_geometry.bounds
-    ax.set_xlim(xmin - 0.7, xmax + 0.7) 
-    ax.set_ylim(ymin - 0.7, ymax + 0.7)
+    # Définition des limites de la carte dans le nouveau CRS (en mètres)
+    ax.set_xlim(xmin - 5000, xmax + 5000) 
+    ax.set_ylim(ymin - 5000, ymax + 5000)
 
     # --- AJOUT DES ÉTIQUETTES ---
     
-    # Décalages généraux
-    DEFAULT_X_OFFSET = 0.04 # Réduit de 0.08
-    DEFAULT_Y_OFFSET = 0.04 # Réduit de 0.08
-    LINE_SPACING = 0.13 
-    # Espacement entre les deux taux (réduit pour compenser la taille de police plus petite)
-    RATE_INNER_SPACING_X = 0.8 
+    LINE_SPACING = 15000 # Espacement vertical entre les lignes (en mètres)
+    RATE_INNER_SPACING_X = 40000 # Espacement entre les deux taux (en mètres)
     
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
     for idx, row in gdf.iterrows():
-        lon = row['longitude']
-        lat = row['latitude']
+        # Utiliser les coordonnées projetées (x, y)
+        x_coord = row.geometry.x 
+        y_coord = row.geometry.y 
         city_label = row['label'] 
         
+        # Définition des offsets
         if city_label in CUSTOM_LABEL_OFFSETS:
             x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
             y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
         else:
-            x_offset_city = DEFAULT_X_OFFSET
-            y_offset_city = DEFAULT_Y_OFFSET
+            x_offset_city = X_OFFSET_DEFAULT
+            y_offset_city = Y_OFFSET_DEFAULT
 
         ville = str(row['label']).upper()
         prix_val = row['prix_mm_value']
@@ -153,8 +168,8 @@ for type_bien in types_bien:
         ti_12m = row['TAUX_INFL_12M']
         
         # Ancrage du texte
-        anchor_x = lon + x_offset_city
-        anchor_y = lat + y_offset_city
+        anchor_x = x_coord + x_offset_city
+        anchor_y = y_coord + y_offset_city
         
         ha_box_align = 'right' if x_offset_city < 0 else 'left'
         va_align = 'top' 
@@ -205,8 +220,8 @@ for type_bien in types_bien:
                 path_effects=halo_effect)
 
         # 4. Point Ville
-        # Le point reste sur les coordonnées GPS d'origine (lon, lat)
-        ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
+        # Utiliser les coordonnées projetées (x_coord, y_coord)
+        ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
                 markeredgecolor='white', markeredgewidth=0.5) 
 
     # --- FINALISATION ---
