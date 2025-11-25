@@ -6,17 +6,23 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 from shapely.geometry import Point
 import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
 
-# NOTE: Les imports de 'fonctions' et 'param_general' sont conservés pour l'intégrité
-# mais ne sont pas utilisés dans le bloc de visualisation final.
+# Les imports de 'fonctions' et 'param_general' sont conservés pour l'intégrité du script
 from fonctions import (DateOffset, ImportRecentData, CalcMetaNum, EffectifsParMailleGeo, DefMailleGeoCITY, DetectAno)
 from fonctions import detect_ano_ml as detect_ano_ml_fct
 from fonctions import Connector
 import param_general as params
 import time
 
+# =============================================================================
+# --- CONFIGURATION INITIALE ---
+# =============================================================================
+
+# Dossier de sortie pour les images PNG
+# Le chemin doit être défini ou ajusté si vous exécutez le script dans un environnement
+current_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
+output_dir = os.path.join(current_dir, "results")
+os.makedirs(output_dir, exist_ok=True)
 
 
 # Définition du chemin vers le GeoJSON de la France Métropolitaine
@@ -28,18 +34,18 @@ prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_
 df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
 df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 
+
 # =============================================================================
-# PRÉPARATION DES DONNÉES
+# --- PRÉPARATION DES DONNÉES ---
 # =============================================================================
 
-# 1. Nettoyage et Fusion des données de prix
+# Nettoyage et Fusion des données de prix
 prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
 
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# --- FONCTION DE FORMATAGE DU TEXTE ---
-# Crée l'étiquette de texte pour l'affichage (Ville, Prix, Évolution)
+# Fonction de formatage du texte pour l'affichage (Ville, Prix, Évolution)
 def format_text_label(row):
     ville = str(row['label']).capitalize()
     
@@ -56,39 +62,47 @@ def format_text_label(row):
     
     evolution_line = ""
     if ti_3m_str or ti_12m_str:
+        # Format des deux taux : (TI 3M / TI 12M)
         evolution_line = f"({ti_3m_str} / {ti_12m_str})".replace(" / ", "").replace(" ()", "")
         
+    # Retourne le texte sur trois lignes pour Matplotlib
     return f"{ville}\n{prix}\n{evolution_line}"
 
+
 # =============================================================================
-# CRÉATION DES CARTES THÉMATIQUES AVEC MATPLOTLIB
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE (CORRIGÉ) ---
+# =============================================================================
+
+try:
+    france_gdf = gpd.read_file(geojson_path)
+    # Dissoudre toutes les géométries en un seul objet (gestion des MultiPolygons)
+    dissolved_france = france_gdf.dissolve(by=None)
+    
+    # Récupérer l'unique géométrie dissoute
+    france_outline_geometry = dissolved_france.geometry.iloc[0] 
+    
+    print("Contour de la France chargé et dissous avec succès.")
+except Exception as e:
+    print(f"!!! Échec critique du chargement du GeoJSON: {e}")
+    sys.exit(1)
+
+
+# =============================================================================
+# --- CRÉATION DE LA CARTE MATPLOTLIB ---
 # =============================================================================
 
 types_bien = ['APT', 'MAI']
 
-# 1. Charger le contour de la France (FAIT UNE SEULE FOIS)
-try:
-    france_gdf = gpd.read_file(geojson_path)
-    dissolved_france = france_gdf.dissolve(by=None)
-    france_outline = france_gdf.geometry.iloc[0] # Assumons que la première géométrie est la métropole
-    print("Contour de la France chargé avec succès.")
-except Exception as e:
-    print(f"!!! Échec critique du chargement du GeoJSON: {e}")
-    # Si le contour ne peut pas être chargé, le script ne peut pas dessiner le fond.
-    # On sort de l'exécution ou on utilise un contour minimal de secours.
-    sys.exit(1)
-
-
 for type_bien in types_bien:
     print(f"\n--- Génération de la carte pour le type de bien : {type_bien} ---")
     
-    # 2. Filtrage des données par type de bien et merge GPS
+    # Filtrage et merge des données GPS
     df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
 
     df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper()
     df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
     
-    # Sélection des colonnes essentielles et nettoyage
+    # Nettoyage
     df_map = df_map[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']].copy()
     df_map = df_map.dropna(subset=['latitude', 'longitude'])
     df_map = df_map.drop_duplicates(subset='label', keep='first')
@@ -97,120 +111,102 @@ for type_bien in types_bien:
         print("Aucune donnée géographique valide trouvée pour ce type de bien.")
         continue
         
-    # 3. Préparation des étiquettes et des géométries
+    # Préparation des étiquettes et du GeoDataFrame pour les points
     df_map['Formatted_Label'] = df_map.apply(format_text_label, axis=1)
-    
-    # Création du GeoDataFrame pour les points (important pour la cohérence)
     geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
     gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
     
-    # 4. Création de la figure et des axes Matplotlib
+    # --- DESSIN ---
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
     
-    # --- DESSIN DU FOND DE CARTE (STYLE THÉMATIQUE) ---
+    # Fond de l'image (Zone de l'océan/extérieur) - CORRIGÉ en Hex
+    fig.set_facecolor("#006496") 
     
-    # Fond de l'image (Zone de l'océan/extérieur)
-    fig.set_facecolor("#006496") # Bleu foncé/turquoise comme l'exemple
+    # --- DESSIN DU CONTOUR DE LA FRANCE (CORRIGÉ POUR MULTIPOLYGON) ---
     
-    # A. Dessiner le contour de la France (Remplissage Jaune/Ocre)
-    france_outline_geometry = france_outline # Utilisation directe de la géométrie chargée
-    
-    ax.fill(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-            color='#FFDE72', # Jaune/Ocre
-            zorder=1) # Premier plan
-            
-    ax.plot(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-            color='black', 
-            linewidth=1.5, 
-            zorder=2) # Contour noir
-    
-    # B. Définir les limites de la vue (zoom sur la France)
-    xmin, ymin, xmax, ymax = france_outline_geometry.bounds
-    ax.set_xlim(xmin - 0.5, xmax + 0.5)
-    ax.set_ylim(ymin - 0.5, ymax + 0.5)
+    # Gère les îles si elles sont séparées du continent (MultiPolygon)
+    geometries_to_plot = [france_outline_geometry]
+    if france_outline_geometry.geom_type == 'MultiPolygon':
+        geometries_to_plot = list(france_outline_geometry.geoms)
+
+    for geom in geometries_to_plot:
+        # Remplissage Jaune/Ocre
+        ax.fill(geom.exterior.xy[0], geom.exterior.xy[1], 
+                color='#FFDE72', 
+                zorder=1) 
+                
+        # Contour noir
+        ax.plot(geom.exterior.xy[0], geom.exterior.xy[1], 
+                color='black', 
+                linewidth=1.5, 
+                zorder=2)
+    
+    # Définir les limites de la vue (zoom sur la France)
+    xmin, ymin, xmax, ymax = france_outline_geometry.bounds
+    ax.set_xlim(xmin - 0.5, xmax + 0.5)
+    ax.set_ylim(ymin - 0.5, ymax + 0.5)
 
     # --- AJOUT DES ÉTIQUETTES ET DES BULLES ---
-    
-    # Décalage horizontal simple pour éviter les chevauchements
-    x_offset = 0.05 # Peut nécessiter un ajustement
-    y_offset = 0.05
-    
-    for idx, row in gdf.iterrows():
-        lon = row['longitude']
-        lat = row['latitude']
-        
-        # 1. Dessiner le fond blanc de l'étiquette et le texte
-        ax.text(
-            lon + x_offset, 
-            lat + y_offset, 
-            row['Formatted_Label'],
-            fontsize=9,
-            ha='left', # Aligner à gauche de la ville
-            va='bottom',
-            color='black',
-            zorder=3,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", lw=0.5, alpha=0.9) # Fond blanc
-        )
+    
+    # Décalage pour le placement de l'étiquette (à ajuster manuellement si les villes se chevauchent)
+    x_offset = 0.05 
+    y_offset = 0.05
+    
+    for idx, row in gdf.iterrows():
+        lon = row['longitude']
+        lat = row['latitude']
+        
+        # 1. Dessiner le fond blanc de l'étiquette et le texte
+        ax.text(
+            lon + x_offset, 
+            lat + y_offset, 
+            row['Formatted_Label'],
+            fontsize=9,
+            ha='left', 
+            va='bottom',
+            color='black',
+            zorder=3,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", lw=0.5, alpha=0.9)
+        )
 
-        # 2. Ajout du point de ville d'origine (petit cercle noir)
-        ax.plot(lon, lat, marker='o', color='black', markersize=4, zorder=4)
+        # 2. Ajout du point de ville d'origine (petit cercle noir)
+        ax.plot(lon, lat, marker='o', color='black', markersize=4, zorder=4)
 
-        # 3. Ajout de la 'Bulle d'Évolution' (optionnel, basé sur TI_12M)
-        ti_12m = row['TAUX_INFL_12M']
-        if pd.notna(ti_12m):
-            color = 'red' if ti_12m < 0 else 'green'
-            # Placement de la bulle à droite de la ville
-            ax.add_patch(plt.Circle(
-                (lon + x_offset + 0.25, lat + 0.1), 
-                radius=0.1,
-                color=color, alpha=0.8,
-                zorder=5
-            ))
-            # Texte dans la bulle (le taux)
-            ax.text(
-                lon + x_offset + 0.25, 
-                lat + 0.1, 
-                f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=6, color='white', ha='center', va='center',
-                zorder=6
-            )
-    
-    # --- FINALISATION DE L'IMAGE ---
-    ax.axis('off') # Retirer les axes (latitude/longitude)
-    
-    # Titre et signature (comme dans l'exemple)
-    title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
-    subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
+        # 3. Ajout de la 'Bulle d'Évolution'
+        ti_12m = row['TAUX_INFL_12M']
+        if pd.notna(ti_12m):
+            color = 'red' if ti_12m < 0 else 'green'
+            # Placement de la bulle à droite de l'étiquette
+            ax.add_patch(plt.Circle(
+                (lon + x_offset + 0.25, lat + 0.1), 
+                radius=0.1,
+                color=color, alpha=0.8,
+                zorder=5
+            ))
+            # Texte dans la bulle (le taux)
+            ax.text(
+                lon + x_offset + 0.25, 
+                lat + 0.1, 
+                f"{ti_12m:+.1%}".replace('.', ','),
+                fontsize=6, color='white', ha='center', va='center',
+                zorder=6
+            )
+    
+    # --- FINALISATION DE L'IMAGE ---
+    ax.axis('off') # Retirer les axes (latitude/longitude)
+    
+    # Titre et signature 
+    title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
+    subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
 
-    ax.set_title(title_text, fontsize=18, loc='left', pad=20, color='white', ha='center', x=0.45)
-    
-    # Utilisation d'une annotation pour le sous-titre et les sources
-    fig.text(0.9, 0.95, subtitle_text, ha='right', va='top', fontsize=10, color='white')
-    fig.text(0.1, 0.05, "Source: Votre Produit, MM 12M", ha='left', va='bottom', fontsize=8, color='white')
+    ax.set_title(title_text, fontsize=18, loc='left', pad=20, color='white', ha='center', x=0.45)
+    
+    fig.text(0.9, 0.95, subtitle_text, ha='right', va='top', fontsize=10, color='white')
+    fig.text(0.1, 0.05, "Source: Votre Produit, MM 12M", ha='left', va='bottom', fontsize=8, color='white')
 
     # Sauvegarder l'image en haute résolution
-    plt.show()
+    output_file_png = os.path.join(output_dir, f"carte_prix_m2_matplot_{type_bien}.png")
+    plt.savefig(output_file_png, dpi=300, bbox_inches='tight', facecolor=fig.get_facecolor()) 
+    plt.close(fig) # Fermer la figure pour ne pas accumuler dans la mémoire
 
-    print(f"Carte Matplotlib enregistrée")
-
-#####################################################################
-
-{
-	"name": "AttributeError",
-	"message": "'MultiPolygon' object has no attribute 'exterior'",
-	"stack": "---------------------------------------------------------------------------
-AttributeError                            Traceback (most recent call last)
-Cell In[12], line 118
-    115 # A. Dessiner le contour de la France (Remplissage Jaune/Ocre)
-    116 france_outline_geometry = france_outline # Utilisation directe de la géométrie chargée
---> 118 ax.fill(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-    119         color='#FFDE72', # Jaune/Ocre
-    120         zorder=1) # Premier plan
-    122 ax.plot(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-    123         color='black', 
-    124         linewidth=1.5, 
-    125         zorder=2) # Contour noir
-    127 # B. Définir les limites de la vue (zoom sur la France)
-
-AttributeError: 'MultiPolygon' object has no attribute 'exterior'"
-}
+    print(f"Carte Matplotlib enregistrée : {output_file_png}")
