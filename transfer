@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe # IMPORT CRUCIAL POUR LE HALO BLANC
 import geopandas as gpd
 from shapely.geometry import Point
 import math
@@ -26,12 +27,12 @@ df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 # =============================================================================
 # --- PALETTE DE COULEURS & POLICE ---
 # =============================================================================
-CL_TURQUOISE = '#00A79E' # Fond
-CL_BLACK = '#000000' # Texte standard
-CL_LIGHT_GREY = '#F0F0F0' # Fond carte
-# NOUVELLES COULEURS FIXES
-CL_BLUE_3M = '#004B9B' # Bleu foncé pour le taux 3 mois
-CL_RED_12M = '#E4002B' # Rouge Crédit Logement pour le taux 12 mois
+CL_TURQUOISE = '#00A79E' 
+CL_BLACK = '#000000' 
+CL_LIGHT_GREY = '#F0F0F0' 
+CL_MEDIUM_GREY = '#CCCCCC' 
+CL_BLUE_3M = '#004B9B' 
+CL_RED_12M = '#E4002B' 
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -44,15 +45,15 @@ TITRE_FONT_WEIGHT = 'heavy'
 # --- PRÉPARATION DES DONNÉES ---
 # =============================================================================
 
-# 1. Nettoyage et Fusion
 prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage (Simplifiée car on ne l'utilise plus pour la BBOX)
-# Elle sert juste à vérifier si les données existent.
-def check_data_availability(row):
-    return pd.notna(row['prix_mm_value'])
+def format_text_label(row):
+    ville = str(row['label']).upper() 
+    prix_val = row['prix_mm_value']
+    prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
+    return f"{ville}\n{prix}"
 
 # =============================================================================
 # --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
@@ -62,9 +63,9 @@ try:
     france_gdf = gpd.read_file(geojson_path)
     dissolved_france = france_gdf.dissolve(by=None)
     france_outline_geometry = dissolved_france.geometry.iloc[0] 
-    print("Contour de la France chargé et dissous avec succès.")
+    print("Contour de la France chargé.")
 except Exception as e:
-    print(f"!!! Échec critique du chargement du GeoJSON: {e}")
+    print(f"!!! Échec critique: {e}")
     sys.exit(1)
 
 # =============================================================================
@@ -75,9 +76,28 @@ print("Configuration de police 'Century Gothic' appliquée.")
 
 types_bien = ['APT', 'MAI']
 
-# --- DEFINITION DES OFFSETS SPÉCIFIQUES ---
+# --- DEFINITION DES OFFSETS ULTRA-PRÉCIS (Le "Tuning") ---
+# x positif : vers la droite / x négatif : vers la gauche
+# y positif : vers le haut / y négatif : vers le bas
 CUSTOM_LABEL_OFFSETS = {
-    'TOULON': {'x': 0.1, 'y': -0.05} 
+    # SUD-EST (La zone encombrée)
+    'MONTPELLIER': {'x': -0.15, 'y': 0.10}, # Poussé vers la gauche (Ouest) et haut
+    'MARSEILLE':   {'x': 0.10,  'y': 0.10}, # Poussé un peu à droite et haut
+    'TOULON':      {'x': 0.10,  'y': -0.20}, # Poussé vers le bas (dans la mer)
+    'NICE':        {'x': -0.15, 'y': 0.05}, # Poussé vers la gauche (terre) pour éviter l'Italie/Mer
+    'GRENOBLE':    {'x': 0.15, 'y': 0.0},   # Poussé à droite
+
+    # FRONTIÈRES & CÔTES (Pour rentrer dans les terres)
+    'BORDEAUX':    {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
+    'NANTES':      {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
+    'RENNES':      {'x': 0.15,  'y': 0.0},  # Poussé vers la droite (terre)
+    'LILLE':       {'x': 0.0,   'y': -0.25}, # Poussé vers le bas (terre) pour éviter la Belgique
+    'STRASBOURG':  {'x': -0.15, 'y': 0.0},  # Poussé vers la gauche (terre) pour éviter l'Allemagne
+    
+    # CENTRE / AUTRES
+    'PARIS':       {'x': 0.15, 'y': 0.05},
+    'LYON':        {'x': -0.15, 'y': 0.05}, # Poussé à gauche pour s'éloigner de Grenoble
+    'TOULOUSE':    {'x': -0.15, 'y': 0.05}, # Poussé à gauche
 }
 
 for type_bien in types_bien:
@@ -91,10 +111,9 @@ for type_bien in types_bien:
     df_map = df_map.dropna(subset=['latitude', 'longitude'])
     df_map = df_map.drop_duplicates(subset='label', keep='first')
     
-    if df_map.empty:
-        print("Aucune donnée géographique valide.")
-        continue
+    if df_map.empty: continue
         
+    df_map['Formatted_Label'] = df_map.apply(format_text_label, axis=1)
     geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
     gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
     
@@ -115,16 +134,16 @@ for type_bien in types_bien:
     ax.set_xlim(xmin - 0.7, xmax + 0.7) 
     ax.set_ylim(ymin - 0.7, ymax + 0.7)
 
-    # --- AJOUT DES ÉTIQUETTES (SANS CADRES) ---
+    # --- AJOUT DES ÉTIQUETTES ---
     
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
-    
-    # Espacement vertical entre les lignes (Soustrait car va='top')
     LINE_SPACING = 0.13 
-    # Espacement horizontal entre le taux 3M et 12M
     RATE_SPACING_X = 0.60 
     
+    # DEFINITION DU HALO BLANC (Contour autour du texte)
+    halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
+
     for idx, row in gdf.iterrows():
         lon = row['longitude']
         lat = row['latitude']
@@ -137,58 +156,50 @@ for type_bien in types_bien:
             x_offset_city = DEFAULT_X_OFFSET
             y_offset_city = DEFAULT_Y_OFFSET
 
-        # Préparation des textes
         ville = str(row['label']).upper()
         prix_val = row['prix_mm_value']
         prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
-        
         ti_3m = row['TAUX_INFL_3M']
         ti_12m = row['TAUX_INFL_12M']
-        
-        # --- DESSIN DE L'ÉTIQUETTE LIGNE PAR LIGNE ---
         
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
+        # Alignement dynamique : si offset X négatif, on aligne à droite pour que le texte "pousse" vers la gauche
         ha_align = 'right' if x_offset_city < 0 else 'left'
         va_align_box = 'top' 
         
-        # NOTE : J'ai supprimé le premier appel à ax.text() qui dessinait la "bbox" blanche.
-        
-        # 1. Nom de la Ville (Ligne 1) - Position Y = anchor_y
+        # 1. Nom de la Ville (Ligne 1)
         ax.text(anchor_x, anchor_y, ville, fontsize=10, ha=ha_align, va=va_align_box,
-                color=CL_BLACK, weight='bold', zorder=4)
+                color=CL_BLACK, weight='bold', zorder=4, 
+                path_effects=halo_effect) # Ajout du halo
         
-        # 2. Prix M2 (Ligne 2) - Position Y = anchor_y - LINE_SPACING
+        # 2. Prix M2 (Ligne 2)
         prix_y = anchor_y - LINE_SPACING 
         ax.text(anchor_x, prix_y, prix, fontsize=10, ha=ha_align, va=va_align_box,
-                color=CL_BLACK, weight='normal', zorder=4)
+                color=CL_BLACK, weight='normal', zorder=4,
+                path_effects=halo_effect) # Ajout du halo
         
-        # 3. Taux d'inflation (Ligne 3) - Position Y = prix_y - LINE_SPACING
+        # 3. Taux d'inflation (Ligne 3)
         ti_y = prix_y - LINE_SPACING 
         
-        # Taux 3M (TOUJOURS EN BLEU)
+        # Taux 3M (BLEU)
         if pd.notna(ti_3m):
-            # Couleur fixe bleue
-            color_3m = CL_BLUE_3M 
             text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
         else:
-            color_3m = CL_BLACK
             text_3m = "3M: N/A"
 
         ax.text(anchor_x, ti_y, text_3m, fontsize=10, ha=ha_align, va=va_align_box,
-                color=color_3m, weight='normal', zorder=4)
+                color=CL_BLUE_3M, weight='bold', zorder=4, # Mis en gras pour lisibilité
+                path_effects=halo_effect) # Ajout du halo
         
-        # Taux 12M (TOUJOURS EN ROUGE)
+        # Taux 12M (ROUGE)
         if pd.notna(ti_12m):
-            # Couleur fixe rouge
-            color_12m = CL_RED_12M
             text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
         else:
-            color_12m = CL_BLACK
             text_12m = "12M: N/A"
 
-        # Calcul de la position X du 12M
+        # Calcul position 12M
         if ha_align == 'left':
             x_12m = anchor_x + RATE_SPACING_X
             align_12m = 'left'
@@ -197,10 +208,12 @@ for type_bien in types_bien:
             align_12m = 'right'
 
         ax.text(x_12m, ti_y, text_12m, fontsize=10, ha=align_12m, va=va_align_box,
-                color=color_12m, weight='normal', zorder=4)
+                color=CL_RED_12M, weight='bold', zorder=4, # Mis en gras pour lisibilité
+                path_effects=halo_effect) # Ajout du halo
 
         # 4. Point Ville
-        ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
+        ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
+                markeredgecolor='white', markeredgewidth=0.5) # Petit contour blanc sur le point aussi
 
     # --- FINALISATION ---
     ax.axis('off') 
@@ -209,11 +222,8 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # LÉGENDE MISE À JOUR
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
-    
     fig.text(0.05, 0.1, "LÉGENDE TAUX:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    # Nouvelle légende reflétant les couleurs fixes
     fig.text(0.05, 0.08, "Bleu: Taux 3 mois", ha='left', va='bottom', fontsize=8, color=CL_BLUE_3M)
     fig.text(0.05, 0.06, "Rouge: Taux 12 mois", ha='left', va='bottom', fontsize=8, color=CL_RED_12M)
 
