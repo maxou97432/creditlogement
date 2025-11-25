@@ -70,7 +70,7 @@ def format_text_label(row):
 
 try:
     france_gdf = gpd.read_file(geojson_path)
-    dissolved_france = france_gdf.dissolve(by=None)
+    dissolved_france = france_france_gdf.dissolve(by=None)
     france_outline_geometry = dissolved_france.geometry.iloc[0] 
     print("Contour de la France chargé et dissous avec succès.")
 except Exception as e:
@@ -148,10 +148,14 @@ for type_bien in types_bien:
     # Variables d'Offset des Bulles 
     BUBBLE_X_SHIFT = 0.30 
     BUBBLE_Y_SHIFT = 0.02 
-    BUBBLE_RADIUS = 0.12 
     
-    # Ajustement de l'espacement pour éviter la superposition (CORRIGÉ)
-    LINE_SPACING = 0.07 
+    BUBBLE_RADIUS = 0.14 
+    
+    # Ajustement de l'espacement entre les lignes Ville/Prix
+    LINE_SPACING = 0.1 
+    
+    # --- DÉFINITION DE LA BBOX (CADRE BLANC) AVEC PAD PLUS GRAND ---
+    bbox_props = dict(boxstyle="round,pad=0.4", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
@@ -180,12 +184,8 @@ for type_bien in types_bien:
         ha_align = 'right' if x_offset_city < 0 else 'left'
         va_align = 'top' if y_offset_city < 0 else 'bottom'
         
-        # Paramètres pour la BBOX (fond blanc)
-        bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
-        
         
         # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
-        # Ceci permet à Matplotlib de calculer la zone de la bbox correctement pour englober les deux lignes.
         ax.text(
             anchor_x, 
             anchor_y, 
@@ -199,9 +199,16 @@ for type_bien in types_bien:
         )
         
         # 2. Dessiner le Nom de la Ville (Ligne 1, en gras)
+        if va_align == 'bottom':
+            # Augmenté de 0.02 à 0.1 pour remonter la ligne dans le cadre étiré
+            ville_y = anchor_y + 0.1 
+        else: 
+            # Si va_align est 'top', la ville doit descendre. On utilise le même décalage.
+            ville_y = anchor_y - 0.1
+            
         ax.text(
             anchor_x, 
-            anchor_y, 
+            ville_y, 
             ville, 
             fontsize=10, 
             ha=ha_align, 
@@ -212,7 +219,6 @@ for type_bien in types_bien:
         )
         
         # 3. Dessiner le Prix M2 (Ligne 2, en normal)
-        # On applique le décalage pour la deuxième ligne (Prix)
         if va_align == 'bottom':
             # Décale vers le bas (Y diminue)
             prix_y = anchor_y - LINE_SPACING 
@@ -263,7 +269,7 @@ for type_bien in types_bien:
                 bubble_center_x, 
                 bubble_center_y, 
                 f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=7, 
+                fontsize=8, 
                 color='white', 
                 ha='center', 
                 va='center',
