@@ -1,19 +1,16 @@
-{
-	"name": "AttributeError",
-	"message": "'MultiPolygon' object has no attribute 'exterior'",
-	"stack": "---------------------------------------------------------------------------
-AttributeError                            Traceback (most recent call last)
-Cell In[11], line 117
-    114 # A. Dessiner le contour de la France (Remplissage Jaune/Ocre)
-    115 france_outline_geometry = france_outline # Utilisation directe de la géométrie chargée
---> 117 ax.fill(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-    118         color='#FFDE72', # Jaune/Ocre
-    119         zorder=1) # Premier plan
-    121 ax.plot(france_outline_geometry.exterior.xy[0], france_outline_geometry.exterior.xy[1], 
-    122         color='black', 
-    123         linewidth=1.5, 
-    124         zorder=2) # Contour noir
-    126 # B. Définir les limites de la vue (zoom sur la France)
-
-AttributeError: 'MultiPolygon' object has no attribute 'exterior'"
-}
+# --- NOUVEAU CODE : UTILISER DISSOLVE ---
+try:
+    france_gdf = gpd.read_file(geojson_path)
+    
+    # 1. Dissoudre toutes les géométries en un seul MultiPolygon (ou Polygon)
+    # L'argument 'by=None' dissout tout le GeoDataFrame en une seule ligne.
+    dissolved_france = france_gdf.dissolve(by=None)
+    
+    # 2. Récupérer l'unique géométrie résultante
+    # Cela garantit que c'est un Polygon ou MultiPolygon "propre"
+    france_outline_geometry = dissolved_france.geometry.iloc[0] 
+    
+    print("Contour de la France chargé et dissous avec succès.")
+except Exception as e:
+    print(f"!!! Échec critique du chargement du GeoJSON: {e}")
+    sys.exit(1)
