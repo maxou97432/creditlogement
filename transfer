@@ -51,7 +51,7 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (SIMPLIFIÉE)
+# 2. Fonction de formatage du texte pour l'affichage (Ville et Prix seulement)
 def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
@@ -60,9 +60,7 @@ def format_text_label(row):
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    # On supprime la ligne d'évolution pour éviter la duplication et garder le style CL
-    
-    # Retourne deux lignes : Ville, Prix
+    # Retourne deux lignes : Ville, Prix (séparées par '\n')
     return f"{ville}\n{prix}"
 
 
@@ -148,10 +146,8 @@ for type_bien in types_bien:
     DEFAULT_Y_OFFSET = 0.08 
     
     # Variables d'Offset des Bulles 
-    # X_SHIFT est réduit car l'étiquette est plus courte (2 lignes vs 3)
     BUBBLE_X_SHIFT = 0.30 
-    # Y_SHIFT est ajusté pour aligner la bulle sur la LIGNE DU PRIX
-    BUBBLE_Y_SHIFT = 0.02 
+    BUBBLE_Y_SHIFT = 0.02 # Aligner sur la ligne du prix
     BUBBLE_RADIUS = 0.12 
     
     for idx, row in gdf.iterrows():
@@ -172,6 +168,7 @@ for type_bien in types_bien:
         full_text = row['Formatted_Label']
         formatted_parts = full_text.split('\n')
         ville = formatted_parts[0] 
+        prix = formatted_parts[1]
         
         # Position de départ pour l'étiquette
         anchor_x = lon + x_offset_city
@@ -180,10 +177,22 @@ for type_bien in types_bien:
         ha_align = 'right' if x_offset_city < 0 else 'left'
         va_align = 'top' if y_offset_city < 0 else 'bottom'
         
-        
-        # 1. Dessiner le fond blanc de l'étiquette et tout le texte
+        # Paramètres pour la BBOX (fond blanc)
         bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
         
+        # Facteur d'espacement vertical (pour décaler le Prix)
+        # 0.02 est une valeur estimée pour l'interligne de l'étiquette
+        LINE_SPACING = 0.02 
+        
+        # --- NOUVEAU LOGIQUE D'AFFICHAGE SANS DUPLICATION ---
+        
+        # Dessiner le fond blanc (BBOX) en utilisant le texte complet, mais le rendre invisible.
+        # Ceci permet de calculer la zone de la bbox correctement.
+        # NOTE : Cette technique nécessite que Matplotlib calcule la taille de la bbox à partir du texte.
+        # Pour une mise en forme avancée, nous devons dessiner la BBOX manuellement ou nous simplifier la vie.
+        
+        # SOLUTION PRATIQUE : Dessiner le texte en deux fois, mais une seule fois la BBOX.
+        # On utilise une seule commande text() invisible pour la BBOX:
         ax.text(
             anchor_x, 
             anchor_y, 
@@ -191,23 +200,46 @@ for type_bien in types_bien:
             fontsize=10, 
             ha=ha_align, 
             va=va_align,
-            color=CL_BLACK,
+            color='none', # Couleur de texte transparente
             zorder=3,
             bbox=bbox_props
         )
         
-        # 2. Mise en gras du nom de la ville (sur la première ligne)
+        # 1. Dessiner le Nom de la Ville (en gras)
         ax.text(
             anchor_x, 
             anchor_y, 
-            ville, # Uniquement le nom de la ville
+            ville, 
             fontsize=10, 
             ha=ha_align, 
             va=va_align,
             color=CL_BLACK,
-            weight='bold', # Ceci met le nom de la ville en gras
+            weight='bold', 
             zorder=4 
         )
+        
+        # 2. Dessiner le Prix M2 (ligne suivante, en normal)
+        # La position verticale doit être ajustée pour la deuxième ligne (décalage vers le bas si va='bottom')
+        if va_align == 'bottom':
+            prix_y = anchor_y - LINE_SPACING 
+        elif va_align == 'top':
+            prix_y = anchor_y + LINE_SPACING 
+        else:
+            prix_y = anchor_y # Si centré, ça ne marchera pas bien
+            
+        ax.text(
+            anchor_x, 
+            prix_y, 
+            prix, 
+            fontsize=10, 
+            ha=ha_align, 
+            va=va_align,
+            color=CL_BLACK,
+            weight='normal', # Texte normal
+            zorder=4
+        )
+        
+        # -----------------------------------------------------
 
 
         # 3. Ajout du point de ville d'origine (petit cercle noir)
@@ -215,58 +247,4 @@ for type_bien in types_bien:
 
         # 4. Ajout de la 'Bulle d'Évolution'
         ti_12m = row['TAUX_INFL_12M']
-        if pd.notna(ti_12m):
-            # Utilisation de la bulle pour la variation sur 12M
-            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
-            
-            # Coordonnées du centre de la bulle
-            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
-            bubble_center_y = lat + y_offset_city + BUBBLE_Y_SHIFT 
-            
-            # a. Dessin de la bulle (Cercle avec contour noir)
-            ax.add_patch(plt.Circle(
-                (bubble_center_x, bubble_center_y), 
-                radius=BUBBLE_RADIUS, 
-                color=color_evolution, 
-                alpha=0.9,
-                ec='black', 
-                lw=1.0, 
-                zorder=5
-            ))
-            
-            # b. Texte dans la bulle (en gras)
-            ax.text(
-                bubble_center_x, 
-                bubble_center_y, 
-                f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=7, 
-                color='white', 
-                ha='center', 
-                va='center',
-                weight='bold', 
-                zorder=6
-            )
-    
-    # --- FINALISATION DE L'IMAGE ---
-    ax.axis('off') 
-    
-    # Titre principal (noir sur turquoise)
-    title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
-    ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
-    
-    # Sous-titre et sources (noir sur turquoise)
-    subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
-    fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
-
-    # Ajout de la source et de la légende (simplifiée pour correspondre au style)
-    fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
-    
-    fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
-    fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
-
-    # --- AFFICHAGE SEUL ---
-    plt.show() 
-    plt.close(fig) 
-
-    print(f"Génération de la carte pour {type_bien} terminée.")
+        if pd.notna(ti
