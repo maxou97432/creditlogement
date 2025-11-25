@@ -1,131 +1,42 @@
-import sys
-import os
-import pandas as pd
-import numpy as np
-import plotly.express as px
-# Les autres imports sont conservés...
-# ...
-# from dateutil.relativedelta import relativedelta
-# from fonctions import (...)
-# ...
-
-# Le reste des imports et des chemins d'accès est conservé
-# ...
-
-# Dossier de sortie (ajusté pour Plotly)
-output_dir = os.path.join(os.path.dirname(__file__), "results")
-os.makedirs(output_dir, exist_ok=True)
-
-# Chargement des données (conservé)
-prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_complet_CITY.csv")
-prix_m2_univ_elem_MAJ_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
-
-prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
-df = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
-
-df['Commune'] = df['Commune'].apply(lambda x: x.upper())
-df_prix_m2 = df.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
+import matplotlib.pyplot as plt
+import geopandas as gpd # Très important pour lire le GeoJSON
+from shapely.geometry import Point
+# ... (vos autres imports) ...
 
 # =============================================================================
-# CARTE PRIX M2 - VILLE (PLOTLY EXPRESS)
+# ÉTAPE 2 : CHARGEMENT DU CONTOUR DE LA FRANCE METROPOLITAINE
 # =============================================================================
 
-types_bien = ['APT', 'MAI']
+# Définissez le chemin vers votre fichier
+geojson_path = r"chemin\vers\votre\metropole.geojson" # <-- **MODIFIEZ CE CHEMIN**
 
-for type_bien in types_bien:
-    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
+try:
+    # 1. Charger la géométrie de la France (en WGS84 - EPSG:4326 par défaut)
+    france_gdf = gpd.read_file(geojson_path)
+    
+    # 2. Simplifier l'accès à la géométrie (si le GeoJSON contient plusieurs polygones)
+    # On prend la première (et souvent seule) géométrie pour le dessin
+    france_outline = france_gdf.geometry.iloc[0] 
+    
+except Exception as e:
+    print(f"Erreur lors du chargement du GeoJSON : {e}")
+    # Gérer l'erreur si le fichier n'est pas trouvé ou invalide
+    # Vous pouvez mettre ici une géométrie de secours si nécessaire
 
-    df_geo = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
-    df_geo['label'] = df_geo['label'].apply(lambda x: x.upper())
-    df_plot = df_geo.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
-    
-    # Sélection et nettoyage des colonnes
-    df_plot = df_plot[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']]
-    df_plot = df_plot.dropna(subset=['latitude', 'longitude'])
-    df_plot = df_plot.drop_duplicates(subset='label', keep='first').copy() # Utilisation de copy() pour éviter SettingWithCopyWarning
-    
-    # Remplacer les NaN par 0 pour le calcul de la taille (ou filtrer)
-    df_plot["prix_mm_value"] = df_plot["prix_mm_value"].fillna(0)
-    
-    # --- PRÉPARATION DES ÉTIQUETTES TEXTUELLES POUR PLOTLY ---
-    
-    def create_label_text(row):
-        ville = str(row['label']).capitalize()
-        prix_formate = f"{round(row['prix_mm_value']):,} €".replace(',', ' ')
-        
-        # Utilisez le Taux 12M pour la couleur du marqueur
-        # Utilisez le Taux 3M ou 12M (ou les deux, séparés par '/') pour le texte
-        ti_12m = row["TAUX_INFL_12M"]
-        ti_3m = row["TAUX_INFL_3M"]
-        
-        ti_12m_formate = f"{ti_12m:+.1%}" if pd.notna(ti_12m) else "N/A"
-        ti_3m_formate = f"{ti_3m:+.1%}" if pd.notna(ti_3m) else "N/A"
-        
-        # Création de l'étiquette sur plusieurs lignes (utilisation de <br> en HTML/Plotly)
-        return (
-            f"<b>{ville}</b><br>"
-            f"{prix_formate}<br>"
-            f"({ti_3m_formate} / {ti_12m_formate})"
-        )
+# --- NOTE IMPORTANTE SUR LA PROJECTION ---
+# Pour un dessin précis, il est conseillé de travailler en Lambert 93 (EPSG:2154).
+# Si vous avez des problèmes de distorsion, reprojetez comme ceci :
+# france_crs = "EPSG:2154" 
+# france_outline = france_gdf.to_crs(france_crs).geometry.iloc[0]
+# gdf = gdf.to_crs(france_crs) # Reprojeter aussi vos points de villes !
 
-    df_plot['Text_Label'] = df_plot.apply(create_label_text, axis=1)
-    
-    # Créer une colonne pour la taille/couleur (si la taille est liée au prix)
-    # Le prix est très variable, une division ou un log peut être utile pour la taille.
-    df_plot['Prix_Size_Scale'] = df_plot['prix_mm_value'].apply(lambda x: np.sqrt(x) if x > 0 else 0) 
-    
-    # --- CRÉATION DE LA CARTE PLOTLY ---
-    
-    fig = px.scatter_geo(
-        df_plot,
-        lat='latitude',
-        lon='longitude',
-        hover_name='label',
-        text='Text_Label',  # Utilise l'étiquette formatée
-        scope='europe',
-        # Couleur basée sur l'évolution annuelle (pour visualiser les tendances)
-        color='TAUX_INFL_12M', 
-        # Taille basée sur la racine carrée du prix (ou des transactions, si disponible)
-        size='Prix_Size_Scale', 
-        color_continuous_scale=px.colors.diverging.RdYlGn, # Rouge/Vert pour l'inflation
-        projection="mercator"
-    )
+# Dessiner le fond de la France
+# Utiliser les coordonnées brutes (xy) de l'objet Shapely
+ax.plot(france_outline.exterior.xy[0], france_outline.exterior.xy[1], color='black', linewidth=1.5) # Contour
+ax.fill(france_outline.exterior.xy[0], france_outline.exterior.xy[1], color='rgb(255, 223, 110)') # Remplissage jaune
 
-    # Configuration du fond de carte (similaire à un cartogramme thématique)
-    fig.update_geos(
-        visible=False, # Cache le fond de carte Plotly par défaut
-        resolution=50,
-        showcountries=True, 
-        countrycolor="Gray",
-        # Limite la vue à la France
-        lataxis_range=[42, 51], 
-        lonaxis_range=[-6, 10], 
-        landcolor='rgb(255, 230, 160)', # Couleur de la France (similaire à l'image)
-        subunitcolor='rgb(200, 200, 200)', # Contour des régions
-    )
-    
-    # Configuration des marqueurs et des étiquettes
-    fig.update_traces(
-        mode='markers+text', # Affiche les marqueurs (bulles) ET le texte
-        textposition='top center',
-        textfont=dict(size=10, color='black'),
-        marker=dict(line_width=1, sizemode='area', sizemin=5, opacity=0.8)
-    )
+# Définir les limites de la carte
+ax.set_xlim(france_outline.bounds[0] - 0.5, france_outline.bounds[2] + 0.5)
+ax.set_ylim(france_outline.bounds[1] - 0.5, france_outline.bounds[3] + 0.5)
 
-    fig.update_layout(
-        title_text=f"Prix au m² {type_bien} (Moyenne Mobile 12M)",
-        height=700,
-        margin={"r":0,"t":50,"l":0,"b":0},
-        showlegend=False,
-    )
-    
-    # --- EXPORTATION ---
-    output_file = os.path.join(output_dir, f"carte_prix_m2_plotly_villes_{type_bien}.html")
-    
-    # Le fichier HTML Plotly est interactif
-    fig.write_html(output_file) 
-    
-    # Optionnel : pour l'exporter en PNG statique comme votre image, vous devez installer 'kaleido'
-    # fig.write_image(os.path.join(output_dir, f"carte_prix_m2_plotly_villes_{type_bien}.png"))
-    
-    print(f"Carte Plotly enregistrée : {output_file}")
+# ... (Le reste du code pour les étiquettes et les bulles reste inchangé) ...
