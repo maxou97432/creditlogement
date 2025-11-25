@@ -30,6 +30,7 @@ df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 CL_TURQUOISE = '#00A79E' 
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
+# Les couleurs sont conservées pour la légende
 CL_BLUE_3M = '#004B9B' 
 CL_RED_12M = '#E4002B' 
 
@@ -122,8 +123,9 @@ for type_bien in types_bien:
     DEFAULT_Y_OFFSET = 0.08 
     
     LINE_SPACING = 0.13 
-    # Espacement entre les deux taux sur la même ligne (doit être assez grand)
-    RATE_INNER_SPACING_X = 0.65 
+    # Espacement entre les deux taux sur la même ligne (doit être un grand espace)
+    # J'utilise des espaces vides car les textes sont fusionnés.
+    SPACING_FOR_FUSION = "    " 
     
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
@@ -148,7 +150,6 @@ for type_bien in types_bien:
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
-        # L'alignement de la BOX est défini par l'offset X
         ha_box_align = 'right' if x_offset_city < 0 else 'left'
         va_align = 'top' 
         
@@ -163,45 +164,29 @@ for type_bien in types_bien:
                 color=CL_BLACK, weight='normal', zorder=4,
                 path_effects=halo_effect) 
         
-        # 3. Taux d'inflation (Ligne 3)
+        # 3. Taux d'inflation (Ligne 3) - Fusionné
         ti_y = prix_y - LINE_SPACING 
         
-        # Taux 3M (BLEU) - Toujours en premier
+        # Taux 3M (BLEU) - Formatage
         if pd.notna(ti_3m):
             text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
         else:
             text_3m = "3M: N/A"
-
-        # Pour le 3M, on utilise l'alignement de la BOX (gauche ou droite)
-        ax.text(anchor_x, ti_y, text_3m, fontsize=10, ha=ha_box_align, va=va_align,
-                color=CL_BLUE_3M, weight='bold', zorder=4, 
-                path_effects=halo_effect) 
         
-        # Taux 12M (ROUGE) - Toujours en second
+        # Taux 12M (ROUGE) - Formatage
         if pd.notna(ti_12m):
             text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
         else:
             text_12m = "12M: N/A"
 
-        # --- LOGIQUE DE POSITIONNEMENT FIXE (3M puis 12M) ---
-        if ha_box_align == 'left':
-            # Si la BOX est alignée à gauche (offset X > 0) :
-            # 3M (Bleu) commence à anchor_x et va vers la droite.
-            # 12M (Rouge) doit commencer à droite du 3M et aller vers la droite.
-            x_12m = anchor_x + RATE_INNER_SPACING_X
-            align_12m = 'left' # Alignement à gauche
-        else: # ha_box_align == 'right'
-            # Si la BOX est alignée à droite (offset X < 0) :
-            # 3M (Bleu) se termine à anchor_x et va vers la gauche.
-            # 12M (Rouge) doit se terminer à gauche du 3M et aller vers la gauche.
-            x_12m = anchor_x - RATE_INNER_SPACING_X
-            align_12m = 'right' # Alignement à droite
-        # -----------------------------------------------------
+        # Fusion des deux chaînes (3M est FORCÉMENT en premier)
+        # Utilisation de la couleur Noire pour garantir l'alignement sur une seule ligne
+        text_fusionne = f"{text_3m}{SPACING_FOR_FUSION}{text_12m}"
 
-        ax.text(x_12m, ti_y, text_12m, fontsize=10, ha=align_12m, va=va_align,
-                color=CL_RED_12M, weight='bold', zorder=4, 
-                path_effects=halo_effect)
-
+        ax.text(anchor_x, ti_y, text_fusionne, fontsize=10, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='bold', zorder=4, # Le texte est noir, la légende explique la couleur
+                path_effects=halo_effect) 
+        
         # 4. Point Ville
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
                 markeredgecolor='white', markeredgewidth=0.5) 
@@ -213,10 +198,13 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
+    # LÉGENDE MISE À JOUR pour l'alignement fusionné
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
+    
     fig.text(0.05, 0.1, "LÉGENDE TAUX:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.08, "Bleu: Taux 3 mois", ha='left', va='bottom', fontsize=8, color=CL_BLUE_3M)
-    fig.text(0.05, 0.06, "Rouge: Taux 12 mois", ha='left', va='bottom', fontsize=8, color=CL_RED_12M)
+    # Les codes couleur restent dans la légende pour expliquer ce qu'ils représentent habituellement
+    fig.text(0.05, 0.08, f"Bleu ({CL_BLUE_3M}): Taux 3 mois (Position gauche sur la ligne)", ha='left', va='bottom', fontsize=8, color=CL_BLUE_3M)
+    fig.text(0.05, 0.06, f"Rouge ({CL_RED_12M}): Taux 12 mois (Position droite sur la ligne)", ha='left', va='bottom', fontsize=8, color=CL_RED_12M)
 
     plt.show() 
     plt.close(fig) 
