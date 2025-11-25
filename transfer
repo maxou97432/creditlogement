@@ -32,7 +32,7 @@ CL_TURQUOISE = '#00A79E'
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
-CL_RED = '#E4002B' # Rouge pour les baisses (maintenant couleur fixe pour TI 12M)
+CL_RED = '#E4002B' 
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -89,7 +89,6 @@ CUSTOM_LABEL_OFFSETS = {
     'PARIS': {'x': 0.08, 'y': 0.08},
     'REIMS': {'x': 0.08, 'y': 0.08},
     'LILLE': {'x': 0.08, 'y': 0.08},
-    # Ajoutez d'autres villes ici si elles se chevauchent
 }
 
 
@@ -153,8 +152,9 @@ for type_bien in types_bien:
     FONT_SIZE = 10
     FONT_SIZE_EVOL = 8
     
-    # Approximation de la largeur d'un caractère (pour l'alignement horizontal des taux)
-    CHAR_WIDTH_APPROX = 0.012 # Légèrement réduit pour améliorer l'alignement
+    # Approximation de la largeur d'un caractère (CORRECTION)
+    # Ajusté à 0.015, car 0.012 était trop petit.
+    CHAR_WIDTH_APPROX = 0.015 
     
     # Couleur fixe pour TI 3M
     COLOR_TI_3M = CL_TURQUOISE 
@@ -239,6 +239,7 @@ for type_bien in types_bien:
         
         if ti_3m_str and ti_12m_str:
             
+            # Parties de la chaîne de caractères
             part0_open = "("
             part1_3m = ti_3m_str
             part2_sep = " / "
@@ -255,7 +256,7 @@ for type_bien in types_bien:
                 
                 # Draw TI_3M (Couleur fixe: Turquoise)
                 ax.text(current_x, evolution_y, part1_3m, fontsize=FONT_SIZE_EVOL, ha='left', va=va_align_lines, color=COLOR_TI_3M, weight='bold', zorder=4)
-                current_x += len(part1_3m) * CHAR_WIDTH_APPROX
+                current_x += (len(part1_3m) * CHAR_WIDTH_APPROX) - 0.005 # Ajustement fin
                 
                 # Draw / (Noir)
                 ax.text(current_x, evolution_y, part2_sep, fontsize=FONT_SIZE_EVOL, ha='left', va=va_align_lines, color=CL_BLACK, weight='bold', zorder=4)
@@ -277,7 +278,7 @@ for type_bien in types_bien:
                 
                 # Draw TI_12M (Couleur fixe: Rouge)
                 ax.text(current_x, evolution_y, part3_12m, fontsize=FONT_SIZE_EVOL, ha='right', va=va_align_lines, color=COLOR_TI_12M, weight='bold', zorder=4)
-                current_x -= len(part3_12m) * CHAR_WIDTH_APPROX
+                current_x -= (len(part3_12m) * CHAR_WIDTH_APPROX) - 0.005
                 
                 # Draw / (Noir)
                 ax.text(current_x, evolution_y, part2_sep, fontsize=FONT_SIZE_EVOL, ha='right', va=va_align_lines, color=CL_BLACK, weight='bold', zorder=4)
