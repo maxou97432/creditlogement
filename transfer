@@ -1,3 +1,4 @@
+
 import sys
 import os
 import pandas as pd
@@ -66,12 +67,12 @@ def format_text_label(row):
     ti_3m = row['TAUX_INFL_3M']
     ti_12m = row['TAUX_INFL_12M']
     
-    ti_3m_formatted = f"3M: {ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "3M: N/A"
-    ti_12m_formatted = f"12M: {ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "12M: N/A"
+    ti_3m_formatted = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
+    ti_12m_formatted = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
 
     # Le séparateur est important pour la BBOX mais sera ignoré pour l'affichage ligne par ligne
     # On retourne trois lignes : Ville, Prix, Taux 3M (espace) Taux 12M
-    return f"{ville}\n{prix}\n{ti_3m_formatted} {ti_12m_formatted}"
+    return f"{ville}\n{prix}\n{ti_3m_formatted}/{ti_12m_formatted}"
 
 
 # =============================================================================
@@ -256,7 +257,7 @@ for type_bien in types_bien:
         
         # Affichage du Taux 3M
         ti_3m_color = CL_RED_EVOLUTION if pd.notna(ti_3m_value) and ti_3m_value < 0 else CL_GREEN_EVOLUTION
-        ti_3m_text_part = f"3M: {ti_3m_value:+.1%}".replace('.', ',') if pd.notna(ti_3m_value) else "3M: N/A"
+        ti_3m_text_part = f"{ti_3m_value:+.1%}".replace('.', ',') if pd.notna(ti_3m_value) else "N/A"
 
         ax.text(
             anchor_x,
@@ -280,7 +281,7 @@ for type_bien in types_bien:
             
             # Affichage du Taux 12M
             ti_12m_color = CL_RED_EVOLUTION if pd.notna(ti_12m_value) and ti_12m_value < 0 else CL_GREEN_EVOLUTION
-            ti_12m_text_part = f"12M: {ti_12m_value:+.1%}".replace('.', ',') if pd.notna(ti_12m_value) else "12M: N/A"
+            ti_12m_text_part = f"{ti_12m_value:+.1%}".replace('.', ',') if pd.notna(ti_12m_value) else "N/A"
 
             ax.text(
                 x_offset_12m,
