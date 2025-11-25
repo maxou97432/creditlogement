@@ -32,13 +32,6 @@ CL_TURQUOISE = '#00A79E'
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
-CL_RED_BAISSE = '#E4002B' 
-
-# (NOUVEAU) Couleurs spécifiques pour les taux d'inflation
-COLOR_INFL_3M = '#FF7F00' # Orange (exemple)
-COLOR_INFL_12M = CL_TURQUOISE # Turquoise (hausse, comme avant)
-COLOR_INFL_BAISSE = CL_RED_BAISSE # Rouge (baisse, comme avant)
-
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -58,7 +51,7 @@ prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CI
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
 
-# 2. Fonction de formatage du texte pour l'affichage (MAIN MODIFICATION ICI)
+# 2. Fonction de formatage du texte pour l'affichage (Ville et Prix seulement)
 def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
@@ -67,16 +60,8 @@ def format_text_label(row):
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
-    # Ligne 3 : Taux d'inflation 3M
-    ti_3m_val = row['TAUX_INFL_3M']
-    ti_3m = f"3M: {ti_3m_val:+.1%}".replace('.', ',') if pd.notna(ti_3m_val) else "3M: N/A"
-    
-    # Ligne 4 : Taux d'inflation 12M
-    ti_12m_val = row['TAUX_INFL_12M']
-    ti_12m = f"12M: {ti_12m_val:+.1%}".replace('.', ',') if pd.notna(ti_12m_val) else "12M: N/A"
-    
-    # Retourne QUATRE lignes : Ville, Prix, 3M, 12M (séparées par '\n')
-    return f"{ville}\n{prix}\n{ti_3m}\n{ti_12m}"
+    # Retourne deux lignes : Ville, Prix (séparées par '\n')
+    return f"{ville}\n{prix}"
 
 
 # =============================================================================
@@ -105,7 +90,11 @@ types_bien = ['APT', 'MAI']
 # --- DEFINITION DES OFFSETS SPÉCIFQUES ---
 CUSTOM_LABEL_OFFSETS = {
     # Déplace le label de Toulon vers le bas/droite (inchangé)
-    'TOULON': {'x': 0.1, 'y': -0.05} 
+    'TOULON': {'x': 0.1, 'y': -0.05} ,
+    # Ajoutez un décalage vertical pour PARIS et REIMS pour que l'étiquette se développe bien vers le bas
+    'PARIS': {'x': 0.08, 'y': 0.08},
+    'REIMS': {'x': 0.08, 'y': 0.08},
+    'LILLE': {'x': 0.08, 'y': 0.08},
 }
 
 
@@ -154,16 +143,19 @@ for type_bien in types_bien:
     ax.set_xlim(xmin - 0.7, xmax + 0.7) 
     ax.set_ylim(ymin - 0.7, ymax + 0.7)
 
-    # --- AJOUT DES ÉTIQUETTES ET DES COULEURS DE TEXTE ---
+    # --- AJOUT DES ÉTIQUETTES ET DES BULLES ---
     
+    # Variables d'Offset par DÉFAUT des Étiquettes
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # (AJUSTÉ) Espacement entre les lignes de texte (à ajuster si besoin)
-    LINE_SPACING_UNIT = 0.045 # Unité de base pour l'espacement
+    # Variables d'Offset des Bulles 
+    BUBBLE_X_SHIFT = 0.30 
+    BUBBLE_Y_SHIFT = 0.02 
+    BUBBLE_RADIUS = 0.12 
     
-    # (AJUSTÉ) Padding des cadres pour accommoder 4 lignes de texte
-    bbox_props = dict(boxstyle="round,pad=0.6", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
+    # Espacement vertical entre Ligne 1 (Ville) et Ligne 2 (Prix) (CORRIGÉ)
+    LINE_SPACING = 0.07 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
@@ -179,110 +171,105 @@ for type_bien in types_bien:
             y_offset_city = DEFAULT_Y_OFFSET
         # ---------------------------------------------
 
-        # Séparation du texte en ses 4 parties
+        # Séparation du texte
         full_text = row['Formatted_Label']
         formatted_parts = full_text.split('\n')
         ville = formatted_parts[0] 
         prix = formatted_parts[1]
-        ti_3m_text = formatted_parts[2]
-        ti_12m_text = formatted_parts[3]
         
         # Position de départ pour l'étiquette
         anchor_x = lon + x_offset_city
         anchor_y = lat + y_offset_city
         
         ha_align = 'right' if x_offset_city < 0 else 'left'
-        va_align = 'top' if y_offset_city < 0 else 'bottom'
+        
+        # Pour que l'étiquette se déroule vers le bas (comme sur l'image)
+        # on utilise va='top' (l'ancre est le coin supérieur du texte)
+        va_align_box = 'top' 
         
         # 1. Dessiner le fond blanc (BBOX) en utilisant le texte complet invisible
+        # Ceci permet à Matplotlib de calculer la zone de la bbox pour les deux lignes
+        bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95)
+
         ax.text(
             anchor_x, 
             anchor_y, 
             full_text,
             fontsize=10, 
             ha=ha_align, 
-            va=va_align,
+            va=va_align_box,
             color='none', 
             zorder=3,
             bbox=bbox_props
         )
         
-        # Décalages spécifiques pour chaque ligne dans la bbox (va='bottom')
-        # Ajustement manuel pour centrer verticalement les 4 lignes dans la bbox étendue
-        if va_align == 'bottom':
-            # La ville est la plus haute, décalage positif depuis l'ancre
-            ville_y_adjusted = anchor_y + (LINE_SPACING_UNIT * 1.5) 
-            prix_y_adjusted = anchor_y - (LINE_SPACING_UNIT * 0.5) 
-            ti_3m_y_adjusted = anchor_y - (LINE_SPACING_UNIT * 1.5) 
-            ti_12m_y_adjusted = anchor_y - (LINE_SPACING_UNIT * 2.5) 
-        else: # va_align == 'top'
-            # La ville est la plus basse, décalage négatif depuis l'ancre
-            ville_y_adjusted = anchor_y - (LINE_SPACING_UNIT * 1.5)
-            prix_y_adjusted = anchor_y + (LINE_SPACING_UNIT * 0.5)
-            ti_3m_y_adjusted = anchor_y + (LINE_SPACING_UNIT * 1.5)
-            ti_12m_y_adjusted = anchor_y + (LINE_SPACING_UNIT * 2.5)
-
-        # 2. Dessiner le Nom de la Ville (Ligne 1, en gras, noir)
+        # 2. Dessiner le Nom de la Ville (Ligne 1, en gras)
+        # Le va='top' signifie que le texte commence à anchor_y
         ax.text(
             anchor_x, 
-            ville_y_adjusted, 
+            anchor_y, 
             ville, 
             fontsize=10, 
             ha=ha_align, 
-            va='center', # Utilisation de 'center' pour un meilleur contrôle
+            va=va_align_box,
             color=CL_BLACK,
             weight='bold', 
             zorder=4 
         )
         
-        # 3. Dessiner le Prix M2 (Ligne 2, normal, noir)
+        # 3. Dessiner le Prix M2 (Ligne 2, en normal)
+        # Nous ajoutons LINE_SPACING à l'ancre pour décaler vers le bas (car va='top')
+        prix_y = anchor_y + LINE_SPACING 
+            
         ax.text(
             anchor_x, 
-            prix_y_adjusted, 
+            prix_y, 
             prix, 
             fontsize=10, 
             ha=ha_align, 
-            va='center', # Utilisation de 'center'
-            color=CL_BLACK, # Prix en noir
+            va=va_align_box,
+            color=CL_BLACK,
             weight='normal', 
             zorder=4
         )
         
-        # 4. Dessiner le Taux d'inflation 3M (Ligne 3, coloré)
-        ti_3m_val_raw = row['TAUX_INFL_3M']
-        color_ti_3m = COLOR_INFL_BAISSE if pd.notna(ti_3m_val_raw) and ti_3m_val_raw < 0 else COLOR_INFL_3M
-        
-        ax.text(
-            anchor_x, 
-            ti_3m_y_adjusted, 
-            ti_3m_text, 
-            fontsize=9, # Taille légèrement plus petite
-            ha=ha_align, 
-            va='center', # Utilisation de 'center'
-            color=color_ti_3m,
-            weight='bold', 
-            zorder=4
-        )
-
-        # 5. Dessiner le Taux d'inflation 12M (Ligne 4, coloré)
-        ti_12m_val_raw = row['TAUX_INFL_12M']
-        color_ti_12m = COLOR_INFL_BAISSE if pd.notna(ti_12m_val_raw) and ti_12m_val_raw < 0 else COLOR_INFL_12M
-
-        ax.text(
-            anchor_x, 
-            ti_12m_y_adjusted, 
-            ti_12m_text, 
-            fontsize=9, # Taille légèrement plus petite
-            ha=ha_align, 
-            va='center', # Utilisation de 'center'
-            color=color_ti_12m,
-            weight='bold', 
-            zorder=4
-        )
-        
-        # 6. Ajout du point de ville d'origine (petit cercle noir)
+        # 4. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
-        
+
+        # 5. Ajout de la 'Bulle d'Évolution'
+        ti_12m = row['TAUX_INFL_12M']
+        if pd.notna(ti_12m):
+            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
+            
+            # Coordonnées du centre de la bulle
+            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
+            # On aligne la bulle sur la ligne du prix (prix_y)
+            bubble_center_y = prix_y + BUBBLE_Y_SHIFT 
+            
+            # a. Dessin de la bulle (Cercle avec contour noir)
+            ax.add_patch(plt.Circle(
+                (bubble_center_x, bubble_center_y), 
+                radius=BUBBLE_RADIUS, 
+                color=color_evolution, 
+                alpha=0.9,
+                ec='black', 
+                lw=1.0, 
+                zorder=5
+            ))
+            
+            # b. Texte dans la bulle (en gras)
+            ax.text(
+                bubble_center_x, 
+                bubble_center_y, 
+                f"{ti_12m:+.1%}".replace('.', ','),
+                fontsize=7, 
+                color='white', 
+                ha='center', 
+                va='center',
+                weight='bold', 
+                zorder=6
+            )
+    
     # --- FINALISATION DE L'IMAGE ---
     ax.axis('off') 
     
@@ -294,13 +281,12 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # Ajout de la source et de la légende (MIS À JOUR pour 3M et 12M)
+    # Ajout de la source et de la légende
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
     
-    fig.text(0.05, 0.13, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.11, f"Couleur {COLOR_INFL_3M}: Taux 3 Mois", ha='left', va='bottom', fontsize=8, color=COLOR_INFL_3M)
-    fig.text(0.05, 0.09, f"Couleur {COLOR_INFL_12M}: Taux 12 Mois", ha='left', va='bottom', fontsize=8, color=COLOR_INFL_12M)
-    fig.text(0.05, 0.07, f"Couleur {COLOR_INFL_BAISSE}: Baisse (3M ou 12M)", ha='left', va='bottom', fontsize=8, color=COLOR_INFL_BAISSE)
+    fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
+    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
+    fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
 
     # --- AFFICHAGE SEUL ---
     plt.show() 
