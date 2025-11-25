@@ -150,9 +150,8 @@ for type_bien in types_bien:
     BUBBLE_Y_SHIFT = 0.02 
     BUBBLE_RADIUS = 0.12 
     
-    # Ajustement de l'espacement pour éviter la superposition
-    # Cette valeur est critique pour l'écart vertical entre Ville et Prix
-    LINE_SPACING = 0.045 
+    # Ajustement de l'espacement pour éviter la superposition (CORRIGÉ)
+    LINE_SPACING = 0.07 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
@@ -194,7 +193,7 @@ for type_bien in types_bien:
             fontsize=10, 
             ha=ha_align, 
             va=va_align,
-            color='none', # Couleur de texte transparente
+            color='none', 
             zorder=3,
             bbox=bbox_props
         )
@@ -215,8 +214,10 @@ for type_bien in types_bien:
         # 3. Dessiner le Prix M2 (Ligne 2, en normal)
         # On applique le décalage pour la deuxième ligne (Prix)
         if va_align == 'bottom':
+            # Décale vers le bas (Y diminue)
             prix_y = anchor_y - LINE_SPACING 
         elif va_align == 'top':
+            # Décale vers le bas (Y augmente)
             prix_y = anchor_y + LINE_SPACING 
         else:
             prix_y = anchor_y 
