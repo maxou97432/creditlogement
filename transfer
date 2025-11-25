@@ -17,20 +17,13 @@ import time
 import matplotlib.font_manager as fm
 
 
-# --- CONFIGURATION INITIALE & CHEMINS (Non modifiés) ---
-
-# Le chemin est conservé tel quel (attention au U+00A0 qui peut revenir)
+# Le chemin est conservé tel quel
 geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole.geojson" 
 
 # Chemins des données (vérifiez l'accessibilité)
 prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
 df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
 df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
-
-# Dossier de sortie (ajusté pour être fonctionnel sans '__file__')
-current_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if len(sys.argv) > 0 and os.path.exists(sys.argv[0]) else os.getcwd()
-output_dir = os.path.join(current_dir, "results")
-os.makedirs(output_dir, exist_ok=True)
 
 # =============================================================================
 # --- PALETTE DE COULEURS CRÉDIT LOGEMENT & POLICE ---
@@ -41,15 +34,12 @@ CL_LIGHT_GREY = '#F0F0F0' # Un gris très clair pour les fonds ou bordures discr
 CL_MEDIUM_GREY = '#CCCCCC' # Gris moyen
 
 # --- CONFIGURATION DE POLICE ---
-# Utilisation de Century Gothic comme meilleur choix géométrique
 NOM_POLICE_CL = 'Century Gothic' 
 plt.rcParams['font.family'] = 'sans-serif' 
-# Définition de la liste de polices, en mettant Century Gothic en premier
 plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
-plt.rcParams['font.weight'] = 'medium' # Poids par défaut
+plt.rcParams['font.weight'] = 'medium' 
 
 TITRE_FONT_WEIGHT = 'heavy' # Poids forcé pour le titre principal
-
 
 # =============================================================================
 # --- PRÉPARATION DES DONNÉES (Non modifiée) ---
@@ -104,6 +94,13 @@ print("Configuration de police 'Century Gothic' appliquée.")
 
 types_bien = ['APT', 'MAI']
 
+# --- DEFINITION DES OFFSETS SPÉCIFIQUES ---
+CUSTOM_LABEL_OFFSETS = {
+    # Déplace le label de Toulon vers le bas pour le séparer de Marseille
+    'TOULON': {'x': 0.1, 'y': -0.05} 
+}
+
+
 for type_bien in types_bien:
     print(f"\n--- Génération de la carte pour le type de bien : {type_bien} ---")
     
@@ -151,11 +148,11 @@ for type_bien in types_bien:
 
     # --- AJOUT DES ÉTIQUETTES ET DES BULLES ---
     
-    # Variables d'Offset des Étiquettes
-    x_offset = 0.08 
-    y_offset = 0.08 
+    # Variables d'Offset par DÉFAUT des Étiquettes
+    DEFAULT_X_OFFSET = 0.08 
+    DEFAULT_Y_OFFSET = 0.08 
     
-    # Variables d'Offset des Bulles (NOUVEAU)
+    # Variables d'Offset des Bulles (relatifs à l'ancre de l'étiquette)
     BUBBLE_X_SHIFT = 0.38 
     BUBBLE_Y_SHIFT = 0.1 
     BUBBLE_RADIUS = 0.12 
@@ -163,15 +160,25 @@ for type_bien in types_bien:
     for idx, row in gdf.iterrows():
         lon = row['longitude']
         lat = row['latitude']
+        city_label = row['label'] # Nom de la ville en MAJUSCULES
         
+        # --- LOGIQUE D'OFFSET SPÉCIFIQUE ---
+        if city_label in CUSTOM_LABEL_OFFSETS:
+            x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
+            y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
+        else:
+            x_offset_city = DEFAULT_X_OFFSET
+            y_offset_city = DEFAULT_Y_OFFSET
+        # ---------------------------------------------
+
         # 1. Dessiner le fond blanc de l'étiquette et le texte
         ax.text(
-            lon + x_offset, 
-            lat + y_offset, 
+            lon + x_offset_city, 
+            lat + y_offset_city, 
             row['Formatted_Label'],
             fontsize=10, 
-            ha='left', 
-            va='bottom',
+            ha='right' if x_offset_city < 0 else 'left', 
+            va='top' if y_offset_city < 0 else 'bottom', 
             color=CL_BLACK,
             zorder=3,
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95) 
@@ -180,14 +187,14 @@ for type_bien in types_bien:
         # 2. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # 3. Ajout de la 'Bulle d'Évolution' (AMÉLIORÉ)
+        # 3. Ajout de la 'Bulle d'Évolution'
         ti_12m = row['TAUX_INFL_12M']
         if pd.notna(ti_12m):
             color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
             
             # Coordonnées du centre de la bulle
-            bubble_center_x = lon + x_offset + BUBBLE_X_SHIFT
-            bubble_center_y = lat + BUBBLE_Y_SHIFT
+            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
+            bubble_center_y = lat + y_offset_city + BUBBLE_Y_SHIFT
             
             # a. Dessin de la bulle (Cercle avec contour noir)
             ax.add_patch(plt.Circle(
@@ -195,8 +202,8 @@ for type_bien in types_bien:
                 radius=BUBBLE_RADIUS, 
                 color=color_evolution, 
                 alpha=0.9,
-                ec='black', # Bordure noire ajoutée
-                lw=1.0, # Épaisseur de la bordure
+                ec='black', 
+                lw=1.0, 
                 zorder=5
             ))
             
@@ -209,7 +216,7 @@ for type_bien in types_bien:
                 color='white', 
                 ha='center', 
                 va='center',
-                weight='bold', # Texte en gras ajouté
+                weight='bold', 
                 zorder=6
             )
     
@@ -224,16 +231,15 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # Ajout de la source et de la légende (comme dans la version stylisée)
+    # Ajout de la source et de la légende
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
     
     fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
     fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
     fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
 
-    # Sauvegarder l'image au lieu de juste plt.show()
-    output_file_png = os.path.join(output_dir, f"carte_prix_m2_CL_Style_{type_bien}.png")
-    plt.savefig(output_file_png, dpi=300, bbox_inches='tight', facecolor=fig.get_facecolor()) 
-    plt.close(fig) 
-    
-    print(f"Carte Matplotlib enregistrée : {output_file_png}")
+    # --- AFFICHAGE SEUL ---
+    plt.show() 
+    plt.close(fig) # Fermer la figure après l'affichage
+
+    print(f"Génération de la carte pour {type_bien} terminée.")
