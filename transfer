@@ -247,4 +247,58 @@ for type_bien in types_bien:
 
         # 4. Ajout de la 'Bulle d'Évolution'
         ti_12m = row['TAUX_INFL_12M']
-        if pd.notna(ti
+        if pd.notna(ti_12m):
+            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
+            
+            # Coordonnées du centre de la bulle
+            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
+            # On aligne la bulle sur le prix (deuxième ligne)
+            bubble_center_y = prix_y + BUBBLE_Y_SHIFT 
+            
+            # a. Dessin de la bulle (Cercle avec contour noir)
+            ax.add_patch(plt.Circle(
+                (bubble_center_x, bubble_center_y), 
+                radius=BUBBLE_RADIUS, 
+                color=color_evolution, 
+                alpha=0.9,
+                ec='black', 
+                lw=1.0, 
+                zorder=5
+            ))
+            
+            # b. Texte dans la bulle (en gras)
+            ax.text(
+                bubble_center_x, 
+                bubble_center_y, 
+                f"{ti_12m:+.1%}".replace('.', ','),
+                fontsize=7, 
+                color='white', 
+                ha='center', 
+                va='center',
+                weight='bold', 
+                zorder=6
+            )
+    
+    # --- FINALISATION DE L'IMAGE ---
+    ax.axis('off') 
+    
+    # Titre principal (noir sur turquoise)
+    title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
+    ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
+    
+    # Sous-titre et sources (noir sur turquoise)
+    subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
+    fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
+
+    # Ajout de la source et de la légende
+    fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
+    
+    fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
+    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
+    fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
+
+    # --- AFFICHAGE SEUL ---
+    plt.show() 
+    plt.close(fig) 
+
+    print(f"Génération de la carte pour {type_bien} terminée.")
