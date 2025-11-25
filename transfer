@@ -1,26 +1,75 @@
-import matplotlib.font_manager as fm
-import os
-
-# 1. Obtenir la liste de tous les fichiers de police trouvés par Matplotlib
-all_font_files = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-
-# 2. Extraire les noms de famille de police lisibles (en éliminant les doublons)
-available_fonts = set()
-for font_file in all_font_files:
-    try:
-        # Tenter d'obtenir les propriétés de la police
-        prop = fm.FontProperties(fname=font_file)
-        # Ajouter le nom de la famille de police
-        available_fonts.add(prop.get_name())
-    except Exception:
-        # Ignorer les fichiers qui ne sont pas des polices valides pour Matplotlib
-        continue
-
-# 3. Afficher les noms des polices triées
-print("--- POLICES DISPONIBLES SUR VOTRE SYSTÈME POUR MATPLOTLIB ---")
-for font_name in sorted(list(available_fonts)):
-    print(font_name)
-print("-------------------------------------------------------------")
-
-# Facultatif : Vider le cache des polices si la liste semble incomplète
-# fm._rebuild()
+--- POLICES DISPONIBLES SUR VOTRE SYSTÈME POUR MATPLOTLIB ---
+Arial
+Bahnschrift
+Book Antiqua
+Bookshelf Symbol 7
+Calibri
+Cambria
+Candara
+Cascadia Code
+Cascadia Mono
+Century
+Century Gothic
+Comic Sans MS
+Consolas
+Constantia
+Corbel
+Courier New
+Dubai
+Ebrima
+Franklin Gothic Medium
+Gabriola
+Gadugi
+Georgia
+Gulim
+Impact
+Ink Free
+Javanese Text
+Leelawadee
+Leelawadee UI
+Lucida Console
+Lucida Sans Unicode
+MS Gothic
+MS Reference Sans Serif
+MS Reference Specialty
+MT Extra
+MV Boli
+Malgun Gothic
+Microsoft Himalaya
+Microsoft JhengHei
+Microsoft New Tai Lue
+Microsoft PhagsPa
+Microsoft Sans Serif
+Microsoft Tai Le
+Microsoft Uighur
+Microsoft YaHei
+Microsoft Yi Baiti
+MingLiU
+MingLiU-ExtB
+Mongolian Baiti
+Myanmar Text
+Nirmala UI
+Palatino Linotype
+Segoe MDL2 Assets
+Segoe Print
+Segoe Script
+Segoe UI
+Segoe UI Emoji
+Segoe UI Historic
+Segoe UI Symbol
+SimSun
+SimSun-ExtB
+SimSun-ExtG
+Sitka
+Sylfaen
+Symbol
+Tahoma
+Times New Roman
+Trebuchet MS
+Verdana
+Webdings
+Wingdings
+Wingdings 2
+Wingdings 3
+Yu Gothic
+-------------------------------------------------------------
