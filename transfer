@@ -17,6 +17,9 @@ import time
 import matplotlib.font_manager as fm
 
 
+# --- CONFIGURATION INITIALE & CHEMINS (Non modifiés) ---
+
+# Le chemin est conservé tel quel (attention au U+00A0 qui peut revenir)
 geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole.geojson" 
 
 # Chemins des données (vérifiez l'accessibilité)
@@ -24,19 +27,32 @@ prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_
 df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
 df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 
+# Dossier de sortie (ajusté pour être fonctionnel sans '__file__')
+current_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if len(sys.argv) > 0 and os.path.exists(sys.argv[0]) else os.getcwd()
+output_dir = os.path.join(current_dir, "results")
+os.makedirs(output_dir, exist_ok=True)
 
 # =============================================================================
-# --- PALETTE DE COULEURS CRÉDIT LOGEMENT ---
+# --- PALETTE DE COULEURS CRÉDIT LOGEMENT & POLICE ---
 # =============================================================================
 CL_TURQUOISE = '#00A79E' # Couleur principale du logo Crédit Logement
 CL_BLACK = '#000000' # Noir pour le texte
 CL_LIGHT_GREY = '#F0F0F0' # Un gris très clair pour les fonds ou bordures discrètes
 CL_MEDIUM_GREY = '#CCCCCC' # Gris moyen
 
-NOM_POLICE = "Montserrat"
+# --- CONFIGURATION DE POLICE ---
+# Utilisation de Century Gothic comme meilleur choix géométrique
+NOM_POLICE_CL = 'Century Gothic' 
+plt.rcParams['font.family'] = 'sans-serif' 
+# Définition de la liste de polices, en mettant Century Gothic en premier
+plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+plt.rcParams['font.weight'] = 'medium' # Poids par défaut
+
+TITRE_FONT_WEIGHT = 'heavy' # Poids forcé pour le titre principal
+
 
 # =============================================================================
-# --- PRÉPARATION DES DONNÉES ---
+# --- PRÉPARATION DES DONNÉES (Non modifiée) ---
 # =============================================================================
 
 # 1. Nettoyage et Fusion
@@ -66,7 +82,7 @@ def format_text_label(row):
 
 
 # =============================================================================
-# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ---
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE (Non modifiée) ---
 # =============================================================================
 
 try:
@@ -83,21 +99,7 @@ except Exception as e:
 # --- CRÉATION DE LA CARTE MATPLOTLIB ---
 # =============================================================================
 
-# 1. Utiliser 'sans-serif', le choix le plus compatible.
-plt.rcParams['font.family'] = 'Century Gothic' 
-
-
-#plt.rcParams['font.sans-serif'] = ['Arial', 'Verdana', 'DejaVu Sans', 'sans-serif'] 
-
-# 3. Augmenter le poids par défaut pour simuler l'aspect 'Bold' du logo CL
-# Cela affectera la plupart des textes, y compris les labels.
-plt.rcParams['font.weight'] = 'medium' 
-
-# 4. Définir explicitement les titres en gras (Black/Heavy)
-# C'est important pour les éléments principaux (titres et prix).
-TITRE_FONT_WEIGHT = 'heavy' # Matplotlib utilise 'heavy' ou 'black' pour très gras.
-
-print("Configuration de police remplacée par 'sans-serif' forcé en gras.")
+print("Configuration de police 'Century Gothic' appliquée.")
 
 
 types_bien = ['APT', 'MAI']
@@ -122,10 +124,8 @@ for type_bien in types_bien:
     gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
     
     # --- DESSIN ---
-    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) # Augmente la taille de la figure
-    
-    # Fond de l'image (Zone de l'océan/extérieur) - Couleur de fond générale
-    fig.set_facecolor(CL_TURQUOISE) # Utilise le turquoise de CL
+    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
+    fig.set_facecolor(CL_TURQUOISE) 
     
     # --- DESSIN DU CONTOUR DE LA FRANCE ---
     geometries_to_plot = [france_outline_geometry]
@@ -135,24 +135,30 @@ for type_bien in types_bien:
     for geom in geometries_to_plot:
         # Remplissage de la France
         ax.fill(geom.exterior.xy[0], geom.exterior.xy[1], 
-                color=CL_LIGHT_GREY, # Gris clair pour le fond de la France
+                color=CL_LIGHT_GREY, 
                 zorder=1) 
                 
         # Contour noir
         ax.plot(geom.exterior.xy[0], geom.exterior.xy[1], 
                 color=CL_BLACK, 
-                linewidth=1.0, # Épaisseur du contour
+                linewidth=1.0, 
                 zorder=2)
     
     # Définir les limites de la vue (zoom sur la France)
     xmin, ymin, xmax, ymax = france_outline_geometry.bounds
-    ax.set_xlim(xmin - 0.7, xmax + 0.7) # Augmente légèrement les marges
+    ax.set_xlim(xmin - 0.7, xmax + 0.7) 
     ax.set_ylim(ymin - 0.7, ymax + 0.7)
 
     # --- AJOUT DES ÉTIQUETTES ET DES BULLES ---
     
-    x_offset = 0.08 # Décalage horizontal plus grand
-    y_offset = 0.08 # Décalage vertical plus grand
+    # Variables d'Offset des Étiquettes
+    x_offset = 0.08 
+    y_offset = 0.08 
+    
+    # Variables d'Offset des Bulles (NOUVEAU)
+    BUBBLE_X_SHIFT = 0.38 
+    BUBBLE_Y_SHIFT = 0.1 
+    BUBBLE_RADIUS = 0.12 
     
     for idx, row in gdf.iterrows():
         lon = row['longitude']
@@ -163,51 +169,71 @@ for type_bien in types_bien:
             lon + x_offset, 
             lat + y_offset, 
             row['Formatted_Label'],
-            fontsize=10, # Taille de police légèrement augmentée
+            fontsize=10, 
             ha='left', 
             va='bottom',
             color=CL_BLACK,
             zorder=3,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95) # Bordure grise
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=CL_MEDIUM_GREY, lw=0.7, alpha=0.95) 
         )
 
         # 2. Ajout du point de ville d'origine (petit cercle noir)
-        ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=4, zorder=4)
+        ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # 3. Ajout de la 'Bulle d'Évolution'
+        # 3. Ajout de la 'Bulle d'Évolution' (AMÉLIORÉ)
         ti_12m = row['TAUX_INFL_12M']
         if pd.notna(ti_12m):
-            # Utilisation de couleurs contrastées pour l'évolution
-            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE # Rouge pour négatif, Turquoise pour positif
+            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
             
-            # Placement de la bulle
+            # Coordonnées du centre de la bulle
+            bubble_center_x = lon + x_offset + BUBBLE_X_SHIFT
+            bubble_center_y = lat + BUBBLE_Y_SHIFT
+            
+            # a. Dessin de la bulle (Cercle avec contour noir)
             ax.add_patch(plt.Circle(
-                (lon + x_offset + 0.35, lat + 0.1), # Ajuster le placement de la bulle
-                radius=0.12, # Taille de la bulle
-                color=color_evolution, alpha=0.9,
+                (bubble_center_x, bubble_center_y), 
+                radius=BUBBLE_RADIUS, 
+                color=color_evolution, 
+                alpha=0.9,
+                ec='black', # Bordure noire ajoutée
+                lw=1.0, # Épaisseur de la bordure
                 zorder=5
             ))
-            # Texte dans la bulle
+            
+            # b. Texte dans la bulle (en gras)
             ax.text(
-                lon + x_offset + 0.35, 
-                lat + 0.1, 
+                bubble_center_x, 
+                bubble_center_y, 
                 f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=7, color='white', ha='center', va='center',
+                fontsize=7, 
+                color='white', 
+                ha='center', 
+                va='center',
+                weight='bold', # Texte en gras ajouté
                 zorder=6
             )
     
     # --- FINALISATION DE L'IMAGE ---
-    ax.axis('off') # Retirer les axes (latitude/longitude)
+    ax.axis('off') 
     
     # Titre principal (noir sur turquoise)
     title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
-    ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center',weight = TITRE_FONT_WEIGHT) # Centré
+    ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
     
     # Sous-titre et sources (noir sur turquoise)
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
-    fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK) # Centré
+    fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
+    # Ajout de la source et de la légende (comme dans la version stylisée)
+    fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
+    
+    fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
+    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
+    fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
 
-    plt.show()
-
-    print(f"Carte Matplotlib enregistrée ")
+    # Sauvegarder l'image au lieu de juste plt.show()
+    output_file_png = os.path.join(output_dir, f"carte_prix_m2_CL_Style_{type_bien}.png")
+    plt.savefig(output_file_png, dpi=300, bbox_inches='tight', facecolor=fig.get_facecolor()) 
+    plt.close(fig) 
+    
+    print(f"Carte Matplotlib enregistrée : {output_file_png}")
