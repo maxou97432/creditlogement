@@ -32,6 +32,8 @@ CL_TURQUOISE = '#00A79E'
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
 CL_MEDIUM_GREY = '#CCCCCC' 
+# Couleur rouge pour la baisse (utilisée précédemment dans la bulle)
+CL_RED_BAISSE = '#E4002B' 
 
 # --- CONFIGURATION DE POLICE ---
 NOM_POLICE_CL = 'Century Gothic' 
@@ -56,7 +58,7 @@ def format_text_label(row):
     # Ligne 1 : Nom de la ville en MAJUSCULES
     ville = str(row['label']).upper() 
     
-    # Ligne 2 : Prix
+    # Ligne 2 : Prix (le format reste le même)
     prix_val = row['prix_mm_value']
     prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
     
@@ -70,7 +72,7 @@ def format_text_label(row):
 
 try:
     france_gdf = gpd.read_file(geojson_path)
-    dissolved_france = france_france_gdf.dissolve(by=None)
+    dissolved_france = france_gdf.dissolve(by=None)
     france_outline_geometry = dissolved_france.geometry.iloc[0] 
     print("Contour de la France chargé et dissous avec succès.")
 except Exception as e:
@@ -139,17 +141,13 @@ for type_bien in types_bien:
     ax.set_xlim(xmin - 0.7, xmax + 0.7) 
     ax.set_ylim(ymin - 0.7, ymax + 0.7)
 
-    # --- AJOUT DES ÉTIQUETTES ET DES BULLES ---
+    # --- AJOUT DES ÉTIQUETTES ET DES COULEURS DE TEXTE ---
     
     # Variables d'Offset par DÉFAUT des Étiquettes
     DEFAULT_X_OFFSET = 0.08 
     DEFAULT_Y_OFFSET = 0.08 
     
-    # Variables d'Offset des Bulles 
-    BUBBLE_X_SHIFT = 0.30 
-    BUBBLE_Y_SHIFT = 0.02 
-    
-    BUBBLE_RADIUS = 0.14 
+    # (SUPPRIMÉ) BUBBLE_X_SHIFT, BUBBLE_Y_SHIFT, BUBBLE_RADIUS ne sont plus nécessaires
     
     # Ajustement de l'espacement entre les lignes Ville/Prix
     LINE_SPACING = 0.1 
@@ -200,10 +198,8 @@ for type_bien in types_bien:
         
         # 2. Dessiner le Nom de la Ville (Ligne 1, en gras)
         if va_align == 'bottom':
-            # Augmenté de 0.02 à 0.1 pour remonter la ligne dans le cadre étiré
             ville_y = anchor_y + 0.1 
         else: 
-            # Si va_align est 'top', la ville doit descendre. On utilise le même décalage.
             ville_y = anchor_y - 0.1
             
         ax.text(
@@ -218,15 +214,20 @@ for type_bien in types_bien:
             zorder=4 
         )
         
-        # 3. Dessiner le Prix M2 (Ligne 2, en normal)
+        # 3. Dessiner le Prix M2 (Ligne 2, avec couleur selon l'évolution)
         if va_align == 'bottom':
-            # Décale vers le bas (Y diminue)
             prix_y = anchor_y - LINE_SPACING 
         elif va_align == 'top':
-            # Décale vers le bas (Y augmente)
             prix_y = anchor_y + LINE_SPACING 
         else:
             prix_y = anchor_y 
+            
+        # (NOUVEAU) Déterminer la couleur du texte du prix
+        ti_12m = row['TAUX_INFL_12M']
+        if pd.notna(ti_12m):
+            text_color_prix = CL_RED_BAISSE if ti_12m < 0 else CL_TURQUOISE
+        else:
+            text_color_prix = CL_BLACK # Couleur par défaut si pas de taux d'inflation
             
         ax.text(
             anchor_x, 
@@ -235,48 +236,16 @@ for type_bien in types_bien:
             fontsize=10, 
             ha=ha_align, 
             va=va_align,
-            color=CL_BLACK,
-            weight='normal', 
+            color=text_color_prix, # Couleur dynamique
+            weight='bold', # Mise en gras du prix pour la lisibilité
             zorder=4
         )
         
         # 4. Ajout du point de ville d'origine (petit cercle noir)
         ax.plot(lon, lat, marker='o', color=CL_BLACK, markersize=5, zorder=4)
 
-        # 5. Ajout de la 'Bulle d'Évolution'
-        ti_12m = row['TAUX_INFL_12M']
-        if pd.notna(ti_12m):
-            color_evolution = '#E4002B' if ti_12m < 0 else CL_TURQUOISE
-            
-            # Coordonnées du centre de la bulle
-            bubble_center_x = lon + x_offset_city + BUBBLE_X_SHIFT
-            # On aligne la bulle sur la ligne du prix (prix_y)
-            bubble_center_y = prix_y + BUBBLE_Y_SHIFT 
-            
-            # a. Dessin de la bulle (Cercle avec contour noir)
-            ax.add_patch(plt.Circle(
-                (bubble_center_x, bubble_center_y), 
-                radius=BUBBLE_RADIUS, 
-                color=color_evolution, 
-                alpha=0.9,
-                ec='black', 
-                lw=1.0, 
-                zorder=5
-            ))
-            
-            # b. Texte dans la bulle (en gras)
-            ax.text(
-                bubble_center_x, 
-                bubble_center_y, 
-                f"{ti_12m:+.1%}".replace('.', ','),
-                fontsize=8, 
-                color='white', 
-                ha='center', 
-                va='center',
-                weight='bold', 
-                zorder=6
-            )
-    
+        # (SUPPRIMÉ) La section de la bulle d'évolution est complètement retirée
+        
     # --- FINALISATION DE L'IMAGE ---
     ax.axis('off') 
     
@@ -288,12 +257,12 @@ for type_bien in types_bien:
     subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
     fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
 
-    # Ajout de la source et de la légende
+    # Ajout de la source et de la légende (MIS À JOUR pour le texte coloré)
     fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
     
     fig.text(0.05, 0.1, "LÉGENDE ÉVOLUTION:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.08, "Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
-    fig.text(0.05, 0.06, "Rouge: Baisse", ha='left', va='bottom', fontsize=8, color='#E4002B')
+    fig.text(0.05, 0.08, "Texte Prix Turquoise: Hausse", ha='left', va='bottom', fontsize=8, color=CL_TURQUOISE)
+    fig.text(0.05, 0.06, "Texte Prix Rouge: Baisse", ha='left', va='bottom', fontsize=8, color=CL_RED_BAISSE) # Utilise CL_RED_BAISSE
 
     # --- AFFICHAGE SEUL ---
     plt.show() 
