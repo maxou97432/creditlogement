@@ -70,28 +70,24 @@ except Exception as e:
 
 types_bien = ['APT', 'MAI']
 
-# --- NOUVELLE DEFINITION DES OFFSETS EN MÈTRES (m) ---
+# --- DEFINITION DES OFFSETS EN MÈTRES (m) ---
 X_OFFSET_DEFAULT = 3000 # 3 km
 Y_OFFSET_DEFAULT = 3000 # 3 km
 
-# Ajustement des offsets manuels
+# Offsets manuels conservés
 CUSTOM_LABEL_OFFSETS = {
-    # Offsets en mètres (x=Est/Ouest, y=Nord/Sud)
-    # SUD-EST (Zone encombrée)
-    'MONTPELLIER': {'x': -5000, 'y': 5000}, # Réduit pour rapprocher
-    'MARSEILLE':   {'x': -5000,  'y': -5000}, # Réduit pour rapprocher
+    'MONTPELLIER': {'x': -5000, 'y': 5000}, 
+    'MARSEILLE':   {'x': -5000,  'y': -5000},
     'TOULON':      {'x': 5000,  'y': -10000},
     'NICE':        {'x': -5000, 'y': 3000}, 
     'GRENOBLE':    {'x': 5000, 'y': 0},   
 
-    # FRONTIÈRES & CÔTES (Pour rentrer dans les terres)
-    'BORDEAUX':    {'x': 5000,  'y': 0},  # Réduit
-    'NANTES':      {'x': 5000,  'y': 0},  # Réduit
-    'RENNES':      {'x': 5000,  'y': 0},  # Réduit
-    'LILLE':       {'x': 0,   'y': -10000}, # Réduit
-    'STRASBOURG':  {'x': -5000, 'y': 0},  # Réduit
+    'BORDEAUX':    {'x': 5000,  'y': 0},  
+    'NANTES':      {'x': 5000,  'y': 0},  
+    'RENNES':      {'x': 5000,  'y': 0},  
+    'LILLE':       {'x': 0,   'y': -10000}, 
+    'STRASBOURG':  {'x': -5000, 'y': 0},  
     
-    # CENTRE / AUTRES
     'PARIS':       {'x': 5000, 'y': 3000},
     'LYON':        {'x': -5000, 'y': 3000}, 
     'TOULOUSE':    {'x': -5000, 'y': 3000}, 
@@ -133,10 +129,8 @@ for type_bien in types_bien:
 
     # --- AJOUT DES ÉTIQUETTES ---
     
-    # MODIFICATION : Espacement vertical réduit (10 km)
-    LINE_SPACING = 10000 
-    # MODIFICATION : Espacement horizontal des taux réduit (20 km)
-    RATE_INNER_SPACING_X = 20000 
+    # Espacement vertical réduit à 9 km (pour compacter 4 lignes)
+    LINE_SPACING = 9000 
     
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
@@ -158,6 +152,7 @@ for type_bien in types_bien:
         ti_3m = row['TAUX_INFL_3M']
         ti_12m = row['TAUX_INFL_12M']
         
+        # Ancrage du texte
         anchor_x = x_coord + x_offset_city
         anchor_y = y_coord + y_offset_city
         
@@ -175,41 +170,33 @@ for type_bien in types_bien:
                 color=CL_BLACK, weight='normal', zorder=4,
                 path_effects=halo_effect) 
         
-        # 3. Taux d'inflation (Ligne 3) - Ordre 3M (Bleu) puis 12M (Rouge)
-        ti_y = prix_y - LINE_SPACING 
+        # 3. Taux d'inflation 3M (Ligne 3) - BLEU
+        ti_3m_y = prix_y - LINE_SPACING 
         
-        # Taux 3M (BLEU) - Toujours en premier
         if pd.notna(ti_3m):
             text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
         else:
             text_3m = "3M: N/A"
 
         # Dessin du 3M (BLEU)
-        ax.text(anchor_x, ti_y, text_3m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
+        ax.text(anchor_x, ti_3m_y, text_3m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
                 color=CL_BLUE_3M, weight='bold', zorder=4, 
                 path_effects=halo_effect) 
         
-        # Taux 12M (ROUGE) - Toujours en second
+        # 4. Taux d'inflation 12M (Ligne 4) - ROUGE
+        ti_12m_y = ti_3m_y - LINE_SPACING 
+        
         if pd.notna(ti_12m):
             text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
         else:
             text_12m = "12M: N/A"
 
-        # --- LOGIQUE DE POSITIONNEMENT FIXE (3M puis 12M) ---
-        if ha_box_align == 'left':
-            x_12m = anchor_x + RATE_INNER_SPACING_X
-            align_12m = 'left' 
-        else: # ha_box_align == 'right'
-            x_12m = anchor_x - RATE_INNER_SPACING_X
-            align_12m = 'right' 
-        # -----------------------------------------------------
-
-        # Dessin du 12M (ROUGE)
-        ax.text(x_12m, ti_y, text_12m, fontsize=TAUX_FONT_SIZE, ha=align_12m, va=va_align,
+        # Dessin du 12M (ROUGE) - utilise la même ancre et le même alignement que les autres lignes
+        ax.text(anchor_x, ti_12m_y, text_12m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
                 color=CL_RED_12M, weight='bold', zorder=4, 
                 path_effects=halo_effect)
 
-        # 4. Point Ville
+        # 5. Point Ville
         ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
                 markeredgecolor='white', markeredgewidth=0.5) 
 
