@@ -1,33 +1,491 @@
-# =============================================================================
-# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION (SANS LA CORSE) ---
-# =============================================================================
+import sys
+import os
 
-try:
-    france_gdf = gpd.read_file(geojson_path)
-    dissolved_france = france_gdf.dissolve(by=None)
-    
-    # 1. Projeter et extraire la géométrie du MultiPolygon
-    france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
-    
-    # 2. Séparer les différents polygones (continent et îles)
-    geometries_list = []
-    if france_geometry.geom_type == 'MultiPolygon':
-        geometries_list = list(france_geometry.geoms)
-    else:
-        geometries_list = [france_geometry]
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(parent_dir)
 
-    # 3. Trouver le plus grand polygone (le continent)
-    if geometries_list:
-        # Trier par aire (surface) et prendre le plus grand (le continent)
-        geometries_list.sort(key=lambda x: x.area, reverse=True)
-        france_outline_geometry = geometries_list[0]
-        print("INFO: La Corse et les îles mineures ont été exclues.")
-    else:
-        raise ValueError("Aucune géométrie de contour trouvée après dissolution.")
+import time
+from datetime import datetime
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import plotly.express as px
+import plotly.io as pio
+from classe import Connector
+import param_general as params
+pio.renderers.default = "png"
+
+output_dir = os.path.join(os.path.dirname(__file__))
+os.makedirs(output_dir, exist_ok=True)
+
+base_ml = pd.read_parquet("base_complete_filtree.parquet")
+
+
+
+def complete_months(g, col):       #complète les mois manquants dans un sous univers en attribuant des valeurs nulles pour nb_transac et na pour prix_m2_moyen
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[i] = g[i].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    g["prix_moyen"] = g["prix_moyen"]
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
+    result = []
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
+        if periode.month % 3 != 0:
+            continue
         
-except Exception as e:
-    print(f"!!! Échec critique lors du chargement ou de la projection du GeoJSON: {e}")
-    sys.exit(1)
+        df_actif = df_fenetre[
+            (df_fenetre[col_prix].notna()) & 
+            (df_fenetre[col_indicatrice] == 1)
+        ].copy()
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_typologies": 0
+            })
+            continue
+        
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            poids_norm = df_actif["poids_relatif"] / total_poids
+            prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
+        else:
+            prix_mm = np.nan
+        
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": len(df_actif),
+            "nb_typologies": df_actif.groupby(typokeys).ngroups
+        })
+    
+    return pd.DataFrame(result)
 
-# Le reste du code (la boucle for geom in geometries_to_plot) peut être simplifié car 
-# france_outline_geometry est maintenant un Polygon simple (le continent).
+start = datetime.now()
+################# CONSTRUCTION DES UNIVERS ELEMENTAIRES #################
+############################# VILLES 
+base_ml = base_ml.rename(columns={"DEPT_Corse_2A_2B": "DEPT","ville_" : "CITY", "code_iris" : "IRIS", "CODE_POSTAL" : "CP"})
+base_ml = base_ml.dropna(subset=["CITY","CP","DEPT"])
+
+base_ml["DATE"] = pd.to_datetime(base_ml["DATE"])
+base_ml["Periode"] = base_ml["DATE"].dt.to_period("M").dt.to_timestamp()
+
+
+codes_insee_nice = [
+    "06159", "06157", "06156", "06153", "06151", "06149", "06147", "06146", "06144",
+    "06129", "06127", "06126", "06123", "06122", "06121", "06120", "06119", "06117",
+    "06114", "06111", "06110", "06109", "06103", "06102", "06088", "06080", "06075",
+    "06074", "06073", "06072", "06066", "06065", "06064", "06060", "06059", "06055",
+    "06054", "06046", "06042", "06039", "06034", "06033", "06032", "06027", "06025",
+    "06021", "06020", "06013", "06011", "06009", "06006"
+]
+
+
+mask_nice = base_ml["IRIS"].str[:5].isin(codes_insee_nice)
+base_ml.loc[mask_nice, "CITY"] == "NICE"
+
+top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE","NICE", "BORDEAUX", "STRASBOURG", "NANTES", "MONTPELLIER",
+         "TOULON", "REIMS", "SAINT ETIENNE","GRENOBLE", "HAVRE"]
+
+base_ville = base_ml[(base_ml["CITY"].isin(top15))]
+
+
+
+
+maille_geo = ["CITY","CP"]
+univers_complet = {}
+resultats_finaux = {}
+
+VILLES_ARRONDISSEMENTS = ["PARIS","LILLE","MARSEILLE","LYON"]
+
+for col in maille_geo:
+    dims = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    
+    if base_ville[col].dtype in ["object", "str"]:
+        base_ville[col] = base_ville[col].astype(str).str.strip().str.upper()
+    
+    if col == "CP":
+        df_work = base_ville[base_ville["CITY"].isin(VILLES_ARRONDISSEMENTS)].copy()
+    else :
+        df_work = base_ville.copy()
+
+    # AGRÉGATION MENSUELLE
+    univers_mensuel = (
+        df_work.groupby(dims, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_median=("Prix_m2", "median"),
+            prix_moyen=("Prix_m2", "mean"),
+        )
+        .reset_index()
+    )
+    
+    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
+    univers_mensuel["PB"] = (
+        univers_mensuel["NB_PIECES_RANGE"]
+        .astype(str).str.strip().str[:3].str.upper()
+    )
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    
+    mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
+    univers_mensuel = univers_mensuel.loc[~mask].copy()
+    univers_mensuel = univers_mensuel.drop(columns=["PB"])
+    
+    # COMPLÉTION DES MOIS
+    univers_complet_temp = (
+        univers_mensuel
+        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(lambda g: complete_months(g, col))
+    )
+    
+    # POIDS STRUCTURELS SUR 2025-2025
+    poids_global = (
+        univers_mensuel
+        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum()
+        .rename(columns={"nb_transac": "poids_total"})
+    )
+    poids_global["poids_relatif"] = (
+        poids_global.groupby(col)["poids_total"].transform(lambda x: x / x.sum())
+    )
+    
+
+    univers_complet_temp = univers_complet_temp.merge(
+        poids_global,
+        on=[col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+        how="left"
+    )
+    
+    print(f"✓ Poids structurels calculés")
+    
+    # INDICATRICES
+    typokeys = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet_temp = univers_complet_temp.sort_values(typokeys + ["Periode"])
+    
+    # CORRECTION : univers_complet_temp au lieu de univers_complet
+    univers_complet_temp["I_3m"] = (
+        univers_complet_temp
+        .groupby(typokeys, group_keys=False)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    )
+    univers_complet_temp["I_12m"] = (
+        univers_complet_temp
+        .groupby(typokeys, group_keys=False)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+    )
+    
+    print("✓ Indicatrices calculées")
+    
+    univers_complet[col] = univers_complet_temp
+    
+    # MOYENNES MOBILES PAR TYPE DE BIEN
+    print("Calcul des moyennes mobiles par maille et type de bien")
+    
+    resultats_mm = []
+    
+    for maille in univers_complet_temp[col].unique():
+        df_maille = univers_complet_temp[univers_complet_temp[col] == maille].copy()
+        
+        # BOUCLE PAR TYPE DE BIEN (APP ou MAI)
+        for type_bien in df_maille['TYPE_BIEN'].unique():
+            df_type = df_maille[df_maille['TYPE_BIEN'] == type_bien].copy()
+            
+            if len(df_type) == 0:
+                continue
+            
+            # MM 3 mois
+            mm_3m = calcule_moyenne_mobile_ponderee(
+                df_type,  # Seulement ce type de bien
+                window=3,
+                col_prix='prix_moyen',
+                col_indicatrice='I_3m',
+                typokeys=typokeys
+            )
+            mm_3m["DIC_NAME"] = "prix_m2_3m"
+            mm_3m = mm_3m.rename(columns={
+                "prix_mm": "prix_mm_value",
+                "nb_observations": "NB_BIENS",
+            })
+            
+            # MM 12 mois
+            mm_12m = calcule_moyenne_mobile_ponderee(
+                df_type,  # Seulement ce type de bien
+                window=12,
+                col_prix='prix_moyen',
+                col_indicatrice='I_12m',
+                typokeys=typokeys
+            )
+            mm_12m["DIC_NAME"] = "prix_m2_12m"
+            mm_12m = mm_12m.rename(columns={
+                "prix_mm": "prix_mm_value",
+                "nb_observations": "NB_BIENS",
+            })
+            
+            # Concat
+            mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
+            mm_type[col] = maille
+            mm_type["TYPE_MAILLE"] = col
+            mm_type["CD_TYPE_BIEN"] = type_bien  # APP ou MAI
+            
+            resultats_mm.append(mm_type)
+    
+    model_agg = pd.concat(resultats_mm, ignore_index=True)
+    model_agg = model_agg.sort_values([col, "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    
+    resultats_finaux[col] = model_agg
+    
+    print(f"✓ Maille {col} traitée")
+
+end = datetime.now()
+print(f"Durée : {end - start}")
+
+
+
+
+#=========================================================
+#FUSION DE TOUTES LES MAILLES DANS UN DF ET CREATION DE LA BASE dbo.PRIX_M2
+#=========================================================
+
+dfs_to_concat = []
+
+for type_maille in maille_geo:
+    df = resultats_finaux[type_maille].copy()
+
+    df = df.rename(columns={type_maille : "VAL_MAILLE_GEO"})
+    dfs_to_concat.append(df)
+
+resultats_finaux = pd.concat(dfs_to_concat, ignore_index = True)
+resultats_finaux= resultats_finaux[resultats_finaux["VAL_MAILLE_GEO"] != "NAN"]
+csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_complet_CITY.csv")
+resultats_finaux.to_csv(csv_chem, index = False)
+
+resultats_finaux = resultats_finaux.sort_values(by=["Periode"])
+resultats_finaux["TAUX_INFL_12M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=12, fill_method=None)
+resultats_finaux["TAUX_INFL_3M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=3,fill_method=None)
+
+res = resultats_finaux.sort_values(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode","DIC_NAME"])
+res = res[res["Periode"] == res["Periode"].max()]
+res = res.rename(columns={"Periode":"DT_MAJ_PM2"})
+colonnes = ["DIC_NAME", "CD_TYPE_BIEN","TYPE_MAILLE","VAL_MAILLE_GEO","DT_MAJ_PM2","NB_BIENS","prix_mm_value","TAUX_INFL_3M","TAUX_INFL_12M"]
+res = res[colonnes]
+
+csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_MAJ_CITY.csv")
+res.to_csv(csv_chem, index = False)
+
+
+res2 = resultats_finaux.copy()
+res2["Periode"] = pd.to_datetime(res2["Periode"], dayfirst=True)
+res2 = res2[res2["Periode"] >= "2017-03-01"]
+
+res2 = res2.groupby("VAL_MAILLE_GEO", as_index=False)["NB_BIENS"].min()
+res2.rename(columns={"NB_BIENS": "seuil_min"}, inplace=True)
+res2 = res2.dropna(subset=["VAL_MAILLE_GEO"])
+csv_chem = os.path.join(output_dir, "stat_volumeterie_CITY.csv")
+res2.to_csv(csv_chem, index = False)
+
+
+############################### DEPARTEMENTS
+
+
+
+maille_geo = ["DEPT"]
+univers_complet = {}
+resultats_finaux = {}
+
+
+for col in maille_geo:
+    dims = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    
+
+    df_work = base_ml.copy()
+
+    # AGRÉGATION MENSUELLE
+    univers_mensuel = (
+        df_work.groupby(dims, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_median=("Prix_m2", "median"),
+            prix_moyen=("Prix_m2", "mean"),
+        )
+        .reset_index()
+    )
+    
+    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
+    univers_mensuel["PB"] = (
+        univers_mensuel["NB_PIECES_RANGE"]
+        .astype(str).str.strip().str[:3].str.upper()
+    )
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    
+    mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
+    univers_mensuel = univers_mensuel.loc[~mask].copy()
+    univers_mensuel = univers_mensuel.drop(columns=["PB"])
+    
+    # COMPLÉTION DES MOIS
+    univers_complet_temp = (
+        univers_mensuel
+        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(lambda g: complete_months(g, col))
+    )
+    
+    # POIDS STRUCTURELS SUR 2025-2025
+    poids_global = (
+        univers_mensuel
+        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum()
+        .rename(columns={"nb_transac": "poids_total"})
+    )
+    poids_global["poids_relatif"] = (
+        poids_global.groupby(col)["poids_total"].transform(lambda x: x / x.sum())
+    )
+    
+
+    univers_complet_temp = univers_complet_temp.merge(
+        poids_global,
+        on=[col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+        how="left"
+    )
+    
+    print(f"✓ Poids structurels calculés")
+    
+    # INDICATRICES
+    typokeys = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet_temp = univers_complet_temp.sort_values(typokeys + ["Periode"])
+    
+    # CORRECTION : univers_complet_temp au lieu de univers_complet
+    univers_complet_temp["I_3m"] = (
+        univers_complet_temp
+        .groupby(typokeys, group_keys=False)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    )
+    univers_complet_temp["I_12m"] = (
+        univers_complet_temp
+        .groupby(typokeys, group_keys=False)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+    )
+    
+    print("✓ Indicatrices calculées")
+    
+    univers_complet[col] = univers_complet_temp
+    
+    # MOYENNES MOBILES PAR TYPE DE BIEN
+    print("Calcul des moyennes mobiles par maille et type de bien")
+    
+    resultats_mm = []
+    
+    for maille in univers_complet_temp[col].unique():
+        df_maille = univers_complet_temp[univers_complet_temp[col] == maille].copy()
+        
+        # BOUCLE PAR TYPE DE BIEN (APP ou MAI)
+        for type_bien in df_maille['TYPE_BIEN'].unique():
+            df_type = df_maille[df_maille['TYPE_BIEN'] == type_bien].copy()
+            
+            if len(df_type) == 0:
+                continue
+            
+            # MM 3 mois
+            mm_3m = calcule_moyenne_mobile_ponderee(
+                df_type,  # Seulement ce type de bien
+                window=3,
+                col_prix='prix_moyen',
+                col_indicatrice='I_3m',
+                typokeys=typokeys
+            )
+            mm_3m["DIC_NAME"] = "prix_m2_3m"
+            mm_3m = mm_3m.rename(columns={
+                "prix_mm": "prix_mm_value",
+                "nb_observations": "NB_BIENS",
+            })
+            
+            # MM 12 mois
+            mm_12m = calcule_moyenne_mobile_ponderee(
+                df_type,  # Seulement ce type de bien
+                window=12,
+                col_prix='prix_moyen',
+                col_indicatrice='I_12m',
+                typokeys=typokeys
+            )
+            mm_12m["DIC_NAME"] = "prix_m2_12m"
+            mm_12m = mm_12m.rename(columns={
+                "prix_mm": "prix_mm_value",
+                "nb_observations": "NB_BIENS",
+            })
+            
+            # Concat
+            mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
+            mm_type[col] = maille
+            mm_type["TYPE_MAILLE"] = col
+            mm_type["CD_TYPE_BIEN"] = type_bien  # APP ou MAI
+            
+            resultats_mm.append(mm_type)
+    
+    model_agg = pd.concat(resultats_mm, ignore_index=True)
+    model_agg = model_agg.sort_values([col, "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    
+    resultats_finaux[col] = model_agg
+    
+    print(f"✓ Maille {col} traitée")
+
+end = datetime.now()
+print(f"Durée : {end - start}")
+
+
+
+
+#=========================================================
+#FUSION DE TOUTES LES MAILLES DANS UN DF ET CREATION DE LA BASE dbo.PRIX_M2
+#=========================================================
+
+dfs_to_concat = []
+
+for type_maille in maille_geo:
+    df = resultats_finaux[type_maille].copy()
+
+    df = df.rename(columns={type_maille : "VAL_MAILLE_GEO"})
+    dfs_to_concat.append(df)
+
+resultats_finaux = pd.concat(dfs_to_concat, ignore_index = True)
+csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_complet_DEPT.csv")
+resultats_finaux.to_csv(csv_chem, index = False)
+
+resultats_finaux = resultats_finaux.sort_values(by=["Periode"])
+resultats_finaux["TAUX_INFL_12M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=12, fill_method=None)
+resultats_finaux["TAUX_INFL_3M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=3,fill_method=None)
+
+res = resultats_finaux.sort_values(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode","DIC_NAME"])
+res = res[res["Periode"] == res["Periode"].max()]
+res = res.rename(columns={"Periode":"DT_MAJ_PM2"})
+colonnes = ["DIC_NAME", "CD_TYPE_BIEN","TYPE_MAILLE","VAL_MAILLE_GEO","DT_MAJ_PM2","NB_BIENS","prix_mm_value","TAUX_INFL_3M","TAUX_INFL_12M"]
+res = res[colonnes]
+
+csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_MAJ_DEPT.csv")
+res.to_csv(csv_chem, index = False)
+
+
+res2 = resultats_finaux.copy()
+res2["Periode"] = pd.to_datetime(res2["Periode"], dayfirst=True)
+res2 = res2[res2["Periode"] >= "2017-03-01"]
+
+res2 = res2.groupby("VAL_MAILLE_GEO", as_index=False)["NB_BIENS"].min()
+res2.rename(columns={"NB_BIENS": "seuil_min"}, inplace=True)
+
+csv_chem = os.path.join(output_dir, "stat_volumeterie_DEPT.csv")
+res2.to_csv(csv_chem, index = False) 
