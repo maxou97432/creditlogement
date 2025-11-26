@@ -1,237 +1,33 @@
-import sys
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe 
-import geopandas as gpd
-from shapely.geometry import Point
-from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
-import matplotlib.font_manager as fm
-
-# Dossier de sortie
-output_dir = os.path.join(os.path.dirname(__file__), "results")
-os.makedirs(output_dir, exist_ok=True)
-
-# Chemins (Inchangés)
-geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole-version-simplifiee.geojson" 
-prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
-df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
-df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
-
 # =============================================================================
-# --- NOUVELLE PALETTE DE COULEURS HARMONISÉE ---
-# =============================================================================
-# 1. Fond de la carte (Mer) : Le Turquoise Crédit Logement
-CL_TURQUOISE = '#00A79E' 
-
-# 2. Fond du Pays (Terre) : BLANC PUR pour la clarté
-CL_LAND_WHITE = '#FFFFFF' 
-
-# 3. Texte Principal : NOIR ou GRIS TRÈS FONCÉ (plus doux)
-CL_BLACK = '#1A1A1A' 
-
-# 4. Taux 3M : BLEU CRÉDIT LOGEMENT (Bleu foncé/Marine)
-# Cela crée un lien direct avec la marque sans jurer avec le turquoise
-CL_BLUE_3M = '#004B9B' 
-
-# 5. Taux 12M : ROUGE BRIQUE (Terracotta) ou GRIS ANTHRACITE
-# Le rouge brique est visible mais moins "alerte" que le rouge pur.
-CL_RED_12M = '#C0392B' 
-# Si vous préférez du gris pour le 12M, décommentez la ligne suivante :
-# CL_RED_12M = '#666666' 
-
-# --- CONFIGURATION POLICE ---
-NOM_POLICE_CL = 'Century Gothic' 
-plt.rcParams['font.family'] = 'sans-serif' 
-plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
-plt.rcParams['font.weight'] = 'medium' 
-TITRE_FONT_WEIGHT = 'heavy' 
-
-TAUX_FONT_SIZE = 9
-DEFAULT_FONT_SIZE = 20
-TARGET_CRS = "EPSG:2154"
-
-# =============================================================================
-# --- PRÉPARATION DES DONNÉES ---
-# =============================================================================
-
-prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
-df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
-df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
-df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
-    "HAVRE": "LE HAVRE",
-    "SAINT ETIENNE": "ST ETIENNE"})
-
-# =============================================================================
-# --- PRÉPARATION GÉO ---
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION (SANS LA CORSE) ---
 # =============================================================================
 
 try:
     france_gdf = gpd.read_file(geojson_path)
     dissolved_france = france_gdf.dissolve(by=None)
-    france_outline_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
+    
+    # 1. Projeter et extraire la géométrie du MultiPolygon
+    france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
+    
+    # 2. Séparer les différents polygones (continent et îles)
+    geometries_list = []
+    if france_geometry.geom_type == 'MultiPolygon':
+        geometries_list = list(france_geometry.geoms)
+    else:
+        geometries_list = [france_geometry]
+
+    # 3. Trouver le plus grand polygone (le continent)
+    if geometries_list:
+        # Trier par aire (surface) et prendre le plus grand (le continent)
+        geometries_list.sort(key=lambda x: x.area, reverse=True)
+        france_outline_geometry = geometries_list[0]
+        print("INFO: La Corse et les îles mineures ont été exclues.")
+    else:
+        raise ValueError("Aucune géométrie de contour trouvée après dissolution.")
+        
 except Exception as e:
-    print(f"!!! Échec critique : {e}")
+    print(f"!!! Échec critique lors du chargement ou de la projection du GeoJSON: {e}")
     sys.exit(1)
 
-# =============================================================================
-# --- CRÉATION CARTE ---
-# =============================================================================
-
-types_bien = ['APT', 'MAI']
-X_OFFSET_DEFAULT = 3000 
-Y_OFFSET_DEFAULT = 3000 
-
-CUSTOM_LABEL_OFFSETS = {
-    'MONTPELLIER': {'x': -5000, 'y': 60000}, 
-    'MARSEILLE':   {'x': -5000,  'y': -5000},
-    'TOULON':      {'x': 5000,  'y': -10000},
-    'NICE':        {'x': 30000, 'y': 3000}, 
-    'GRENOBLE':    {'x': 5000, 'y': -10000},   
-    'ST ETIENNE':  {'x': -30000, 'y': -0},
-    'LE HAVRE':    {'x': 10000, 'y': -0},
-    'BORDEAUX':    {'x': 5000,  'y': 0},  
-    'NANTES':      {'x': 5000,  'y': 0},  
-    'RENNES':      {'x': 5000,  'y': 0},  
-    'LILLE':       {'x': 0,   'y': -10000}, 
-    'STRASBOURG':  {'x': -5000, 'y': 0},  
-    'PARIS':       {'x': 5000, 'y': 3000},
-    'LYON':        {'x': 6000, 'y': 60000}, 
-    'TOULOUSE':    {'x': -5000, 'y': 3000}, 
-}
-
-type_bien_labels = {"APT": "APPARTEMENTS", "MAI": "MAISONS"}
-
-for type_bien in types_bien:
-    print(f"\n--- Génération : {type_bien} ---")
-    
-    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
-    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper()
-    df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
-    
-    df_map = df_map[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']].copy()
-    df_map = df_map.dropna(subset=['latitude', 'longitude'])
-    df_map = df_map.drop_duplicates(subset='label', keep='first')
-    
-    if df_map.empty: continue
-        
-    geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
-    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
-    gdf = gdf.to_crs(TARGET_CRS) 
-    
-    # --- DESSIN ---
-    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
-    fig.set_facecolor(CL_TURQUOISE) # Fond Turquoise
-    
-    geometries_to_plot = [france_outline_geometry]
-    if france_outline_geometry.geom_type == 'MultiPolygon':
-        geometries_to_plot = list(france_outline_geometry.geoms)
-
-    for geom in geometries_to_plot:
-        x, y = geom.exterior.xy
-        # CHANGEMENT : Fond de la France en BLANC pour la pureté
-        ax.fill(x, y, color=CL_LAND_WHITE, zorder=1) 
-        # Contour un peu plus subtil (gris très foncé au lieu de noir pur)
-        ax.plot(x, y, color='#333333', linewidth=0.8, zorder=2) 
-    
-    xmin, ymin, xmax, ymax = france_outline_geometry.bounds
-    ax.set_xlim(xmin - 5000, xmax + 5000) 
-    ax.set_ylim(ymin - 5000, ymax + 5000)
-
-    # --- ETIQUETTES ---
-    LINE_SPACING = 15000 
-    
-    # Halo blanc plus épais pour bien détacher le texte de la mer turquoise
-    halo_effect = [pe.withStroke(linewidth=3.0, foreground="white")]
-
-    for idx, row in gdf.iterrows():
-        x_coord = row.geometry.x 
-        y_coord = row.geometry.y 
-        city_label = row['label'] 
-        
-        if city_label in CUSTOM_LABEL_OFFSETS:
-            x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
-            y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
-        else:
-            x_offset_city = X_OFFSET_DEFAULT
-            y_offset_city = Y_OFFSET_DEFAULT
-
-        ville = str(row['label']).upper()
-        prix_val = row['prix_mm_value']
-        prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
-        ti_3m = row['TAUX_INFL_3M']
-        ti_12m = row['TAUX_INFL_12M']
-        
-        anchor_x = x_coord + x_offset_city
-        anchor_y = y_coord + y_offset_city
-        
-        ha_box_align = 'right' if x_offset_city < 0 else 'left'
-        va_align = 'top' 
-        
-        # 1. Nom de la Ville (Ligne 1) 
-        ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='normal', zorder=4, 
-                path_effects=halo_effect) 
-        
-        # 2. Prix M2 (Ligne 2) 
-        prix_y = anchor_y - 1.5 * LINE_SPACING 
-        ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='bold', zorder=4,
-                path_effects=halo_effect) 
-        
-        # 3. Calcul Position Taux
-        ti_y = prix_y - LINE_SPACING 
-        
-        if pd.notna(ti_3m): text_3m = f"{ti_3m:+.1%}".replace('.', ',')
-        else: text_3m = "N/A"
-        
-        if pd.notna(ti_12m): text_12m = f"{ti_12m:+.1%}".replace('.', ',')
-        else: text_12m = "N/A"
-
-        # Construction des blocs de texte colorés
-        ta_3m = TextArea(text_3m, textprops=dict(
-            fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='bold')) # Bleu + Gras
-        
-        ta_12m = TextArea(text_12m, textprops=dict(
-            fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='bold')) # Rouge + Gras
-
-        # Assemblage Horizontal
-        hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=12) 
-
-        # Alignement correct du bloc (Correction précédente incluse)
-        box_x_align = 1.0 if ha_box_align == 'right' else 0.0
-        
-        ab = AnnotationBbox(
-            hpack,
-            (anchor_x, ti_y), 
-            xybox=(0, 0),
-            xycoords='data',
-            boxcoords='offset points', 
-            frameon=False,
-            box_alignment=(box_x_align, 0.5)
-        )
-        # Ajouter le halo au bloc est compliqué, on compte sur le fond blanc de la carte
-        # Si le texte dépasse sur la mer, le halo blanc des autres textes aidera, 
-        # mais AnnotationBbox ne supporte pas path_effects directement sur le conteneur.
-        
-        ax.add_artist(ab)
-
-        # 5. Point Ville
-        ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=6, zorder=4, 
-                markeredgecolor='white', markeredgewidth=1.0) 
-
-    # --- FINALISATION ---
-    ax.axis('off')
-    title_text = f"LES PRIX DU M² DES {type_bien_labels[type_bien]} DANS 16 VILLES"
-    ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
-
-    # LÉGENDE (Mise à jour avec les nouvelles couleurs)
-    fig.text(0.05, 0.10, "Prix/m² moyen sur 12 mois", ha='left', va='bottom', fontsize=16, color=CL_BLACK, path_effects=halo_effect)
-    fig.text(0.05, 0.08, "Bleu : Taux inflation 3 mois", ha='left', va='bottom', fontsize=16, color=CL_BLUE_3M, weight='bold', path_effects=halo_effect)
-    fig.text(0.05, 0.06, "Rouge : Taux inflation 12 mois", ha='left', va='bottom', fontsize=16, color=CL_RED_12M, weight='bold', path_effects=halo_effect)
-    
-    output_file_png = os.path.join(output_dir, f"carte_prix_m2_CITY_{type_bien}.png")
-    plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
-    plt.close(fig) 
-    print(f"Génération terminée pour {type_bien}")
+# Le reste du code (la boucle for geom in geometries_to_plot) peut être simplifié car 
+# france_outline_geometry est maintenant un Polygon simple (le continent).
