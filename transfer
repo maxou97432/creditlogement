@@ -6,18 +6,20 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe 
 import geopandas as gpd
 from shapely.geometry import Point
-import math
+from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
 
-# Imports fonctionnels (conservés)
-from fonctions import (DateOffset, ImportRecentData, CalcMetaNum, EffectifsParMailleGeo, DefMailleGeoCITY, DetectAno)
-from fonctions import detect_ano_ml as detect_ano_ml_fct
-from fonctions import Connector
-import param_general as params
-import time
-import matplotlib.font_manager as fm
+
+# Dossier de sortie pour les images PNG
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
+
+
+
+
+
 
 # Le chemin est conservé tel quel
-geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole.geojson" 
+geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole-version-simplifiee.geojson" 
 
 # Chemins des données (conservés)
 prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\prix_m2_univ_elem_MAJ_CITY.csv")
@@ -30,8 +32,8 @@ df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
 CL_TURQUOISE = '#00A79E' 
 CL_BLACK = '#000000' 
 CL_LIGHT_GREY = '#F0F0F0' 
-CL_BLUE_3M = '#004B9B' 
-CL_RED_12M = '#E4002B' 
+CL_BLUE_3M = '#00766F' 
+CL_RED_12M = '#A9A9A9' 
 
 NOM_POLICE_CL = 'Century Gothic' 
 plt.rcParams['font.family'] = 'sans-serif' 
@@ -40,7 +42,7 @@ plt.rcParams['font.weight'] = 'medium'
 TITRE_FONT_WEIGHT = 'heavy' 
 
 TAUX_FONT_SIZE = 9
-DEFAULT_FONT_SIZE = 10 
+DEFAULT_FONT_SIZE = 20
 
 TARGET_CRS = "EPSG:2154"
 
@@ -51,6 +53,11 @@ TARGET_CRS = "EPSG:2154"
 prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
 df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
 df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
+df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+    "HAVRE": "LE HAVRE",
+    "SAINT ETIENNE": "ST ETIENNE"})
+
+
 
 # =============================================================================
 # --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION ---
@@ -76,11 +83,13 @@ Y_OFFSET_DEFAULT = 3000 # 3 km
 
 # Offsets manuels conservés
 CUSTOM_LABEL_OFFSETS = {
-    'MONTPELLIER': {'x': -5000, 'y': 5000}, 
+    'MONTPELLIER': {'x': -5000, 'y': 60000}, 
     'MARSEILLE':   {'x': -5000,  'y': -5000},
     'TOULON':      {'x': 5000,  'y': -10000},
-    'NICE':        {'x': -5000, 'y': 3000}, 
-    'GRENOBLE':    {'x': 5000, 'y': 0},   
+    'NICE':        {'x': 30000, 'y': 3000}, 
+    'GRENOBLE':    {'x': 5000, 'y': -10000},   
+    'ST ETIENNE':    {'x': -30000, 'y': -0},
+    'LE HAVRE':    {'x': 10000, 'y': -0},
 
     'BORDEAUX':    {'x': 5000,  'y': 0},  
     'NANTES':      {'x': 5000,  'y': 0},  
@@ -89,8 +98,14 @@ CUSTOM_LABEL_OFFSETS = {
     'STRASBOURG':  {'x': -5000, 'y': 0},  
     
     'PARIS':       {'x': 5000, 'y': 3000},
-    'LYON':        {'x': -5000, 'y': 3000}, 
+    'LYON':        {'x': 6000, 'y': 60000}, 
     'TOULOUSE':    {'x': -5000, 'y': 3000}, 
+}
+
+
+type_bien_labels = {
+    "APT": "APPARTEMENTS",
+    "MAI": "MAISONS"
 }
 
 for type_bien in types_bien:
@@ -130,7 +145,7 @@ for type_bien in types_bien:
     # --- AJOUT DES ÉTIQUETTES ---
     
     # Espacement vertical réduit à 9 km (pour compacter 4 lignes)
-    LINE_SPACING = 9000 
+    LINE_SPACING = 15000 
     
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
@@ -161,58 +176,81 @@ for type_bien in types_bien:
         
         # 1. Nom de la Ville (Ligne 1) 
         ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='bold', zorder=4, 
+                color=CL_BLACK, weight='normal', zorder=4, 
                 path_effects=halo_effect) 
         
         # 2. Prix M2 (Ligne 2) 
-        prix_y = anchor_y - LINE_SPACING 
-        ax.text(anchor_x, prix_y, prix, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='normal', zorder=4,
+        prix_y = anchor_y - 1.5 *LINE_SPACING 
+        ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='bold', zorder=4,
                 path_effects=halo_effect) 
         
         # 3. Taux d'inflation 3M (Ligne 3) - BLEU
         ti_3m_y = prix_y - LINE_SPACING 
         
         if pd.notna(ti_3m):
-            text_3m = f"3M: {ti_3m:+.1%}".replace('.', ',')
+            text_3m = f"{ti_3m:+.1%}".replace('.', ',')
         else:
-            text_3m = "3M: N/A"
+            text_3m = "N/A"
 
-        # Dessin du 3M (BLEU)
-        ax.text(anchor_x, ti_3m_y, text_3m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLUE_3M, weight='bold', zorder=4, 
-                path_effects=halo_effect) 
         
         # 4. Taux d'inflation 12M (Ligne 4) - ROUGE
         ti_12m_y = ti_3m_y - LINE_SPACING 
         
         if pd.notna(ti_12m):
-            text_12m = f"12M: {ti_12m:+.1%}".replace('.', ',')
+            text_12m = f"{ti_12m:+.1%}".replace('.', ',')
         else:
-            text_12m = "12M: N/A"
+            text_12m = "N/A"
 
         # Dessin du 12M (ROUGE) - utilise la même ancre et le même alignement que les autres lignes
-        ax.text(anchor_x, ti_12m_y, text_12m, fontsize=TAUX_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_RED_12M, weight='bold', zorder=4, 
-                path_effects=halo_effect)
+        
+        
+        
+        
+        
+        
+        
+        # Construire les deux TextArea avec style
+        ta_3m = TextArea(text_3m, textprops=dict(
+            fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'
+        ))
+        ta_12m = TextArea(text_12m, textprops=dict(
+            fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'
+        ))
+
+        # Packer horizontal: 3M puis 12M, avec un espacement (sep) en pixels
+        # Ajuste 'sep' pour augmenter/diminuer l’espace entre les deux taux
+        hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)  # sep=8px par ex.
+
+        # Placer le bloc au bon endroit (en unités de données)
+        ab = AnnotationBbox(
+            hpack,
+            (anchor_x, ti_12m_y),     # coordonnées données (comme tes autres lignes)
+            xybox=(0, 0),
+            xycoords='data',
+            boxcoords='offset points',   # le packer est géré en pixels
+            frameon=False,
+            box_alignment=(0, 0.5)       # ancrage du bloc: gauche / milieu vertical
+        )
+
+        ax.add_artist(ab)
+
 
         # 5. Point Ville
         ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
                 markeredgecolor='white', markeredgewidth=0.5) 
 
     # --- FINALISATION ---
-    ax.axis('off') 
-    title_text = f"LES PRIX DES {type_bien} DANS L'ANCIEN"
-    ax.set_title(title_text, fontsize=20, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
-    subtitle_text = "SUR 1 AN DANS LES PRINCIPALES VILLES"
-    fig.text(0.5, 0.94, subtitle_text, ha='center', va='top', fontsize=12, color=CL_BLACK, weight='bold') 
+    ax.axis('off')
+    title_text = f"LES PRIX DU M² DES {type_bien_labels[type_bien]} DANS 16 VILLES"
+    ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT) 
 
     # LÉGENDE
-    fig.text(0.05, 0.03, "Source: Crédit Logement, MM 12M", ha='left', va='bottom', fontsize=9, color=CL_BLACK)
-    fig.text(0.05, 0.1, "LÉGENDE TAUX:", ha='left', va='bottom', fontsize=9, color=CL_BLACK, weight='bold')
-    fig.text(0.05, 0.08, "Bleu: Taux 3 mois", ha='left', va='bottom', fontsize=8, color=CL_BLUE_3M)
-    fig.text(0.05, 0.06, "Rouge: Taux 12 mois", ha='left', va='bottom', fontsize=8, color=CL_RED_12M)
-
-    plt.show() 
+    fig.text(0.05, 0.10, "Prix/m² moyen sur 12 mois", ha='left', va='bottom', fontsize=20,path_effects=halo_effect)
+    fig.text(0.05, 0.08, "Bleu: Taux inflation 3 mois", ha='left', va='bottom', fontsize=20, color=CL_BLUE_3M,path_effects=halo_effect)
+    fig.text(0.05, 0.06, "Gris: Taux inflation 12 mois", ha='left', va='bottom', fontsize=20, color=CL_RED_12M,path_effects=halo_effect)
+    
+    output_file_png = os.path.join(output_dir, f"carte_prix_m2_CITY_{type_bien}.png")
+    plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
     plt.close(fig) 
     print(f"Génération terminée pour {type_bien}")
