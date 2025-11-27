@@ -1,170 +1,141 @@
-def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_years=2):
-
-    logging.info("ML detection of anomalies starting")
-    
-  
-    data_original = input_df.copy()  
-    
-    # Pré-filtrage des données
-    df = input_df.copy()
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    df = df.sort_values("DATE", ascending=False)
-    df["DATE"] = df["DATE"].apply(lambda x: x.replace(day=1))
-
-    # Application des conditions
-    conditions = pd.Series(True, index=df.index)
-
-    if date_min is not None:
-        conditions &= df["DATE"] >= pd.to_datetime(date_min)
-
-    if date_max is not None:
-        conditions &= df["DATE"] < pd.to_datetime(date_max)
-
-    if type_bien is not None:
-        conditions &= df["TYPE_BIEN"] == type_bien
-
-    df = df[conditions]
-    
-  
-    ids_avant_detection = set(df["ID"])  # ← IDs qui entrent dans la détection
-    
-    # Import des données sur les N_YEARS dernières années
-    start_time = datetime.now()
-    importrecentdata = ImportRecentData(n_years=n_years, input_=df)
-    data_recent = importrecentdata.import_data_recent()
-    print(
-        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
-    )
-
-    # =============================================================================
-    # Calculs des effectifs par ville et par Iris
-    # =============================================================================
-    step_time = datetime.now()
-    logging.info("workforce calculation")
-    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
-    logging.info(
-        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
-    )
-    step_time = datetime.now()
-    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
-    logging.info(
-        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
-    )
-
-    dict_geo_iris = effectifsparIris.transform(data_recent)
-    dict_geo_city = effectifsparVille.transform(data_recent)
-
-    defmaillegeoiris = DefMailleGeoIRIS(
-        n_min=params.N_MIN,
-        dict_geo_city=dict_geo_city,
-        dict_geo_iris=dict_geo_iris,
-        geo_bien="geo_bien_iris",
-        maille_geo_loc="maille_geo_loc",
-    )
-    data_recent = defmaillegeoiris.transform(data_recent)
-
-    defmaillegeocity = DefMailleGeoCITY(
-        n_min=params.N_MIN,
-        dict_geo_city=dict_geo_city,
-        geo_bien="geo_bien_city",
-        by_year=0,
-    )
-    data_recent = defmaillegeocity.transform(data_recent)
-
-    logging.info("workforce calculation OK")
-
-    # =============================================================================
-    # Calculs des statistiques descriptives par typologie de bien
-    # =============================================================================
-
-    logging.info("statistics calculation")
-    step_time = datetime.now()
-    calcmetanumCity = CalcMetaNum(
-        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
-    )
-    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
-    logging.info(
-        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
-    )
-
-    # =============================================================================
-    # Détection et suppression des anomalies
-    # =============================================================================
-    logging.info("Detection and elimination of anomalies")
-    
-    ids_avant = data_recent["ID"].copy()
-    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
-    result = detectano.transform(data_recent)
-    
-    if isinstance(result, tuple):
-        _, data_recent = result
-    else:
-        data_recent = result
-    
-    if "ID" not in data_recent.columns:
-        data_recent["ID"] = ids_avant.loc[data_recent.index].values
-
-    data_recent.drop(columns=["year_geo_bien"], inplace=True, errors="ignore")
-    logging.info("Detection and elimination of anomalies OK")
-    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
+def analyse_generale_outliers(data_mauvais, data_recent):
+    total = len(data_mauvais) + len(data_recent)
+    print("STATISTIQUES GÉNÉRALES")
+    print("-" * 80)
+    print(f"Nombre total de biens sur 2015-2025 : {total:,}")
+    print(f"Biens valides : {len(data_recent):,} ({len(data_recent)/total*100:.2f}%)")
+    print(f"Outliers détectés : {len(data_mauvais):,} ({len(data_mauvais)/total*100:.2f}%)")
+    print()
     
     
-    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
-                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
-                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
-                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR"]
+    print("Prix au m² - Outliers :")
+    print(f"  Min : {data_mauvais['Prix_m2'].min():,.0f} €")
+    print(f"  Max : {data_mauvais['Prix_m2'].max():,.0f} €")
+    print(f"  Médiane : {data_mauvais['Prix_m2'].median():,.0f} €")
+    print(f"  Moyenne : {data_mauvais['Prix_m2'].mean():,.0f} €")
+    print()
+
+
+def classifier_outliers(data_mauvais, data_recent):
+    print("CLASSIFICATION DES OUTLIERS")
+    print("-" * 80)
     
-    # Vérifier que toutes les colonnes existent
-    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
-    data_recent = data_recent[colonnes_disponibles]
+    medianes = data_recent.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+    medianes.rename(columns={'Prix_m2': 'mediane'}, inplace=True)
     
+    data_outliers_class = data_mauvais.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
     
-    ids_valides = set(data_recent["ID"])
+    def classifier(row):
+        prix = row['Prix_m2']
+        if pd.isna(row['mediane']):
+            if prix < 200:
+                return 'Prix < 200€'
+            elif prix > 20000:
+                return 'Prix > 20000€'
+            else:
+                return 'Groupe insuffisant'
+        else:
+            mediane = row['mediane']
+            if prix < 200:
+                return 'Prix < 200€'
+            elif prix > 20000:
+                return 'Prix > 20000€'
+            elif prix < mediane / 4:
+                return 'Prix < médiane/4'
+            elif prix > 4 * mediane:
+                return 'Prix > 4×médiane'
+            else:
+                return 'Autre'
     
-    # Outliers = IDs entrés dans la détection MAIS rejetés
-    ids_outliers = ids_avant_detection - ids_valides
+    data_outliers_class['type_anomalie'] = data_outliers_class.apply(classifier, axis=1)
     
-    # Récupérer les outliers depuis les données ORIGINALES
-    data_mauvais = data_original[
-        (data_original["ID"].isin(ids_outliers)) &
-        (data_original["ID"].isin(ids_avant_detection))  
-    ].copy()
+    repartition = data_outliers_class['type_anomalie'].value_counts()
+    print("\nRépartition par type d'anomalie :")
+    for anomalie, count in repartition.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {anomalie:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
     
-    # Ne garder que les colonnes disponibles
-    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
-    data_mauvais = data_mauvais[colonnes_communes]
+    return data_outliers_class
+
+
+def analyse_geo_outliers(data_outliers_class):
+    print("RÉPARTITION GÉOGRAPHIQUE")
+    print("-" * 80)
+    
+    print("\nTop 10 départements avec le plus d'outliers :")
+    top_dept = data_outliers_class['LIBELLE_DEPT'].value_counts().head(10)
+    for dept, count in top_dept.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+    print("Top 10 villes avec le plus d'outliers :")
+    top_ville = data_outliers_class['ville_'].value_counts().head(10)
+    for ville, count in top_ville.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
+    print()
+
+
+def analyse_typologie_outliers(data_outliers_class):
+    print("RÉPARTITION PAR TYPE DE BIEN")
+    print("-" * 80)
+    
+    print("\nPar type de bien :")
+    type_bien = data_outliers_class['TYPE_BIEN'].value_counts()
+    for tb, count in type_bien.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {tb:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+    print("Par année :")
+    annee = data_outliers_class['YEAR'].value_counts().sort_index()
+    for year, count in annee.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {year} : {count:5d} ({pct:5.2f}%)")
+    print()
     
 
-    return data_recent, data_mauvais
 
-Par année :
-  1994 :     1 ( 0.00%)
-  1995 :     4 ( 0.00%)
-  1996 :     3 ( 0.00%)
-  1997 :     5 ( 0.00%)
-  1998 :    14 ( 0.00%)
-  1999 :   120 ( 0.00%)
-  2000 :   510 ( 0.01%)
-  2001 :  2523 ( 0.02%)
-  2002 :  5391 ( 0.05%)
-  2003 : 11064 ( 0.11%)
-  2004 : 18039 ( 0.18%)
-  2005 : 34320 ( 0.34%)
-  2006 : 50510 ( 0.50%)
-  2007 : 52170 ( 0.52%)
-  2008 : 45657 ( 0.45%)
-  2009 : 54124 ( 0.54%)
-  2010 : 96681 ( 0.96%)
-  2011 : 88544 ( 0.88%)
-  2012 : 70356 ( 0.70%)
-  2013 : 76827 ( 0.76%)
-  2014 : 708995 ( 7.02%)
-  2015 : 816980 ( 8.09%)
-  2016 : 869055 ( 8.61%)
-  2017 : 989851 ( 9.81%)
-  2018 : 983337 ( 9.74%)
-  2019 : 1073878 (10.64%)
-  2020 : 1027223 (10.18%)
-  2021 : 1209375 (11.98%)
-  2022 : 1143894 (11.33%)
-  2023 : 665792 ( 6.60%)
+def analyse_sources_outliers(data_outliers_class):
+
+    print("ANALYSE PAR SOURCE DE DONNÉES")
+    print("-" * 80)
+    
+    print("\nPar source :")
+    source = data_outliers_class['SOURCE'].value_counts()
+    for src, count in source.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {src:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+
+
+def exemples_outliers(data_outliers_class):
+    print("=" * 80)
+    print("EXEMPLES D'OUTLIERS EXTRÊMES")
+    print("=" * 80)
+    
+    print("\n5 prix au m² les plus bas :")
+    cols_display = ['ville_', 'TYPE_BIEN', 'Prix_m2', 'NB_SURF_HAB', 'NB_PIECES', 'type_anomalie']
+    print(data_outliers_class.nsmallest(5, 'Prix_m2')[cols_display].to_string(index=False))
+    print()
+    
+    print("5 prix au m² les plus hauts :")
+    print(data_outliers_class.nlargest(5, 'Prix_m2')[cols_display].to_string(index=False))
+    print()
+
+
+
+
+def analyser_outliers_complet(data_mauvais, data_recent):
+    analyse_generale_outliers(data_mauvais, data_recent)
+    data_outliers_class = classifier_outliers(data_mauvais, data_recent)
+    analyse_geo_outliers(data_outliers_class)
+    analyse_typologie_outliers(data_outliers_class)
+    analyse_sources_outliers(data_outliers_class)
+    exemples_outliers(data_outliers_class)
+    return data_outliers_class
+
+data_outliers_classified = analyser_outliers_complet(outliers,base_ml_full)
