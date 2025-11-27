@@ -23,20 +23,17 @@ def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_year
     if type_bien is not None:
         conditions &= df["TYPE_BIEN"] == type_bien
 
-    df = df[conditions]
+    data_recent = df[conditions]
     
   
 
     
     # Import des données sur les N_YEARS dernières années
     start_time = datetime.now()
-    importrecentdata = ImportRecentData(n_years=n_years, input_=df)
-    data_recent = importrecentdata.import_data_recent()
     ids_entrees_dans_ml = set(data_recent["ID"])
     print(
         f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
     )
-    ids_entrees_dans_ml = set(data_recent["ID"])
     # =============================================================================
     # Calculs des effectifs par ville et par Iris
     # =============================================================================
