@@ -1,16 +1,170 @@
-# --- TEST DE VÉRIFICATION POUR NICE ---
-# Transactions qui étaient initialement dans Nice (code INSEE 06088)
-code_insee_nice_ville = "06088" 
-mask_nice_ville_seule = base_ml["IRIS"].str[:5] == code_insee_nice_ville
-df_nice_ville = base_ml[mask_nice_ville_seule].copy()
+def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_years=2):
 
-# Transactions qui étaient dans l'agglomération mais PAS dans la ville de Nice
-# On retire le code 06088 de la liste des codes de l'agglomération pour isoler les périphéries
-codes_peripheriques = [c for c in codes_insee_nice if c != code_insee_nice_ville]
-mask_peripherie = base_ml["IRIS"].str[:5].isin(codes_peripheriques)
-df_nice_peripherie = base_ml[mask_peripherie].copy()
+    logging.info("ML detection of anomalies starting")
+    
+  
+    data_original = input_df.copy()  
+    
+    # Pré-filtrage des données
+    df = input_df.copy()
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df = df.sort_values("DATE", ascending=False)
+    df["DATE"] = df["DATE"].apply(lambda x: x.replace(day=1))
 
-print("\n--- Analyse des prix Nice vs Périphérie (Toutes périodes) ---")
-print(f"Volume Nice Ville (06088): {len(df_nice_ville):,} transactions. Prix moyen: {df_nice_ville['Prix_m2'].mean():.2f} €/m²")
-print(f"Volume Nice Périphérie: {len(df_nice_peripherie):,} transactions. Prix moyen: {df_nice_peripherie['Prix_m2'].mean():.2f} €/m²")
-print("----------------------------------------------------------\n")
+    # Application des conditions
+    conditions = pd.Series(True, index=df.index)
+
+    if date_min is not None:
+        conditions &= df["DATE"] >= pd.to_datetime(date_min)
+
+    if date_max is not None:
+        conditions &= df["DATE"] < pd.to_datetime(date_max)
+
+    if type_bien is not None:
+        conditions &= df["TYPE_BIEN"] == type_bien
+
+    df = df[conditions]
+    
+  
+    ids_avant_detection = set(df["ID"])  # ← IDs qui entrent dans la détection
+    
+    # Import des données sur les N_YEARS dernières années
+    start_time = datetime.now()
+    importrecentdata = ImportRecentData(n_years=n_years, input_=df)
+    data_recent = importrecentdata.import_data_recent()
+    print(
+        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
+    )
+
+    # =============================================================================
+    # Calculs des effectifs par ville et par Iris
+    # =============================================================================
+    step_time = datetime.now()
+    logging.info("workforce calculation")
+    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
+    )
+    step_time = datetime.now()
+    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
+    )
+
+    dict_geo_iris = effectifsparIris.transform(data_recent)
+    dict_geo_city = effectifsparVille.transform(data_recent)
+
+    defmaillegeoiris = DefMailleGeoIRIS(
+        n_min=params.N_MIN,
+        dict_geo_city=dict_geo_city,
+        dict_geo_iris=dict_geo_iris,
+        geo_bien="geo_bien_iris",
+        maille_geo_loc="maille_geo_loc",
+    )
+    data_recent = defmaillegeoiris.transform(data_recent)
+
+    defmaillegeocity = DefMailleGeoCITY(
+        n_min=params.N_MIN,
+        dict_geo_city=dict_geo_city,
+        geo_bien="geo_bien_city",
+        by_year=0,
+    )
+    data_recent = defmaillegeocity.transform(data_recent)
+
+    logging.info("workforce calculation OK")
+
+    # =============================================================================
+    # Calculs des statistiques descriptives par typologie de bien
+    # =============================================================================
+
+    logging.info("statistics calculation")
+    step_time = datetime.now()
+    calcmetanumCity = CalcMetaNum(
+        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
+    )
+    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
+    logging.info(
+        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
+    )
+
+    # =============================================================================
+    # Détection et suppression des anomalies
+    # =============================================================================
+    logging.info("Detection and elimination of anomalies")
+    
+    ids_avant = data_recent["ID"].copy()
+    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
+    result = detectano.transform(data_recent)
+    
+    if isinstance(result, tuple):
+        _, data_recent = result
+    else:
+        data_recent = result
+    
+    if "ID" not in data_recent.columns:
+        data_recent["ID"] = ids_avant.loc[data_recent.index].values
+
+    data_recent.drop(columns=["year_geo_bien"], inplace=True, errors="ignore")
+    logging.info("Detection and elimination of anomalies OK")
+    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
+    
+    
+    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
+                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR"]
+    
+    # Vérifier que toutes les colonnes existent
+    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
+    data_recent = data_recent[colonnes_disponibles]
+    
+    
+    ids_valides = set(data_recent["ID"])
+    
+    # Outliers = IDs entrés dans la détection MAIS rejetés
+    ids_outliers = ids_avant_detection - ids_valides
+    
+    # Récupérer les outliers depuis les données ORIGINALES
+    data_mauvais = data_original[
+        (data_original["ID"].isin(ids_outliers)) &
+        (data_original["ID"].isin(ids_avant_detection))  
+    ].copy()
+    
+    # Ne garder que les colonnes disponibles
+    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
+    data_mauvais = data_mauvais[colonnes_communes]
+    
+
+    return data_recent, data_mauvais
+
+Par année :
+  1994 :     1 ( 0.00%)
+  1995 :     4 ( 0.00%)
+  1996 :     3 ( 0.00%)
+  1997 :     5 ( 0.00%)
+  1998 :    14 ( 0.00%)
+  1999 :   120 ( 0.00%)
+  2000 :   510 ( 0.01%)
+  2001 :  2523 ( 0.02%)
+  2002 :  5391 ( 0.05%)
+  2003 : 11064 ( 0.11%)
+  2004 : 18039 ( 0.18%)
+  2005 : 34320 ( 0.34%)
+  2006 : 50510 ( 0.50%)
+  2007 : 52170 ( 0.52%)
+  2008 : 45657 ( 0.45%)
+  2009 : 54124 ( 0.54%)
+  2010 : 96681 ( 0.96%)
+  2011 : 88544 ( 0.88%)
+  2012 : 70356 ( 0.70%)
+  2013 : 76827 ( 0.76%)
+  2014 : 708995 ( 7.02%)
+  2015 : 816980 ( 8.09%)
+  2016 : 869055 ( 8.61%)
+  2017 : 989851 ( 9.81%)
+  2018 : 983337 ( 9.74%)
+  2019 : 1073878 (10.64%)
+  2020 : 1027223 (10.18%)
+  2021 : 1209375 (11.98%)
+  2022 : 1143894 (11.33%)
+  2023 : 665792 ( 6.60%)
