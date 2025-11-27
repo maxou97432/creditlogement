@@ -1,491 +1,1132 @@
-import sys
-import os
-
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-sys.path.append(parent_dir)
-
-import time
-from datetime import datetime
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-import plotly.express as px
-import plotly.io as pio
-from classe import Connector
-import param_general as params
-pio.renderers.default = "png"
-
-output_dir = os.path.join(os.path.dirname(__file__))
-os.makedirs(output_dir, exist_ok=True)
-
-base_ml = pd.read_parquet("base_complete_filtree.parquet")
-
-
-
-def complete_months(g, col):       #complète les mois manquants dans un sous univers en attribuant des valeurs nulles pour nb_transac et na pour prix_m2_moyen
-    g = g.sort_values("Periode").set_index("Periode")
-    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
-    g = g.reindex(idx)
-    
-    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
-        g[i] = g[i].ffill().bfill()
-    
-    g["nb_transac"] = g["nb_transac"].fillna(0)
-    g["prix_moyen"] = g["prix_moyen"]
-    
-    return g.reset_index().rename(columns={"index": "Periode"})
-
-def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
-    result = []
-    g = g.sort_values("Periode")
-    periodes = g["Periode"].unique()
-    
-    for i, periode in enumerate(periodes):
-        start_idx = max(0, i - window + 1)
-        periodes_fenetre = periodes[start_idx:i+1]
-        df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
-        if periode.month % 3 != 0:
-            continue
-        
-        df_actif = df_fenetre[
-            (df_fenetre[col_prix].notna()) & 
-            (df_fenetre[col_indicatrice] == 1)
-        ].copy()
-        
-        if len(df_actif) == 0:
-            result.append({
-                "Periode": periode,
-                "prix_mm": np.nan,
-                "nb_observations": 0,
-                "nb_typologies": 0
-            })
-            continue
-        
-        total_poids = df_actif["poids_relatif"].sum()
-        
-        if total_poids > 0:
-            poids_norm = df_actif["poids_relatif"] / total_poids
-            prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
-        else:
-            prix_mm = np.nan
-        
-        result.append({
-            "Periode": periode,
-            "prix_mm": prix_mm,
-            "nb_observations": len(df_actif),
-            "nb_typologies": df_actif.groupby(typokeys).ngroups
-        })
-    
-    return pd.DataFrame(result)
-
-start = datetime.now()
-################# CONSTRUCTION DES UNIVERS ELEMENTAIRES #################
-############################# VILLES 
-base_ml = base_ml.rename(columns={"DEPT_Corse_2A_2B": "DEPT","ville_" : "CITY", "code_iris" : "IRIS", "CODE_POSTAL" : "CP"})
-base_ml = base_ml.dropna(subset=["CITY","CP","DEPT"])
-
-base_ml["DATE"] = pd.to_datetime(base_ml["DATE"])
-base_ml["Periode"] = base_ml["DATE"].dt.to_period("M").dt.to_timestamp()
-
-
-codes_insee_nice = [
-    "06159", "06157", "06156", "06153", "06151", "06149", "06147", "06146", "06144",
-    "06129", "06127", "06126", "06123", "06122", "06121", "06120", "06119", "06117",
-    "06114", "06111", "06110", "06109", "06103", "06102", "06088", "06080", "06075",
-    "06074", "06073", "06072", "06066", "06065", "06064", "06060", "06059", "06055",
-    "06054", "06046", "06042", "06039", "06034", "06033", "06032", "06027", "06025",
-    "06021", "06020", "06013", "06011", "06009", "06006"
-]
-
-
-mask_nice = base_ml["IRIS"].str[:5].isin(codes_insee_nice)
-base_ml.loc[mask_nice, "CITY"] == "NICE"
-
-top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE","NICE", "BORDEAUX", "STRASBOURG", "NANTES", "MONTPELLIER",
-         "TOULON", "REIMS", "SAINT ETIENNE","GRENOBLE", "HAVRE"]
-
-base_ville = base_ml[(base_ml["CITY"].isin(top15))]
-
-
-
-
-maille_geo = ["CITY","CP"]
-univers_complet = {}
-resultats_finaux = {}
-
-VILLES_ARRONDISSEMENTS = ["PARIS","LILLE","MARSEILLE","LYON"]
-
-for col in maille_geo:
-    dims = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
-    
-    if base_ville[col].dtype in ["object", "str"]:
-        base_ville[col] = base_ville[col].astype(str).str.strip().str.upper()
-    
-    if col == "CP":
-        df_work = base_ville[base_ville["CITY"].isin(VILLES_ARRONDISSEMENTS)].copy()
-    else :
-        df_work = base_ville.copy()
-
-    # AGRÉGATION MENSUELLE
-    univers_mensuel = (
-        df_work.groupby(dims, dropna=False)
-        .agg(
-            nb_transac=("ID", "size"),
-            prix_median=("Prix_m2", "median"),
-            prix_moyen=("Prix_m2", "mean"),
-        )
-        .reset_index()
-    )
-    
-    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
-    univers_mensuel["PB"] = (
-        univers_mensuel["NB_PIECES_RANGE"]
-        .astype(str).str.strip().str[:3].str.upper()
-    )
-    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
-    
-    mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
-    univers_mensuel = univers_mensuel.loc[~mask].copy()
-    univers_mensuel = univers_mensuel.drop(columns=["PB"])
-    
-    # COMPLÉTION DES MOIS
-    univers_complet_temp = (
-        univers_mensuel
-        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
-        .apply(lambda g: complete_months(g, col))
-    )
-    
-    # POIDS STRUCTURELS SUR 2025-2025
-    poids_global = (
-        univers_mensuel
-        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
-        .sum()
-        .rename(columns={"nb_transac": "poids_total"})
-    )
-    poids_global["poids_relatif"] = (
-        poids_global.groupby(col)["poids_total"].transform(lambda x: x / x.sum())
-    )
-    
-
-    univers_complet_temp = univers_complet_temp.merge(
-        poids_global,
-        on=[col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
-        how="left"
-    )
-    
-    print(f"✓ Poids structurels calculés")
-    
-    # INDICATRICES
-    typokeys = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    univers_complet_temp = univers_complet_temp.sort_values(typokeys + ["Periode"])
-    
-    # CORRECTION : univers_complet_temp au lieu de univers_complet
-    univers_complet_temp["I_3m"] = (
-        univers_complet_temp
-        .groupby(typokeys, group_keys=False)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
-    )
-    univers_complet_temp["I_12m"] = (
-        univers_complet_temp
-        .groupby(typokeys, group_keys=False)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
-    )
-    
-    print("✓ Indicatrices calculées")
-    
-    univers_complet[col] = univers_complet_temp
-    
-    # MOYENNES MOBILES PAR TYPE DE BIEN
-    print("Calcul des moyennes mobiles par maille et type de bien")
-    
-    resultats_mm = []
-    
-    for maille in univers_complet_temp[col].unique():
-        df_maille = univers_complet_temp[univers_complet_temp[col] == maille].copy()
-        
-        # BOUCLE PAR TYPE DE BIEN (APP ou MAI)
-        for type_bien in df_maille['TYPE_BIEN'].unique():
-            df_type = df_maille[df_maille['TYPE_BIEN'] == type_bien].copy()
-            
-            if len(df_type) == 0:
-                continue
-            
-            # MM 3 mois
-            mm_3m = calcule_moyenne_mobile_ponderee(
-                df_type,  # Seulement ce type de bien
-                window=3,
-                col_prix='prix_moyen',
-                col_indicatrice='I_3m',
-                typokeys=typokeys
-            )
-            mm_3m["DIC_NAME"] = "prix_m2_3m"
-            mm_3m = mm_3m.rename(columns={
-                "prix_mm": "prix_mm_value",
-                "nb_observations": "NB_BIENS",
-            })
-            
-            # MM 12 mois
-            mm_12m = calcule_moyenne_mobile_ponderee(
-                df_type,  # Seulement ce type de bien
-                window=12,
-                col_prix='prix_moyen',
-                col_indicatrice='I_12m',
-                typokeys=typokeys
-            )
-            mm_12m["DIC_NAME"] = "prix_m2_12m"
-            mm_12m = mm_12m.rename(columns={
-                "prix_mm": "prix_mm_value",
-                "nb_observations": "NB_BIENS",
-            })
-            
-            # Concat
-            mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
-            mm_type[col] = maille
-            mm_type["TYPE_MAILLE"] = col
-            mm_type["CD_TYPE_BIEN"] = type_bien  # APP ou MAI
-            
-            resultats_mm.append(mm_type)
-    
-    model_agg = pd.concat(resultats_mm, ignore_index=True)
-    model_agg = model_agg.sort_values([col, "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    
-    resultats_finaux[col] = model_agg
-    
-    print(f"✓ Maille {col} traitée")
-
-end = datetime.now()
-print(f"Durée : {end - start}")
-
-
-
-
-#=========================================================
-#FUSION DE TOUTES LES MAILLES DANS UN DF ET CREATION DE LA BASE dbo.PRIX_M2
-#=========================================================
-
-dfs_to_concat = []
-
-for type_maille in maille_geo:
-    df = resultats_finaux[type_maille].copy()
-
-    df = df.rename(columns={type_maille : "VAL_MAILLE_GEO"})
-    dfs_to_concat.append(df)
-
-resultats_finaux = pd.concat(dfs_to_concat, ignore_index = True)
-resultats_finaux= resultats_finaux[resultats_finaux["VAL_MAILLE_GEO"] != "NAN"]
-csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_complet_CITY.csv")
-resultats_finaux.to_csv(csv_chem, index = False)
-
-resultats_finaux = resultats_finaux.sort_values(by=["Periode"])
-resultats_finaux["TAUX_INFL_12M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=12, fill_method=None)
-resultats_finaux["TAUX_INFL_3M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=3,fill_method=None)
-
-res = resultats_finaux.sort_values(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode","DIC_NAME"])
-res = res[res["Periode"] == res["Periode"].max()]
-res = res.rename(columns={"Periode":"DT_MAJ_PM2"})
-colonnes = ["DIC_NAME", "CD_TYPE_BIEN","TYPE_MAILLE","VAL_MAILLE_GEO","DT_MAJ_PM2","NB_BIENS","prix_mm_value","TAUX_INFL_3M","TAUX_INFL_12M"]
-res = res[colonnes]
-
-csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_MAJ_CITY.csv")
-res.to_csv(csv_chem, index = False)
-
-
-res2 = resultats_finaux.copy()
-res2["Periode"] = pd.to_datetime(res2["Periode"], dayfirst=True)
-res2 = res2[res2["Periode"] >= "2017-03-01"]
-
-res2 = res2.groupby("VAL_MAILLE_GEO", as_index=False)["NB_BIENS"].min()
-res2.rename(columns={"NB_BIENS": "seuil_min"}, inplace=True)
-res2 = res2.dropna(subset=["VAL_MAILLE_GEO"])
-csv_chem = os.path.join(output_dir, "stat_volumeterie_CITY.csv")
-res2.to_csv(csv_chem, index = False)
-
-
-############################### DEPARTEMENTS
-
-
-
-maille_geo = ["DEPT"]
-univers_complet = {}
-resultats_finaux = {}
-
-
-for col in maille_geo:
-    dims = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
-    
-
-    df_work = base_ml.copy()
-
-    # AGRÉGATION MENSUELLE
-    univers_mensuel = (
-        df_work.groupby(dims, dropna=False)
-        .agg(
-            nb_transac=("ID", "size"),
-            prix_median=("Prix_m2", "median"),
-            prix_moyen=("Prix_m2", "mean"),
-        )
-        .reset_index()
-    )
-    
-    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
-    univers_mensuel["PB"] = (
-        univers_mensuel["NB_PIECES_RANGE"]
-        .astype(str).str.strip().str[:3].str.upper()
-    )
-    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
-    
-    mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
-    univers_mensuel = univers_mensuel.loc[~mask].copy()
-    univers_mensuel = univers_mensuel.drop(columns=["PB"])
-    
-    # COMPLÉTION DES MOIS
-    univers_complet_temp = (
-        univers_mensuel
-        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
-        .apply(lambda g: complete_months(g, col))
-    )
-    
-    # POIDS STRUCTURELS SUR 2025-2025
-    poids_global = (
-        univers_mensuel
-        .groupby([col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
-        .sum()
-        .rename(columns={"nb_transac": "poids_total"})
-    )
-    poids_global["poids_relatif"] = (
-        poids_global.groupby(col)["poids_total"].transform(lambda x: x / x.sum())
-    )
-    
-
-    univers_complet_temp = univers_complet_temp.merge(
-        poids_global,
-        on=[col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
-        how="left"
-    )
-    
-    print(f"✓ Poids structurels calculés")
-    
-    # INDICATRICES
-    typokeys = [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    univers_complet_temp = univers_complet_temp.sort_values(typokeys + ["Periode"])
-    
-    # CORRECTION : univers_complet_temp au lieu de univers_complet
-    univers_complet_temp["I_3m"] = (
-        univers_complet_temp
-        .groupby(typokeys, group_keys=False)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
-    )
-    univers_complet_temp["I_12m"] = (
-        univers_complet_temp
-        .groupby(typokeys, group_keys=False)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
-    )
-    
-    print("✓ Indicatrices calculées")
-    
-    univers_complet[col] = univers_complet_temp
-    
-    # MOYENNES MOBILES PAR TYPE DE BIEN
-    print("Calcul des moyennes mobiles par maille et type de bien")
-    
-    resultats_mm = []
-    
-    for maille in univers_complet_temp[col].unique():
-        df_maille = univers_complet_temp[univers_complet_temp[col] == maille].copy()
-        
-        # BOUCLE PAR TYPE DE BIEN (APP ou MAI)
-        for type_bien in df_maille['TYPE_BIEN'].unique():
-            df_type = df_maille[df_maille['TYPE_BIEN'] == type_bien].copy()
-            
-            if len(df_type) == 0:
-                continue
-            
-            # MM 3 mois
-            mm_3m = calcule_moyenne_mobile_ponderee(
-                df_type,  # Seulement ce type de bien
-                window=3,
-                col_prix='prix_moyen',
-                col_indicatrice='I_3m',
-                typokeys=typokeys
-            )
-            mm_3m["DIC_NAME"] = "prix_m2_3m"
-            mm_3m = mm_3m.rename(columns={
-                "prix_mm": "prix_mm_value",
-                "nb_observations": "NB_BIENS",
-            })
-            
-            # MM 12 mois
-            mm_12m = calcule_moyenne_mobile_ponderee(
-                df_type,  # Seulement ce type de bien
-                window=12,
-                col_prix='prix_moyen',
-                col_indicatrice='I_12m',
-                typokeys=typokeys
-            )
-            mm_12m["DIC_NAME"] = "prix_m2_12m"
-            mm_12m = mm_12m.rename(columns={
-                "prix_mm": "prix_mm_value",
-                "nb_observations": "NB_BIENS",
-            })
-            
-            # Concat
-            mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
-            mm_type[col] = maille
-            mm_type["TYPE_MAILLE"] = col
-            mm_type["CD_TYPE_BIEN"] = type_bien  # APP ou MAI
-            
-            resultats_mm.append(mm_type)
-    
-    model_agg = pd.concat(resultats_mm, ignore_index=True)
-    model_agg = model_agg.sort_values([col, "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    
-    resultats_finaux[col] = model_agg
-    
-    print(f"✓ Maille {col} traitée")
-
-end = datetime.now()
-print(f"Durée : {end - start}")
-
-
-
-
-#=========================================================
-#FUSION DE TOUTES LES MAILLES DANS UN DF ET CREATION DE LA BASE dbo.PRIX_M2
-#=========================================================
-
-dfs_to_concat = []
-
-for type_maille in maille_geo:
-    df = resultats_finaux[type_maille].copy()
-
-    df = df.rename(columns={type_maille : "VAL_MAILLE_GEO"})
-    dfs_to_concat.append(df)
-
-resultats_finaux = pd.concat(dfs_to_concat, ignore_index = True)
-csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_complet_DEPT.csv")
-resultats_finaux.to_csv(csv_chem, index = False)
-
-resultats_finaux = resultats_finaux.sort_values(by=["Periode"])
-resultats_finaux["TAUX_INFL_12M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=12, fill_method=None)
-resultats_finaux["TAUX_INFL_3M"] = resultats_finaux.groupby(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN"])["prix_mm_value"].pct_change(periods=3,fill_method=None)
-
-res = resultats_finaux.sort_values(["TYPE_MAILLE","VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode","DIC_NAME"])
-res = res[res["Periode"] == res["Periode"].max()]
-res = res.rename(columns={"Periode":"DT_MAJ_PM2"})
-colonnes = ["DIC_NAME", "CD_TYPE_BIEN","TYPE_MAILLE","VAL_MAILLE_GEO","DT_MAJ_PM2","NB_BIENS","prix_mm_value","TAUX_INFL_3M","TAUX_INFL_12M"]
-res = res[colonnes]
-
-csv_chem = os.path.join(output_dir, "prix_m2_univ_elem_MAJ_DEPT.csv")
-res.to_csv(csv_chem, index = False)
-
-
-res2 = resultats_finaux.copy()
-res2["Periode"] = pd.to_datetime(res2["Periode"], dayfirst=True)
-res2 = res2[res2["Periode"] >= "2017-03-01"]
-
-res2 = res2.groupby("VAL_MAILLE_GEO", as_index=False)["NB_BIENS"].min()
-res2.rename(columns={"NB_BIENS": "seuil_min"}, inplace=True)
-
-csv_chem = os.path.join(output_dir, "stat_volumeterie_DEPT.csv")
-res2.to_csv(csv_chem, index = False) 
+\documentclass{article}
+\title{Your Title Here}
+\usepackage{bbm}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage[french]{babel}
+ \usepackage[T1]{fontenc}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{graphicx} 
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{minted}
+\usepackage{longtable}
+\usepackage{changepage}
+\usepackage{listings}
+\usepackage{adjustbox}
+\usepackage{graphicx}
+\usepackage{subcaption}  % dans le préambule
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{graphicx}      % pour insérer des images
+\usepackage{caption}       % pour personnaliser les légendes
+\usepackage{subcaption}    % pour mettre des figures côte à côte
+\usepackage{float}         % pour l'option [H]
+\usepackage{amsmath, amssymb, booktabs, multirow}
+\tcbuselibrary{listingsutf8}
+\usepackage{hyperref}
+\usepackage[utf8]{inputenc} % Gère les caractères UTF-8
+\usepackage[T1]{fontenc}
+\usepackage{csvsimple}
+\usepackage{threeparttable}
+
+
+% Couleurs personnalisées pour le style Python
+\definecolor{keywordcolor}{rgb}{0, 0.5, 0}     % Vert pour les mots-clés (ex: def, class)
+\definecolor{classnamecolor}{rgb}{0, 0, 0.5}   % Bleu pour les noms de classes (ex: UserDAO)
+\definecolor{commentcolor}{rgb}{0.5, 0.3, 0.1} % Marron pour les commentaires
+\definecolor{stringcolor}{rgb}{0.6, 0, 0}      % Rouge pour les chaînes de caractères
+\definecolor{functioncolor}{rgb}{0.1, 0.1, 0.1}% Noir pour les noms de fonctions
+\definecolor{bgcolor}{rgb}{0.95, 0.95, 0.95}   % Gris clair pour le fond
+
+% Définition du style de code Python avec tcolorbox
+\newtcblisting{pythoncode}{
+    listing engine=listings,
+    colback=bgcolor,                % Couleur de fond
+    colframe=black,                 % Couleur de la bordure
+    listing only,
+    listing options={
+        basicstyle=\ttfamily\small,                % Style de base
+        keywordstyle=\color{keywordcolor}\bfseries,% Couleur pour les mots-clés Python (class, def)
+        commentstyle=\color{commentcolor},         % Couleur pour les commentaires
+        stringstyle=\color{stringcolor},           % Couleur pour les chaînes de caractères
+        identifierstyle=\color{functioncolor},     % Couleur pour les noms de fonctions/variables
+        emph={UserDAO, Singleton},                 % Mots spécifiques à colorer
+        emphstyle=\color{classnamecolor}\bfseries, % Couleur pour les classes et noms spécifiques
+        numbers=left,                              % Numéros de ligne à gauche
+        numberstyle=\tiny\color{gray},
+        keywordstyle=\color{keywordcolor},
+        language=Python,
+        breaklines=true,
+        tabsize=4,
+        showspaces=false,                             
+        showstringspaces=false,
+        morekeywords={with,False,True,as},
+           inputencoding=utf8,                 
+    extendedchars=true,                 
+    literate={é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1
+             {É}{{\'E}}1 {À}{{\`A}}1 {à}{{\`a}}1
+             {ç}{{\c{c}}}1 {Ç}{{\c{C}}}1 {â}{{\^a}}1
+             {ä}{{\"a}}1 {û}{{\^u}}1 {ù}{{\`u}}1
+             {î}{{\^i}}1 {ï}{{\"i}}1 {ô}{{\^o}}1
+             {ö}{{\"o}}1 {û}{{\^u}}1
+    },
+    left=3pt, right=3pt, top=2pt, bottom=3pt, % Marges internes
+    enhanced,
+    boxrule=0.5pt,                         % Épaisseur de la bordure
+    sharp corners                          % Coins non arrondis
+}
+
+\newcommand{\champ}[1]{\caption*{\hfill Champ: {#1}} }
+\newcommand{\source}[1]{\caption*{\hfill Source: {#1}} }
+\newcommand{\note}[1]{\caption*{\hfill \textit{Note: }{#1}} }
+\newcommand{\notelec}[1]{\caption*{\hfill Note de lecture: {#1}} }
+
+\documentclass[a4paper,12pt]{article}
+\usepackage[margin=0.5cm, top=0.5cm, bottom=0.5cm]{geometry}
+\begin{document}
+\begin{titlepage}
+\begin{center}
+\includegraphics[width=0.7\textwidth]{télécharger.png}\\[2.0 cm] 
+
+\rule{\linewidth}{0.4mm}
+\\[0.4cm]{\Large\bfseries \Large{Note d'étude - Projet d'intégration d'indicateurs de prix immobilier dans l'observatoire CL-CSA}}\\[0.2cm]
+\rule{\linewidth}{0.4mm}\\[3cm]
+
+\begin{flushleft} \large
+
+
+
+
+\begin{flushright} \large
+
+\end{flushright}
+
+\end{flushleft}
+\vfill
+{\large {30 Octobre 2025}}
+\end{center}
+\end{titlepage}
+\newpage
+\newgeometry{left=3cm, right=3cm, top=1cm, bottom=1cm}
+
+\thispagestyle{empty}
+\clearpage 
+\restoregeometry
+
+\thispagestyle{empty}
+\newpage
+\setcounter{page}{1}
+\tableofcontents
+\newpage
+\section*{Introduction}
+
+Cette note vise à présenter la base de données utilisée par CL-Estim, ainsi qu’une nouvelle méthodologie fondée sur des indicateurs par "univers élémentaires". Elle a également pour objectif de comparer cette approche aux données issues de LPI/IAD.
+
+
+\newpage
+
+\section{Présentation de la base de données \texttt{df\_transac\_clean}}
+L'entièreté de ce travail a été réalisé sur la base de données \texttt{df\_transac\_clean}, qui est principalement issue et utilisée dans le cadre de CL-ESTIM. Elle résulte d’un travail de fusion entre deux sources principales :
+\begin{itemize}
+    \item La base \textbf{DVF} (Demande de Valeurs Foncières), qui recense l’ensemble des transactions immobilières réalisées en France.
+    \item La base \textbf{CL OPERATION}, qui regroupe les opérations de financement réalisées par Crédit Logement.
+\end{itemize}
+
+L’objectif de cette fusion est triple :
+\begin{itemize}
+    \item Vérifier si les opérations de Crédit Logement sont présentes dans DVF.
+    \item Contrôler la cohérence des variables communes entre les deux bases.
+    \item Compléter les données manquantes dans CL OPERATION à l’aide des informations DVF.
+\end{itemize}
+
+Le rapprochement entre les deux bases repose sur le calcul d’un \textbf{score de similarité}. Ce score permet d’identifier les correspondances les plus probables entre les transactions DVF et les opérations CL.
+
+Grâce à cette méthode :
+\begin{itemize}
+    \item Environ \textbf{60\% des valeurs} sont renseignées via le matching.
+    \item En moyenne, \textbf{23\% des valeurs} sont récupérées grâce à ce processus.
+    \item Pour certaines variables clés comme la \textbf{surface habitable} et le \textbf{nombre de pièces}, le taux de renseignement atteint \textbf{80\%}.
+\end{itemize}
+
+
+On remarque cependant que certaines variables, comme la \textbf{surface du terrain}, sont peu renseignées, notamment pour les appartements, qui ne disposent généralement pas de terrain propre.\\
+
+
+La base de données obtenue couvre une période allant de 1994 à 2025 et regroupe plus de 11 millions de transactions immobilières, précisément \textbf{11\,462\,787} enregistrements. La répartition annuelle des transactions montre une évolution variable au fil des années. Conformément à la méthode que nous décrirons plus tard dans cette étude, nous nous concentrerons sur la période 2015-2025, où l'on enregistre\textbf{ 9\,557\,711} transactions avec un pic en \textbf{2021} avec plus de \textbf{1\,209\,375} enregistrements, avant de diminuer progressivement jusqu’ en \textbf{2025}. \\
+Elle contient \textbf{67 variables} décrivant les caractéristiques des biens, les informations socio-économiques, ainsi que des éléments géographiques et temporels.
+
+Parmi les variables principales, on retrouve :
+\begin{itemize}
+    \item \texttt{ville\_} : nom de la commune concernée,
+    \item \texttt{DATE} : date de la transaction,
+    \item \texttt{Prix\_m2}: le prix au m2
+    \item \texttt{TYPE\_BIEN}, \texttt{NB\_SURF\_HAB}, \texttt{NB\_PIECES} : caractéristiques physiques du bien,
+    \item \texttt{VALEUR\_FONCIERE}, \texttt{MT\_REVENU\_ANN}, \texttt{AGE\_EMP1}, \texttt{AGE\_EMP2} : informations socio-économiques des parties.
+\end{itemize}
+
+La base présente un taux de données manquantes relativement faible, avec environ \textbf{374\,882 valeurs manquantes}, soit \textbf{3{,}92\,\%} du total. \\
+
+Dans la continuité de l’analyse descriptive, l'ensemble de la base est ensuite soumise à un processus de \textbf{détection et de traitement des anomalies}. Cette étape vise à identifier les incohérences, les valeurs aberrantes ou les erreurs de saisie susceptibles d’altérer la qualité des indicateurs produits. On se place dans le cas où l’effectif est supérieur à 7.  
+Pour chaque groupe défini par \textbf{année}, \textbf{ville} et \textbf{type de bien}, on calcule la médiane des prix au mètre carré.  
+
+Nous supprimons ensuite les biens dont le prix au mètre carré vérifie l’une des conditions suivantes :
+\begin{itemize}
+    \item inférieur à $\frac{\text{médiane}}{4}$,
+    \item supérieur à $4 \times \text{médiane}$,
+    \item inférieur à 200,
+    \item supérieur à 20\,000.
+\end{itemize}
+Cependant, on opère une détection sur les valeurs foncières par rapport au montant du prêt, sur les surfaces habitables, mais ne sont pas détaillées ici.
+
+La base obtenue à l’issue du traitement regroupe les transactions immobilières les plus récentes \footnote{À ce jour les transactions les plus récentes datent du 10 octobre 2025}. Elle contient des informations essentielles sur les biens vendus, leur localisation, leur typologie, ainsi que certaines caractéristiques physiques et économiques:
+
+\begin{itemize}
+    \item \texttt{ID} : identifiant unique de la transaction.
+    \item \texttt{ville\_} : nom de la commune.
+    \item \texttt{LIBELLE\_DEPT} : nom du département.
+    \item \texttt{DEPT\_Corse\_2A\_2B} : code départemental.
+    \item \texttt{TYPE\_BIEN} : type de bien (ex. APT pour appartement, MAI pour maison).
+    \item \texttt{DATE} et \texttt{YEAR} : date de la transaction et année correspondante.
+    \item \texttt{Prix\_m2} : prix moyen au mètre carré.
+    \item \texttt{SOURCE} : origine de la donnée (Crédit Logement ou DVF).
+    \item \texttt{CD\_NATUR\_OP} : nature de l’opération.
+    \item \texttt{NB\_SURF\_HAB} : surface habitable en m².
+    \item \texttt{NB\_PIECES} : nombre de pièces.
+    \item \texttt{CODE\_POSTAL} : code postal du bien.
+    \item \texttt{NATURE\_MUTATION} : type de mutation .
+\end{itemize}
+
+\subsection{Statistiques descriptives et détection des outliers}
+
+\subsubsection{Statistiques générales}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Indicateur} & \textbf{Valeur} & \textbf{Pourcentage} \\
+\midrule
+Nombre total de biens & 11\,462\,787 & -- \\
+Biens valides & 9\,557\,711 & 83.38\,\% \\
+Outliers détectés & 1\,905\,076 & 16.62\,\% \\
+\bottomrule
+\end{tabular}
+\caption{Synthèse générale des observations et outliers}
+\end{table}
+
+\vspace{1em}
+
+\noindent\textbf{Prix au mètre carré (outliers uniquement) :}
+\begin{itemize}
+  \item Minimum : 2 € /m²
+  \item Maximum : 25 781 250 € /m²
+  \item Médiane : 2 222 € /m²
+  \item Moyenne : 2 807 € /m²
+\end{itemize}
+
+
+\subsubsection{Classification des outliers}
+
+\begin{table}[H]
+\centering
+\begin{threeparttable}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Type d’anomalie} & \textbf{Nombre} & \textbf{Part (\%)} \\
+\midrule
+Groupe insuffisant\tnote{1} & 1\,336\,638 & 70.16 \\
+Autre\tnote{2} & 556\,032 & 29.19 \\
+Prix $<$ médiane/4 & 5\,498 & 0.29 \\
+Prix $<$ 200 € & 4\,914 & 0.26 \\
+Prix $>$ 20 000 € & 1\,024 & 0.05 \\
+Prix $>$ 4 × médiane & 970 & 0.05 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}
+\item \small [1] Effectif inférieur à 7 transactions dans la zone géographique
+\item \small [2] Opérations triées sur les valeurs foncières par rapport au montant du prêt et sur les surfaces habitables
+\end{tablenotes}
+\end{threeparttable}
+\caption{Répartition des types d’anomalies détectées}
+\end{table}
+
+
+\subsubsection{Répartition géographique}
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Département} & \textbf{Outliers} & \textbf{Part (\%)} \\
+\midrule
+Paris & 48\,555 & 2.55 \\
+Hauts-de-Seine & 41\,211 & 2.16 \\
+Nord & 39\,162 & 2.06 \\
+Yvelines & 32\,519 & 1.71 \\
+Seine-Saint-Denis & 28\,977 & 1.52 \\
+Val-de-Marne & 28\,358 & 1.49 \\
+Bouches-du-Rhône & 27\,723 & 1.46 \\
+Seine-et-Marne & 27\,310 & 1.43 \\
+Essonne & 26\,387 & 1.39 \\
+Val-d’Oise & 26\,316 & 1.38 \\
+\bottomrule
+\end{tabular}
+\caption{Top 10 départements les plus touchés par les outliers}
+\end{table}
+
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Ville} & \textbf{Outliers} & \textbf{Part (\%)} \\
+\midrule
+Paris & 85\,251 & 4.47 \\
+Marseille & 29\,104 & 1.53 \\
+Toulouse & 23\,118 & 1.21 \\
+Lyon & 20\,496 & 1.08 \\
+Nice & 15\,844 & 0.83 \\
+Nantes & 14\,751 & 0.77 \\
+Bordeaux & 13\,720 & 0.72 \\
+Montpellier & 13\,211 & 0.69 \\
+Lille & 11\,236 & 0.59 \\
+Rennes & 8\,306 & 0.44 \\
+\bottomrule
+\end{tabular}
+\caption{Top 10 villes avec le plus d’outliers}
+\end{table}
+
+
+\subsubsection{Répartition par type de bien}
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Type de bien} & \textbf{Nombre} & \textbf{Part (\%)} \\
+\midrule
+Maisons (MAI) & 991\,842 & 52.06 \\
+Appartements (APT) & 913\,234 & 47.94 \\
+\bottomrule
+\end{tabular}
+\caption{Répartition des outliers par type de bien}
+\end{table}
+\newpage
+
+
+
+\subsubsection{Analyse par source de données}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Source} & \textbf{Nombre} & \textbf{Part (\%)} \\
+\midrule
+DVF & 1\,092\,348 & 57.34 \\
+CL & 812\,728 & 42.66 \\
+\bottomrule
+\end{tabular}
+\caption{Répartition des outliers selon la source de données}
+\end{table}
+
+
+\subsubsection{Exemples d’outliers extrêmes}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Ville} & \textbf{Type} & \textbf{Prix/m² (€)} & \textbf{Surface (m²)} & \textbf{Pièces} & \textbf{Anomalie} \\
+\midrule
+Matoury & MAI & 2.23 & 17\,285 & 868 & Prix < 200 € \\
+Auberchicourt & MAI & 3.73 & 2\,733 & 133 & Prix < 200 € \\
+Lamentin & MAI & 5.36 & 2\,237 & 110 & Prix < 200 € \\
+Reims & MAI & 5.58 & 2\,330 & 106 & Prix < 200 € \\
+Dijon & APT & 5.95 & 1\,681 & 83 & Prix < 200 € \\
+\bottomrule
+\end{tabular}
+\caption{Exemples d’outliers présentant les plus faibles prix au mètre carré}
+\end{table}
+
+
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Ville} & \textbf{Type} & \textbf{Prix/m² (€)} & \textbf{Surface (m²)} & \textbf{Pièces} & \textbf{Anomalie} \\
+\midrule
+Chambly & MAI & 25\,781\,250 & 128 & 5 & Prix > 20\,000 € \\
+Chambly & APT & 19\,545\,455 & 88 & 2 & Prix > 20\,000 € \\
+Saint-Père-sur-Loire & APT & 11\,111\,111 & 54 & 2 & Prix > 20\,000 € \\
+Cannes & APT & 8\,914\,652 & 72 & 2 & Prix > 20\,000 € \\
+Fréjus & APT & 4\,100\,000 & 22 & 1 & Prix > 20\,000 € \\
+\bottomrule
+\end{tabular}
+\caption{Exemples d’outliers présentant les plus hauts prix au mètre carré}
+\end{table}
+
+\subsection{Études statistiques de la base de données filtrée}
+
+\begin{figure}[H]
+    \centering
+    % --- Image de gauche ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{transactions_annuelles.png}
+        \caption{Évolution annuelle du nombre de transactions.}
+        \label{fig:transactions_annuelles}
+    \end{subfigure}
+    \hfill
+    % --- Image de droite ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{source.png}
+        \caption{Taux de couverture annuelle des données par source.}
+        \label{fig:source}
+    \end{subfigure}
+
+    \label{fig:comparaison_transactions_sources}
+\end{figure}
+
+
+
+
+L’étude du nombre annuel de transactions (toutes sources confondues) montre une forte croissance du marché immobilier français entre 2015 et 2021, culminant à près de 1,2~million de transactions.
+Cette dynamique s’inverse ensuite nettement, avec une baisse continue depuis 2022.
+
+
+La base DVF concentre environ 75 à 80 \% du volume total observé, contre 20–25 \% pour Crédit Logement. Cette distinction est toutefois relative, puisque les transactions Crédit Logement sont intégrées dans la base DVF, expliquant ainsi la représentation plus importante de cette dernière.
+
+\begin{figure}[H]
+    \centering
+    % --- Image de gauche ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{newplot.png}
+        \caption{Évolution annuelle du pourcentage de valeurs manquantes (\textit{Prix\_m2}).}
+        \label{fig:valeurs_manquantes_global}
+    \end{subfigure}
+    \hfill
+    % --- Image de droite ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{newplot2.png}
+        \caption{Évolution annuelle du pourcentage de valeurs manquantes (\textit{Prix\_m2}) par source.}
+        \label{fig:valeurs_manquantes_source}
+    \end{subfigure}
+
+    \label{fig:valeurs_manquantes_comparaison}
+\end{figure}
+
+
+L’analyse du pourcentage de valeurs manquantes (\texttt{Prix\_m2}) met en évidence une stabilité notable autour de 4\,\% entre 2015 et 2021, suivie d’une amélioration progressive entre 2022 et 2024 (atteignant 2,4\,\%). 
+Cette baisse traduit une montée en qualité des données disponibles. 
+
+En revanche, l’année 2025 présente une rupture brutale avec un taux de valeurs manquantes de 5,7\,\%. 
+Ce pic, que l’on retrouve sur d’autres variables (notamment \texttt{NB\_SURF\_HAB}), s’expliquant  par un \textbf{retard d'intégration} de la base de données DVF du deuxième semestre 2025 à cette date.\\ 
+Les données issues de \textbf{DVF} présentent un taux de complétude globalement supérieur, avec 25 à 40\,\% de valeurs manquantes selon les années. À l’inverse, les données de \textbf{Crédt logement} sont beaucoup plus lacunaires, avec 60 à 70\,\% de valeurs manquantes. 
+
+
+
+\begin{figure}[H]
+    \centering
+    % --- Image de gauche ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{newplot3.png}
+        \caption{Évolution annuelle du pourcentage de valeurs manquantes (\textit{NB\_SURF\_HAB}).}
+        \label{fig:valeurs_manquantes_nb_surf_hab_global}
+    \end{subfigure}
+    \hfill
+    % --- Image de droite ---
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{newplot4.png}
+        \caption{Évolution annuelle du pourcentage de valeurs manquantes (\textit{NB\_SURF\_HAB}) par source.}
+        \label{fig:valeurs_manquantes_nb_surf_hab_source}
+    \end{subfigure}
+    % --- Légende commune ---
+    \label{fig:valeurs_manquantes_nb_surf_hab_comparaison}
+\end{figure}
+
+
+L’analyse du taux de valeurs manquantes sur la variable \texttt{NB\_SURF\_HAB} confirme les tendances précédentes.
+La cohérence entre ces deux variables montre que les variations ne viennent pas d’un cas isolé, mais d’une tendance globale qui touche tout le jeu de données.
+
+
+
+
+
+
+\subsection{Analyse des évolutions du prix au mètre carré}
+
+
+Afin de modéliser l'évolution des prix immobiliers sur la période 2015--2025, les transactions ont été regroupées par \textbf{ville} et par \textbf{mois}.
+Pour chaque couple ((\text{Ville}, \text{Période})), deux indicateurs centraux ont été calculés :
+\begin{itemize}
+    \item le \textbf{prix moyen au mètre carré} ;
+    \item le \textbf{prix médian au mètre carré}.
+\end{itemize}
+
+Cette modélisation simpliste permet d'obtenir une série temporelle mensuelle, indépendante des caractéristiques structurelles (type de bien, nombre de pièces, etc.).
+Les graphiques produits pour Paris, Marseille, Bordeaux et Rennes modélisent l'évolution du prix au mètre carré selon ces deux indicateurs.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{newplot-2.png}
+    \caption{Bordeaux}
+    \label{fig:placeholder}
+\end{figure}
+
+La ville a connu une forte expansion entre 2015 et 2020, suivie d'une stabilisation autour de 4~800--5~000~€.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{newplot-3.png}
+    \caption{Marseille}
+    \label{fig:placeholder}
+\end{figure}
+
+On observe une croissance régulière et continue du prix au mètre carré sur la période, passant d'environ 2~200~€ à plus de 3~600~€.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{newplot-4.png}
+    \caption{Paris}
+    \label{fig:placeholder}
+\end{figure}
+
+La capitale présente une hausse soutenue jusqu'en 2020, atteignant près de 10~500~€/m\textsuperscript{2}, suivie d'une phase de stabilisation, voire d'un léger recul après 2021.
+Les valeurs moyennes et médianes évoluent de façon parallèle, traduisant une structure de marché homogène et une modération récente des prix.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{newplot-5.png}
+    \caption{Rennes}
+    \label{fig:placeholder}
+\end{figure}
+Les prix progressent de manière constante et linéaire, de 2~800~€ à près de 4~800~€/m.
+
+
+
+
+
+
+\newpage
+
+
+
+
+
+
+\section{Méthode des Univers Élémentaire}
+
+L'indice des prix utilisé dans LPI pour évaluer le niveau de marché et ses évolution est l'indice synthétique. \\
+L'évolution des prix immobiliers (€/m²) sur une zone géographique donnée est lié à 3 facteurs différents:
+\begin{itemize}
+    \item L'évolution de la strucure de marché (par exemple, hausse de la part des studios d'une période à l'autre);
+    \item L'évolution de la qualité des biens, à structure constante;
+    \item L'évolution du niveau de marché, à structure et qualité constantes
+\end{itemize}
+
+L'évolution d'indices synthétiques permet de neutraliser l'effet strucure de marché.\\
+
+La méthodologie, similaire à celle de l'observatoire CL/CSA, consiste à calculer des indicateurs par "univers élémentaires": les indices élémentaires.\\
+Un univers élémentaire est le croisement :
+\begin{itemize}
+    \item D'une zone géographique (commune/département/région)
+    \item D'une ancienneté de bien (neuf/ancien)
+    \item D'un type de logement (appartement/maison)
+    \item D'un nombre de pièces (appartement: 1, 2, 3, 4 ,5, 6 pièces et plus ; maison : 3 pièces et moins, 4, 5, 6, 7, 8 pièces et plus)
+\end{itemize}
+
+Sur chaque zone géographique suivie par l'observatoire des prix, la strucure du marché est déterminée par la répartition des transactions sur le long terme (par exemple 10 ans) par ancienneté du bien, type de logement, nombre de pièces. \\
+ Cette structure du marché fournit des pondérations qui sont utilisées pour le calcul des indices synthétiques. \\
+ En effet, l'indice synthétqiue est la moyenne des indices élémentaires pondérée par les pondérations issues de la structure du marché.\\
+ Le calcul doit tenir compte des univers élémentaires "vides", c'est-à-dire sans observations sur une période donnée. Une repondération excluant ces univers vides doit être calculée à partir de la pondération initiale (mise à l'échelle pour que la somme des pondérations des univers non vides fasse 100 \%).
+
+ \subsection*{Méthodologie adaptée aux données de Crédit Logement}
+ Dans l'optique de l'intégration d'éléments sur les prix de l'immobilier à l'observatoire Crédit Logement/CSA, une méthodologie similaire à celle exposée précédemment, avec le calcul d'indices synthétiques, sera reprise.\\
+
+ Compte tenu de la représentativité et du taux d'intervention de Crédit Logement, les zones géographiques éligibles sont les \textbf{grandes villes} et les \textbf{régions} (les 22 régions avant le regroupement du milieu des années 2010), mais pas les départements pour lesquels le nombre de transactions dans chaque univers élémentaires risque d'être insufissant.\\
+
+ La strucure de marché est fournie par la répartition des opérations de Crédit Logement (même périmètre que celui de l'observation) par univers élémentaire entre 2015 et 2025 inclus.\\
+ Il y a donc un système de pondération pour chaque ville et un système de pondération pour chaque région.\\
+ Cette structure sera recalculée tous les mois afin de profiter de l'enrichissement des dernières transactions.\\
+
+ Les indicateurs à calculer et à restituer sont:
+ \begin{itemize}
+     \item Le prix au m\textsuperscript{2}
+     \item Les effectifs
+     \item Le prix du lot (le coût) moyen
+     \item la surface moyenne
+ \end{itemize}
+ Ces calculs seront effectués d'une part en \textbf{niveau annuel glissant} (utilisation des opérations de la dernière année glissante), et d'autre part, en \textbf{niveau trimeriel glissant} (utilisation des opérations du dernier trimestre glissant); et par univers élémentaire, puis par ancienneté de bien (neuf/ancien) croisé avec le type de logement (appartement/maison).
+On rappelle qu'un univers élémentaire est le croisement:
+\begin{itemize}
+    \item d'une zone géographique (ville/région)
+    \item d'une ancienneté de bien (neuf/ancien)
+    \item d'un type de logement (appartement/maison)
+    \item d'un nombre de pièces
+\end{itemize}
+
+\subsection{Analyse des prix immobiliers par région}
+
+Les données ont été agrégées à l’échelle régionale sur l’ensemble de la période d’étude via la variable \texttt{DEPT\_Corse\_2A\_2B} (2015--2025).
+Pour chaque région, trois indicateurs principaux ont été calculés :
+\begin{itemize}
+\item le \textbf{prix médian au mètre carré}, représentant la valeur centrale du marché, moins sensible aux valeurs extrêmes ;
+\item le \textbf{prix moyen au mètre carré}, reflétant la tendance globale incluant l’ensemble des transactions ;
+\item le \textbf{nombre total de transactions} sur dix ans
+\end{itemize}
+
+Les graphiques comparent la hiérarchie régionale selon ces trois dimensions.
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{evolution_prix_median_region.png}
+    \caption{Prix médian par région (€/m\textsuperscript{2})}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{evolution_prix_moyen_region.png}
+    \caption{Prix moyen par région (€/m\textsuperscript{2})}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{evolution_transac_region.png}
+    \caption{Nombre total de transactions par région (2015--2025)}
+    \label{fig:placeholder}
+\end{figure}
+
+
+Le graphique des prix médians montre une hiérarchie nette dominée par l’\textbf{Île-de-France} (environ 4~450~€/m\textsuperscript{2}), suivie de la \textbf{Provence-Alpes-Côte d’Azur} et de la \textbf{Corse}.
+Les régions de l’Ouest (Pays de la Loire, Bretagne) se situent autour de 2~000--2~200~€/m\textsuperscript{2}, tandis que le \textbf{Limousin} clôture le classement avec un prix médian inférieur à 1~300~€/m\textsuperscript{2}.
+Cette structure illustre le fort contraste entre régions métropolitaines attractives et territoires ruraux à faible tension immobilière.\\
+
+L'étude des prix moyens confirme la même hiérarchie, avec une accentuation des écarts : l’Île-de-France dépasse 5~500~€/m\textsuperscript{2}, traduisant la présence de valeurs extrêmes dans certains départements franciliens (Paris, Hauts-de-Seine).\\
+
+Sur la période 2015--2025, l’\textbf{Île-de-France} concentre plus de 1,6~million de transactions, suivie des régions \textbf{Rhône-Alpes} et \textbf{PACA}.
+Les régions à marché tendu cumulent donc à la fois un niveau de prix élevé et un volume d’échanges important.
+À l’inverse, les territoires comme le \textbf{Limousin}, la \textbf{Franche-Comté} ou la \textbf{Auvergne} se distinguent par une faible activité, traduisant une demande plus faible.
+
+\subsection{Statistique univariée de chaque grand univers}
+\subsubsection{Analyse de la répartition annuelle des types de biens}
+
+Les transactions ont été regroupées par \textbf{année} et \textbf{type de bien}, afin d’estimer la répartition entre \textbf{appartements (APT)} et \textbf{maisons (MAI)} sur la période 2015--2025.
+Pour chaque année, la part relative de chaque catégorie a été calculée en pourcentage du total des transactions, ce qui permet d’observer l’évolution du marché résidentiel.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{repartition_type_bien.png}
+    \caption{Évolution de la répartition du type de bien}
+    \label{fig:repartition_type_bien}
+\end{figure}
+
+On remarque une stabilité globale de la structure du marché entre 2015 et 2025, avec toutefois une légère \textbf{progression de la part des maisons}.
+La proportion d’appartements passe d’environ 47~\% en 2015 à 44--46~\% en fin de période, tandis que celle des maisons progresse de 52--53~\% à près de 55~\%.
+
+\subsubsection{Analyse de la répartition annuelle des transactions selon l’ancienneté du bien}
+
+Pour chaque année, la part de chaque catégorie a été calculée en pourcentage du total des transactions afin de suivre l’évolution du poids relatif du neuf dans le marché résidentiel français.\\
+
+L'information quant à l'ancienneté du bien n'étant pas donnée directement dans la base \texttt{df\_transac\_clean}, il a fallu croiser cette table avec la table \texttt{BAT\_ENRICHIE} qui fournit l'année de construction du bien. Par la suite, on crée la variable \texttt{BIEN\_NEUF} qui associe la valeur \texttt{NEUF} si \texttt{NATURE\_MUTATION} est "Vente en l'état futur d'achèvement", ou si le \texttt{CD\_NATUR\_OP} est Acquisition neuf (AQN) ou si le bien a été construit il y a moins de deux ans.
+
+Les transactions ont été regroupées par \textbf{année} et par \textbf{ancienneté du bien}, distinguant les logements \textbf{neufs} et \textbf{anciens}.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\linewidth]{anciennete.png}
+\caption{Évolution annuelle du pourcentage de transactions selon l’ancienneté du bien (2015--2025).}
+\label{fig:anciennete_bien}
+\end{figure}
+
+Le graphique montre une tendance très nette : la part des biens \textbf{anciens} représente la majorité écrasante du marché, passant de 86~\% en 2015 à plus de 97~\% en 2025.
+Inversement, la part du \textbf{neuf} diminue régulièrement, passant d’environ 14~\% à moins de 3~\% sur la période.
+
+
+Le marché de l’ancien s’impose ainsi comme le \textbf{pilier quasi exclusif des transactions résidentielles}.
+
+
+
+\subsubsection{Analyse de la distribution du nombre de pièces selon le type de bien}
+
+Les transactions ont été regroupées selon la \textbf{catégorie de bien} (\textit{appartement} ou \textit{maison}) et en \textbf{tranches de pièces}, puis ramenées en pourcentage du total des ventes.  
+Deux représentations ont été produites :
+\begin{itemize}
+    \item la \textbf{répartition interne par type de bien}, montrant la structure d’appartements et de maisons ;
+    \item la \textbf{répartition globale toutes catégories confondues}, indiquant la contribution relative de chaque segment au marché total.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{repartition_nb_pieces.png}
+\caption{Répartition du nombre de pièces par type de bien entre 2015 et 2025}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{repartitions_pieces_tout_confondu.png}
+\caption{Répartition du nombre de pièces tous biens confondus entre 2015 et 2025}
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+Les \textbf{appartements} se concentrent très majoritairement dans les classes de \textbf{1 à 4 pièces}, représentant plus de 88~\% des transactions.  
+Les grands appartements (5 pièces et plus) demeurent minoritaires (moins de 9~\%), ce qui reflète la forte demande pour des logements compacts, notamment en zones urbaines denses.
+
+Les \textbf{maisons}, à l’inverse, se caractérisent par une structure plus spacieuse : près de 40~\% des ventes concernent des biens de \textbf{5 pièces et plus}, tandis que 57~\% sont des maisons de 4 pièces ou moins.  
+Cette répartition illustre la complémentarité fonctionnelle entre les deux marchés : appartements pour la densité urbaine, maisons pour l’espace résidentiel périphérique.
+
+Le second graphique confirme la \textbf{prépondérance des logements familiaux} (3 à 4 pièces et maisons de 4 pièces ou moins), qui représentent ensemble plus de la moitié des transactions totales.
+
+\subsection{Exemple d'univers élémentaires sur la période 2015-2025}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.18.57.png}
+    \caption{Univers élémentaires de Paris}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.20.48.png}
+    \caption{Univers élémentaires de Marseille}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.18.01.png}
+    \caption{Univers élémentaires de Bordeaux}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.19.21.png}
+    \caption{Univers élémentaires de Rennes}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.18.27.png}
+    \caption{Univers élémentaires en Ile-de-France et Bretagne}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{Capture d’écran 2025-11-04 à 17.28.31.png}
+    \caption{Comparaison des volumes univers élémentaires par ville}
+    \label{fig:placeholder}
+\end{figure}
+
+\newpage
+\section{Comparaison des méthodes}
+
+Cette partie a pour but de tester la validité de la méthode des univers élémentaires en les comparant à la méthode de base de Crédit Logement, et celle fournit par le baromètre LPI/IAD. À noter toutefois que cette étude comparative a été restreinte au périmètre des \textbf{appartements} situés dans les \textbf{15 plus grandes villes françaises}, ces dernières constituant l’unique ensemble de données exploitables publiées par LPI/IAD.
+
+\subsection{Première méthode de Crédit Logement}
+La première méthode de construction des prix par ville de Crédit Logement repose sur une approche simple : on regroupe l’ensemble des transactions réalisées dans une même zone géographique, tous types de biens confondus, puis applique une moyenne glissante sur 12 mois afin de lisser les variations temporelles.
+
+\subsection{Baromètre LPI/IAD}
+
+
+Les prix moyens sont calculés pour des \textbf{univers élémentaires} définis à partir de 274 zones géographiques :  
+178 villes de plus de 40\,000 habitants et 96 départements métropolitains. Il est à noter que le baromètre LPI/IAD distingue l’ancienneté des biens, mais que, dans la publication mensuelle des prix par ville, seuls les biens \textbf{anciens} sont pris en compte.
+Chaque zone est désagrégée en \textbf{12 segments de marché élémentaires} :  
+6 pour les maisons (de «~3 pièces et moins~» à «~8 pièces et plus~») et 6 pour les appartements (du «~studio et 1 pièce~» au «~6 pièces et plus~»).\\
+
+Des \textbf{indices élémentaires de prix} (base 100 en décembre 2012) sont ensuite construits pour chacun de ces segments de marché dans chaque zone.  
+Les \textbf{indices synthétiques de zone} sont obtenus par agrégation pondérée des indices élémentaires, les pondérations correspondant aux structures de marché observées sur la période 2009--2024, à partir de 7{,}6 millions de références (dont 20\,\% de logements neufs).  
+Ces indices sont donc \textbf{corrigés des effets de structure}.
+
+Les indices régionaux et nationaux résultent d’une pondération des indices départementaux.  
+Les \textbf{prix moyens affichés} sont calculés en \textbf{moyenne glissante trimestrielle} pour les niveaux national, régional, départemental et pour les villes de plus de 100\,000 habitants.  
+Pour les zones plus petites (arrondissements ou villes de province), les prix sont exprimés en \textbf{moyenne glissante annuelle}.  
+Lors des comparaisons entre villes de plus de 40\,000 habitants, tous les prix sont ramenés à une base annuelle glissante afin de garantir la comparabilité entre zones de taille différente.
+
+Les indicateurs diffusés incluent des variations en glissement trimestriel et annuelles. On prendra cependant des prix calculés en moyennes glissantes annuelles par soucis de simplicité de la constitution de la base de données, et sur les 15 plus grandes villes de France. On notera au passage que les éventuelles données manquantes seront remplacées par interpolation linéaire.
+
+\subsection{Méthode de calcul des univers élémentaires glissants}
+
+L'objectif est d'estimer, pour chaque ville $v$ et pour chaque mois période glissante (3 et 12 mois), 
+un prix moyen pondéré tenant compte de la structure des sous-marchés observés entre 2015 et 2025.
+Cette méthode garantit que l'évolution temporelle du prix ne soit pas biaisée par des variations de structure 
+(par exemple, une surreprésentation d'un type de bien pour une certaine période). On remarquera les fortes similitudes de cette méthode avec celle du baromètre LPI/IAD.
+
+\paragraph{Étape 1 : définition des poids structurels}
+Pour chaque ville $v$, et pour chaque sous-marché $s$ défini par la combinaison 
+\textit{(neuf/ancien, type de bien, nombre de pièces)}, 
+on calcule le volume total de transactions sur l'ensemble de la période 2015--2025 :
+\[
+T_{v,s} = \sum_{t=2015}^{2025} N_{v,s,t}
+\]
+où $N_{v,s,t}$ désigne le nombre de transactions observées pour le sous-marché $s$ à la période $t$.
+
+Le poids structurel relatif de chaque sous-marché dans la ville est alors :
+\[
+w_{v,s} = \frac{T_{v,s}}{\sum_{s} T_{v,s}}
+\]
+Ces poids $w_{v,s}$ reflètent la part moyenne de chaque segment dans le marché local de long terme.
+
+\paragraph{Étape 2 : prise en compte des sous-marchés actifs}
+À chaque période $t$ (correspondant à un mois), tous les sous-marchés ne sont pas nécessairement observés, en effet il se peut que l'on n'observe pas de transactions pour un univers. 
+On viens alors définir une variable indicatrice glissante sur 3 (et respectivement  12) mois tel que :
+
+\begin{center}
+\[
+I_{v,s,t} =
+\begin{cases}
+1 & \text{si } N_{v,s,t} > 0 \text{, i.e. s'il y a des transactions sur les } 3 \text{ (resp. 12) derniers mois}, \\
+0 & \text{sinon.}
+\end{cases}
+\]
+\end{center}
+
+Le poids actif devient :
+\[
+w^{*}_{v,s,t} = w_{v,s} \times I_{v,s,t}
+\]
+et la somme des poids actifs :
+\[
+W_{v,t} = \sum_{s} w^{*}_{v,s,t}
+\]
+Pour normaliser, on calcule le poids dynamique :
+\[
+\tilde{w}_{v,s,t} = 
+\begin{cases}
+\dfrac{w^{*}_{v,s,t}}{W_{v,t}} & \text{si } W_{v,t} > 0 \\[1em]
+0 & \text{sinon}
+\end{cases}
+\]
+
+\paragraph{Étape 3 : prix pondéré lissé}
+
+On définit une fenêtre temporelle de taille $W$ (3 ou 12 mois), incluant la période courante $t$. On sélectionne uniquement les observations actives (prix renseigné et poids actifs) dans cette fenêtre, puis on calcule un prix moyen pondéré en normalisant les poids relatifs.
+
+La formule est :
+\[
+\bar{P}_{v,t}^{(W)} = \sum_{i \in \mathcal{O}_{t,W}} \tilde{w}_{i} \times p_{i}
+\]
+où :
+\begin{itemize}
+    \item $\mathcal{O}_{t,W}$ est l’ensemble des observations valides dans la fenêtre des $W$ dernières périodes,
+    \item $p_{i}$ est le prix observé pour l’observation $i$,
+    \item $\tilde{w}_{i} = \dfrac{w_{i}}{\sum_{j \in \mathcal{O}_{t,W}} w_{j}}$ est le poids relatif normalisé,
+\end{itemize}
+
+
+Ce dispositif de pondération arrangé permet :
+\begin{itemize}
+    \item de maintenir une structure de marché constante dans le temps (pondération fixe sur 2015--2025),
+    \item d’écarter temporairement les sous-marchés inactifs à une période $t$,
+
+\end{itemize}
+
+
+\subsection{Analyse graphique}
+
+Les figures présentées ci-dessous comparent les trajectoires historiques et prévisionnelles du prix au mètre carré pour quatre grandes métropoles françaises : Paris, Marseille, Bordeaux et Rennes.
+Chaque graphique juxtapose trois sources principales : LPI/IAD, CL et l’univers élémentaire reconstruit — selon deux horizons de lissage (3 mois et 12 mois). Les courbes en pointillés représentent les projections du prix au m², obtenues via le modèle additif de tendance \texttt{Prophet} mis en place par Facebook/Meta, ajusté sur la période 2015–2025 avec extrapolation sur 12 mois.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\linewidth]{bordeaux_comparaison.png}
+    \label{fig:placeholder}
+\end{figure}
+
+\paragraph{Bordeaux.}
+Sur la période 2016–2022, les trois sources décrivent une hausse similaire (+30 à +35 \%).
+LPI/IAD présente des niveaux supérieurs à ceux du CL d’environ 5 à 7 \%, tandis que la série Univ Elem se situe entre les deux, reproduisant la dynamique moyenne.
+Depuis 2023, toutes les sources signalent une correction modérée, et les projections \texttt{Prophet} prévoient une baisse autour de 4 200 €/m² à l’horizon 2026.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\linewidth]{marseille_comparaison.png}
+    \label{fig:placeholder}
+\end{figure}
+
+\paragraph{Marseille.}
+Les écarts inter-sources sont ici plus marqués : LPI/IAD affiche des valeurs jusqu’à 8 \% au-dessus de CL, notamment sur la phase haussière 2020–2022.
+La série Univ Elem reproduit bien la tendance générale, tout en restant plus lissée et moins volatile.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\linewidth]{paris_comparaison.png}
+    \label{fig:placeholder}
+\end{figure}
+
+\paragraph{Paris.}
+Le marché parisien montre une correspondance quasi parfaite entre Univ Elem et CL jusqu’en 2022, les deux séries encadrant LPI/IAD (légèrement plus haute, +3–4 \%).
+Les trois bases s’accordent sur un retournement après 2022, avec une baisse estimée entre -8 et -10 \%.
+La projection Prophet amplifie légèrement ce mouvement, suggérant une stabilisation autour de 9 500 €/m² en 2026.
+L’alignement des séries témoigne d’une forte homogénéité des sources.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\linewidth]{rennes_comparaison.png}
+    \label{fig:placeholder}
+\end{figure}
+
+\paragraph{Rennes.}
+Les séries concordent globalement dans leur trajectoire, bien que LPI/IAD présente des valeurs supérieures à Univ Elem et CL d’environ +5 \%.
+L’écart se réduit après 2022, où toutes convergent vers 3 900–4 100 €/m².
+La dynamique observée est très régulière, et le modèle Prophet prolonge cette stabilité.
+
+\newpage
+\subsection{Analyse statistique et validation des séries de prix}
+\subsubsection{Correspondances statistiques}
+Cette section présente une analyse statistique des correspondances entre les principales séries de prix glissants utilisées dans la modélisation.
+Les comparaisons reposent sur les moyennes mobiles à 12 mois, incluant les corrélations, régressions linéaires et tests t appariés.
+
+\paragraph{1. Univ Elem vs LPI/IAD.}
+Les deux séries sont extrêmement corrélées ((r = 0{,}995)) et présentent une relation quasi linéaire ((R² = 0{,}989), pente (= 1{,}011)).
+En moyenne, la série Univ Elem est inférieure d’environ 100 €/m² à LPI/IAD, avec un écart-type de 208 €.
+La différence est statistiquement significative (p < 0.05).
+Cela confirme que l’univers élémentaire reproduit fidèlement la dynamique décrite par LPI/IAD.
+
+\paragraph{2. Univ Elem vs CL.}
+La corrélation est encore plus forte ((r = 0{,}998)), avec un ajustement linéaire quasi parfait ((R² = 0{,}995)).
+Univ Elem affiche ici des valeurs supérieures de +64 €/m² en moyenne, soit un écart de +1,5 \%.
+Les deux séries suivent donc une structure de marché identique, CL apparaissant seulement un peu plus prudente dans les zones de prix élevés.
+La différence reste significative (p < 0.05).
+
+\paragraph{3. Univ Elem (12 m) vs Univ Elem (3 m).}
+La corrélation quasi parfaite ((r = 0{,}999)) et la pente de 1,002 illustrent le bon comportement interne de lissage.
+L’écart moyen n’est que de –44 €/m², lié à la réactivité accrue du glissant 3 mois aux variations saisonnières.
+
+
+\paragraph{4. LPI/IAD vs CL.}
+Ces deux sources sont très corrélées ((r = 0{,}995)), mais LPI/IAD est systématiquement plus haute de +163 €/m² en moyenne.
+L’écart-type (210 €) suggère une surestimation régulière de 3 à 4 \% du prix réel par le baromètre LPI/IAD.
+Le test t (p < 0.05) confirme que cette différence, bien que stable, est significative.
+
+\subsubsection{Évaluation de la couverture des intervalles de confiance}
+Pour évaluer la variabilité des estimations, on calcule un intervalle de confiance à 95\% autour de la moyenne glissante sur 3 (resp. 12 mois) mois de la méthode des univers élémentaires. L’intervalle est défini par :
+
+\[
+IC_{\text{inf},t} = \bar{P}_{t}^{(3)} - 1.96 \times \sigma_{t}^{(3)}, 
+\qquad
+IC_{\text{sup},t} = \bar{P}_{t}^{(3)} + 1.96 \times \sigma_{t}^{(3)}
+\]
+
+où :
+\begin{itemize}
+    \item $\bar{P}_{t}^{(3)}$ est le prix moyen glissant sur 3 mois à la période $t$,
+    \item $\sigma_{t}^{(3)}$ est l’écart-type calculé sur la même fenêtre,
+    \item $1.96$ correspond au quantile de la loi normale pour un niveau de confiance de 95\%.
+\end{itemize}
+
+On mesure ensuite la couverture de cet intervalle, c’est-à-dire la proportion des observations des données LPI/IAD qui se situent à l’intérieur de $[IC_{\text{inf},t}, IC_{\text{sup},t}]$.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{parisIC.png}
+
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{bordeauxIC.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{marseilleIC.png}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{rennesIC.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+L’analyse a été réalisée sur l’ensemble des 15 plus grandes villes françaises. Les résultats montrent :
+\begin{itemize}
+    \item Une correspondance moyenne de \textbf{47,55\%} des données pour les séries lissées sur 3 mois.
+    \item Une correspondance moyenne de \textbf{27,87\%} des données pour les séries lissées sur 12 mois.
+\end{itemize}
+
+\subsection{Modélisation basée exclusivement sur les données Crédit Logement}
+On rappelle que la base utilisée ici dans cette analyse, la base de données \texttt{df\_transac\_clean} est issu d’une fusionn entre deux sources principales :
+\begin{itemize}
+    \item La base \textbf{DVF} (Demande de Valeurs Foncières), qui recense l’ensemble des transactions immobilières réalisées en France.
+    \item La base \textbf{CL OPERATION}, qui regroupe les opérations de financement réalisées par Crédit Logement.
+\end{itemize}
+Il est intéressant de répliquer l'ensemble de l'analyse précédente en se concentrant uniquement sur les données issues de Crédit Logement. Cette approche permet d'évaluer la cohérence et la pertinence des estimations fournies par cette source.\\
+
+Les données Crédit Logement présentent des caractéristiques particulières : un volume plus faible que DVF et une concentration plus forte sur les zones urbaines denses.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{bordeauxCL.png}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{parisCL.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{marseilleCL.png}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{rennesCL.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{bordeauxIC_CL.png}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{parisIC_CL.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{maresilleIC_CL.png}
+\label{fig:repartition_nb_pieces}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{rennesIC_CL.png}
+
+\label{fig:repartitions_pieces_tout_confondu}
+\end{subfigure}
+
+\end{figure}
+
+
+
+\paragraph{Résultats obtenus.}
+
+L’application de la méthode par ``univers élémentaires'' aux seules opérations CL conduit à des résultats très proches de ceux obtenus avec l’ensemble DVF+CL.
+
+Graphiquement, les trajectoires issues des seules données CL conservent les mêmes inflexions que celles obtenues avec la base DVF+CL : hausse marquée jusqu’en 2020--2021, suivi d’un retournement à Paris et Lyon ; progression régulière à Marseille et Rennes ; convergence générale vers les mêmes niveaux de prix en fin de période. Les écarts absolus restent faibles (de l’ordre de $\pm 2$ à $\pm 3\%$), et la dynamique temporelle demeure parfaitement cohérente.
+
+Les taux de couverture des séries LPI/IAD par les intervalles de confiance à 95\% issus de la méthode sont les suivants :
+\begin{itemize}
+    \item \textbf{46,99\%} pour les séries en moyenne glissante 3 mois ;
+    \item \textbf{29,97\%} pour les séries en moyenne glissante 12 mois.
+\end{itemize}
+
+Ces niveaux sont quasiment identiques à ceux obtenus avec la base complète, ce qui traduit une \textbf{bonne stabilité du modèle}, même en présence d’un volume plus restreint de transactions. La cohérence des résultats montre que les données de Crédit Logement reflètent bien les dynamiques de marché des grandes métropoles.
+
+\newpage
+\section{Cartes des prix}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.50\linewidth]{carte_prix_m2_CITY_APT.png}
+    \caption{Prix des appartements dans les 16 plus grandes villes - Crédit Logement (méthode des univers élémentaires}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.50\linewidth]{lpi.PNG}
+    \caption{Prix des appartements dans les 16 plus grandes villes - Baromètre LPI/IAD}
+    \label{fig:placeholder}
+\end{figure}
+
+
+
+
+
+
+
+\newpage
+\subsection{Conclusion}
+L’analyse conjointe des graphiques d’évolution et des comparaisons statistiques confirme la grande cohérence de la méthode des univers élémentaires. Les séries obtenues présentent des trajectoires quasi identiques, traduisant une évolution parallèle des prix au mètre carré dans l’ensemble des villes étudiées. Les coefficients de corrélation dépassent systématiquement 0,99, les pentes d’ajustement sont proches de~1 et les écarts moyens restent faibles (±2--3~\%), ce qui atteste de la robustesse structurelle du modèle.
+
+Les courbes montrent également que les valeurs issues des univers élémentaires se situent de manière stable entre celles de \emph{LPI/IAD} (généralement plus élevées) et de \emph{CL} (plus basses), traduisant un positionnement médian cohérent. Les tendances observées suivent fidèlement les cycles de marché : phases de hausse, retournements et périodes de correction sont reproduites sans décalage notable. Si les tests statistiques mettent en évidence des différences significatives, les écarts mesurés (50 à 100~€/m²) demeurent limités au regard des niveaux de prix considérés.
+
+Enfin, la réapplication de la méthode en se limitant aux seules données Crédit Logement conduit à des résultats tout aussi stables. Les taux de couverture, les dynamiques temporelles et les niveaux de prix obtenus se révèlent très proches de ceux produits avec la base complète DVF+CL. Cela montre que la structure des univers élémentaires compense efficacement le volume plus restreint, et que les moyennes glissantes pondérées assurent une bonne stabilité des séries.
+
+Dans l’ensemble, ces résultats montrent que la seule base Crédit Logement permet de produire un indicateur fiable via la méthode des univers élémentaires. Cette approche se révèle d’autant plus pertinente, car les données DVF ne sont disponibles qu’avec plusieurs mois de décalage : les séries issues de CL restent cohérentes et représentatives des dynamiques de marché, même en l’absence des dernières mises à jour DVF.
+
+
+
+
+
+
+
+
+
+\newpage
+\section*{Ressource}
+L'ensemble des résultats se trouvent ici:
+\url{https://github.com/maxou97432/comparaison_CL}
+
+
+
+
+
+\end{document}
