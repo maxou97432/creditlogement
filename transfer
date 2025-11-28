@@ -1,3 +1,126 @@
+
+class DetectAno:
+
+    def __init__(self, meta_num_all, var_num):
+        self.meta_num_all = meta_num_all
+        self.var_num = var_num
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Détection et suppression des anomalies
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        dic_geo_meta: dict
+                      Dictionnaire contenant les informations nécessaires à la détection d'anomalies.
+        X: pandas.DataFrame
+           Dataframe
+        """
+
+        start_time = datetime.now()
+        dic_geo_meta = {}
+        for i in self.meta_num_all.index:
+            meta_num = self.meta_num_all.loc[i, :].unstack(level=[0]).transpose()
+            meta_num.columns = [
+                "N",
+                "Mean",
+                "Std",
+                "Min",
+                "D1",
+                "Q1",
+                "Median",
+                "Q3",
+                "D9",
+                "Max",
+            ]
+            meta_num["IQR"] = meta_num["Q3"] - meta_num["Q1"]
+            if OUTLIER_MODE == "iqr":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Median"] - COEFF_ECART * meta_num["IQR"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Median"] + COEFF_ECART * meta_num["IQR"]
+                )
+            elif OUTLIER_MODE == "std":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Mean"] - COEFF_ECART * meta_num["Std"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Mean"] + COEFF_ECART * meta_num["Std"]
+                )
+            else:
+                meta_num["Lower_Limit"] = meta_num["Median"] / COEFF_ECART
+                meta_num["Upper_Limit"] = meta_num["Median"] * COEFF_ECART
+            dic_geo_meta[i] = meta_num
+
+        for var in self.var_num:
+            logging.info("\t Topage des anomalies pour la variable " + var)
+            X["Ano_" + var] = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    0
+                    if x["year_geo_bien"] == x["year_geo_bien"]
+                    and dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
+                    < x[var]
+                    < dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
+                    else 1
+                ),
+                axis=1,
+            )
+
+        nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        # Attention, on supprime les surfaces habitables alors que le pb peut provenir de la valeur foncière sous ou sur-estimée
+        if "Prix_m2" in self.var_num:
+            X.loc[(X["Ano_Prix_m2"] == 1), "NB_SURF_HAB"] = np.nan
+            X.loc[(X["Ano_Prix_m2"] == 1), "Prix_m2"] = np.nan
+        if "Prix_piece" in self.var_num:
+            X.loc[X["Ano_Prix_piece"] == 1, "NB_PIECES"] = np.nan
+        if "nb_m2_by_piece" in self.var_num:
+            X.loc[X["Ano_nb_m2_by_piece"] == 1, "NB_PIECES"] = np.nan
+            X.drop(columns=["Ano_nb_m2_by_piece"], inplace=True)
+
+        post_nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        post_nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        post_nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        nb_suppr_surf_hab = nb_nn_surf_hab - post_nb_nn_surf_hab
+        nb_suppr_prix_m2 = nb_nn_prix_m2 - post_nb_nn_prix_m2
+        nb_suppr_nb_pieces = nb_nn_nb_pieces - post_nb_nn_nb_pieces
+
+        logging.info(
+            f"\t \t {nb_suppr_surf_hab} anomalies supprimées sur le champ NB_SURF_HAB soit {round((nb_suppr_surf_hab/nb_nn_surf_hab)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_prix_m2} anomalies supprimées sur le champ Prix_m2 soit {round((nb_suppr_prix_m2/nb_nn_prix_m2)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
+        )
+
+        # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
+        X["ratio_val_mt_op"] = np.nan
+        X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
+            X["MT_OPE"] / X["VALEUR_FONCIERE"]
+        )
+        X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
+        X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
+
+        X.drop(columns=["ratio_val_mt_op"], inplace=True)
+        X.reset_index(drop=True, inplace=True)
+
+        return dic_geo_meta, X
+    
+
 def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_years=10):
 
     logging.info("ML detection of anomalies starting")
@@ -26,40 +149,27 @@ def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_year
     data_recent = df[conditions]
     
   
-
+    ids_avant_detection = set(df["ID"])  # ← IDs qui entrent dans la détection
     
     # Import des données sur les N_YEARS dernières années
     start_time = datetime.now()
-    ids_entrees_dans_ml = set(data_recent["ID"])
-    print(
+    logging.info(
         f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
     )
+
     # =============================================================================
     # Calculs des effectifs par ville et par Iris
     # =============================================================================
-    step_time = datetime.now()
-    logging.info("workforce calculation")
-    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
-    logging.info(
-        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
-    )
+
     step_time = datetime.now()
     effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
     logging.info(
         f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
     )
 
-    dict_geo_iris = effectifsparIris.transform(data_recent)
+
     dict_geo_city = effectifsparVille.transform(data_recent)
 
-    defmaillegeoiris = DefMailleGeoIRIS(
-        n_min=params.N_MIN,
-        dict_geo_city=dict_geo_city,
-        dict_geo_iris=dict_geo_iris,
-        geo_bien="geo_bien_iris",
-        maille_geo_loc="maille_geo_loc",
-    )
-    data_recent = defmaillegeoiris.transform(data_recent)
 
     defmaillegeocity = DefMailleGeoCITY(
         n_min=params.N_MIN,
@@ -120,11 +230,12 @@ def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_year
     ids_valides = set(data_recent["ID"])
     
     # Outliers = IDs entrés dans la détection MAIS rejetés
-    ids_outliers = ids_entrees_dans_ml - ids_valides
+    ids_outliers = ids_avant_detection - ids_valides
     
     # Récupérer les outliers depuis les données ORIGINALES
     data_mauvais = data_original[
-        (data_original["ID"].isin(ids_outliers))  
+        (data_original["ID"].isin(ids_outliers)) &
+        (data_original["ID"].isin(ids_avant_detection))  # Sécurité
     ].copy()
     
     # Ne garder que les colonnes disponibles
