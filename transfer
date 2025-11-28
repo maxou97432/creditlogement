@@ -1,3 +1,115 @@
-valeurs_trimestrielles['Year'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('-')[0]))
+import sys
+import os
+
+import pickle
+import matplotlib.pyplot as plt
+from datetime import datetime
+import logging
+import math
+from datetime import timedelta, datetime
+from dateutil.relativedelta import relativedelta
+import numpy as np
+import time
+from fonctions import Connector
+import param_general as params
+import os
+import os
+import pandas as pd
+import time
+
+import textwrap
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import folium
+import json
+from folium.features import GeoJsonTooltip
+import io
+import scipy.stats as stats
+from datetime import datetime
+import string
+import openpyxl
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from openpyxl.styles.differential import DifferentialStyle
+from openpyxl.formatting.rule import Rule
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
+import shutil
+from openpyxl.drawing.image import Image
+from openpyxl.styles import Font, Color, PatternFill, Border, Side
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+import warnings
+import pathlib
+import pyodbc
+import pandasql as ps
+import copy
+warnings.filterwarnings('ignore')
+sns.set_theme()
+
+prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_CITY.csv")
+
+prix_m2_univ_elem_complet_DEPT = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_DEPT.csv")
+
+prix_m2_univ_elem_complet_REGION = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_REGION.csv")
+dfs_to_concat = []
+dfs_to_concat.append(prix_m2_univ_elem_complet_CITY)
+dfs_to_concat.append(prix_m2_univ_elem_complet_DEPT)
+dfs_to_concat.append(prix_m2_univ_elem_complet_REGION)
+
+
+df_final = pd.concat(dfs_to_concat, ignore_index = True)
+df_final = df_final[df_final['DIC_NAME'] != "prix_m2_3m"]
+df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"])
+mask_2019 = df_final["Periode"].str[:4] == "2019"
+mean_2019 = df_final.loc[mask_2019, "prix_mm_value"].mean()
+df_final["Indice de prix (CL)"] = ((df_final["prix_mm_value"] /mean_2019 ) * 100).round(2)
+
+
+
+
+types_biens = ['APT', 'MAI']
+
+#df_final = df_min.pivot(index= 'VAL_MAILLE_GEO',columns = 'DIC_NAME',values = 'NB_BIENS')
+
+perimetre_insee= ['92', '93', '94', '95', '91', '78', '77', "MARSEILLE", "LYON", "LILLE",'NORD-PAS-DE-CALAIS','PACA','RHONE-ALPES','PROVINCE','AUVERGNE']
+insee_to_concat = []
+
+for perimetre in perimetre_insee:
+    for type in types_biens:
+        try:
+            valeurs_trimestrielles = pd.read_csv(rf"TI\table_rapport (2025)\valeurs_trimestrielles_{perimetre}_{type}.csv", sep = ';')
+        except FileNotFoundError:
+            continue
+        valeurs_trimestrielles=valeurs_trimestrielles[4:]
+        valeurs_trimestrielles = valeurs_trimestrielles.rename(columns={valeurs_trimestrielles.columns[1]: 'Indice de prix (INSEE)'})
+        valeurs_trimestrielles['Year'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('-')[0]))
         valeurs_trimestrielles['Quarter'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('T')[-1]))
-        valeurs_trimestrielles["Periode"] = valeurs_trimestrielles[valeurs_trimestrielles['Year'] + "0"+valeurs_trimestrielles['Quarter'] + "01" ]
+        valeurs_trimestrielles["Date code"] = (valeurs_trimestrielles['Year'].astype(str) + 'Q' + valeurs_trimestrielles["Quarter"].astype(str))
+        valeurs_trimestrielles["Periode"] = pd.PeriodIndex(valeurs_trimestrielles["Date code"],freq = "Q").to_timestamp(how="start")
+        valeurs_trimestrielles["VAL_MAILLE_GEO"] = perimetre
+        valeurs_trimestrielles["CD_TYPE_BIEN"] = type
+        valeurs_trimestrielles = valeurs_trimestrielles.drop(columns=["Libellé","Year","Quarter","Date code"])
+        insee_to_concat.append(valeurs_trimestrielles)
+
+insee_final = pd.concat(insee_to_concat, ignore_index = True)
+insee_final = insee_final.drop(columns=["Codes"])
+colonnes = ['VAL_MAILLE_GEO',"CD_TYPE_BIEN",'Periode','Indice de prix (INSEE)']
+insee_final = insee_final[colonnes]
+
+df_final["Periode"] = pd.to_datetime(df_final["Periode"])
+insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
+
+for df in (df_final, insee_final):
+    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+merge = pd.merge(df_final,insee_final,how = "inner",on = ["VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode"])
+print(merge.head(20))
+PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe n:/uflumth/indicateur_marche/univers_elementaire/TI/comparaison_insee.py
+Empty DataFrame
+Columns: [Periode, prix_mm_value, NB_BIENS, nb_univers, VAL_MAILLE_GEO, CD_TYPE_BIEN, Indice de prix (CL), Indice de prix (INSEE)]
+Index: []
+
+
+
