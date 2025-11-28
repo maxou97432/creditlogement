@@ -1,6 +1,4 @@
-   
-
-def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_years=10):
+def detect_ano_ml(input_df, type_bien=None, n_years=10):
 
     logging.info("ML detection of anomalies starting")
 
@@ -26,12 +24,6 @@ def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_year
 
     # Application des conditions
     conditions = pd.Series(True, index=df.index)
-
-    if date_min is not None:
-        conditions &= df["DATE"] >= pd.to_datetime(date_min)
-
-    if date_max is not None:
-        conditions &= df["DATE"] < pd.to_datetime(date_max)
 
     if type_bien is not None:
         conditions &= df["TYPE_BIEN"] == type_bien
@@ -62,17 +54,10 @@ def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_year
         f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
     )
 
-    dict_geo_iris = effectifsparIris.transform(data_recent)
+
     dict_geo_city = effectifsparVille.transform(data_recent)
 
-    defmaillegeoiris = DefMailleGeoIRIS(
-        n_min=params.N_MIN,
-        dict_geo_city=dict_geo_city,
-        dict_geo_iris=dict_geo_iris,
-        geo_bien="geo_bien_iris",
-        maille_geo_loc="maille_geo_loc",
-    )
-    data_recent = defmaillegeoiris.transform(data_recent)
+
 
     defmaillegeocity = DefMailleGeoCITY(
         n_min=params.N_MIN,
