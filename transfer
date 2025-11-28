@@ -1,7 +1,20 @@
+   
+
 def detect_ano_ml(input_df, date_min=None, date_max=None, type_bien=None, n_years=10):
 
     logging.info("ML detection of anomalies starting")
-    
+
+    # =============================================================================
+    # Import des données sur les N_YEARS dernières années
+    # =============================================================================
+
+    start_time = datetime.now()
+
+    importrecentdata = ImportRecentData(n_years=n_years, input_=input_df)
+    data_recent = importrecentdata.import_data_recent()
+    logging.info(
+        f"Base d'analyse filtrée sur les {params.N_YEARS} dernières années : {datetime.now()-start_time}\n"
+    )
   
     data_original = input_df.copy()  
     
