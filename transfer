@@ -1,48 +1,41 @@
-# --- Définition des constantes de colonnes ---
-INSEE_COL = "Indice de prix (INSEE) - Base 2020"
-CL_COL = "Indice de prix (CL)"
+from scipy import stats
 
-# 1. Calcul de la Corrélation (Méthode .apply() pour éviter le MultiIndex de colonnes)
-def calculate_correlation_value(df):
-    """Calcule la corrélation de Pearson entre CL et INSEE."""
-    return df[CL_COL].corr(df[INSEE_COL])
+def test_t_significatif(group):
+    # Teste si la moyenne de l'écart (Dif) est significativement différente de 0
+    # On utilise le test t pour un échantillon (one-sample t-test)
+    # Règle générale : p-value < 0.05 signifie que l'écart est significatif
+    
+    # stats.ttest_1samp renvoie la statistique t et la p-value
+    t_stat, p_value = stats.ttest_1samp(group['Dif'].dropna(), popmean=0)
+    
+    # On retourne la p-value et la conclusion
+    return pd.Series({
+        't_statistic': t_stat,
+        'p_value': p_value,
+        'Significatif (p<0.05)': p_value < 0.05
+    })
 
-correlation_mat = (
-    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
-    .apply(calculate_correlation_value)
-    .rename("Corrélation") # Renomme la série de résultat
-    .reset_index()          # Transforme l'index (les groupes) en colonnes
-)
+# Appliquer le test t par groupe
+test_t_results = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(test_t_significatif).reset_index()
 
-# 2. Stats (Ecarts)
-ecarts_stats = (
-    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])[["Dif"]]
-    .agg(
-        Ecart_Moyen=("Dif", "mean"),
-        Ecart_type=("Dif", "std"),
-        Ecart_min=("Dif", "min"),
-        Ecart_max=("Dif", "max")
-    )
-    .reset_index()
-)
+from statsmodels.tsa.stattools import adfuller
 
-# 3. RMSE
-def rmse(series):
-    return np.sqrt(np.mean(series**2))
+def test_adf_stationnarite(group):
+    # Le test ADF est sensible aux NaN, donc on doit les retirer
+    ecart_series = group['Dif'].dropna()
+    
+    # Nécessite un minimum de données (souvent 10-20 observations)
+    if len(ecart_series) < 20: 
+        return pd.Series({'Stationnaire (ADF)': np.nan})
 
-rmse_results = (
-    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])[["Dif"]]
-    .agg(RMSE=("Dif", rmse))
-    .reset_index()
-)
+    # Effectuer le test ADF
+    adf_result = adfuller(ecart_series)
+    p_value = adf_result[1]
+    
+    # Si p-value < 0.05, on rejette H0, donc l'écart est stationnaire
+    return pd.Series({
+        'Stationnaire (ADF)': p_value < 0.05
+    })
 
-# 4. Fusion finale (fonctionne maintenant car toutes les sources ont des colonnes à un seul niveau)
-comparaison = (
-    ecarts_stats
-    .merge(rmse_results, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
-    .merge(correlation_mat, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
-)
-
-# Afficher les premières lignes du résultat final
-print("\n--- Résultat Final de la Comparaison Statistique ---")
-print(comparaison.head())
+# Appliquer le test ADF par groupe
+adf_results = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(test_adf_stationnarite).reset_index()
