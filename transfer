@@ -1,41 +1,56 @@
-from scipy import stats
+import plotly.express as px
+import pandas as pd
+# NOTE: Le DataFrame 'merge' est supposé être disponible dans votre environnement.
 
-def test_t_significatif(group):
-    # Teste si la moyenne de l'écart (Dif) est significativement différente de 0
-    # On utilise le test t pour un échantillon (one-sample t-test)
-    # Règle générale : p-value < 0.05 signifie que l'écart est significatif
+# --- Préparation des données pour le tracé ---
+
+# 1. Utiliser un format long pour que Plotly puisse différencier les deux séries
+df_plot = merge.melt(
+    id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
+    value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
+    var_name="Source",
+    value_name="Indice_Valeur"
+)
+
+# 2. Créer une colonne pour combiner la zone et le type de bien (pour les facettes/groupes)
+df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
+
+# --- Création du Graphique Plotly ---
+
+# Utilisation de la facette (facet_col/row) pour créer un graphique séparé par segment
+# Ceci est essentiel pour visualiser l'hétérogénéité
+fig = px.line(
+    df_plot,
+    x="Periode",
+    y="Indice_Valeur",
+    color="Source",
+    line_group="Segment",
     
-    # stats.ttest_1samp renvoie la statistique t et la p-value
-    t_stat, p_value = stats.ttest_1samp(group['Dif'].dropna(), popmean=0)
+    # Séparer les graphiques par Segment (ex: PARIS - APT, MARSEILLE - MAI, etc.)
+    facet_col="Segment", 
+    facet_col_wrap=3, # Afficher 3 graphiques par ligne pour une meilleure lisibilité
     
-    # On retourne la p-value et la conclusion
-    return pd.Series({
-        't_statistic': t_stat,
-        'p_value': p_value,
-        'Significatif (p<0.05)': p_value < 0.05
-    })
+    title="Évolution Comparée des Indices de Prix Immobiliers (Base 2020)",
+    labels={
+        "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
+        "Periode": "Date (Trimestre)",
+        "Source": "Source de l'Indice"
+    },
+    # Ajouter des lignes pour marquer le niveau 100 (l'année de base)
+    height=800 
+)
 
-# Appliquer le test t par groupe
-test_t_results = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(test_t_significatif).reset_index()
+# Ajouter une ligne horizontale à y=100 pour chaque sous-graphique (Base 2020)
+fig.update_yaxes(rangemode="tozero")
+fig.add_hline(y=100, line_dash="dash", line_color="gray", 
+              annotation_text="Base 2020 = 100", annotation_position="top left", row="all", col="all")
 
-from statsmodels.tsa.stattools import adfuller
+# Ajuster l'affichage pour améliorer la lisibilité
+fig.update_layout(
+    legend_title_text='Légende',
+    font=dict(size=10),
+    title_x=0.5
+)
 
-def test_adf_stationnarite(group):
-    # Le test ADF est sensible aux NaN, donc on doit les retirer
-    ecart_series = group['Dif'].dropna()
-    
-    # Nécessite un minimum de données (souvent 10-20 observations)
-    if len(ecart_series) < 20: 
-        return pd.Series({'Stationnaire (ADF)': np.nan})
-
-    # Effectuer le test ADF
-    adf_result = adfuller(ecart_series)
-    p_value = adf_result[1]
-    
-    # Si p-value < 0.05, on rejette H0, donc l'écart est stationnaire
-    return pd.Series({
-        'Stationnaire (ADF)': p_value < 0.05
-    })
-
-# Appliquer le test ADF par groupe
-adf_results = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(test_adf_stationnarite).reset_index()
+# Afficher le graphique
+fig.show()
