@@ -1,24 +1,13 @@
-import plotly.express as px
-import pandas as pd
-# NOTE: Le DataFrame 'merge' est supposé être disponible dans votre environnement.
-
-# --- Préparation des données pour le tracé ---
-
-# 1. Utiliser un format long pour que Plotly puisse différencier les deux séries
 df_plot = merge.melt(
     id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
     value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
     var_name="Source",
     value_name="Indice_Valeur"
 )
-
-# 2. Créer une colonne pour combiner la zone et le type de bien (pour les facettes/groupes)
 df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
 # --- Création du Graphique Plotly ---
 
-# Utilisation de la facette (facet_col/row) pour créer un graphique séparé par segment
-# Ceci est essentiel pour visualiser l'hétérogénéité
 fig = px.line(
     df_plot,
     x="Periode",
@@ -26,9 +15,8 @@ fig = px.line(
     color="Source",
     line_group="Segment",
     
-    # Séparer les graphiques par Segment (ex: PARIS - APT, MARSEILLE - MAI, etc.)
     facet_col="Segment", 
-    facet_col_wrap=3, # Afficher 3 graphiques par ligne pour une meilleure lisibilité
+    facet_col_wrap=4, # <--- CORRECTION ICI : 4 graphiques par ligne
     
     title="Évolution Comparée des Indices de Prix Immobiliers (Base 2020)",
     labels={
@@ -36,8 +24,8 @@ fig = px.line(
         "Periode": "Date (Trimestre)",
         "Source": "Source de l'Indice"
     },
-    # Ajouter des lignes pour marquer le niveau 100 (l'année de base)
-    height=800 
+    # Augmenter la hauteur pour accommoder plus de lignes de graphiques
+    height=1200 
 )
 
 # Ajouter une ligne horizontale à y=100 pour chaque sous-graphique (Base 2020)
@@ -45,7 +33,7 @@ fig.update_yaxes(rangemode="tozero")
 fig.add_hline(y=100, line_dash="dash", line_color="gray", 
               annotation_text="Base 2020 = 100", annotation_position="top left", row="all", col="all")
 
-# Ajuster l'affichage pour améliorer la lisibilité
+# Ajuster l'affichage
 fig.update_layout(
     legend_title_text='Légende',
     font=dict(size=10),
