@@ -1,12 +1,27 @@
+import plotly.express as px
+import pandas as pd
+import plotly.io as pio
+
+# Configuration du rendu JSON (pour la compatibilité)
+pio.renderers.default = "json" 
+
+# NOTE: Le DataFrame 'merge' est supposé être disponible dans votre environnement.
+
+# --- Préparation des données pour le tracé ---
+
+# 1. Mise en format long (melt) pour superposer les indices
 df_plot = merge.melt(
     id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
     value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
     var_name="Source",
     value_name="Indice_Valeur"
 )
+
+# 2. Création de la colonne de segmentation pour les facettes
 df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
-# --- Création du Graphique Plotly ---
+
+# --- Création du Graphique Plotly (Grille 3xN) ---
 
 fig = px.line(
     df_plot,
@@ -16,7 +31,7 @@ fig = px.line(
     line_group="Segment",
     
     facet_col="Segment", 
-    facet_col_wrap=4, # <--- CORRECTION ICI : 4 graphiques par ligne
+    facet_col_wrap=3, # 3 graphiques par ligne pour une bonne lisibilité
     
     title="Évolution Comparée des Indices de Prix Immobiliers (Base 2020)",
     labels={
@@ -24,21 +39,20 @@ fig = px.line(
         "Periode": "Date (Trimestre)",
         "Source": "Source de l'Indice"
     },
-    # Augmenter la hauteur pour accommoder plus de lignes de graphiques
-    height=1200 
+    height=800 # Hauteur ajustée pour étaler les lignes
 )
 
-# Ajouter une ligne horizontale à y=100 pour chaque sous-graphique (Base 2020)
+# Ajout de la ligne horizontale de référence (Base 2020 = 100)
 fig.update_yaxes(rangemode="tozero")
 fig.add_hline(y=100, line_dash="dash", line_color="gray", 
               annotation_text="Base 2020 = 100", annotation_position="top left", row="all", col="all")
 
-# Ajuster l'affichage
+# Ajustement du titre et de la légende
 fig.update_layout(
     legend_title_text='Légende',
     font=dict(size=10),
     title_x=0.5
 )
 
-# Afficher le graphique
+# Affichage du graphique
 fig.show()
