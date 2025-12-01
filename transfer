@@ -1,78 +1,48 @@
-{
-	"name": "MergeError",
-	"message": "Not allowed to merge between different levels. (1 levels on the left, 2 on the right)",
-	"stack": "---------------------------------------------------------------------------
-MergeError                                Traceback (most recent call last)
-Cell In[20], line 42
-     36 correlation_mat = correlation_mat.rename(columns={correlation_mat.columns[-1]: \"Corrélation\"}) # Renommer la dernière colonne de corrélation
-     38 # --- Fusion finale (votre code original) ---
-     39 comparaison = (
-     40     ecarts_stats
-     41     .merge(rmse_results, on=[\"VAL_MAILLE_GEO\", \"CD_TYPE_BIEN\"])
----> 42     .merge(correlation_mat, on=[\"VAL_MAILLE_GEO\", \"CD_TYPE_BIEN\"])
-     43 )
-     45 print(comparaison.head())
+# --- Définition des constantes de colonnes ---
+INSEE_COL = "Indice de prix (INSEE) - Base 2020"
+CL_COL = "Indice de prix (CL)"
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\frame.py:10859, in DataFrame.merge(self, right, how, on, left_on, right_on, left_index, right_index, sort, suffixes, copy, indicator, validate)
-  10840 @Substitution(\"\")
-  10841 @Appender(_merge_doc, indents=2)
-  10842 def merge(
-   (...)  10855     validate: MergeValidate | None = None,
-  10856 ) -> DataFrame:
-  10857     from pandas.core.reshape.merge import merge
-> 10859     return merge(
-  10860         self,
-  10861         right,
-  10862         how=how,
-  10863         on=on,
-  10864         left_on=left_on,
-  10865         right_on=right_on,
-  10866         left_index=left_index,
-  10867         right_index=right_index,
-  10868         sort=sort,
-  10869         suffixes=suffixes,
-  10870         copy=copy,
-  10871         indicator=indicator,
-  10872         validate=validate,
-  10873     )
+# 1. Calcul de la Corrélation (Méthode .apply() pour éviter le MultiIndex de colonnes)
+def calculate_correlation_value(df):
+    """Calcule la corrélation de Pearson entre CL et INSEE."""
+    return df[CL_COL].corr(df[INSEE_COL])
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\reshape\\merge.py:170, in merge(left, right, how, on, left_on, right_on, left_index, right_index, sort, suffixes, copy, indicator, validate)
-    155     return _cross_merge(
-    156         left_df,
-    157         right_df,
-   (...)    167         copy=copy,
-    168     )
-    169 else:
---> 170     op = _MergeOperation(
-    171         left_df,
-    172         right_df,
-    173         how=how,
-    174         on=on,
-    175         left_on=left_on,
-    176         right_on=right_on,
-    177         left_index=left_index,
-    178         right_index=right_index,
-    179         sort=sort,
-    180         suffixes=suffixes,
-    181         indicator=indicator,
-    182         validate=validate,
-    183     )
-    184     return op.get_result(copy=copy)
+correlation_mat = (
+    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+    .apply(calculate_correlation_value)
+    .rename("Corrélation") # Renomme la série de résultat
+    .reset_index()          # Transforme l'index (les groupes) en colonnes
+)
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\reshape\\merge.py:784, in _MergeOperation.__init__(self, left, right, how, on, left_on, right_on, left_index, right_index, sort, suffixes, indicator, validate)
-    778 if _left.columns.nlevels != _right.columns.nlevels:
-    779     msg = (
-    780         \"Not allowed to merge between different levels. \"
-    781         f\"({_left.columns.nlevels} levels on the left, \"
-    782         f\"{_right.columns.nlevels} on the right)\"
-    783     )
---> 784     raise MergeError(msg)
-    786 self.left_on, self.right_on = self._validate_left_right_on(left_on, right_on)
-    788 (
-    789     self.left_join_keys,
-    790     self.right_join_keys,
-   (...)    793     right_drop,
-    794 ) = self._get_merge_keys()
+# 2. Stats (Ecarts)
+ecarts_stats = (
+    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])[["Dif"]]
+    .agg(
+        Ecart_Moyen=("Dif", "mean"),
+        Ecart_type=("Dif", "std"),
+        Ecart_min=("Dif", "min"),
+        Ecart_max=("Dif", "max")
+    )
+    .reset_index()
+)
 
-MergeError: Not allowed to merge between different levels. (1 levels on the left, 2 on the right)"
-}
+# 3. RMSE
+def rmse(series):
+    return np.sqrt(np.mean(series**2))
+
+rmse_results = (
+    merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])[["Dif"]]
+    .agg(RMSE=("Dif", rmse))
+    .reset_index()
+)
+
+# 4. Fusion finale (fonctionne maintenant car toutes les sources ont des colonnes à un seul niveau)
+comparaison = (
+    ecarts_stats
+    .merge(rmse_results, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+    .merge(correlation_mat, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+)
+
+# Afficher les premières lignes du résultat final
+print("\n--- Résultat Final de la Comparaison Statistique ---")
+print(comparaison.head())
