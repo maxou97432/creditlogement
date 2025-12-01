@@ -5,11 +5,9 @@ import plotly.io as pio
 # Configuration du rendu JSON (pour la compatibilité)
 pio.renderers.default = "json" 
 
-# NOTE: Le DataFrame 'merge' est supposé être disponible dans votre environnement.
-
 # --- Préparation des données pour le tracé ---
 
-# 1. Mise en format long (melt) pour superposer les indices
+# 1. Mise en format long (melt)
 df_plot = merge.melt(
     id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
     value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
@@ -17,29 +15,33 @@ df_plot = merge.melt(
     value_name="Indice_Valeur"
 )
 
-# 2. Création de la colonne de segmentation pour les facettes
+# 2. Création de la colonne de segmentation
 df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
+# 3. FIX CRITIQUE : Sélectionner uniquement les 9 premiers segments pour une visualisation claire
+segments_a_tracer = df_plot['Segment'].unique()[:9]
+df_plot_limite = df_plot[df_plot['Segment'].isin(segments_a_tracer)]
 
-# --- Création du Graphique Plotly (Grille 3xN) ---
+
+# --- Création du Graphique Plotly (Grille 3x3) ---
 
 fig = px.line(
-    df_plot,
+    df_plot_limite, # Utilisation du DataFrame LIMITÉ
     x="Periode",
     y="Indice_Valeur",
     color="Source",
     line_group="Segment",
     
     facet_col="Segment", 
-    facet_col_wrap=3, # 3 graphiques par ligne pour une bonne lisibilité
+    facet_col_wrap=3, # Grille 3x3 (ou 3xN si moins de 9 segments)
     
-    title="Évolution Comparée des Indices de Prix Immobiliers (Base 2020)",
+    title="Évolution Comparée des 9 Premiers Segments (Base 2020)",
     labels={
         "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
         "Periode": "Date (Trimestre)",
         "Source": "Source de l'Indice"
     },
-    height=800 # Hauteur ajustée pour étaler les lignes
+    height=800 # Hauteur confortable
 )
 
 # Ajout de la ligne horizontale de référence (Base 2020 = 100)
