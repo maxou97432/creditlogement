@@ -18,43 +18,40 @@ df_plot = merge.melt(
 # 2. Création de la colonne de segmentation
 df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
-# 3. FIX CRITIQUE : Sélectionner uniquement les 9 premiers segments pour une visualisation claire
-segments_a_tracer = df_plot['Segment'].unique()[:9]
-df_plot_limite = df_plot[df_plot['Segment'].isin(segments_a_tracer)]
+# --- Boucle sur chaque segment ---
 
+segments_uniques = df_plot['Segment'].unique()
 
-# --- Création du Graphique Plotly (Grille 3x3) ---
-
-fig = px.line(
-    df_plot_limite, # Utilisation du DataFrame LIMITÉ
-    x="Periode",
-    y="Indice_Valeur",
-    color="Source",
-    line_group="Segment",
+for segment in segments_uniques:
+    # Filtre le DataFrame pour le segment actuel
+    df_segment = df_plot[df_plot['Segment'] == segment]
     
-    facet_col="Segment", 
-    facet_col_wrap=3, # Grille 3x3 (ou 3xN si moins de 9 segments)
-    
-    title="Évolution Comparée des 9 Premiers Segments (Base 2020)",
-    labels={
-        "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
-        "Periode": "Date (Trimestre)",
-        "Source": "Source de l'Indice"
-    },
-    height=800 # Hauteur confortable
-)
+    # Création du Graphique Plotly
+    fig = px.line(
+        df_segment,
+        x="Periode",
+        y="Indice_Valeur",
+        color="Source",
+        
+        title=f"Évolution Comparée des Indices: {segment} (Base 2020)",
+        labels={
+            "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
+            "Periode": "Date (Trimestre)",
+            "Source": "Source de l'Indice"
+        },
+        height=450 
+    )
 
-# Ajout de la ligne horizontale de référence (Base 2020 = 100)
-fig.update_yaxes(rangemode="tozero")
-fig.add_hline(y=100, line_dash="dash", line_color="gray", 
-              annotation_text="Base 2020 = 100", annotation_position="top left", row="all", col="all")
+    # Ajout de la ligne horizontale de référence (Base 2020 = 100)
+    fig.update_yaxes(rangemode="tozero")
+    fig.add_hline(y=100, line_dash="dash", line_color="gray", 
+                  annotation_text="Base 2020 = 100", annotation_position="top left")
 
-# Ajustement du titre et de la légende
-fig.update_layout(
-    legend_title_text='Légende',
-    font=dict(size=10),
-    title_x=0.5
-)
+    # Ajustement et affichage
+    fig.update_layout(
+        legend_title_text='Légende',
+        title_x=0.5
+    )
 
-# Affichage du graphique
-fig.show()
+    # Affiche le graphique actuel (le résultat de fig.show() ou de la génération JSON/PNG)
+    fig.show()
