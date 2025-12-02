@@ -1,52 +1,91 @@
 import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.io as pio
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 
-# On ignore les warnings de convergence pour la clarté
+# Configuration
 warnings.filterwarnings("ignore")
+pio.renderers.default = "notebook" 
 
-# Liste pour stocker les résultats
-previsions = []
+# --- ÉTAPE 1 : Calcul de l'Indice Corrigé par HOLT (DES) ET Prévisions Futures ---
 
-# On boucle sur chaque segment (Zone / Type de bien)
+corrected_data = []
+# Liste pour stocker les prévisions d'ajustement futur
+future_adjustments = []
+
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("Calcul des prévisions en cours...\n")
+print("Calcul des modèles de Lissage de Holt par segment...")
 
 for name, group in grouped:
     zone, type_bien = name
+    group = group.sort_values("Periode").set_index("Periode")
     
-    # 1. Préparation de la série temporelle de l'écart
-    ts_ecart = group.sort_values("Periode").set_index("Periode")['Dif'].dropna()
+    ts_ecart = group['Dif'].dropna()
     
-    # Sécurité : il faut un minimum de points pour modéliser
-    if len(ts_ecart) > 4:
+    if len(ts_ecart) > 12: 
         try:
-            # 2. Modèle de Holt (Lissage Double Exponentiel)
+            # Modélisation Holt
             model = ExponentialSmoothing(
                 ts_ecart, 
                 trend='add', 
-                damped_trend=True, 
+                seasonal=None, 
+                damped_trend=True,
                 initialization_method="estimated"
-            ).fit()
+            )
+            model_fit = model.fit()
             
-            # 3. Prévision sur 2 périodes (T+1 et T+2)
-            forecast = model.forecast(2)
+            # --- Partie A : Correction Historique ---
+            ecart_modelise = model_fit.fittedvalues
+            ecart_modelise = ecart_modelise.reindex(group.index)
+            group['Indice de prix (CL) - Corrigé Holt'] = group['Indice de prix (CL)'] - ecart_modelise
             
-            # 4. Stockage propre
-            previsions.append({
-                "Zone": zone,
-                "Type": type_bien,
-                "Dernier Écart Connu": round(ts_ecart.iloc[-1], 2),
-                "Ajustement Prévu T+1": round(forecast.iloc[0], 2),
-                "Ajustement Prévu T+2": round(forecast.iloc[1], 2)
+            # --- Partie B : Prévision de l'Ajustement Futur (NOUVEAU) ---
+            # On prédit le biais pour T+1 et T+2
+            forecast = model_fit.forecast(2)
+            
+            future_adjustments.append({
+                "VAL_MAILLE_GEO": zone,
+                "CD_TYPE_BIEN": type_bien,
+                "Ajustement_T+1": round(forecast.iloc[0], 2),
+                "Ajustement_T+2": round(forecast.iloc[1], 2)
             })
             
-        except:
-            pass
+        except Exception as e:
+            print(f"Echec Holt pour {name}: {e}")
+            group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+    else:
+        group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+        
+    corrected_data.append(group.reset_index())
 
-# Conversion en DataFrame pour un affichage propre
-df_resultats = pd.DataFrame(previsions)
+# Reconstitution du DataFrame historique
+merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-print("=== TABLEAU DES AJUSTEMENTS À APPLIQUER (INDICE CL - AJUSTEMENT = INSEE ESTIMÉ) ===")
-print(df_resultats.to_string(index=False))
+# Création du DataFrame des prévisions futures
+df_previsions = pd.DataFrame(future_adjustments)
+
+# Affichage du tableau des ajustements (votre demande)
+print("\n--- Tableau des Ajustements Futurs à Appliquer (Biais Prévu) ---")
+print(df_previsions)
+
+
+# --- ÉTAPE 2 : Préparation Plotly (Code inchangé pour vos graphiques) ---
+
+df_plot = merge_corrected.melt(
+    id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
+    value_vars=[
+        "Indice de prix (INSEE) - Base 2020", 
+        "Indice de prix (CL)", 
+        "Indice de prix (CL) - Corrigé Holt"
+    ],
+    var_name="Source",
+    value_name="Indice_Valeur"
+)
+
+df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
+
+# --- ÉTAPE 3 : Génération des Graphiques (Code inchangé) ---
+# ... (votre boucle de plotting existante reste ici) ...
