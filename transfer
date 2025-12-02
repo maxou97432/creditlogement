@@ -1,18 +1,78 @@
-from statsmodels.tsa.api import SimpleExpSmoothing
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.metrics import mean_squared_error
 
-# Supposons que 'merge' contient vos données et la colonne 'Dif' (Ecart)
-ts_ecart = merge.set_index('Periode')['Dif'].dropna()
+# 1. PRÉPARATION DE LA SÉRIE TEMPORELLE
+# On s'assure que la série est bien triée par date
+df_analyse = merge.sort_values("Periode").set_index("Periode")
+ts_ecart = df_analyse['Dif'].dropna()
 
-# 1. Modèle Naïf (Moyenne constante)
-mean_bias = ts_ecart.mean()
-rmse_naif = np.sqrt(((ts_ecart - mean_bias) ** 2).mean())
+# 2. SPLIT TRAIN / TEST (Essentiel pour valider la prédiction)
+# On garde les 8 derniers trimestres (2 ans) pour tester la performance
+n_test = 8
+train = ts_ecart.iloc[:-n_test]
+test = ts_ecart.iloc[-n_test:]
 
-# 2. Modèle SES (Lissage Exponentiel)
-# On entraine le modèle
-ses_model = SimpleExpSmoothing(ts_ecart).fit(smoothing_level=0.5, optimized=False)
-# fittedvalues donne la prédiction faite pour T sachant les données jusqu'à T-1
-rmse_ses = np.sqrt(mean_squared_error(ts_ecart, ses_model.fittedvalues))
+print(f"Période d'entrainement : {train.index.min().date()} à {train.index.max().date()}")
+print(f"Période de test        : {test.index.min().date()} à {test.index.max().date()}")
+print("-" * 50)
 
-print(f"RMSE avec correction fixe (Moyenne) : {rmse_naif:.4f}")
-print(f"RMSE avec correction dynamique (SES) : {rmse_ses:.4f}")
+# ==============================================================================
+# MODÈLE 1 : ARIMA (AutoRegressive Integrated Moving Average)
+# ==============================================================================
+# Ordre (1,1,0) : On différencie 1 fois (pour la stationnarité) et on regarde le passé (AR=1)
+# C'est un bon point de départ pour un écart qui dérive.
+model_arima = ARIMA(train, order=(1, 1, 0)) 
+fit_arima = model_arima.fit()
+
+# Prédiction sur l'ensemble du jeu de test
+pred_arima = fit_arima.forecast(steps=n_test)
+rmse_arima = np.sqrt(mean_squared_error(test, pred_arima))
+
+# ==============================================================================
+# MODÈLE 2 : DES (Double Exponential Smoothing / Holt)
+# ==============================================================================
+# trend='add' : On suppose qu'il y a une tendance locale additive (linéaire)
+model_des = ExponentialSmoothing(train, trend='add', seasonal=None, damped_trend=True)
+fit_des = model_des.fit()
+
+# Prédiction
+pred_des = fit_des.forecast(steps=n_test)
+rmse_des = np.sqrt(mean_squared_error(test, pred_des))
+
+# ==============================================================================
+# RÉSULTATS & COMPARAISON
+# ==============================================================================
+
+print(f"RMSE Modèle ARIMA (1,1,0) : {rmse_arima:.4f}")
+print(f"RMSE Modèle DES (Holt)    : {rmse_des:.4f}")
+
+if rmse_arima < rmse_des:
+    print("\n🏆 LE GAGNANT EST : ARIMA")
+    best_pred = pred_arima
+    model_name = "ARIMA"
+else:
+    print("\n🏆 LE GAGNANT EST : DES (Lissage de Holt)")
+    best_pred = pred_des
+    model_name = "DES"
+
+# ==============================================================================
+# VISUALISATION
+# ==============================================================================
+plt.figure(figsize=(12, 6))
+plt.plot(train.index, train, label='Historique (Train)', color='gray')
+plt.plot(test.index, test, label='Réalité (Test)', color='black', linewidth=2)
+
+# Tracé des prévisions
+plt.plot(test.index, pred_arima, label=f'Prévision ARIMA (RMSE={rmse_arima:.2f})', linestyle='--', color='blue')
+plt.plot(test.index, pred_des, label=f'Prévision DES (RMSE={rmse_des:.2f})', linestyle='--', color='red')
+
+plt.title(f'Comparaison des Modèles de Correction de l\'Écart (CL - INSEE)\nZone Test', fontsize=14)
+plt.xlabel('Date')
+plt.ylabel('Valeur de l\'Écart (Points)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
