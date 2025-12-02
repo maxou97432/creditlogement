@@ -1,58 +1,57 @@
-import itertools
-import warnings
-from statsmodels.tsa.arima.model import ARIMA
+import plotly.express as px
+import pandas as pd
+import plotly.io as pio
 
-# Ignorer les avertissements de convergence pour la clarté
-warnings.filterwarnings("ignore")
+# Configuration du rendu JSON (pour la compatibilité)
+pio.renderers.default = "notebook" 
 
-# 1. Définir les plages de paramètres à tester
-# p (Auto-Regressive) : 0 à 3
-# d (Integrated) : 1 (car ADF a dit non-stationnaire) ou 0
-# q (Moving Average) : 0 à 3
-p_values = range(0, 3)
-d_values = [1] # On force la différenciation car la série dérive
-q_values = range(0, 3)
+# --- Préparation des données pour le tracé ---
 
-# Générer toutes les combinaisons (ex: 0,1,0 | 1,1,0 | 1,1,1 ...)
-pdq = list(itertools.product(p_values, d_values, q_values))
+# 1. Mise en format long (melt)
+df_plot = merge.melt(
+    id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
+    value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
+    var_name="Source",
+    value_name="Indice_Valeur"
+)
 
-best_aic = float("inf")
-best_order = None
-best_model = None
+# 2. Création de la colonne de segmentation
+df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
-print("Recherche du meilleur modèle ARIMA en cours...")
+# --- Boucle sur chaque segment ---
 
-# 2. Boucle de test (Grid Search)
-for order in pdq:
-    try:
-        # On entraine le modèle sur le TRAIN set
-        model_temp = ARIMA(train, order=order)
-        results_temp = model_temp.fit()
+segments_uniques = df_plot['Segment'].unique()
+
+for segment in segments_uniques:
+    # Filtre le DataFrame pour le segment actuel
+    df_segment = df_plot[df_plot['Segment'] == segment]
+    
+    # Création du Graphique Plotly
+    fig = px.line(
+        df_segment,
+        x="Periode",
+        y="Indice_Valeur",
+        color="Source",
         
-        # On récupère l'AIC
-        current_aic = results_temp.aic
-        
-        # Si c'est le meilleur score jusqu'ici, on le garde
-        if current_aic < best_aic:
-            best_aic = current_aic
-            best_order = order
-            best_model = results_temp
-            
-        print(f'ARIMA{order} - AIC:{current_aic:.2f}')
-        
-    except:
-        continue
+        title=f"Évolution Comparée des Indices: {segment} (Base 2020)",
+        labels={
+            "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
+            "Periode": "Date (Trimestre)",
+            "Source": "Source de l'Indice"
+        },
+        height=450 
+    )
 
-print("-" * 50)
-print(f"🏆 MEILLEUR MODÈLE : ARIMA{best_order} avec AIC = {best_aic:.2f}")
-print("-" * 50)
+    # Ajout de la ligne horizontale de référence (Base 2020 = 100)
+    fig.update_yaxes(range=[60, df_segment["Indice_Valeur"].max() + 10])
+    fig.add_hline(y=100, line_dash="dash", line_color="gray", 
+                  annotation_text="Base 2020 = 100", annotation_position="top left")
 
-# 3. Utiliser le meilleur modèle pour la prévision
-# Note: On ré-entraine ou on utilise le modèle déjà fité
-fit_arima_optimal = best_model
+    # Ajustement et affichage
+    fig.update_layout(
+        legend_title_text='Légende',
+        title_x=0.5
+    )
 
-# Prévision sur le test set
-pred_arima = fit_arima_optimal.forecast(steps=n_test)
-rmse_arima = np.sqrt(mean_squared_error(test, pred_arima))
-
-print(f"RMSE du modèle optimal ARIMA{best_order} : {rmse_arima:.4f}")
+    # Affiche le graphique actuel (le résultat de fig.show() ou de la génération JSON/PNG)
+    fig.show()
