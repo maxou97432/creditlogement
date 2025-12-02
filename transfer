@@ -1,78 +1,58 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+import itertools
+import warnings
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from sklearn.metrics import mean_squared_error
 
-# 1. PRÉPARATION DE LA SÉRIE TEMPORELLE
-# On s'assure que la série est bien triée par date
-df_analyse = merge.sort_values("Periode").set_index("Periode")
-ts_ecart = df_analyse['Dif'].dropna()
+# Ignorer les avertissements de convergence pour la clarté
+warnings.filterwarnings("ignore")
 
-# 2. SPLIT TRAIN / TEST (Essentiel pour valider la prédiction)
-# On garde les 8 derniers trimestres (2 ans) pour tester la performance
-n_test = 8
-train = ts_ecart.iloc[:-n_test]
-test = ts_ecart.iloc[-n_test:]
+# 1. Définir les plages de paramètres à tester
+# p (Auto-Regressive) : 0 à 3
+# d (Integrated) : 1 (car ADF a dit non-stationnaire) ou 0
+# q (Moving Average) : 0 à 3
+p_values = range(0, 3)
+d_values = [1] # On force la différenciation car la série dérive
+q_values = range(0, 3)
 
-print(f"Période d'entrainement : {train.index.min().date()} à {train.index.max().date()}")
-print(f"Période de test        : {test.index.min().date()} à {test.index.max().date()}")
+# Générer toutes les combinaisons (ex: 0,1,0 | 1,1,0 | 1,1,1 ...)
+pdq = list(itertools.product(p_values, d_values, q_values))
+
+best_aic = float("inf")
+best_order = None
+best_model = None
+
+print("Recherche du meilleur modèle ARIMA en cours...")
+
+# 2. Boucle de test (Grid Search)
+for order in pdq:
+    try:
+        # On entraine le modèle sur le TRAIN set
+        model_temp = ARIMA(train, order=order)
+        results_temp = model_temp.fit()
+        
+        # On récupère l'AIC
+        current_aic = results_temp.aic
+        
+        # Si c'est le meilleur score jusqu'ici, on le garde
+        if current_aic < best_aic:
+            best_aic = current_aic
+            best_order = order
+            best_model = results_temp
+            
+        print(f'ARIMA{order} - AIC:{current_aic:.2f}')
+        
+    except:
+        continue
+
+print("-" * 50)
+print(f"🏆 MEILLEUR MODÈLE : ARIMA{best_order} avec AIC = {best_aic:.2f}")
 print("-" * 50)
 
-# ==============================================================================
-# MODÈLE 1 : ARIMA (AutoRegressive Integrated Moving Average)
-# ==============================================================================
-# Ordre (1,1,0) : On différencie 1 fois (pour la stationnarité) et on regarde le passé (AR=1)
-# C'est un bon point de départ pour un écart qui dérive.
-model_arima = ARIMA(train, order=(1, 1, 0)) 
-fit_arima = model_arima.fit()
+# 3. Utiliser le meilleur modèle pour la prévision
+# Note: On ré-entraine ou on utilise le modèle déjà fité
+fit_arima_optimal = best_model
 
-# Prédiction sur l'ensemble du jeu de test
-pred_arima = fit_arima.forecast(steps=n_test)
+# Prévision sur le test set
+pred_arima = fit_arima_optimal.forecast(steps=n_test)
 rmse_arima = np.sqrt(mean_squared_error(test, pred_arima))
 
-# ==============================================================================
-# MODÈLE 2 : DES (Double Exponential Smoothing / Holt)
-# ==============================================================================
-# trend='add' : On suppose qu'il y a une tendance locale additive (linéaire)
-model_des = ExponentialSmoothing(train, trend='add', seasonal=None, damped_trend=True)
-fit_des = model_des.fit()
-
-# Prédiction
-pred_des = fit_des.forecast(steps=n_test)
-rmse_des = np.sqrt(mean_squared_error(test, pred_des))
-
-# ==============================================================================
-# RÉSULTATS & COMPARAISON
-# ==============================================================================
-
-print(f"RMSE Modèle ARIMA (1,1,0) : {rmse_arima:.4f}")
-print(f"RMSE Modèle DES (Holt)    : {rmse_des:.4f}")
-
-if rmse_arima < rmse_des:
-    print("\n🏆 LE GAGNANT EST : ARIMA")
-    best_pred = pred_arima
-    model_name = "ARIMA"
-else:
-    print("\n🏆 LE GAGNANT EST : DES (Lissage de Holt)")
-    best_pred = pred_des
-    model_name = "DES"
-
-# ==============================================================================
-# VISUALISATION
-# ==============================================================================
-plt.figure(figsize=(12, 6))
-plt.plot(train.index, train, label='Historique (Train)', color='gray')
-plt.plot(test.index, test, label='Réalité (Test)', color='black', linewidth=2)
-
-# Tracé des prévisions
-plt.plot(test.index, pred_arima, label=f'Prévision ARIMA (RMSE={rmse_arima:.2f})', linestyle='--', color='blue')
-plt.plot(test.index, pred_des, label=f'Prévision DES (RMSE={rmse_des:.2f})', linestyle='--', color='red')
-
-plt.title(f'Comparaison des Modèles de Correction de l\'Écart (CL - INSEE)\nZone Test', fontsize=14)
-plt.xlabel('Date')
-plt.ylabel('Valeur de l\'Écart (Points)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.show()
+print(f"RMSE du modèle optimal ARIMA{best_order} : {rmse_arima:.4f}")
