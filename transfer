@@ -1,57 +1,130 @@
-import plotly.express as px
 import pandas as pd
+import numpy as np
+import plotly.express as px
 import plotly.io as pio
+from statsmodels.tsa.arima.model import ARIMA
+import warnings
 
-# Configuration du rendu JSON (pour la compatibilité)
-pio.renderers.default = "notebook" 
+# Configuration
+warnings.filterwarnings("ignore")
+pio.renderers.default = "notebook" # Ou "browser", "png" selon ton IDE
 
-# --- Préparation des données pour le tracé ---
+# --- ÉTAPE 1 : Calcul de l'Indice Corrigé par ARIMA pour chaque segment ---
 
-# 1. Mise en format long (melt)
-df_plot = merge.melt(
+# On prépare une liste pour stocker les résultats corrigés
+corrected_data = []
+
+# On groupe par segment pour ajuster un modèle ARIMA spécifique à chaque zone
+grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+
+print("Calcul des modèles ARIMA par segment en cours...")
+
+for name, group in grouped:
+    zone, type_bien = name
+    group = group.sort_values("Periode").set_index("Periode")
+    
+    # Série de l'écart
+    ts_ecart = group['Dif'].dropna()
+    
+    if len(ts_ecart) > 10: # Sécurité : il faut assez de points
+        try:
+            # On utilise un ARIMA(1,1,0) standard qui marche souvent bien pour la dérive
+            # (Tu peux réintégrer le grid search ici si tu veux être ultra-précis)
+            model = ARIMA(ts_ecart, order=(1, 1, 0))
+            model_fit = model.fit()
+            
+            # On récupère l'écart modélisé (Fitted Values)
+            # Cela représente "l'écart structurel" vu par le modèle à chaque instant
+            ecart_modelise = model_fit.fittedvalues
+            
+            # On remet l'index temporel propre
+            ecart_modelise = ecart_modelise.reindex(group.index)
+            
+            # Calcul de l'indice corrigé
+            # Formule : CL Corrigé = CL Brut - Biais Estimé par ARIMA
+            group['Indice de prix (CL) - Corrigé ARIMA'] = group['Indice de prix (CL)'] - ecart_modelise
+            
+        except Exception as e:
+            print(f"Echec ARIMA pour {name}: {e}")
+            group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
+    else:
+        group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
+        
+    corrected_data.append(group.reset_index())
+
+# Reconstitution du DataFrame complet avec la nouvelle colonne
+merge_corrected = pd.concat(corrected_data, ignore_index=True)
+
+
+# --- ÉTAPE 2 : Préparation pour Plotly (Format Long) ---
+
+df_plot = merge_corrected.melt(
     id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
-    value_vars=["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"],
+    value_vars=[
+        "Indice de prix (INSEE) - Base 2020", 
+        "Indice de prix (CL)", 
+        "Indice de prix (CL) - Corrigé ARIMA"
+    ],
     var_name="Source",
     value_name="Indice_Valeur"
 )
 
-# 2. Création de la colonne de segmentation
+# Création de la colonne de segmentation
 df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
 
-# --- Boucle sur chaque segment ---
+# --- ÉTAPE 3 : Génération des Graphiques ---
 
 segments_uniques = df_plot['Segment'].unique()
 
+print(f"Génération des graphiques pour {len(segments_uniques)} segments...")
+
 for segment in segments_uniques:
-    # Filtre le DataFrame pour le segment actuel
     df_segment = df_plot[df_plot['Segment'] == segment]
     
-    # Création du Graphique Plotly
+    # Nettoyage des NaN pour le graphique (évite les trous dans les lignes)
+    df_segment = df_segment.dropna(subset=["Indice_Valeur"])
+    
+    if df_segment.empty:
+        continue
+
     fig = px.line(
         df_segment,
         x="Periode",
         y="Indice_Valeur",
         color="Source",
         
-        title=f"Évolution Comparée des Indices: {segment} (Base 2020)",
+        # Définir des couleurs spécifiques pour bien distinguer
+        color_discrete_map={
+            "Indice de prix (INSEE) - Base 2020": "black",  # La référence (Réalité)
+            "Indice de prix (CL)": "red",                   # L'original (Biaisé)
+            "Indice de prix (CL) - Corrigé ARIMA": "green"  # La correction (Optimisé)
+        },
+        
+        title=f"Correction Dynamique de l'Indice CL (ARIMA): {segment}",
         labels={
             "Indice_Valeur": "Indice de Prix (Base 2020 = 100)",
-            "Periode": "Date (Trimestre)",
-            "Source": "Source de l'Indice"
+            "Periode": "Date",
+            "Source": "Indicateur"
         },
-        height=450 
+        height=500
     )
 
-    # Ajout de la ligne horizontale de référence (Base 2020 = 100)
-    fig.update_yaxes(range=[60, df_segment["Indice_Valeur"].max() + 10])
-    fig.add_hline(y=100, line_dash="dash", line_color="gray", 
-                  annotation_text="Base 2020 = 100", annotation_position="top left")
+    # Style des lignes : Pointillés pour l'original, Solide pour le corrigé et l'INSEE
+    fig.update_traces(patch={"line": {"dash": "dot"}}, selector={"legendgroup": "Indice de prix (CL)"})
+    fig.update_traces(patch={"line": {"width": 3}}, selector={"legendgroup": "Indice de prix (CL) - Corrigé ARIMA"})
 
-    # Ajustement et affichage
+    # Ajustement de l'axe Y pour zoomer sur les données
+    y_min = df_segment["Indice_Valeur"].min()
+    y_max = df_segment["Indice_Valeur"].max()
+    fig.update_yaxes(range=[y_min - 5, y_max + 5])
+
+    # Ligne de référence 100
+    fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
+
     fig.update_layout(
-        legend_title_text='Légende',
-        title_x=0.5
+        legend_title_text='Comparaison',
+        title_x=0.5,
+        template="plotly_white" # Fond blanc plus pro
     )
 
-    # Affiche le graphique actuel (le résultat de fig.show() ou de la génération JSON/PNG)
     fig.show()
