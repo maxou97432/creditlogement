@@ -1,26 +1,18 @@
-                            OLS Regression Results                            
-==============================================================================
-Dep. Variable:            Delta_INSEE   R-squared:                       0.620
-Model:                            OLS   Adj. R-squared:                  0.619
-Method:                 Least Squares   F-statistic:                     995.1
-Date:              mar., 02 déc. 2025   Prob (F-statistic):          4.09e-257
-Time:                        15:54:49   Log-Likelihood:                -2939.4
-No. Observations:                1224   AIC:                             5885.
-Df Residuals:                    1221   BIC:                             5900.
-Df Model:                           2                                         
-Covariance Type:            nonrobust                                         
-==============================================================================
-                 coef    std err          t      P>|t|      [0.025      0.975]
-------------------------------------------------------------------------------
-const         -0.7315      0.086     -8.542      0.000      -0.899      -0.563
-Delta_CL       0.9563      0.022     43.231      0.000       0.913       1.000
-Ecart_Lag1     0.4750      0.025     19.035      0.000       0.426       0.524
-==============================================================================
-Omnibus:                       32.003   Durbin-Watson:                   2.817
-Prob(Omnibus):                  0.000   Jarque-Bera (JB):               72.056
-Skew:                          -0.017   Prob(JB):                     2.26e-16
-Kurtosis:                       4.188   Cond. No.                         4.29
-==============================================================================
+from statsmodels.tsa.api import SimpleExpSmoothing
+from sklearn.metrics import mean_squared_error
 
-Notes:
-[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+# Supposons que 'merge' contient vos données et la colonne 'Dif' (Ecart)
+ts_ecart = merge.set_index('Periode')['Dif'].dropna()
+
+# 1. Modèle Naïf (Moyenne constante)
+mean_bias = ts_ecart.mean()
+rmse_naif = np.sqrt(((ts_ecart - mean_bias) ** 2).mean())
+
+# 2. Modèle SES (Lissage Exponentiel)
+# On entraine le modèle
+ses_model = SimpleExpSmoothing(ts_ecart).fit(smoothing_level=0.5, optimized=False)
+# fittedvalues donne la prédiction faite pour T sachant les données jusqu'à T-1
+rmse_ses = np.sqrt(mean_squared_error(ts_ecart, ses_model.fittedvalues))
+
+print(f"RMSE avec correction fixe (Moyenne) : {rmse_naif:.4f}")
+print(f"RMSE avec correction dynamique (SES) : {rmse_ses:.4f}")
