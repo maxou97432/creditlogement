@@ -1,27 +1,26 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go # On passe à graph_objects pour plus de flexibilité (zones grisées)
+import plotly.graph_objects as go
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 
-# Configuration
 warnings.filterwarnings("ignore")
-n_forecast = 2 # Nombre de trimestres à prédire
+n_forecast = 2 
 
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("Génération des analyses complètes (Correction + Prévision)...")
+print("Génération des graphiques de l'Ajustement Prévu (Forecasted Bias)...")
 
 for name, group in grouped:
     zone, type_bien = name
     group = group.sort_values("Periode").set_index("Periode")
     
+    # On analyse UNIQUEMENT l'écart (La correction à appliquer)
     ts_ecart = group['Dif'].dropna()
-    last_cl_value = group['Indice de prix (CL)'].iloc[-1]
     
     if len(ts_ecart) > 12:
         try:
-            # 1. Modélisation Holt
+            # Modélisation de la dynamique de l'écart
             model = ExponentialSmoothing(
                 ts_ecart, 
                 trend='add', 
@@ -30,91 +29,73 @@ for name, group in grouped:
             )
             model_fit = model.fit()
             
-            # --- PARTIE 1 : CORRECTION DU PASSÉ (Backtest) ---
-            ecart_modelise = model_fit.fittedvalues
-            # On aligne sur l'index du groupe pour pouvoir soustraire
-            ecart_modelise = ecart_modelise.reindex(group.index)
-            
-            # Calcul de la courbe corrigée historique
-            # CL Corrigé = CL Brut - Biais Estimé
-            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            
-            # --- PARTIE 2 : PRÉVISION DU FUTUR ---
+            # Prévision de l'écart futur
             forecast_bias = model_fit.forecast(n_forecast)
             
-            # Calcul de l'intervalle de confiance (basé sur le sigma des résidus)
+            # Intervalle de confiance
             sigma = np.std(model_fit.resid)
             confidence_interval = []
             for step in range(1, n_forecast + 1):
                 confidence_interval.append(1.96 * sigma * np.sqrt(step))
             
-            # Estimation de l'INSEE futur (CL constant - Biais futur)
-            # Note: Idéalement, remplacez last_cl_value par votre propre prévision de l'indice CL si vous l'avez
-            pred_values = last_cl_value - forecast_bias
+            upper_bound = forecast_bias + confidence_interval
+            lower_bound = forecast_bias - confidence_interval
             
-            upper_bound = pred_values + confidence_interval
-            lower_bound = pred_values - confidence_interval
-            
-            # Dates futures
-            last_date = group.index[-1]
+            # Dates
+            last_date = ts_ecart.index[-1]
             future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
             
-            # --- VISUALISATION (Plotly Graph Objects) ---
+            # --- VISUALISATION (Focus sur l'Ajustement) ---
             
             fig = go.Figure()
 
-            # 1. Historique INSEE (Référence)
+            # 1. Historique de l'écart réel
             fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='INSEE (Réalité)',
-                line=dict(color='black', width=2)
+                x=ts_ecart.index, y=ts_ecart,
+                mode='lines+markers', name='Écart Historique (CL - INSEE)',
+                line=dict(color='gray'), marker=dict(size=4)
             ))
 
-            # 2. Historique CL Original (Pour montrer la dérive)
+            # 2. Tendance lissée par le modèle (Pour voir si le modèle "comprend" l'histoire)
             fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='CL (Brut)',
-                line=dict(color='red', width=1, dash='dot')
+                x=ts_ecart.index, y=model_fit.fittedvalues,
+                mode='lines', name='Tendance Modélisée (Holt)',
+                line=dict(color='blue', width=1)
             ))
 
-            # 3. Historique CL Corrigé (Notre modèle)
+            # 3. Prévision de l'ajustement (Ligne Rouge)
             fig.add_trace(go.Scatter(
-                x=group.index, y=cl_corrected_history,
-                mode='lines', name='CL Corrigé (Holt)',
-                line=dict(color='blue', width=2)
+                x=future_dates, y=forecast_bias,
+                mode='lines+markers+text', name='Ajustement Prévu',
+                line=dict(color='red', width=3),
+                text=[f"{v:.2f} pts" for v in forecast_bias], # Affiche la valeur exacte
+                textposition="top center"
             ))
 
-            # 4. Prévision Future (Pointillé ou Marqueurs)
-            fig.add_trace(go.Scatter(
-                x=future_dates, y=pred_values,
-                mode='lines+markers', name=f'Prévision T+{n_forecast}',
-                line=dict(color='green', width=3)
-            ))
-
-            # 5. Zone de Confiance
+            # 4. Zone d'incertitude
             fig.add_trace(go.Scatter(
                 x=future_dates + future_dates[::-1],
                 y=list(upper_bound) + list(lower_bound)[::-1],
                 fill='toself',
-                fillcolor='rgba(0, 255, 0, 0.2)', # Vert transparent
+                fillcolor='rgba(255, 0, 0, 0.2)',
                 line=dict(color='rgba(255,255,255,0)'),
-                hoverinfo="skip",
-                showlegend=True,
-                name='Intervalle de Confiance (95%)'
+                showlegend=True, name='Marge d\'erreur (95%)'
             ))
 
-            # Mise en page
+            # Ligne Zéro (Si l'écart est à 0, CL = INSEE)
+            fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
+
             fig.update_layout(
-                title=f"Correction Dynamique & Prévision : {zone} - {type_bien}",
-                yaxis_title="Indice (Base 2020 = 100)",
+                title=f"Ajustement à appliquer sur l'Indice CL : {zone} - {type_bien}",
+                yaxis_title="Points d'indice (Correction)",
                 template="plotly_white",
-                height=600,
+                height=500,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
-            # Ligne de séparation Passé/Futur
+            # Séparation Passé/Futur
             fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
-            
+
             fig.show()
 
         except Exception as e:
