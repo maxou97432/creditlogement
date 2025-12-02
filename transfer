@@ -1,102 +1,130 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import plotly.express as px
+import plotly.io as pio
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 
+# Configuration
 warnings.filterwarnings("ignore")
-n_forecast = 2 
+pio.renderers.default = "notebook" 
 
+# --- ÉTAPE 1 : Calcul de l'Indice Corrigé par HOLT (DES) ---
+
+corrected_data = []
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("Génération des graphiques de l'Ajustement Prévu (Forecasted Bias)...")
+print("Calcul des modèles de Lissage de Holt par segment...")
 
 for name, group in grouped:
     zone, type_bien = name
+    # Tri temporel indispensable
     group = group.sort_values("Periode").set_index("Periode")
     
-    # On analyse UNIQUEMENT l'écart (La correction à appliquer)
+    # On travaille sur la série de l'écart
     ts_ecart = group['Dif'].dropna()
     
-    if len(ts_ecart) > 12:
+    # Sécurité : Holt a besoin d'un peu plus de données que la moyenne simple
+    if len(ts_ecart) > 12: 
         try:
-            # Modélisation de la dynamique de l'écart
+            # Configuration du modèle de Holt (Tendance Additive)
+            # damped_trend=True est souvent conseillé pour éviter que la tendance ne parte à l'infini
             model = ExponentialSmoothing(
                 ts_ecart, 
                 trend='add', 
-                damped_trend=True, 
+                seasonal=None, 
+                damped_trend=True,
                 initialization_method="estimated"
             )
             model_fit = model.fit()
             
-            # Prévision de l'écart futur
-            forecast_bias = model_fit.forecast(n_forecast)
+            # Récupération des valeurs ajustées (Le "Biais modélisé")
+            ecart_modelise = model_fit.fittedvalues
             
-            # Intervalle de confiance
-            sigma = np.std(model_fit.resid)
-            confidence_interval = []
-            for step in range(1, n_forecast + 1):
-                confidence_interval.append(1.96 * sigma * np.sqrt(step))
+            # Réalignement sur l'index temporel
+            ecart_modelise = ecart_modelise.reindex(group.index)
             
-            upper_bound = forecast_bias + confidence_interval
-            lower_bound = forecast_bias - confidence_interval
+            # CALCUL DE L'INDICE CORRIGÉ
+            # CL Corrigé = CL Brut - Biais Estimé par Holt
+            group['Indice de prix (CL) - Corrigé Holt'] = group['Indice de prix (CL)'] - ecart_modelise
             
-            # Dates
-            last_date = ts_ecart.index[-1]
-            future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
-            
-            # --- VISUALISATION (Focus sur l'Ajustement) ---
-            
-            fig = go.Figure()
-
-            # 1. Historique de l'écart réel
-            fig.add_trace(go.Scatter(
-                x=ts_ecart.index, y=ts_ecart,
-                mode='lines+markers', name='Écart Historique (CL - INSEE)',
-                line=dict(color='gray'), marker=dict(size=4)
-            ))
-
-            # 2. Tendance lissée par le modèle (Pour voir si le modèle "comprend" l'histoire)
-            fig.add_trace(go.Scatter(
-                x=ts_ecart.index, y=model_fit.fittedvalues,
-                mode='lines', name='Tendance Modélisée (Holt)',
-                line=dict(color='blue', width=1)
-            ))
-
-            # 3. Prévision de l'ajustement (Ligne Rouge)
-            fig.add_trace(go.Scatter(
-                x=future_dates, y=forecast_bias,
-                mode='lines+markers+text', name='Ajustement Prévu',
-                line=dict(color='red', width=3),
-                text=[f"{v:.2f} pts" for v in forecast_bias], # Affiche la valeur exacte
-                textposition="top center"
-            ))
-
-            # 4. Zone d'incertitude
-            fig.add_trace(go.Scatter(
-                x=future_dates + future_dates[::-1],
-                y=list(upper_bound) + list(lower_bound)[::-1],
-                fill='toself',
-                fillcolor='rgba(255, 0, 0, 0.2)',
-                line=dict(color='rgba(255,255,255,0)'),
-                showlegend=True, name='Marge d\'erreur (95%)'
-            ))
-
-            # Ligne Zéro (Si l'écart est à 0, CL = INSEE)
-            fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
-
-            fig.update_layout(
-                title=f"Ajustement à appliquer sur l'Indice CL : {zone} - {type_bien}",
-                yaxis_title="Points d'indice (Correction)",
-                template="plotly_white",
-                height=500,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            
-            # Séparation Passé/Futur
-            fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
-
-            fig.show()
-
         except Exception as e:
-            print(f"Erreur sur {name}: {e}")
+            print(f"Echec Holt pour {name}: {e}")
+            group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+    else:
+        group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+        
+    corrected_data.append(group.reset_index())
+
+# Reconstitution du DataFrame
+merge_corrected = pd.concat(corrected_data, ignore_index=True)
+
+
+# --- ÉTAPE 2 : Préparation Plotly ---
+
+df_plot = merge_corrected.melt(
+    id_vars=["Periode", "VAL_MAILLE_GEO", "CD_TYPE_BIEN"],
+    value_vars=[
+        "Indice de prix (INSEE) - Base 2020", 
+        "Indice de prix (CL)", 
+        "Indice de prix (CL) - Corrigé Holt"
+    ],
+    var_name="Source",
+    value_name="Indice_Valeur"
+)
+
+df_plot['Segment'] = df_plot['VAL_MAILLE_GEO'] + ' - ' + df_plot['CD_TYPE_BIEN']
+
+# --- ÉTAPE 3 : Génération des Graphiques ---
+
+segments_uniques = df_plot['Segment'].unique()
+
+print(f"Génération des graphiques pour {len(segments_uniques)} segments...")
+
+for segment in segments_uniques:
+    df_segment = df_plot[df_plot['Segment'] == segment]
+    df_segment = df_segment.dropna(subset=["Indice_Valeur"])
+    
+    if df_segment.empty:
+        continue
+
+    fig = px.line(
+        df_segment,
+        x="Periode",
+        y="Indice_Valeur",
+        color="Source",
+        
+        # Couleurs : Noir (Réalité), Rouge (Original), Bleu (Correction Holt)
+        color_discrete_map={
+            "Indice de prix (INSEE) - Base 2020": "black",
+            "Indice de prix (CL)": "red",
+            "Indice de prix (CL) - Corrigé Holt": "blue" 
+        },
+        
+        title=f"Correction Dynamique (Holt) vs INSEE : {segment}",
+        labels={
+            "Indice_Valeur": "Indice (Base 2020 = 100)",
+            "Periode": "Trimestre",
+            "Source": "Indicateur"
+        },
+        height=500
+    )
+
+    # Styles de lignes pour bien distinguer
+    # Pointillés pour l'original (CL) qui dérive
+    fig.update_traces(patch={"line": {"dash": "dot", "width": 2}}, selector={"legendgroup": "Indice de prix (CL)"})
+    # Trait épais solide pour la correction
+    fig.update_traces(patch={"line": {"width": 3}}, selector={"legendgroup": "Indice de prix (CL) - Corrigé Holt"})
+    # Trait solide normal pour l'INSEE
+    fig.update_traces(patch={"line": {"width": 2}}, selector={"legendgroup": "Indice de prix (INSEE) - Base 2020"})
+
+    # Zoom Y intelligent
+    y_min = df_segment["Indice_Valeur"].min()
+    y_max = df_segment["Indice_Valeur"].max()
+    fig.update_yaxes(range=[y_min - 5, y_max + 5])
+
+    # Ligne 100
+    fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
+
+    fig.update_layout(template="plotly_white", title_x=0.5)
+    fig.show()
