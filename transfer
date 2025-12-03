@@ -1,113 +1,147 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 from statsmodels.tsa.arima.model import ARIMA
-import plotly.io as pio
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.api import SimpleExpSmoothing
+from sklearn.metrics import mean_squared_error
+import itertools
 import warnings
+# 1. PRÉPARATION DE LA SÉRIE TEMPORELLE
+# On s'assure que la série est bien triée par date
+df_analyse = merge.sort_values("Periode").set_index("Periode")
+df_analyse['Dif'] = df_analyse['Indice de prix (CL)'] - df_analyse['Indice de prix (INSEE) - Base 2020']
+ts_ecart = df_analyse.groupby('Periode')['Dif'].mean()
 
-# Configuration
+# 2. SPLIT TRAIN / TEST (Essentiel pour valider la prédiction)
+# On garde les 8 derniers trimestres (2 ans) pour tester la performance
+n_test = 8
+
+
+
+# Conversion en trimestriel
+ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
+
+
+
+
+train = ts_ecart.iloc[:-n_test]
+test = ts_ecart.iloc[-n_test:]
+
+
+# Ignorer les avertissements de convergence pour la clarté
 warnings.filterwarnings("ignore")
-pio.renderers.default = "notebook" 
 
-# --- Initialisation ---
-n_forecast = 2 
-corrected_data = []
-future_adjustments = []
+# 1. Définir les plages de paramètres à tester
+# p (Auto-Regressive) : 0 à 3
+# d (Integrated) : 1 (car ADF a dit non-stationnaire) ou 0
+# q (Moving Average) : 0 à 3
+p_values = range(0, 6)
+d_values = [1] # On force la différenciation car la série dérive
+q_values = range(0, 6)
 
-grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+# Générer toutes les combinaisons (ex: 0,1,0 | 1,1,0 | 1,1,1 ...)
+pdq = list(itertools.product(p_values, d_values, q_values))
 
-print("🚀 Démarrage de la modélisation ARIMA(4,1,3) (Graphique Historique + Print Prévision)...")
+best_aic = float("inf")
+best_order = None
+best_model = None
 
-for name, group in grouped:
-    zone, type_bien = name
-    
-    # 1. Préparation des données
-    group = group.sort_values("Periode").set_index("Periode")
-    group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
-    
-    # Série de l'écart
-    ts_ecart = group['Dif'].dropna()
-    
-    if len(ts_ecart) > 15:
-        try:
-            # 2. Modélisation ARIMA(4, 1, 3)
-            model = ARIMA(ts_ecart, order=(4, 1, 3))
-            model_fit = model.fit()
+print("Recherche du meilleur modèle ARIMA en cours...")
+
+# 2. Boucle de test (Grid Search)
+for order in pdq:
+    try:
+        # On entraine le modèle sur le TRAIN set
+        model_temp = ARIMA(train, order=order)
+        results_temp = model_temp.fit()
+        
+        # On récupère l'AIC
+        current_aic = results_temp.aic
+        
+        # Si c'est le meilleur score jusqu'ici, on le garde
+        if current_aic < best_aic:
+            best_aic = current_aic
+            best_order = order
+            best_model = results_temp
             
-            # --- A. Correction Historique (Pour le Graphique) ---
-            ecart_modelise = model_fit.fittedvalues.reindex(group.index)
-            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé ARIMA'] = cl_corrected_history
-            
-            # --- B. Calcul de la Prévision Future (Pour le Print uniquement) ---
-            forecast_result = model_fit.get_forecast(steps=n_forecast)
-            forecast_bias = forecast_result.predicted_mean
-            conf_int = forecast_result.conf_int(alpha=0.05)
-            
-            # Stockage des valeurs pour le tableau
-            future_adjustments.append({
-                "Zone": zone,
-                "Type": type_bien,
-                "Ajustement T+1": round(forecast_bias.iloc[0], 2),
-                "Ajustement T+2": round(forecast_bias.iloc[1], 2),
-                "Marge Erreur T+1": round((conf_int.iloc[0, 1] - conf_int.iloc[0, 0])/2, 2)
-            })
+        print(f'ARIMA{order} - AIC:{current_aic:.2f}')
+        
+    except:
+        continue
 
-            # =================================================================
-            # 3. Visualisation (HISTORIQUE UNIQUEMENT)
-            # =================================================================
-            
-            fig = go.Figure()
+print("-" * 50)
+print(f"🏆 MEILLEUR MODÈLE : ARIMA{best_order} avec AIC = {best_aic:.2f}")
+print("-" * 50)
 
-            # Historique INSEE (Noir)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='INSEE (Réalité)',
-                line=dict(color='black', width=3)
-            ))
 
-            # Historique CL Brut (Rouge Pointillé)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='CL (Brut)',
-                line=dict(color='red', width=1, dash='dot')
-            ))
+print(f"Période d'entrainement : {train.index.min().strftime('%Y-Q%q')} à {train.index.max().strftime('%Y-Q%q')}")
+print(f"Période de test        : {test.index.max().strftime('%Y-Q%q')} à {test.index.max().strftime('%Y-Q%q')}")
+print("-" * 50)
 
-            # Historique CL Corrigé ARIMA (Bleu)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=cl_corrected_history,
-                mode='lines', name='CL Corrigé (ARIMA)',
-                line=dict(color='blue', width=2)
-            ))
+# ==============================================================================
+# MODÈLE 1 : ARIMA (AutoRegressive Integrated Moving Average)
+# ==============================================================================
+# Ordre (0,1,1) :
 
-            # Pas de traces futures ici (supprimées comme demandé)
+model_arima = ARIMA(train, order=(4, 1, 3)) 
+fit_arima = model_arima.fit()
 
-            fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction ARIMA",
-                yaxis_title="Indice (Base 2020 = 100)",
-                template="plotly_white",
-                height=500,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            
-            fig.show()
-            
-        except Exception as e:
-            print(f"⚠️ Echec ARIMA pour {name} : {e}")
-            
-    corrected_data.append(group.reset_index())
+# Prédiction sur l'ensemble du jeu de test
+pred_arima = fit_arima.forecast(steps=n_test)
+rmse_arima = np.sqrt(mean_squared_error(test, pred_arima))
 
-# Reconstitution
-merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-# --- Affichage du Tableau de Bord (Prévisions) ---
-if future_adjustments:
-    df_previsions = pd.DataFrame(future_adjustments)
-    print("\n" + "="*80)
-    print("📊 TABLEAU DE BORD : VALEURS D'AJUSTEMENT PRÉVUES (ARIMA 4,1,3)")
-    print("Ces valeurs sont à soustraire de l'indice CL futur pour obtenir l'estimation INSEE.")
-    print("="*80)
-    pd.set_option('display.max_rows', None)
-    display(df_previsions)
+# ==============================================================================
+# MODÈLE 2 : SES (Simple Exponential Smoothing)
+# ==============================================================================
+# On entraine le modèle
+ses_model = SimpleExpSmoothing(train).fit(optimized=True)
+
+
+#Prédiction
+pred_ses = ses_model.forecast(steps=n_test)
+rmse_ses = np.sqrt(mean_squared_error(test, pred_ses))
+
+# ==============================================================================
+# MODÈLE 2 : DES (Double Exponential Smoothing / Holt)
+# ==============================================================================
+# trend='add' : On suppose qu'il y a une tendance locale additive (linéaire)
+model_des = ExponentialSmoothing(train, trend='add', seasonal=None, damped_trend=True)
+fit_des = model_des.fit()
+
+# Prédiction
+pred_des = fit_des.forecast(steps=n_test)
+rmse_des = np.sqrt(mean_squared_error(test, pred_des))
+
+# ==============================================================================
+# RÉSULTATS & COMPARAISON
+# ==============================================================================
+
+print(f"RMSE Modèle ARIMA (4,1,3) : {rmse_arima:.4f}")
+print(f"RMSE Modèle SES     : {rmse_ses:.4f}")
+print(f"RMSE Modèle DES (Holt)    : {rmse_des:.4f}")
+
+
+
+# Sélection du meilleur modèle (plus faible RMSE)
+rmse_dict = {
+    "ARIMA(4,1,3)": rmse_arima,
+    "SES": rmse_ses,
+    "DES (Holt, damped add)": rmse_des
+}
+
+best_model_name = min(rmse_dict, key=rmse_dict.get)
+print(f"\nLE MEILLEUR MODELE EST : {best_model_name}")
+
+# Récupération des prédictions du meilleur modèle
+if best_model_name == "ARIMA(4,1,3)":
+    best_pred = pred_arima
+elif best_model_name == "SES":
+    best_pred = pred_ses
 else:
-    print("\nAucune prévision générée.")
+    best_pred = pred_des
+
+
+tu saurais me dire pk: Période d'entrainement : 2015-Q1 à 2023-Q2
+Période de test        : 2025-Q2 à 2025-Q2
