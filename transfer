@@ -16,149 +16,98 @@ future_adjustments = []
 
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("🚀 Démarrage de la modélisation ARIMA(4,1,3)...")
+print("🚀 Démarrage de la modélisation ARIMA(4,1,3) (Graphique Historique + Print Prévision)...")
 
 for name, group in grouped:
     zone, type_bien = name
     
     # 1. Préparation des données
     group = group.sort_values("Periode").set_index("Periode")
-    
-    # On initialise la colonne corrigée
     group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
     
-    # Série de l'écart (Biais)
+    # Série de l'écart
     ts_ecart = group['Dif'].dropna()
     
-    # Dernières valeurs connues
-    last_cl_value = group['Indice de prix (CL)'].iloc[-1]
-    last_date = group.index[-1]
-    
-    # ARIMA(4,1,3) est lourd, il faut plus de données (ex: > 20 points)
     if len(ts_ecart) > 15:
         try:
-            # =================================================================
             # 2. Modélisation ARIMA(4, 1, 3)
-            # =================================================================
-            # enforce_stationarity=False aide parfois la convergence sur des séries difficiles
             model = ARIMA(ts_ecart, order=(4, 1, 3))
             model_fit = model.fit()
             
-            # =================================================================
-            # 3. Calculs : Passé et Futur
-            # =================================================================
-            
-            # --- A. Correction Historique ---
-            # fittedvalues donne la reconstruction du passé par le modèle
+            # --- A. Correction Historique (Pour le Graphique) ---
             ecart_modelise = model_fit.fittedvalues.reindex(group.index)
-            
-            # Calcul de la courbe corrigée
             cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
             group['Indice de prix (CL) - Corrigé ARIMA'] = cl_corrected_history
             
-            # --- B. Prévision Future ---
-            # get_forecast gère automatiquement les intervalles de confiance pour ARIMA
+            # --- B. Calcul de la Prévision Future (Pour le Print uniquement) ---
             forecast_result = model_fit.get_forecast(steps=n_forecast)
-            
-            # Le biais prévu (Moyenne)
             forecast_bias = forecast_result.predicted_mean
+            conf_int = forecast_result.conf_int(alpha=0.05)
             
-            # Les intervalles de confiance du biais (Lower/Upper)
-            conf_int = forecast_result.conf_int(alpha=0.05) # 95%
-            
-            # Projection de l'indice INSEE
-            # INSEE = CL - Biais
-            pred_values = last_cl_value - forecast_bias
-            
-            # Attention aux signes pour les bornes :
-            # INSEE_Haut = CL - Biais_Bas
-            # INSEE_Bas = CL - Biais_Haut
-            # conf_int colonnes : 0=lower, 1=upper
-            upper_bound = last_cl_value - conf_int.iloc[:, 0] 
-            lower_bound = last_cl_value - conf_int.iloc[:, 1]
-            
-            # Dates futures
-            future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
-            
-            # Stockage résultats
+            # Stockage des valeurs pour le tableau
             future_adjustments.append({
                 "Zone": zone,
                 "Type": type_bien,
                 "Ajustement T+1": round(forecast_bias.iloc[0], 2),
                 "Ajustement T+2": round(forecast_bias.iloc[1], 2),
-                # Marge approximative (moyenne des écarts bornes)
                 "Marge Erreur T+1": round((conf_int.iloc[0, 1] - conf_int.iloc[0, 0])/2, 2)
             })
 
             # =================================================================
-            # 4. Visualisation
+            # 3. Visualisation (HISTORIQUE UNIQUEMENT)
             # =================================================================
             
             fig = go.Figure()
 
-            # Historique INSEE
+            # Historique INSEE (Noir)
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
                 mode='lines', name='INSEE (Réalité)',
                 line=dict(color='black', width=3)
             ))
 
-            # Historique CL Brut
+            # Historique CL Brut (Rouge Pointillé)
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (CL)'],
                 mode='lines', name='CL (Brut)',
                 line=dict(color='red', width=1, dash='dot')
             ))
 
-            # Historique CL Corrigé ARIMA
+            # Historique CL Corrigé ARIMA (Bleu)
             fig.add_trace(go.Scatter(
                 x=group.index, y=cl_corrected_history,
                 mode='lines', name='CL Corrigé (ARIMA)',
                 line=dict(color='blue', width=2)
             ))
 
-            # Futur Prévision
-            fig.add_trace(go.Scatter(
-                x=future_dates, y=pred_values,
-                mode='lines+markers', name=f'Prévision T+{n_forecast}',
-                line=dict(color='green', width=3)
-            ))
+            # Pas de traces futures ici (supprimées comme demandé)
 
-            # Futur Zone de Confiance
-            fig.add_trace(go.Scatter(
-                x=future_dates + future_dates[::-1],
-                y=list(upper_bound) + list(lower_bound)[::-1],
-                fill='toself', fillcolor='rgba(0, 255, 0, 0.2)',
-                line=dict(color='rgba(255,255,255,0)'),
-                showlegend=True, name='Intervalle ARIMA (95%)'
-            ))
-
-            fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
             fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Correction ARIMA(4,1,3)",
+                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction ARIMA",
                 yaxis_title="Indice (Base 2020 = 100)",
                 template="plotly_white",
-                height=550,
+                height=500,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
             fig.show()
             
         except Exception as e:
-            print(f"⚠️ Echec ARIMA pour {name} (Données insuffisantes ou non-convergence)")
+            print(f"⚠️ Echec ARIMA pour {name} : {e}")
             
     corrected_data.append(group.reset_index())
 
 # Reconstitution
 merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-# Affichage Tableau
+# --- Affichage du Tableau de Bord (Prévisions) ---
 if future_adjustments:
     df_previsions = pd.DataFrame(future_adjustments)
     print("\n" + "="*80)
-    print("📊 TABLEAU DE BORD : AJUSTEMENTS PRÉVUS (ARIMA 4,1,3)")
+    print("📊 TABLEAU DE BORD : VALEURS D'AJUSTEMENT PRÉVUES (ARIMA 4,1,3)")
+    print("Ces valeurs sont à soustraire de l'indice CL futur pour obtenir l'estimation INSEE.")
     print("="*80)
     pd.set_option('display.max_rows', None)
     display(df_previsions)
 else:
-    print("\nAucune prévision générée. Vérifiez la taille de vos séries (ARIMA demande > 15 pts).")
+    print("\nAucune prévision générée.")
