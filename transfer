@@ -1,141 +1,141 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.arima.model import ARIMA
 import plotly.io as pio
 import warnings
 
 # Configuration
 warnings.filterwarnings("ignore")
-pio.renderers.default = "notebook" # Changez en "browser" si les graphs ne s'affichent pas
+pio.renderers.default = "notebook" 
 
 # --- Initialisation ---
-n_forecast = 2 # Nombre de trimestres à prédire (T+1, T+2)
-corrected_data = [] # Pour stocker l'historique corrigé
-future_adjustments = [] # Pour stocker les valeurs à appliquer demain
+n_forecast = 2 
+corrected_data = []
+future_adjustments = []
 
-# Groupement par zone et type de bien
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("🚀 Démarrage de la modélisation Holt (Backtest + Prévision)...")
+print("🚀 Démarrage de la modélisation ARIMA(4,1,3)...")
 
 for name, group in grouped:
     zone, type_bien = name
     
     # 1. Préparation des données
-    # On s'assure que les dates sont l'index pour les séries temporelles
     group = group.sort_values("Periode").set_index("Periode")
     
-    # On initialise la colonne corrigée à NaN (évite le crash si le modèle échoue)
-    group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+    # On initialise la colonne corrigée
+    group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
     
     # Série de l'écart (Biais)
     ts_ecart = group['Dif'].dropna()
     
-    # On a besoin de la dernière valeur connue de CL pour projeter les courbes
+    # Dernières valeurs connues
     last_cl_value = group['Indice de prix (CL)'].iloc[-1]
     last_date = group.index[-1]
     
-    # Sécurité : On ne lance le modèle que si on a assez de points (ex: > 8 trimestres)
-    if len(ts_ecart) > 8:
+    # ARIMA(4,1,3) est lourd, il faut plus de données (ex: > 20 points)
+    if len(ts_ecart) > 15:
         try:
             # =================================================================
-            # 2. Modélisation (Lissage de Holt)
+            # 2. Modélisation ARIMA(4, 1, 3)
             # =================================================================
-            model = ExponentialSmoothing(
-                ts_ecart, 
-                trend='add', 
-                seasonal=None, 
-                damped_trend=True, 
-                initialization_method="estimated"
-            )
+            # enforce_stationarity=False aide parfois la convergence sur des séries difficiles
+            model = ARIMA(ts_ecart, order=(4, 1, 3))
             model_fit = model.fit()
             
             # =================================================================
-            # 3. Calculs : Passé (Backtest) et Futur (Forecast)
+            # 3. Calculs : Passé et Futur
             # =================================================================
             
             # --- A. Correction Historique ---
-            # On récupère le biais que le modèle aurait prédit dans le passé
+            # fittedvalues donne la reconstruction du passé par le modèle
             ecart_modelise = model_fit.fittedvalues.reindex(group.index)
             
-            # On crée la courbe corrigée : CL Brut - Biais Modélisé
+            # Calcul de la courbe corrigée
             cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé Holt'] = cl_corrected_history
+            group['Indice de prix (CL) - Corrigé ARIMA'] = cl_corrected_history
             
             # --- B. Prévision Future ---
-            # On prédit le biais pour les prochains trimestres
-            forecast_bias = model_fit.forecast(n_forecast)
+            # get_forecast gère automatiquement les intervalles de confiance pour ARIMA
+            forecast_result = model_fit.get_forecast(steps=n_forecast)
             
-            # Calcul des intervalles de confiance (basé sur l'erreur standard résiduelle)
-            sigma = np.std(model_fit.resid)
-            confidence_interval = [1.96 * sigma * np.sqrt(step) for step in range(1, n_forecast + 1)]
+            # Le biais prévu (Moyenne)
+            forecast_bias = forecast_result.predicted_mean
             
-            # Projection de l'indice INSEE (CL constant - Biais futur)
-            # C'est ce qu'on s'attend à voir si CL ne bougeait pas
+            # Les intervalles de confiance du biais (Lower/Upper)
+            conf_int = forecast_result.conf_int(alpha=0.05) # 95%
+            
+            # Projection de l'indice INSEE
+            # INSEE = CL - Biais
             pred_values = last_cl_value - forecast_bias
-            upper_bound = pred_values + confidence_interval
-            lower_bound = pred_values - confidence_interval
+            
+            # Attention aux signes pour les bornes :
+            # INSEE_Haut = CL - Biais_Bas
+            # INSEE_Bas = CL - Biais_Haut
+            # conf_int colonnes : 0=lower, 1=upper
+            upper_bound = last_cl_value - conf_int.iloc[:, 0] 
+            lower_bound = last_cl_value - conf_int.iloc[:, 1]
             
             # Dates futures
             future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
             
-            # Stockage des ajustements pour le tableau final
+            # Stockage résultats
             future_adjustments.append({
                 "Zone": zone,
                 "Type": type_bien,
                 "Ajustement T+1": round(forecast_bias.iloc[0], 2),
                 "Ajustement T+2": round(forecast_bias.iloc[1], 2),
-                "Marge Erreur": round(confidence_interval[0], 2)
+                # Marge approximative (moyenne des écarts bornes)
+                "Marge Erreur T+1": round((conf_int.iloc[0, 1] - conf_int.iloc[0, 0])/2, 2)
             })
 
             # =================================================================
-            # 4. Visualisation (Graphique Complet)
+            # 4. Visualisation
             # =================================================================
             
             fig = go.Figure()
 
-            # Historique : INSEE (Noir)
+            # Historique INSEE
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
                 mode='lines', name='INSEE (Réalité)',
                 line=dict(color='black', width=3)
             ))
 
-            # Historique : CL Brut (Rouge Pointillé) -> Montre la dérive
+            # Historique CL Brut
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (CL)'],
                 mode='lines', name='CL (Brut)',
                 line=dict(color='red', width=1, dash='dot')
             ))
 
-            # Historique : CL Corrigé (Bleu) -> Montre l'efficacité du modèle
+            # Historique CL Corrigé ARIMA
             fig.add_trace(go.Scatter(
                 x=group.index, y=cl_corrected_history,
-                mode='lines', name='CL Corrigé (Backtest)',
+                mode='lines', name='CL Corrigé (ARIMA)',
                 line=dict(color='blue', width=2)
             ))
 
-            # Futur : Prévision (Vert)
+            # Futur Prévision
             fig.add_trace(go.Scatter(
                 x=future_dates, y=pred_values,
                 mode='lines+markers', name=f'Prévision T+{n_forecast}',
                 line=dict(color='green', width=3)
             ))
 
-            # Futur : Zone de confiance (Vert pâle)
+            # Futur Zone de Confiance
             fig.add_trace(go.Scatter(
                 x=future_dates + future_dates[::-1],
                 y=list(upper_bound) + list(lower_bound)[::-1],
                 fill='toself', fillcolor='rgba(0, 255, 0, 0.2)',
                 line=dict(color='rgba(255,255,255,0)'),
-                showlegend=True, name='Intervalle de Confiance (95%)'
+                showlegend=True, name='Intervalle ARIMA (95%)'
             ))
 
-            # Mise en page
             fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
             fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Correction Dynamique & Prévision",
+                title=f"<b>{zone} - {type_bien}</b> : Correction ARIMA(4,1,3)",
                 yaxis_title="Indice (Base 2020 = 100)",
                 template="plotly_white",
                 height=550,
@@ -145,23 +145,20 @@ for name, group in grouped:
             fig.show()
             
         except Exception as e:
-            print(f"⚠️ Echec de la modélisation pour {name}: {e}")
+            print(f"⚠️ Echec ARIMA pour {name} (Données insuffisantes ou non-convergence)")
             
-    # On remet l'index en colonne pour la concaténation finale
     corrected_data.append(group.reset_index())
 
-# --- Reconstitution du DataFrame Global ---
+# Reconstitution
 merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-# --- Affichage du Tableau de Bord ---
+# Affichage Tableau
 if future_adjustments:
     df_previsions = pd.DataFrame(future_adjustments)
     print("\n" + "="*80)
-    print("📊 TABLEAU DE BORD OPÉRATIONNEL : AJUSTEMENTS À APPLIQUER")
-    print("Formule : Indice INSEE Prévu = Indice CL du trimestre - Ajustement")
+    print("📊 TABLEAU DE BORD : AJUSTEMENTS PRÉVUS (ARIMA 4,1,3)")
     print("="*80)
-    # Affichage joli avec pandas
     pd.set_option('display.max_rows', None)
     display(df_previsions)
 else:
-    print("\nAucune prévision n'a pu être générée (pas assez de données).")
+    print("\nAucune prévision générée. Vérifiez la taille de vos séries (ARIMA demande > 15 pts).")
