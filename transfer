@@ -1,45 +1,21 @@
-### 1. Test t de Student – Significativité de l’écart moyen
 
-**Objectif :** Vérifier si l’écart moyen entre les deux indices est statistiquement différent de zéro.
+### Modèle à Correction d'Erreur (ECM)
 
-* **Hypothèses :**
-  * $H_0 : \mu = 0$ (L’écart moyen est nul, pas de différence réelle).
-  * $H_1 : \mu \neq 0$ (L’écart moyen est différent de 0, il existe un biais réel).
+L’objectif est d’examiner s’il existe un mécanisme de **rappel** entre les deux indices, c’est-à-dire une relation de long terme qui contraint les écarts à revenir vers un équilibre.
 
-* **Statistique de test :**
-$$t = \frac{\bar{x} - \mu_0}{s / \sqrt{n}}$$
-  *où : $\bar{x}$ est la moyenne observée, $\mu_0$ l'hypothèse nulle, $s$ l'écart-type et $n$ la taille de l'échantillon.*
+Le modèle ECM (Error Correction Model) permet :
+- **De distinguer les effets de court terme** (variations immédiates),
+- **Des ajustements de long terme** (retour vers la relation d’équilibre).
 
-* **Résultats :**
-  * **Appartements (APT) :** La majorité des zones présentent un écart moyen significatif ($p < 0.05$).
-    * *Exemple Île-de-France :* écart moyen **+3,65**, très significatif ($p < 0.0001$).
-    * *Exemple Rhône-Alpes :* écart moyen **+2,96**, significatif ($p < 0.0001$).
-  * **Maisons (MAI) :** Résultats plus contrastés.
-    * Certaines zones sont significatives (ex. Rhône-Alpes : +2,17).
-    * D'autres non (ex. Lille, Marseille, Île-de-France), suggérant des indices très proches.
-  * **Cas particuliers :**
-    * *92-MAI :* écart moyen **-2,13**, significatif (tendance inverse).
+En pratique, il estime la dynamique suivante :
 
-> **Conclusion :** Les écarts sont faibles en valeur absolue mais **statistiquement significatifs dans la majorité des cas**. Cela confirme l'existence d'un biais structurel (différence de population) qui n'est pas dû au hasard.
+ΔINSEE_t​=α+βΔCL_t​+γ(INSEEt−1​−δCLt−1​)+εt​
 
----
+où :
+- \( \Delta INSEE_t \) : variation de l’indice INSEE à court terme,
+- \( \Delta CL_t \) : variation de l’indice CL à court terme,
+- \( (Y_{t-1} - \delta X_{t-1}) \) : terme de correction d’erreur (écart par rapport à l’équilibre),
+- \( \gamma \) : vitesse d’ajustement vers l’équilibre.
 
-### 2. Test ADF – Stationnarité des écarts dans le temps
-
-**Objectif :** Vérifier si la série des écarts est stationnaire (stable autour d'une moyenne) ou si elle dérive.
-
-* **Hypothèses :**
-  * $H_0$ : La série a une racine unitaire ($\gamma = 0$) $\rightarrow$ **NON STATIONNAIRE** (Dérive).
-  * $H_1$ : La série n'a pas de racine unitaire ($\gamma < 0$) $\rightarrow$ **STATIONNAIRE** (Stable).
-
-* **Statistique de test :** Basée sur le modèle de régression suivant :
-$$\Delta y_t = \alpha + \beta t + \gamma y_{t-1} + \epsilon_t$$
-
-* **Résultats :**
-  * **Majorité des segments (75%) : NON STATIONNAIRES** ($p > 0.05$).
-    L'hypothèse nulle n'est pas rejetée. L’écart évolue et dérive dans le temps.
-  * **Quelques segments stationnaires :**
-    * *92-MAI, 93-APT, 94-APT, Marseille-APT, Nord-Pas-de-Calais-MAI, Province-MAI, Rhône-Alpes*.
-
-> **Interprétation :** Pour la plupart des zones, **l’écart n’est pas stable**. Il varie avec le temps, confirmant la divergence observée visuellement sur la période récente (2022-2023).
-> **Conséquence :** Un correctif fixe (moyenne) serait faux à long terme. Il est nécessaire d'utiliser un modèle de correction dynamique.
+**Interprétation :**
+- Si \( \gamma < 0 \) et significatif → il existe un mécanisme de rappel : les écarts tendent à se corriger dans le temps.
