@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import plotly.io as pio
 import warnings
 
@@ -16,33 +16,54 @@ future_adjustments = []
 
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print(" Démarrage de la modélisation ARIMA(4,1,3) (Graphique Historique + Print Prévision)...")
+print("🚀 Démarrage de la modélisation TES (Holt-Winters)...")
 
 for name, group in grouped:
     zone, type_bien = name
     
     # 1. Préparation des données
     group = group.sort_values("Periode").set_index("Periode")
-    group['Indice de prix (CL) - Corrigé ARIMA'] = np.nan
+    group['Indice de prix (CL) - Corrigé TES'] = np.nan
     
-    # Série de l'écart
+    # Série de l'écart (Biais)
     ts_ecart = group['Dif'].dropna()
     
-    if len(ts_ecart) > 15:
+    # Il faut définir la fréquence pour statsmodels (Trimestriel 'Q')
+    if not ts_ecart.empty:
+        ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
+    
+    if len(ts_ecart) > 12: # TES a besoin d'au moins 2 saisons complètes (4x2=8) + marge
         try:
-            # 2. Modélisation TES
-            mod = ExponentialSmoothing(cv_train, trend='add', seasonal='add', seasonal_periods=4, damped_trend=True, initialization_method="estimated").fit()
-            model_fit = mod.forecast(steps=test_horizon)
+            # 2. Modélisation TES (Holt-Winters)
+            # Tendance additive + Saisonnalité additive (période 4)
+            model = ExponentialSmoothing(
+                ts_ecart, 
+                trend='add', 
+                seasonal='add', 
+                seasonal_periods=4, 
+                damped_trend=True, 
+                initialization_method="estimated"
+            )
+            model_fit = model.fit()
             
             # --- A. Correction Historique (Pour le Graphique) ---
-            ecart_modelise = model_fit.fittedvalues.reindex(group.index)
+            ecart_modelise = model_fit.fittedvalues
+            # Reconversion de l'index Period en Timestamp pour le merge avec le groupe original
+            ecart_modelise.index = ecart_modelise.index.to_timestamp()
+            
+            # Alignement strict des index
+            ecart_modelise = ecart_modelise.reindex(group.index)
+            
             cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé ARIMA'] = cl_corrected_history
+            group['Indice de prix (CL) - Corrigé TES'] = cl_corrected_history
             
             # --- B. Calcul de la Prévision Future (Pour le Print uniquement) ---
-            forecast_result = model_fit.get_forecast(steps=n_forecast)
-            forecast_bias = forecast_result.predicted_mean
-            conf_int = forecast_result.conf_int(alpha=0.05)
+            forecast_bias = model_fit.forecast(steps=n_forecast)
+            
+            # Calcul approximatif de l'intervalle de confiance pour TES (Sigma des résidus)
+            sigma = np.std(model_fit.resid)
+            # Marge à 95% pour T+1
+            margin_error = 1.96 * sigma
             
             # Stockage des valeurs pour le tableau
             future_adjustments.append({
@@ -50,7 +71,7 @@ for name, group in grouped:
                 "Type": type_bien,
                 "Ajustement T+1": round(forecast_bias.iloc[0], 2),
                 "Ajustement T+2": round(forecast_bias.iloc[1], 2),
-                "Marge Erreur T+1": round((conf_int.iloc[0, 1] - conf_int.iloc[0, 0])/2, 2)
+                "Marge Erreur T+1": round(margin_error, 2)
             })
 
             # =================================================================
@@ -62,28 +83,26 @@ for name, group in grouped:
             # Historique INSEE (Noir)
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='Indice de prix (INSEE)',
+                mode='lines', name='INSEE (Réalité)',
                 line=dict(color='black', width=3)
             ))
 
             # Historique CL Brut (Rouge Pointillé)
             fig.add_trace(go.Scatter(
                 x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='Indice de prix (CL)',
+                mode='lines', name='CL (Brut)',
                 line=dict(color='red', width=1, dash='dot')
             ))
 
-            # Historique CL Corrigé ARIMA (Bleu)
+            # Historique CL Corrigé TES (Bleu)
             fig.add_trace(go.Scatter(
                 x=group.index, y=cl_corrected_history,
-                mode='lines', name='Indice CL Corrigé (ARIMA)',
+                mode='lines', name='CL Corrigé (TES)',
                 line=dict(color='blue', width=2)
             ))
 
-            # Pas de traces futures ici (supprimées comme demandé)
-
             fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction ARIMA",
+                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction Holt-Winters",
                 yaxis_title="Indice (Base 2020 = 100)",
                 template="plotly_white",
                 height=500,
@@ -93,7 +112,7 @@ for name, group in grouped:
             fig.show()
             
         except Exception as e:
-            print(f"⚠️ Echec ARIMA pour {name} : {e}")
+            print(f"⚠️ Echec TES pour {name} : {e}")
             
     corrected_data.append(group.reset_index())
 
@@ -104,10 +123,10 @@ merge_corrected = pd.concat(corrected_data, ignore_index=True)
 if future_adjustments:
     df_previsions = pd.DataFrame(future_adjustments)
     print("\n" + "="*80)
-    print(" VALEURS D'AJUSTEMENT PRÉVUES (ARIMA 4,1,3)")
+    print("📊 TABLEAU DE BORD : VALEURS D'AJUSTEMENT PRÉVUES (TES Holt-Winters)")
     print("Ces valeurs sont à soustraire de l'indice CL futur pour obtenir l'estimation INSEE.")
     print("="*80)
     pd.set_option('display.max_rows', None)
-    print(df_previsions)
+    display(df_previsions) # ou print(df_previsions) si pas dans un notebook
 else:
     print("\nAucune prévision générée.")
