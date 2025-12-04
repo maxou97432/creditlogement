@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -5,131 +6,149 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import plotly.io as pio
 import warnings
 
+# Configuration
 warnings.filterwarnings("ignore")
-pio.renderers.default = "notebook" 
+pio.renderers.default = "notebook" # Changez en "browser" si les graphs ne s'affichent pas
 
-n_forecast = 2 
-corrected_data = []
-future_adjustments = []
+# --- Initialisation ---
+n_forecast = 2 # Nombre de trimestres à prédire (T+1, T+2)
+corrected_data = [] # Pour stocker l'historique corrigé
+future_adjustments = [] # Pour stocker les valeurs à appliquer demain
 
+# Groupement par zone et type de bien
 grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("🚀 Démarrage de la modélisation TES (Holt-Winters)...")
+print("Démarrage de la modélisation Holt (Backtest + Prévision)...")
 
 for name, group in grouped:
     zone, type_bien = name
     
-    # 1. Préparation : On s'assure d'avoir un DatetimeIndex propre
-    group = group.sort_values("Periode")
-    group = group.set_index("Periode") # Index est Timestamp
+    # 1. Préparation des données
+    # On s'assure que les dates sont l'index pour les séries temporelles
+    group = group.sort_values("Periode").set_index("Periode")
     
-    group['Indice de prix (CL) - Corrigé TES'] = np.nan
+    # On initialise la colonne corrigée à NaN (évite le crash si le modèle échoue)
+    group['Indice de prix (CL) - Corrigé Holt'] = np.nan
     
-    # Série de l'écart
+    # Série de l'écart (Biais)
     ts_ecart = group['Dif'].dropna()
     
-    if len(ts_ecart) > 12:
+    # On a besoin de la dernière valeur connue de CL pour projeter les courbes
+    last_cl_value = group['Indice de prix (CL)'].iloc[-1]
+    last_date = group.index[-1]
+    
+    # Sécurité : On ne lance le modèle que si on a assez de points (ex: > 8 trimestres)
+    if len(ts_ecart) > 8:
         try:
-            # Pour statsmodels, on crée une copie avec un PeriodIndex
-            ts_modeling = ts_ecart.copy()
-            ts_modeling.index = pd.PeriodIndex(ts_modeling.index, freq='Q')
-            
-            # 2. Modélisation TES
+            # =================================================================
+            # 2. Modélisation (Lissage de Holt)
+            # =================================================================
             model = ExponentialSmoothing(
-                ts_modeling, 
+                ts_ecart, 
                 trend='add', 
                 seasonal='add', 
-                seasonal_periods=4, 
                 damped_trend=True, 
                 initialization_method="estimated"
             )
             model_fit = model.fit()
             
-            # --- A. Correction Historique (LE FIX EST ICI) ---
+            # =================================================================
+            # 3. Calculs : Passé (Backtest) et Futur (Forecast)
+            # =================================================================
             
-            # 1. Récupérer les valeurs lissées (fittedvalues)
-            fitted_series = model_fit.fittedvalues
+            # --- A. Correction Historique ---
+            # On récupère le biais que le modèle aurait prédit dans le passé
+            ecart_modelise = model_fit.fittedvalues.reindex(group.index)
             
-            # 2. Convertir l'index Period (2015Q1) en Timestamp (2015-01-01)
-            # pour qu'il matche l'index du groupe original
-            fitted_series.index = fitted_series.index.to_timestamp()
-            
-            # 3. Réinjecter dans le DataFrame original (Alignement automatique sur les dates)
-            # On utilise une série temporaire pour gérer les trous éventuels
-            group['Biais_Modelise'] = fitted_series
-            
-            # 4. Calcul de la correction (Si Biais_Modelise est NaN, le résultat sera NaN)
-            group['Indice de prix (CL) - Corrigé TES'] = group['Indice de prix (CL)'] - group['Biais_Modelise']
+            # On crée la courbe corrigée : CL Brut - Biais Modélisé
+            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
+            group['Indice de prix (CL) - Corrigé Holt'] = cl_corrected_history
             
             # --- B. Prévision Future ---
-            forecast_bias = model_fit.forecast(steps=n_forecast)
+            # On prédit le biais pour les prochains trimestres
+            forecast_bias = model_fit.forecast(n_forecast)
             
+            # Calcul des intervalles de confiance (basé sur l'erreur standard résiduelle)
             sigma = np.std(model_fit.resid)
-            margin_error = 1.96 * sigma
+            confidence_interval = [1.96 * sigma * np.sqrt(step) for step in range(1, n_forecast + 1)]
             
+            # Projection de l'indice INSEE (CL constant - Biais futur)
+            # C'est ce qu'on s'attend à voir si CL ne bougeait pas
+            pred_values = last_cl_value - forecast_bias
+            upper_bound = pred_values + confidence_interval
+            lower_bound = pred_values - confidence_interval
+            
+            # Dates futures
+            future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
+            
+            # Stockage des ajustements pour le tableau final
             future_adjustments.append({
                 "Zone": zone,
                 "Type": type_bien,
                 "Ajustement T+1": round(forecast_bias.iloc[0], 2),
                 "Ajustement T+2": round(forecast_bias.iloc[1], 2),
-                "Marge Erreur T+1": round(margin_error, 2)
+                "Marge Erreur": round(confidence_interval[0], 2)
             })
 
             # =================================================================
-            # 3. Visualisation
+            # 4. Visualisation (Graphique Complet)
             # =================================================================
             
-            # Vérification qu'on a des données à tracer
-            if group['Indice de prix (CL) - Corrigé TES'].notna().sum() > 0:
-                
-                fig = go.Figure()
+            fig = go.Figure()
 
-                # Historique INSEE (Noir)
-                fig.add_trace(go.Scatter(
-                    x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                    mode='lines', name='INSEE (Réalité)',
-                    line=dict(color='black', width=3)
-                ))
+            # Historique : INSEE (Noir)
+            fig.add_trace(go.Scatter(
+                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
+                mode='lines', name='INSEE (Réalité)',
+                line=dict(color='black', width=3)
+            ))
 
-                # Historique CL Brut (Rouge)
-                fig.add_trace(go.Scatter(
-                    x=group.index, y=group['Indice de prix (CL)'],
-                    mode='lines', name='CL (Brut)',
-                    line=dict(color='red', width=1, dash='dot')
-                ))
+            # Historique : CL Brut (Rouge Pointillé) -> Montre la dérive
+            fig.add_trace(go.Scatter(
+                x=group.index, y=group['Indice de prix (CL)'],
+                mode='lines', name='CL (Brut)',
+                line=dict(color='red', width=1, dash='dot')
+            ))
 
-                # Historique CL Corrigé TES (Bleu) - CELLE QUI MANQUAIT
-                fig.add_trace(go.Scatter(
-                    x=group.index, y=group['Indice de prix (CL) - Corrigé TES'],
-                    mode='lines', name='CL Corrigé (TES)',
-                    line=dict(color='blue', width=2)
-                ))
+            # Historique : CL Corrigé (Bleu) -> Montre l'efficacité du modèle
+            fig.add_trace(go.Scatter(
+                x=group.index, y=cl_corrected_history,
+                mode='lines', name='CL Corrigé (Backtest)',
+                line=dict(color='blue', width=2)
+            ))
 
-                fig.update_layout(
-                    title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction Holt-Winters",
-                    yaxis_title="Indice (Base 2020 = 100)",
-                    template="plotly_white",
-                    height=500,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
-                
-                fig.show()
-            else:
-                print(f"⚠️ Pas de données corrigées générées pour {zone}-{type_bien} (Problème de calcul)")
+            
+
+            # Mise en page
+            fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
+            fig.update_layout(
+                title=f"<b>{zone} - {type_bien}</b> : Correction Dynamique & Prévision",
+                yaxis_title="Indice (Base 2020 = 100)",
+                template="plotly_white",
+                height=550,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            
+            fig.show()
             
         except Exception as e:
-            print(f"⚠️ Echec TES pour {name} : {e}")
+            print(f"⚠️ Echec de la modélisation pour {name}: {e}")
             
+    # On remet l'index en colonne pour la concaténation finale
     corrected_data.append(group.reset_index())
 
-# Reconstitution
+# --- Reconstitution du DataFrame Global ---
 merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-# Affichage Tableau
+# --- Affichage du Tableau de Bord ---
 if future_adjustments:
     df_previsions = pd.DataFrame(future_adjustments)
     print("\n" + "="*80)
-    print("📊 TABLEAU DE BORD : VALEURS D'AJUSTEMENT PRÉVUES (TES Holt-Winters)")
+    print("AJUSTEMENTS À APPLIQUER")
+    print("Formule : Indice INSEE Prévu = Indice CL du trimestre - Ajustement")
     print("="*80)
+    # Affichage joli avec pandas
     pd.set_option('display.max_rows', None)
     display(df_previsions)
+else:
+    print("\nAucune prévision n'a pu être générée (pas assez de données).")
