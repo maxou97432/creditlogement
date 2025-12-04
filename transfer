@@ -1,57 +1,45 @@
 ### 1. Test t de Student – Significativité de l’écart moyen
+
 **Objectif :** Vérifier si l’écart moyen entre les deux indices est statistiquement différent de zéro.
 
-- **Hypothèses :**
-  - \( H_0 \) : L’écart moyen = 0 (pas de différence réelle entre les indices).
-  - \( H_1 \) : L’écart moyen ≠ 0 (il existe une différence réelle).
+* **Hypothèses :**
+  * $H_0 : \mu = 0$ (L’écart moyen est nul, pas de différence réelle).
+  * $H_1 : \mu \neq 0$ (L’écart moyen est différent de 0, il existe un biais réel).
 
-- **Statistique de test :**
-  \[
-  t = \frac{\bar{x} - \mu_0}{s / \sqrt{n}}
-  \]
-  où :
-  - \( \bar{x} \) = moyenne observée des écarts
-  - \( \mu_0 \) = hypothèse nulle (ici 0)
-  - \( s \) = écart-type de l’échantillon
-  - \( n \) = taille de l’échantillon
+* **Statistique de test :**
+$$t = \frac{\bar{x} - \mu_0}{s / \sqrt{n}}$$
+  *où : $\bar{x}$ est la moyenne observée, $\mu_0$ l'hypothèse nulle, $s$ l'écart-type et $n$ la taille de l'échantillon.*
 
+* **Résultats :**
+  * **Appartements (APT) :** La majorité des zones présentent un écart moyen significatif ($p < 0.05$).
+    * *Exemple Île-de-France :* écart moyen **+3,65**, très significatif ($p < 0.0001$).
+    * *Exemple Rhône-Alpes :* écart moyen **+2,96**, significatif ($p < 0.0001$).
+  * **Maisons (MAI) :** Résultats plus contrastés.
+    * Certaines zones sont significatives (ex. Rhône-Alpes : +2,17).
+    * D'autres non (ex. Lille, Marseille, Île-de-France), suggérant des indices très proches.
+  * **Cas particuliers :**
+    * *92-MAI :* écart moyen **-2,13**, significatif (tendance inverse).
 
-- **Résultats :**
-  - **Appartements (APT)** : La majorité des zones présentent un écart moyen significatif (p-value < 0,05).  
-    Exemple :  
-    - Île-de-France : écart moyen **+3,65**, très significatif (p < 0,0001).  
-    - Rhône-Alpes : écart moyen **+2,96**, significatif (p < 0,0001).
-  - **Maisons (MAI)** : Résultats plus contrastés.  
-    - Certaines zones sont significatives (ex. Rhône-Alpes : +2,17, p < 0,0001).  
-    - D’autres non (ex. Lille, Marseille, Île-de-France).
-  - **Cas particuliers :**
-    - 92-MAI : écart moyen **-2,13**, significatif → tendance inverse .
-    - 93-MAI : écart moyen **-1,14**, significatif.
+> **Conclusion :** Les écarts sont faibles en valeur absolue mais **statistiquement significatifs dans la majorité des cas**. Cela confirme l'existence d'un biais structurel (différence de population) qui n'est pas dû au hasard.
 
-**Conclusion :**  
- Les écarts sont faibles en valeur absolue (logique pour des indices en base 100), mais **statistiquement significatifs dans la majorité des cas**, surtout pour les appartements.  Cela signifie que l’écart observé est très peu probable s’il n’y avait pas de différence réelle. Donc, on conclut que l’écart est réel et non dû au hasard.
- Certaines zones et types (ex. maisons dans Lille, Marseille) montrent des écarts non significatifs → indices très proches.
-
-
+---
 
 ### 2. Test ADF – Stationnarité des écarts dans le temps
-**Objectif :** Vérifier si la série des écarts est stationnaire (pas de tendance).
 
-- **Hypothèses :**
-  - \( H_0 \) : La série a une racine unitaire → elle **n’est pas stationnaire**.
-  - \( H_1 \) : La série est stationnaire.
+**Objectif :** Vérifier si la série des écarts est stationnaire (stable autour d'une moyenne) ou si elle dérive.
 
-- **Statistique de test :**
-  \[
-  \text{ADF} = \text{valeur calculée par le test Dickey-Fuller}
-  \]
+* **Hypothèses :**
+  * $H_0$ : La série a une racine unitaire ($\gamma = 0$) $\rightarrow$ **NON STATIONNAIRE** (Dérive).
+  * $H_1$ : La série n'a pas de racine unitaire ($\gamma < 0$) $\rightarrow$ **STATIONNAIRE** (Stable).
 
+* **Statistique de test :** Basée sur le modèle de régression suivant :
+$$\Delta y_t = \alpha + \beta t + \gamma y_{t-1} + \epsilon_t$$
 
+* **Résultats :**
+  * **Majorité des segments (75%) : NON STATIONNAIRES** ($p > 0.05$).
+    L'hypothèse nulle n'est pas rejetée. L’écart évolue et dérive dans le temps.
+  * **Quelques segments stationnaires :**
+    * *92-MAI, 93-APT, 94-APT, Marseille-APT, Nord-Pas-de-Calais-MAI, Province-MAI, Rhône-Alpes*.
 
-- **Résultats :**
-  - **Majorité des segments : NON stationnaires** → l’écart évolue dans le temps: il y a une dérive.
-  - **Quelques segments stationnaires :**
-    - 92-MAI, 93-APT, 94-APT, Marseille-APT, Nord-Pas-de-Calais-MAI, Province-MAI, Rhône-Alpes (APT & MAI).
-  - **Interprétation :**
-    - Pour la plupart des zones, l’écart **n’est pas stable** → il varie avec le temps, ce qui confirme la tendance observée visuellement (accentuation depuis 2022-2023).
-    - Les zones stationnaires sont rares et spécifiques.
+> **Interprétation :** Pour la plupart des zones, **l’écart n’est pas stable**. Il varie avec le temps, confirmant la divergence observée visuellement sur la période récente (2022-2023).
+> **Conséquence :** Un correctif fixe (moyenne) serait faux à long terme. Il est nécessaire d'utiliser un modèle de correction dynamique.
