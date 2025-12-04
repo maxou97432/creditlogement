@@ -1,36 +1,60 @@
-# 📉 Stratégie de Correction du Biais par Modélisation Dynamique
 
-Nous avons constaté un écart structurel entre les deux indices dont la cause n'a pu être expliquée par la volumétrie. Cependant, nous allons tenter de le corriger.
+## Modèles de séries temporelles (avec formulation mathématique)
 
-Il n'est pas pertinent d'appliquer une simple moyenne historique de l'écart comme correctif pour chaque périmètre, car cela introduirait un biais trop important. L'analyse par le **Test ADF** a en effet montré que l'écart est **non-stationnaire** (il dérive).
+### 1. ARIMA (AutoRegressive Integrated Moving Average)
 
-À la place, nous allons modéliser cette dérive en mettant en place un **écart dynamique**.
+ARIMA combine trois composantes :
+- **AR (AutoRegressive)** : dépendance des valeurs passées.
+- **I (Integrated)** : différenciation pour stationnariser la série.
+- **MA (Moving Average)** : dépendance des erreurs passées.
 
-## Méthodologie du Duel (Cross-Validation)
+Formulation générale pour un ARIMA(p,d,q) :
 
-Pour déterminer le meilleur modèle capable de prédire l'évolution future de l'écart, nous avons mis en place une compétition entre les familles de modèles les plus robustes, validée par **Cross-Validation Temporelle**.
+\[
+\phi(B)(1-B)^d y_t = \theta(B)\varepsilon_t
+\]
 
-### 1. Les Modèles Sélectionnés (Candidats)
-Nous avons comparé trois approches de séries temporelles capables de gérer la **saisonnalité** et la **tendance (drift)** :
+où :
+- \( y_t \) : valeur à l'instant \( t \)
+- \( B \) : opérateur de retard (\( B y_t = y_{t-1} \))
+- \( \phi(B) = 1 - \phi_1 B - \dots - \phi_p B^p \) : partie AR
+- \( \theta(B) = 1 + \theta_1 B + \dots + \theta_q B^q \) : partie MA
+- \( d \) : ordre de différenciation
+- \( \varepsilon_t \) : bruit blanc
 
-* **SARIMA Optimisé :** Modèle paramétrique rigoureux.
-* **TES (Holt-Winters) :** Modèle par lissage qui capture le niveau, la tendance et la saisonnalité.
-* **Prophet :** Modèle bayésien flexible, conçu pour gérer les ruptures de tendance.
+---
 
-### 2. Échantillons et Évaluation
-Pour garantir la robustesse des modèles, l'évaluation est faite en **Out-of-Sample** (hors de l'échantillon d'entraînement) :
+### 2. SES (Simple Exponential Smoothing)
 
-| Échantillon | Rôle | Métrique |
-| :--- | :--- | :--- |
-| **Train** | Le reste de la base (historique glissant). | **Entraînement des coefficients.** |
-| **Validation** | Les deux dernières années de données (fenêtre de test). | **Sélection du Vainqueur** (via **RMSE**). |
+SES applique un lissage exponentiel pour des séries **sans tendance ni saisonnalité** :
 
-### 3. Processus de Validation
-Le processus consiste à :
+\[
+\hat{y}_{t+1} = \alpha y_t + (1-\alpha)\hat{y}_t
+\]
 
-1.  **Optimiser les hyperparamètres** (ARIMA, Prophet) par minimisation de l'AIC.
-2.  **Entraîner les modèles** sur l'échantillon *train* (historique).
-3.  **Évaluer la performance** sur l'échantillon *validation*.
-4.  **Sélectionner** le modèle présentant le **RMSE Moyen le plus faible** et la meilleure stabilité (écart-type du RMSE).
+où :
+- \( \hat{y}_{t+1} \) : prévision pour \( t+1 \)
+- \( y_t \) : observation à \( t \)
+- \( \alpha \in [0,1] \) : coefficient de lissage (poids des données récentes)
 
-Ce processus garantit que la correction dynamique choisie est la plus efficace pour neutraliser le biais sur l'ensemble des conditions économiques passées.
+---
+
+### 3. DES (Double Exponential Smoothing)
+
+DES prend en compte **niveau** et **tendance** :
+
+\[
+\begin{cases}
+\ell_t = \alpha y_t + (1-\alpha)(\ell_{t-1} + b_{t-1}) \\
+b_t = \beta (\ell_t - \ell_{t-1}) + (1-\beta)b_{t-1} \\
+\hat{y}_{t+h} = \ell_t + h b_t
+\end{cases}
+\]
+
+où :
+- \( \ell_t \) : niveau estimé à \( t \)
+- \( b_t \) : tendance estimée
+- \( \alpha, \beta \in [0,1] \) : coefficients de lissage
+- \( h \) : horizon de prévision
+
+
