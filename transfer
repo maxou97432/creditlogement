@@ -1,23 +1,23 @@
-## 📈 Triple Lissage Exponentiel (TES / Holt-Winters)
+## 📝 Formules Complètes du Modèle TES (Holt-Winters Additif)
 
-Le modèle TES est l'approche de lissage la plus complète. Il est crucial pour votre analyse car il intègre les trois composantes structurelles de votre série d'écarts ($\text{Dif}$) : **Niveau**, **Tendance** et **Saisonnalité**.
+Le Modèle de Triple Lissage Exponentiel (TES) est défini par les équations suivantes, où $\alpha$, $\beta$, et $\gamma$ sont les coefficients de lissage (entre 0 et 1), et $m=4$ est la période saisonnière.
 
-### 1. Composantes et Rôle dans votre Analyse
+### 1. Mise à Jour du Niveau (Level)
+Le nouveau niveau ($\ell_t$) est calculé en corrigeant l'observation $y_t$ par l'ancien facteur saisonnier, puis en lissant ce résultat avec l'ancienne projection de niveau et tendance :
 
-Le modèle estime trois composantes, chacune gérée par un coefficient de lissage distinct ($\alpha, \beta, \gamma$) :
+$$\ell_t = \alpha (y_t - s_{t-m}) + (1-\alpha)(\ell_{t-1} + b_{t-1})$$
 
-| Composante | Rôle | Coefficient |
-| :--- | :--- | :--- |
-| **Niveau ($\ell_t$)** | Capture la valeur moyenne actuelle de l'écart (le biais statique). | $\alpha$ (Alpha) |
-| **Tendance ($b_t$)** | Capture la **dérive** de l'écart (l'accélération ou le ralentissement du biais). | $\beta$ (Beta) |
-| **Saisonnalité ($s_t$)** | Capture le **cycle trimestriel** répétitif (fluctuation du biais due au décalage administratif). | $\gamma$ (Gamma) |
+### 2. Mise à Jour de la Tendance (Trend)
+La nouvelle tendance ($b_t$) est calculée en lissant la variation récente du niveau ($\ell_t - \ell_{t-1}$) avec l'ancienne estimation de la tendance :
 
-### 2. Le Mécanisme de Correction
+$$b_t = \beta (\ell_t - \ell_{t-1}) + (1-\beta)b_{t-1}$$
 
-Le succès du TES valide qu'il faut un outil capable de corriger le biais statique ($\ell_t$) **ET** d'anticiper la dérive future ($b_t$) **ET** d'ajuster pour le trimestre spécifique ($s_t$).
+### 3. Mise à Jour de la Saisonnalité (Seasonal)
+Le nouveau facteur saisonnier ($s_t$) est calculé en lissant la décomposition saisonnière actuelle ($y_t - \ell_t$) avec l'ancien facteur saisonnier :
 
-**Formule simplifiée de la prévision ($\hat{y}_{t+h}$) :**
+$$s_t = \gamma (y_t - \ell_t) + (1-\gamma)s_{t-m}$$
+
+### 4. Formule de Prévision (Forecast)
+La prévision finale est la somme des trois composantes projetées :
 
 $$\hat{y}_{t+h} = \ell_t + h b_t + s_{t+h-m}$$
-
-Le succès du **TES** démontre que le modèle de correction retenu est capable de s'adapter aux mouvements de fond du marché tout en anticipant la fluctuation cyclique du biais.
