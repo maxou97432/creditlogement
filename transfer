@@ -1,249 +1,142 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from statsmodels.tsa.api import SimpleExpSmoothing
-from sklearn.metrics import mean_squared_error
-import itertools
-import warnings
 from prophet import Prophet
-from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
-import itertools
 import warnings
-warnings.filterwarnings("ignore")
-import itertools
-
-import warnings
-
-
-# 2. SPLIT TRAIN / TEST (Essentiel pour valider la prédiction)
-# On garde les 8 derniers trimestres (2 ans) pour tester la performance
-n_test = 8
-
-
-
-# Conversion en trimestriel
-ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
-
-
-
-
-train = ts_ecart.iloc[:-n_test]
-test = ts_ecart.iloc[-n_test:]
-
-
-# 1. Définition des plages de paramètres
-# On reste prudent (0 à 2) pour éviter le sur-apprentissage et les temps de calcul infinis
-p = q = range(0, 5)
-d = [1] # On sait que la série n'est pas stationnaire (ADF False)
-
-P = Q = range(0, 4) # Saisonniers : souvent 0 ou 1 suffit
-D = [0, 1]          # Différenciation saisonnière : à tester
-s = [4]             # S = 4 car données Trimestrielles (Quarterly)
-
-# Création de toutes les combinaisons possibles
-pdq = list(itertools.product(p, d, q))
-seasonal_pdq = list(itertools.product(P, D, Q, s))
-
-print(f"Nombre total de modèles à tester : {len(pdq) * len(seasonal_pdq)}")
-print("Recherche du meilleur modèle SARIMA en cours... (Patience)")
-print("-" * 50)
-
-best_aic = float("inf")
-best_params = None
-best_seasonal_params = None
-best_model = None
-
-# 2. Boucle de Grid Search
-for param in pdq:
-    for param_seasonal in seasonal_pdq:
-        try:
-            # Entrainement du modèle SARIMA
-            # enforce_stationarity=False permet d'éviter des erreurs sur des séries courtes
-            mod = ARIMA(train,
-                        order=param,
-                        seasonal_order=param_seasonal,
-                        enforce_stationarity=False,
-                        enforce_invertibility=False)
-
-            results = mod.fit()
-
-            # Sélection sur critère AIC
-            if results.aic < best_aic:
-                best_aic = results.aic
-                best_params = param
-                best_seasonal_params = param_seasonal
-                best_model = results
-            
-            # Optionnel : Afficher l'avancement (peut être verbeux)
-            # print(f'SARIMA{param}x{param_seasonal} - AIC:{results.aic:.2f}')
-
-        except:
-            continue
-
-print("-" * 50)
-print(f"🏆 MEILLEUR MODÈLE : SARIMA{best_params}x{best_seasonal_params}")
-print(f"    AIC : {best_aic:.2f}")
-print("-" * 50)
-
-# 3. Utilisation du modèle gagnant pour la comparaison RMSE
-# On refit le modèle gagnant proprement ou on utilise l'objet sauvegardé
-
-
-
-print(f"Période d'entrainement : {train.index.min().strftime('%Y-Q%q')} à {train.index.max().strftime('%Y-Q%q')}")
-print(f"Période de test        : {test.index.min().strftime('%Y-Q%q')} à {test.index.max().strftime('%Y-Q%q')}")
-print("-" * 50)
-
-# ==============================================================================
-# MODÈLE 1 : SARIMA (AutoRegressive Integrated Moving Average)
-# ==============================================================================
-# Ordre (4,1,3) :
-
-
-
-final_sarima = ARIMA(train, order=best_params, seasonal_order=best_seasonal_params).fit()
-
-pred_sarima_opti = final_sarima.forecast(steps=n_test)
-rmse_sarima_opti = np.sqrt(mean_squared_error(test, pred_sarima_opti))
-
-
-
-
-# ==============================================================================
-# MODÈLE 2 : DES (Double Exponential Smoothing / Holt)
-# ==============================================================================
-# trend='add' : On suppose qu'il y a une tendance locale additive (linéaire)
-model_des = ExponentialSmoothing(train, trend='add', seasonal=None, damped_trend=True)
-fit_des = model_des.fit()
-
-# Prédiction
-pred_des = fit_des.forecast(steps=n_test)
-rmse_des = np.sqrt(mean_squared_error(test, pred_des))
-
-# ==============================================================================
-# MODÈLE 3 : TES (Triple Exponential Smoothing)
-# ==============================================================================
-# On entraine le modèle
-model_tes = ExponentialSmoothing(train, trend='add', seasonal='add',seasonal_periods= 4, damped_trend=True)
-fit_tes = model_tes.fit()
-
-#Prédiction
-pred_tes = fit_tes.forecast(steps=n_test)
-rmse_tes = np.sqrt(mean_squared_error(test, pred_tes))
-
-# ==============================================================================
-# RÉSULTATS & COMPARAISON
-# ==============================================================================
-
-print(f"RMSE Modèle ARIMA (4,1,3) : {rmse_sarima_opti:.4f}")
-print(f"RMSE Modèle DES (Holt)    : {rmse_des:.4f}")
-print(f"RMSE Modèle TES     : {rmse_tes:.4f}")
-
-
-
-# Sélection du meilleur modèle (plus faible RMSE)
-rmse_dict = {
-    "ARIMA(4,1,3)": rmse_sarima_opti,
-    "DES(Holt, damped add)": rmse_des,
-    "TES ": rmse_tes
-}
-
-best_model_name = min(rmse_dict, key=rmse_dict.get)
-print(f"\nLE MEILLEUR MODELE EST : {best_model_name}")
-
-# Récupération des prédictions du meilleur modèle
-if best_model_name == "SARIMA":
-    best_pred = rmse_sarima_opti
-elif best_model_name == "DES":
-    best_pred = pred_des
-else:
-    best_pred = pred_tes
-
-
-from prophet import Prophet
-from prophet.diagnostics import cross_validation, performance_metrics
-import itertools
-import pandas as pd
 import logging
 
-# On coupe les logs de Prophet qui sont très verbeux
-logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+# Configuration
+warnings.filterwarnings("ignore")
+logging.getLogger('cmdstanpy').setLevel(logging.WARNING) # Silence Prophet logs
 
-# 1. Préparation des données (Format Prophet)
+# 1. PRÉPARATION DE LA SÉRIE
+# On s'assure d'avoir la série complète de l'écart
+df_analyse = merge.sort_values("Periode").set_index("Periode")
+ts_ecart = df_analyse['Dif'].dropna()
+ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q') # Force trimestriel
 
-df_prophet_full = pd.DataFrame({
-    'ds': ts_ecart.index.to_timestamp(), 
-    'y': ts_ecart.values
-})
+# 2. CONFIGURATION DE LA CROSS-VALIDATION
+# On va faire 5 tests différents en remontant dans le passé
+# test_size=4 : Sur chaque pli, on essaie de prédire 1 an (4 trimestres)
+n_splits = 5
+test_horizon = 4 
+tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_horizon)
 
-# 2. Grille de paramètres
-param_grid = {  
-    'changepoint_prior_scale': [0.01, 0.05, 0.1, 0.5], # Souplesse de la tendance
-    'seasonality_prior_scale': [0.1, 1.0, 10.0],       # Force de la saisonnalité
-    'seasonality_mode': ['additive']                   # Additif car l'écart est stable en amplitude
+# Dictionnaire pour stocker les scores RMSE de chaque passe
+results_cv = {
+    'ARIMA (4,1,3)': [],
+    'DES (Holt)': [],
+    'TES (Holt-Winters)': [],
+    'Prophet': []
 }
 
-all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
+print(f"🚀 Démarrage du Tournoi Cross-Validation ({n_splits} rounds)...")
 
-best_rmse = float('inf')
-best_params = {}
-
-print(f"Démarrage de la Cross-Validation sur {len(all_params)} combinaisons...")
-print("Cela peut être long (Prophet entraîne 3 à 5 modèles par combinaison)...")
-
-# 3. Boucle d'Optimisation par Cross-Validation
-for params in all_params:
+fold = 1
+for train_index, test_index in tscv.split(ts_ecart):
+    
+    # Création des sous-échantillons Train/Test pour ce Round
+    cv_train = ts_ecart.iloc[train_index]
+    cv_test = ts_ecart.iloc[test_index]
+    
+    print(f"\n--- Round {fold}/{n_splits} ---")
+    print(f"Train : {len(cv_train)} trimestres | Test : {cv_test.index[0]} à {cv_test.index[-1]}")
+    
+    # ---------------------------------------------------------
+    # A. Modèle ARIMA (4,1,3)
+    # ---------------------------------------------------------
     try:
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **params)
-        m.fit(df_prophet_full)
-        
-        # --- LA MAGIE DE LA CROSS-VALIDATION PROPHET ---
-        # initial : Taille de l'historique minimum pour commencer à apprendre (ex: '5 years')
-        # period  : On avance de combien à chaque test ? (ex: '180 days' = 2 trimestres)
-        # horizon : On prédit combien de temps ? (ex: '730 days' = 2 ans, comme ton n_test)
-        
-        df_cv = cross_validation(
-            m, 
-            initial='1825 days',  # ~5 ans d'historique pour commencer
-            period='180 days',    # On re-teste tous les 6 mois
-            horizon='730 days',   # On teste la prévision sur 2 ans
-            parallel="processes"  # Accélère le calcul si possible
-        )
-        
-        # Calcul des métriques moyennes sur toutes les coupes
-        df_p = performance_metrics(df_cv, rolling_window=1)
-        rmse_cv = df_p['rmse'].values[0] # RMSE moyen de la CV
-        
-        if rmse_cv < best_rmse:
-            best_rmse = rmse_cv
-            best_params = params
-            print(f"-> Nouveau meilleur RMSE (CV) : {best_rmse:.4f} avec {params}")
-            
-    except Exception as e:
-        continue
+        model_arima = ARIMA(cv_train, order=(4, 1, 3))
+        fit_arima = model_arima.fit()
+        pred_arima = fit_arima.forecast(steps=test_horizon)
+        rmse_arima = np.sqrt(mean_squared_error(cv_test, pred_arima))
+        results_cv['ARIMA (4,1,3)'].append(rmse_arima)
+    except:
+        results_cv['ARIMA (4,1,3)'].append(np.nan)
 
-print("-" * 50)
-print(f"🏆 MEILLEURS PARAMÈTRES (Validés par CV) : {best_params}")
-print(f"RMSE Moyen sur les différentes périodes : {best_rmse:.4f}")
-print("-" * 50)
+    # ---------------------------------------------------------
+    # B. Modèle DES (Holt - Tendance amortie)
+    # ---------------------------------------------------------
+    try:
+        model_des = ExponentialSmoothing(
+            cv_train, 
+            trend='add', 
+            seasonal=None, 
+            damped_trend=True,
+            initialization_method="estimated"
+        ).fit()
+        pred_des = model_des.forecast(steps=test_horizon)
+        rmse_des = np.sqrt(mean_squared_error(cv_test, pred_des))
+        results_cv['DES (Holt)'].append(rmse_des)
+    except:
+        results_cv['DES (Holt)'].append(np.nan)
 
-# 4. Entraînement Final & Prévision (Pour comparaison avec Holt/XGBoost)
-# On ré-entraîne le meilleur modèle sur le TRAIN SET MANUEL pour comparer équitablement
-final_prophet = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **best_params)
+    # ---------------------------------------------------------
+    # C. Modèle TES (Holt-Winters - Saisonnier)
+    # ---------------------------------------------------------
+    try:
+        model_tes = ExponentialSmoothing(
+            cv_train, 
+            trend='add', 
+            seasonal='add', 
+            seasonal_periods=4,
+            damped_trend=True,
+            initialization_method="estimated"
+        ).fit()
+        pred_tes = model_tes.forecast(steps=test_horizon)
+        rmse_tes = np.sqrt(mean_squared_error(cv_test, pred_tes))
+        results_cv['TES (Holt-Winters)'].append(rmse_tes)
+    except:
+        results_cv['TES (Holt-Winters)'].append(np.nan)
 
-df_prophet = pd.DataFrame({
-    'ds': ts_ecart.index.to_timestamp(), 
-    'y': ts_ecart.values
+    # ---------------------------------------------------------
+    # D. Modèle PROPHET
+    # ---------------------------------------------------------
+    try:
+        # Prophet a besoin d'un DataFrame ds/y et de timestamps
+        df_prophet_cv = pd.DataFrame({
+            'ds': cv_train.index.to_timestamp(),
+            'y': cv_train.values
+        })
+        
+        # On utilise les hyperparamètres "moyens" ou optimisés précédemment
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False,
+                    changepoint_prior_scale=0.05) 
+        m.fit(df_prophet_cv)
+        
+        future = m.make_future_dataframe(periods=test_horizon, freq='Q')
+        forecast = m.predict(future)
+        pred_prophet = forecast['yhat'].iloc[-test_horizon:].values
+        
+        rmse_prophet = np.sqrt(mean_squared_error(cv_test, pred_prophet))
+        results_cv['Prophet'].append(rmse_prophet)
+    except:
+        results_cv['Prophet'].append(np.nan)
+        
+    fold += 1
+
+# ==============================================================================
+# SYNTHÈSE DES RÉSULTATS
+# ==============================================================================
+
+# Création d'un tableau récapitulatif
+df_results = pd.DataFrame(results_cv)
+
+# Calcul de la moyenne et de l'écart-type (Stabilité)
+summary = pd.DataFrame({
+    'RMSE Moyen': df_results.mean(),
+    'RMSE Std (Stabilité)': df_results.std(),
+    'Min RMSE': df_results.min(),
+    'Max RMSE': df_results.max()
 })
-# On reprend ton split manuel pour le score final "Test"
-df_prophet_train = df_prophet.iloc[:-n_test] 
-final_prophet.fit(df_prophet_train)
 
-future = final_prophet.make_future_dataframe(periods=n_test, freq='Q')
-forecast = final_prophet.predict(future)
-pred_prophet = forecast['yhat'].iloc[-n_test:].values
+print("\n" + "="*60)
+print("🏆 RÉSULTATS FINAUX DU TOURNOI (Cross-Validation) 🏆")
+print("="*60)
+print(summary.sort_values("RMSE Moyen"))
 
-rmse_prophet_test = np.sqrt(mean_squared_error(test, pred_prophet))
-print(f"RMSE Final Prophet sur le Test Set (Comparatif) : {rmse_prophet_test:.4f}")
+best_model_name = summary['RMSE Moyen'].idxmin()
+print(f"\n✅ Le grand vainqueur (plus faible erreur moyenne) est : {best_model_name}")
