@@ -1,147 +1,46 @@
-import pandas as pd
-import numpy as np
+from statsmodels.tsa.seasonal import seasonal_decompose
 import matplotlib.pyplot as plt
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from statsmodels.tsa.api import SimpleExpSmoothing
-from sklearn.metrics import mean_squared_error
-import itertools
-import warnings
-# 1. PRÉPARATION DE LA SÉRIE TEMPORELLE
-# On s'assure que la série est bien triée par date
-df_analyse = merge.sort_values("Periode").set_index("Periode")
-df_analyse['Dif'] = df_analyse['Indice de prix (CL)'] - df_analyse['Indice de prix (INSEE) - Base 2020']
-ts_ecart = df_analyse.groupby('Periode')['Dif'].mean()
 
-# 2. SPLIT TRAIN / TEST (Essentiel pour valider la prédiction)
-# On garde les 8 derniers trimestres (2 ans) pour tester la performance
-n_test = 8
+# On prend un segment pour l'exemple (ex: PARIS - APT)
+# Assurez-vous que ts_ecart est bien triée et a un index temporel (Trimestriel)
+# ts_ecart.index.freq = 'Q' # Important pour statsmodels
 
+print("Analyse de la Saisonnalité de l'Écart...")
 
+try:
+    # decomposition (model='additive' car l'écart peut être négatif)
+    res = seasonal_decompose(ts_ecart, model='additive', period=4) # period=4 pour des trimestres
 
-# Conversion en trimestriel
-ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
+    # Affichage
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    
+    res.observed.plot(ax=ax1, title='Observation (Écart Réel)')
+    ax1.set_ylabel('Points')
+    
+    res.trend.plot(ax=ax2, title='Tendance (Trend)')
+    ax2.set_ylabel('Points')
+    
+    res.seasonal.plot(ax=ax3, title='Saisonnalité Isolée')
+    ax3.set_ylabel('Points')
+    
+    res.resid.plot(ax=ax4, title='Résidus (Bruit)')
+    ax4.set_ylabel('Points')
+    
+    plt.xlabel('Date')
+    plt.tight_layout()
+    plt.show()
 
+    # Test rapide de la force de la saisonnalité
+    seasonal_range = res.seasonal.max() - res.seasonal.min()
+    trend_range = res.trend.max() - res.trend.min()
+    
+    print(f"Amplitude de la saisonnalité : {seasonal_range:.4f} points")
+    print(f"Amplitude de la tendance     : {trend_range:.4f} points")
+    
+    if seasonal_range > 0.2 * trend_range: # Règle empirique
+        print("⚠️ ALERTE : Forte saisonnalité détectée !")
+    else:
+        print("✅ Pas de saisonnalité majeure détectée.")
 
-
-
-train = ts_ecart.iloc[:-n_test]
-test = ts_ecart.iloc[-n_test:]
-
-
-# Ignorer les avertissements de convergence pour la clarté
-warnings.filterwarnings("ignore")
-
-# 1. Définir les plages de paramètres à tester
-# p (Auto-Regressive) : 0 à 3
-# d (Integrated) : 1 (car ADF a dit non-stationnaire) ou 0
-# q (Moving Average) : 0 à 3
-p_values = range(0, 6)
-d_values = [1] # On force la différenciation car la série dérive
-q_values = range(0, 6)
-
-# Générer toutes les combinaisons (ex: 0,1,0 | 1,1,0 | 1,1,1 ...)
-pdq = list(itertools.product(p_values, d_values, q_values))
-
-best_aic = float("inf")
-best_order = None
-best_model = None
-
-print("Recherche du meilleur modèle ARIMA en cours...")
-
-# 2. Boucle de test (Grid Search)
-for order in pdq:
-    try:
-        # On entraine le modèle sur le TRAIN set
-        model_temp = ARIMA(train, order=order)
-        results_temp = model_temp.fit()
-        
-        # On récupère l'AIC
-        current_aic = results_temp.aic
-        
-        # Si c'est le meilleur score jusqu'ici, on le garde
-        if current_aic < best_aic:
-            best_aic = current_aic
-            best_order = order
-            best_model = results_temp
-            
-        print(f'ARIMA{order} - AIC:{current_aic:.2f}')
-        
-    except:
-        continue
-
-print("-" * 50)
-print(f"🏆 MEILLEUR MODÈLE : ARIMA{best_order} avec AIC = {best_aic:.2f}")
-print("-" * 50)
-
-
-print(f"Période d'entrainement : {train.index.min().strftime('%Y-Q%q')} à {train.index.max().strftime('%Y-Q%q')}")
-print(f"Période de test        : {test.index.max().strftime('%Y-Q%q')} à {test.index.max().strftime('%Y-Q%q')}")
-print("-" * 50)
-
-# ==============================================================================
-# MODÈLE 1 : ARIMA (AutoRegressive Integrated Moving Average)
-# ==============================================================================
-# Ordre (0,1,1) :
-
-model_arima = ARIMA(train, order=(4, 1, 3)) 
-fit_arima = model_arima.fit()
-
-# Prédiction sur l'ensemble du jeu de test
-pred_arima = fit_arima.forecast(steps=n_test)
-rmse_arima = np.sqrt(mean_squared_error(test, pred_arima))
-
-
-# ==============================================================================
-# MODÈLE 2 : SES (Simple Exponential Smoothing)
-# ==============================================================================
-# On entraine le modèle
-ses_model = SimpleExpSmoothing(train).fit(optimized=True)
-
-
-#Prédiction
-pred_ses = ses_model.forecast(steps=n_test)
-rmse_ses = np.sqrt(mean_squared_error(test, pred_ses))
-
-# ==============================================================================
-# MODÈLE 2 : DES (Double Exponential Smoothing / Holt)
-# ==============================================================================
-# trend='add' : On suppose qu'il y a une tendance locale additive (linéaire)
-model_des = ExponentialSmoothing(train, trend='add', seasonal=None, damped_trend=True)
-fit_des = model_des.fit()
-
-# Prédiction
-pred_des = fit_des.forecast(steps=n_test)
-rmse_des = np.sqrt(mean_squared_error(test, pred_des))
-
-# ==============================================================================
-# RÉSULTATS & COMPARAISON
-# ==============================================================================
-
-print(f"RMSE Modèle ARIMA (4,1,3) : {rmse_arima:.4f}")
-print(f"RMSE Modèle SES     : {rmse_ses:.4f}")
-print(f"RMSE Modèle DES (Holt)    : {rmse_des:.4f}")
-
-
-
-# Sélection du meilleur modèle (plus faible RMSE)
-rmse_dict = {
-    "ARIMA(4,1,3)": rmse_arima,
-    "SES": rmse_ses,
-    "DES (Holt, damped add)": rmse_des
-}
-
-best_model_name = min(rmse_dict, key=rmse_dict.get)
-print(f"\nLE MEILLEUR MODELE EST : {best_model_name}")
-
-# Récupération des prédictions du meilleur modèle
-if best_model_name == "ARIMA(4,1,3)":
-    best_pred = pred_arima
-elif best_model_name == "SES":
-    best_pred = pred_ses
-else:
-    best_pred = pred_des
-
-
-tu saurais me dire pk: Période d'entrainement : 2015-Q1 à 2023-Q2
-Période de test        : 2025-Q2 à 2025-Q2
+except Exception as e:
+    print(f"Impossible de décomposer (série trop courte ou index manquant) : {e}")
