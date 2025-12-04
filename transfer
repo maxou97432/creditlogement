@@ -5,11 +5,9 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import plotly.io as pio
 import warnings
 
-# Configuration
 warnings.filterwarnings("ignore")
 pio.renderers.default = "notebook" 
 
-# --- Initialisation ---
 n_forecast = 2 
 corrected_data = []
 future_adjustments = []
@@ -21,23 +19,24 @@ print("🚀 Démarrage de la modélisation TES (Holt-Winters)...")
 for name, group in grouped:
     zone, type_bien = name
     
-    # 1. Préparation des données
-    group = group.sort_values("Periode").set_index("Periode")
+    # 1. Préparation : On s'assure d'avoir un DatetimeIndex propre
+    group = group.sort_values("Periode")
+    group = group.set_index("Periode") # Index est Timestamp
+    
     group['Indice de prix (CL) - Corrigé TES'] = np.nan
     
-    # Série de l'écart (Biais)
+    # Série de l'écart
     ts_ecart = group['Dif'].dropna()
     
-    # Il faut définir la fréquence pour statsmodels (Trimestriel 'Q')
-    if not ts_ecart.empty:
-        ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
-    
-    if len(ts_ecart) > 12: # TES a besoin d'au moins 2 saisons complètes (4x2=8) + marge
+    if len(ts_ecart) > 12:
         try:
-            # 2. Modélisation TES (Holt-Winters)
-            # Tendance additive + Saisonnalité additive (période 4)
+            # Pour statsmodels, on crée une copie avec un PeriodIndex
+            ts_modeling = ts_ecart.copy()
+            ts_modeling.index = pd.PeriodIndex(ts_modeling.index, freq='Q')
+            
+            # 2. Modélisation TES
             model = ExponentialSmoothing(
-                ts_ecart, 
+                ts_modeling, 
                 trend='add', 
                 seasonal='add', 
                 seasonal_periods=4, 
@@ -46,26 +45,28 @@ for name, group in grouped:
             )
             model_fit = model.fit()
             
-            # --- A. Correction Historique (Pour le Graphique) ---
-            ecart_modelise = model_fit.fittedvalues
-            # Reconversion de l'index Period en Timestamp pour le merge avec le groupe original
-            ecart_modelise.index = ecart_modelise.index.to_timestamp()
+            # --- A. Correction Historique (LE FIX EST ICI) ---
             
-            # Alignement strict des index
-            ecart_modelise = ecart_modelise.reindex(group.index)
+            # 1. Récupérer les valeurs lissées (fittedvalues)
+            fitted_series = model_fit.fittedvalues
             
-            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé TES'] = cl_corrected_history
+            # 2. Convertir l'index Period (2015Q1) en Timestamp (2015-01-01)
+            # pour qu'il matche l'index du groupe original
+            fitted_series.index = fitted_series.index.to_timestamp()
             
-            # --- B. Calcul de la Prévision Future (Pour le Print uniquement) ---
+            # 3. Réinjecter dans le DataFrame original (Alignement automatique sur les dates)
+            # On utilise une série temporaire pour gérer les trous éventuels
+            group['Biais_Modelise'] = fitted_series
+            
+            # 4. Calcul de la correction (Si Biais_Modelise est NaN, le résultat sera NaN)
+            group['Indice de prix (CL) - Corrigé TES'] = group['Indice de prix (CL)'] - group['Biais_Modelise']
+            
+            # --- B. Prévision Future ---
             forecast_bias = model_fit.forecast(steps=n_forecast)
             
-            # Calcul approximatif de l'intervalle de confiance pour TES (Sigma des résidus)
             sigma = np.std(model_fit.resid)
-            # Marge à 95% pour T+1
             margin_error = 1.96 * sigma
             
-            # Stockage des valeurs pour le tableau
             future_adjustments.append({
                 "Zone": zone,
                 "Type": type_bien,
@@ -75,41 +76,46 @@ for name, group in grouped:
             })
 
             # =================================================================
-            # 3. Visualisation (HISTORIQUE UNIQUEMENT)
+            # 3. Visualisation
             # =================================================================
             
-            fig = go.Figure()
+            # Vérification qu'on a des données à tracer
+            if group['Indice de prix (CL) - Corrigé TES'].notna().sum() > 0:
+                
+                fig = go.Figure()
 
-            # Historique INSEE (Noir)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='INSEE (Réalité)',
-                line=dict(color='black', width=3)
-            ))
+                # Historique INSEE (Noir)
+                fig.add_trace(go.Scatter(
+                    x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
+                    mode='lines', name='INSEE (Réalité)',
+                    line=dict(color='black', width=3)
+                ))
 
-            # Historique CL Brut (Rouge Pointillé)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='CL (Brut)',
-                line=dict(color='red', width=1, dash='dot')
-            ))
+                # Historique CL Brut (Rouge)
+                fig.add_trace(go.Scatter(
+                    x=group.index, y=group['Indice de prix (CL)'],
+                    mode='lines', name='CL (Brut)',
+                    line=dict(color='red', width=1, dash='dot')
+                ))
 
-            # Historique CL Corrigé TES (Bleu)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=cl_corrected_history,
-                mode='lines', name='CL Corrigé (TES)',
-                line=dict(color='blue', width=2)
-            ))
+                # Historique CL Corrigé TES (Bleu) - CELLE QUI MANQUAIT
+                fig.add_trace(go.Scatter(
+                    x=group.index, y=group['Indice de prix (CL) - Corrigé TES'],
+                    mode='lines', name='CL Corrigé (TES)',
+                    line=dict(color='blue', width=2)
+                ))
 
-            fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction Holt-Winters",
-                yaxis_title="Indice (Base 2020 = 100)",
-                template="plotly_white",
-                height=500,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            
-            fig.show()
+                fig.update_layout(
+                    title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction Holt-Winters",
+                    yaxis_title="Indice (Base 2020 = 100)",
+                    template="plotly_white",
+                    height=500,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                fig.show()
+            else:
+                print(f"⚠️ Pas de données corrigées générées pour {zone}-{type_bien} (Problème de calcul)")
             
         except Exception as e:
             print(f"⚠️ Echec TES pour {name} : {e}")
@@ -119,14 +125,11 @@ for name, group in grouped:
 # Reconstitution
 merge_corrected = pd.concat(corrected_data, ignore_index=True)
 
-# --- Affichage du Tableau de Bord (Prévisions) ---
+# Affichage Tableau
 if future_adjustments:
     df_previsions = pd.DataFrame(future_adjustments)
     print("\n" + "="*80)
     print("📊 TABLEAU DE BORD : VALEURS D'AJUSTEMENT PRÉVUES (TES Holt-Winters)")
-    print("Ces valeurs sont à soustraire de l'indice CL futur pour obtenir l'estimation INSEE.")
     print("="*80)
     pd.set_option('display.max_rows', None)
-    display(df_previsions) # ou print(df_previsions) si pas dans un notebook
-else:
-    print("\nAucune prévision générée.")
+    display(df_previsions)
