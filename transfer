@@ -1,54 +1,23 @@
-# 📉 Modèles de Séries Temporelles (Synthèse Technique)
+## 📈 Triple Lissage Exponentiel (TES / Holt-Winters)
 
-### 1. ARIMA (AutoRegressive Integrated Moving Average)
+Le modèle TES est l'approche de lissage la plus complète. Il est crucial pour votre analyse car il intègre les trois composantes structurelles de votre série d'écarts ($\text{Dif}$) : **Niveau**, **Tendance** et **Saisonnalité**.
 
-ARIMA est un modèle paramétrique qui décompose la série en trois dynamiques :
+### 1. Composantes et Rôle dans votre Analyse
 
-* **AR (AutoRegressive) :** Utilisation des valeurs passées ($y_{t-i}$) pour la prévision.
-* **I (Integrated) :** Différenciation de la série ($d$ fois) pour la rendre stationnaire.
-* **MA (Moving Average) :** Utilisation des erreurs passées ($\varepsilon_{t-i}$) pour affiner la prévision.
+Le modèle estime trois composantes, chacune gérée par un coefficient de lissage distinct ($\alpha, \beta, \gamma$) :
 
-**Formulation générale pour un ARIMA($p, d, q$) :**
+| Composante | Rôle | Coefficient |
+| :--- | :--- | :--- |
+| **Niveau ($\ell_t$)** | Capture la valeur moyenne actuelle de l'écart (le biais statique). | $\alpha$ (Alpha) |
+| **Tendance ($b_t$)** | Capture la **dérive** de l'écart (l'accélération ou le ralentissement du biais). | $\beta$ (Beta) |
+| **Saisonnalité ($s_t$)** | Capture le **cycle trimestriel** répétitif (fluctuation du biais due au décalage administratif). | $\gamma$ (Gamma) |
 
-$$\phi(B)(1-B)^d y_t = \theta(B)\varepsilon_t$$
+### 2. Le Mécanisme de Correction
 
-Où :
-* $y_t$ est la valeur à l'instant $t$.
-* $B$ est l'opérateur de retard ($B y_t = y_{t-1}$).
-* $\phi(B)$ est la partie AR (ordre $p$).
-* $\theta(B)$ est la partie MA (ordre $q$).
-* $d$ est l'ordre de différenciation.
+Le succès du TES valide qu'il faut un outil capable de corriger le biais statique ($\ell_t$) **ET** d'anticiper la dérive future ($b_t$) **ET** d'ajuster pour le trimestre spécifique ($s_t$).
 
----
+**Formule simplifiée de la prévision ($\hat{y}_{t+h}$) :**
 
-### 2. SES (Simple Exponential Smoothing)
+$$\hat{y}_{t+h} = \ell_t + h b_t + s_{t+h-m}$$
 
-Le SES est le modèle de lissage le plus simple. Il est idéal pour les séries **sans tendance ni saisonnalité**. Il prédit la prochaine valeur comme une moyenne pondérée du dernier niveau et de la dernière observation.
-
-**Formulation de la Prévision :**
-
-$$\hat{y}_{t+1} = \alpha y_t + (1-\alpha)\hat{y}_t$$
-
-Où :
-* $\hat{y}_{t+1}$ est la prévision pour $t+1$.
-* $y_t$ est l'observation actuelle.
-* $\alpha \in [0,1]$ est le coefficient de lissage, qui donne le poids aux données récentes ($\alpha$ élevé = modèle réactif).
-
----
-
-### 3. DES (Double Exponential Smoothing - Lissage de Holt)
-
-Le DES étend le SES en ajoutant une composante pour modéliser la **tendance** ($\mathbf{b_t}$), ce qui est essentiel pour les séries en croissance (comme votre écart non-stationnaire).
-
-**Formulation de l'Ajustement (Mise à jour du Niveau et de la Tendance) :**
-
-$$\begin{cases}
-\ell_t = \alpha y_t + (1-\alpha)(\ell_{t-1} + b_{t-1}) & \text{(Mise à jour du Niveau)} \\
-b_t = \beta (\ell_t - \ell_{t-1}) + (1-\beta)b_{t-1} & \text{(Mise à jour de la Tendance)} \\
-\hat{y}_{t+h} = \ell_t + h b_t & \text{(Prévision)}
-\end{cases}$$
-
-Où :
-* $\ell_t$ est le niveau estimé (valeur actuelle).
-* $b_t$ est la tendance (pente) estimée.
-* $\alpha$ et $\beta$ sont les coefficients de lissage pour le niveau et la tendance, respectivement.
+Le succès du **TES** démontre que le modèle de correction retenu est capable de s'adapter aux mouvements de fond du marché tout en anticipant la fluctuation cyclique du biais.
