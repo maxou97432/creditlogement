@@ -1,90 +1,26 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from sklearn.metrics import mean_squared_error
-import warnings
+print("Recherche du meilleur modèle ARIMA en cours...")
 
-warnings.filterwarnings("ignore")
+# 2. Boucle de test (Grid Search)
+for order in pdq:
+    try:
+        # On entraine le modèle sur le TRAIN set
+        model_temp = ARIMA(train, order=order)
+        results_temp = model_temp.fit()
+        
+        # On récupère l'AIC
+        current_aic = results_temp.aic
+        
+        # Si c'est le meilleur score jusqu'ici, on le garde
+        if current_aic < best_aic:
+            best_aic = current_aic
+            best_order = order
+            best_model = results_temp
+            
+        #print(f'ARIMA{order} - AIC:{current_aic:.2f}')
+        
+    except:
+        continue
 
-# 1. PRÉPARATION
-# Assurez-vous que l'index est bien temporel (Trimestriel)
-df_analyse = merge.sort_values("Periode").set_index("Periode")
-ts_ecart = df_analyse['Dif'].dropna()
-
-# Fréquence explicite pour statsmodels (Q = Quarterly)
-ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
-
-# 2. SPLIT TRAIN / TEST
-n_test = 8
-train = ts_ecart.iloc[:-n_test]
-test = ts_ecart.iloc[-n_test:]
-
-print(f"Saisonnalité détectée. Lancement des modèles saisonniers...")
 print("-" * 50)
-
-# ==============================================================================
-# MODÈLE 1 : SARIMA (Seasonal ARIMA)
-# ==============================================================================
-# Configuration : (p,d,q) x (P,D,Q,s)
-# order=(1,1,1) : Dynamique de court terme
-# seasonal_order=(1,1,0,4) : Dynamique saisonnière (4 = trimestriel)
-# D=1 signifie qu'on regarde la différence avec l'année dernière (Gap_T - Gap_T-4)
-
-model_sarima = ARIMA(train, order=(1, 1, 1), seasonal_order=(1, 1, 0, 4))
-fit_sarima = model_sarima.fit()
-
-pred_sarima = fit_sarima.forecast(steps=n_test)
-rmse_sarima = np.sqrt(mean_squared_error(test, pred_sarima))
-
-# ==============================================================================
-# MODÈLE 2 : Holt-Winters (Triple Lissage Exponentiel)
-# ==============================================================================
-# trend='add' : Tendance linéaire
-# seasonal='add' : Saisonnalité additive (l'amplitude de la vague est constante)
-# seasonal_periods=4 : Cycle de 4 trimestres
-
-model_hw = ExponentialSmoothing(
-    train, 
-    trend='add', 
-    seasonal='add', 
-    seasonal_periods=4, 
-    damped_trend=True
-).fit()
-
-pred_hw = model_hw.forecast(steps=n_test)
-rmse_hw = np.sqrt(mean_squared_error(test, pred_hw))
-
-# ==============================================================================
-# RÉSULTATS
-# ==============================================================================
-
-print(f"RMSE Modèle SARIMA (1,1,1)x(1,1,0,4) : {rmse_sarima:.4f}")
-print(f"RMSE Modèle Holt-Winters (Saisonnier): {rmse_hw:.4f}")
-
-if rmse_sarima < rmse_hw:
-    print("\n🏆 LE GAGNANT EST : SARIMA")
-    best_pred = pred_sarima
-else:
-    print("\n🏆 LE GAGNANT EST : Holt-Winters")
-    best_pred = pred_hw
-
-# ==============================================================================
-# VISUALISATION
-# ==============================================================================
-# Conversion des index Period en Timestamp pour le plot
-train_idx = train.index.to_timestamp()
-test_idx = test.index.to_timestamp()
-
-plt.figure(figsize=(12, 6))
-plt.plot(train_idx, train, label='Historique', color='gray')
-plt.plot(test_idx, test, label='Réalité', color='black', linewidth=2)
-
-plt.plot(test_idx, pred_sarima, label=f'SARIMA (RMSE={rmse_sarima:.2f})', linestyle='--', color='green')
-plt.plot(test_idx, pred_hw, label=f'Holt-Winters (RMSE={rmse_hw:.2f})', linestyle='--', color='blue')
-
-plt.title('Comparaison des Modèles Saisonniers pour la Correction de l\'Écart', fontsize=14)
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.show()
+print(f" MEILLEUR MODÈLE : ARIMA{best_order} avec AIC = {best_aic:.2f}")
+print("-" * 50)
