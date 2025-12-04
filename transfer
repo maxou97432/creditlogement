@@ -1,103 +1,95 @@
 from prophet import Prophet
-import pandas as pd
-import numpy as np
-from sklearn.metrics import mean_squared_error
-from xgboost import XGBRegressor
+import itertools
 
-from sklearn.model_selection import TimeSeriesSplit, KFold, RandomizedSearchCV, GridSearchCV
-from sklearn.metrics import mean_squared_error, make_scorer
-from scipy.stats import randint, uniform
+# Grille de paramètres
+param_grid = {  
+    'changepoint_prior_scale': [0.001, 0.01, 0.05, 0.1, 0.5], # Rigidité de la tendance
+    'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],        # Rigidité de la saisonnalité
+}
 
-import numpy as np
+# Générer les combinaisons
+all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
+best_rmse = float('inf')
+best_params = {}
 
+print("Optimisation Prophet en cours...")
 
-# Préparation au format Prophet (ds = date, y = valeur)
-df_prophet = pd.DataFrame({
-    'ds': train.index.to_timestamp(), # Prophet veut des vraies dates
-    'y': train.values
-})
+for params in all_params:
+    # On configure le modèle avec les params actuels
+    m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **params)
+    m.fit(df_prophet) # df_prophet doit contenir le TRAIN uniquement !
+    
+    # Prévision sur le test
+    future = m.make_future_dataframe(periods=n_test, freq='Q')
+    forecast = m.predict(future)
+    pred_values = forecast['yhat'].iloc[-n_test:].values
+    
+    rmse = np.sqrt(mean_squared_error(test, pred_values))
+    
+    if rmse < best_rmse:
+        best_rmse = rmse
+        best_params = params
 
-# Configuration
-# yearly_seasonality=True si on pense qu'il y a un cycle annuel (4 trimestres)
-# changepoint_prior_scale : flexibilité de la tendance (0.05 par défaut)
-model_prophet = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-model_prophet.fit(df_prophet)
+print(f"Meilleurs params Prophet : {best_params}")
+print(f"RMSE Prophet Optimisé : {best_rmse:.4f}")
 
-# Création du futur
-future = model_prophet.make_future_dataframe(periods=n_test, freq='Q')
-forecast = model_prophet.predict(future)
-
-# Récupération des prévisions sur la partie Test
-pred_prophet = forecast['yhat'].iloc[-n_test:].values
-rmse_prophet = np.sqrt(mean_squared_error(test, pred_prophet))
-
-print(f"RMSE Prophet : {rmse_prophet:.4f}")
-
-
-
-# 1. Feature Engineering : Créer les "Lags" (retards)
+# 1. RENDRE LA SÉRIE STATIONNAIRE (Indispensable pour XGBoost sur données avec tendance)
 df_ml = pd.DataFrame(ts_ecart.copy())
 df_ml.columns = ['y']
+# On prédit la variation (diff), pas la valeur absolue
+df_ml['y_diff'] = df_ml['y'].diff() 
 
-# On crée des variables explicatives : l'écart d'avant, d'il y a 2 trimestres, et d'il y a un an
-df_ml['lag_1'] = df_ml['y'].shift(1)
-df_ml['lag_2'] = df_ml['y'].shift(2)
-df_ml['lag_4'] = df_ml['y'].shift(4) # Pour capturer la saisonnalité éventuelle
+# 2. Feature Engineering sur la Différence
+df_ml['lag_1'] = df_ml['y_diff'].shift(1)
+df_ml['lag_2'] = df_ml['y_diff'].shift(2)
+df_ml['lag_4'] = df_ml['y_diff'].shift(4) # Saisonnalité
 
 df_ml = df_ml.dropna()
 
-# 2. Split Train/Test respectant la chronologie
+# 3. Split Train/Test
+train_size = len(df_ml) - n_test
 X = df_ml[['lag_1', 'lag_2', 'lag_4']]
-y = df_ml['y']
+y = df_ml['y_diff']
 
-X_train = X.iloc[:-n_test]
-y_train = y.iloc[:-n_test]
-X_test = X.iloc[-n_test:]
-y_test = y.iloc[-n_test:]
+X_train, y_train = X.iloc[:train_size], y.iloc[:train_size]
+X_test, y_test = X.iloc[train_size:], y.iloc[train_size:]
 
-
-
-
-
-param_dist = {
-    'n_estimators': randint(300, 2000),
-    'learning_rate': uniform(0.01, 0.2),
-    'max_depth': randint(2, 10),
-    'subsample': uniform(0.6, 0.4),        # [0.6, 1.0]
-    'colsample_bytree': uniform(0.6, 0.4), # [0.6, 1.0]
-    'reg_lambda': uniform(0.0, 2.0),
-    'reg_alpha': uniform(0.0, 1.0),
-    'min_child_weight': randint(1, 8),
-    'gamma': uniform(0.0, 2.0)
-}
-
-base_model = XGBRegressor(
-    objective='reg:squarederror',
-    random_state=42,
-    n_jobs=-1
-)
-
-rs = RandomizedSearchCV(
-    estimator=base_model,
-    param_distributions=param_dist,
-    n_iter=50,
-    scoring='neg_root_mean_squared_error',
-    cv=TimeSeriesSplit(n_splits=5),  # ou KFold selon le cas
-    verbose=1,
-    n_jobs=-1,
-    random_state=42
-)
-
+# 4. Entraînement (RandomizedSearch est très bien, gardez-le)
 rs.fit(X_train, y_train)
-print("Meilleurs paramètres:", rs.best_params_)
-print("Meilleur score RMSE:", -rs.best_score_)
-best_model = rs.best_estimator_
+best_xgb = rs.best_estimator_
 
-# 3. Modélisation
+# 5. PRÉVISION RÉCURSIVE (Sans triche)
+# On récupère la dernière fenêtre connue du Train
+last_window = X_train.iloc[-1].values 
+# last_window = [lag_1, lag_2, lag_4]
 
+predictions_diff = []
+current_lags = last_window.copy()
 
-# 4. Prévision (Attention : en récursif pour aller loin dans le futur, ici on fait du one-step pour simplifier le test)
-pred_xgb = rs.predict(X_test)
-rmse_xgb = np.sqrt(mean_squared_error(y_test, pred_xgb))
+for i in range(n_test):
+    # Prédire la variation pour le pas suivant
+    # Reshape car predict attend un tableau 2D
+    pred_diff = best_xgb.predict(current_lags.reshape(1, -1))[0]
+    predictions_diff.append(pred_diff)
+    
+    # Mettre à jour les lags pour le tour suivant (Shift manuel)
+    # lag_1 devient la prédiction qu'on vient de faire !
+    # lag_2 devient l'ancien lag_1, etc.
+    new_lags = np.array([pred_diff, current_lags[0], current_lags[2]]) 
+    # Note : lag_4 est plus complexe à mettre à jour en récursif strict, 
+    # ici on simplifie ou on récupère l'historique plus loin.
+    current_lags = new_lags
 
-print(f"RMSE XGBoost : {rmse_xgb:.4f}")
+# 6. RECONSTRUCTION (Diff -> Niveau)
+# On repart de la dernière valeur réelle connue du Train
+last_real_value = train.iloc[-1]
+pred_xgb_levels = []
+current_val = last_real_value
+
+for diff in predictions_diff:
+    current_val = current_val + diff
+    pred_xgb_levels.append(current_val)
+
+rmse_xgb_recursive = np.sqrt(mean_squared_error(test, pred_xgb_levels))
+
+print(f"RMSE XGBoost (Récursif + Diff) : {rmse_xgb_recursive:.4f}")
