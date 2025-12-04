@@ -1,13 +1,31 @@
 from prophet import Prophet
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error
+from xgboost import XGBRegressor
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from scipy.stats import randint, uniform
 import itertools
+import warnings
 
-# Grille de paramètres
+warnings.filterwarnings("ignore")
+
+# ==============================================================================
+# 1. OPTIMISATION PROPHET
+# ==============================================================================
+
+# Préparation au format Prophet
+# Assurez-vous que 'train' a un DatetimeIndex
+df_prophet = pd.DataFrame({
+    'ds': train.index.to_timestamp(), 
+    'y': train.values
+})
+
 param_grid = {  
-    'changepoint_prior_scale': [0.001, 0.01, 0.05, 0.1, 0.5], # Rigidité de la tendance
-    'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],        # Rigidité de la saisonnalité
+    'changepoint_prior_scale': [0.001, 0.01, 0.05, 0.1, 0.5],
+    'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],
 }
 
-# Générer les combinaisons
 all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
 best_rmse = float('inf')
 best_params = {}
@@ -15,73 +33,111 @@ best_params = {}
 print("Optimisation Prophet en cours...")
 
 for params in all_params:
-    # On configure le modèle avec les params actuels
-    m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **params)
-    m.fit(df_prophet) # df_prophet doit contenir le TRAIN uniquement !
-    
-    # Prévision sur le test
-    future = m.make_future_dataframe(periods=n_test, freq='Q')
-    forecast = m.predict(future)
-    pred_values = forecast['yhat'].iloc[-n_test:].values
-    
-    rmse = np.sqrt(mean_squared_error(test, pred_values))
-    
-    if rmse < best_rmse:
-        best_rmse = rmse
-        best_params = params
+    try:
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **params)
+        m.fit(df_prophet)
+        
+        future = m.make_future_dataframe(periods=n_test, freq='Q')
+        forecast = m.predict(future)
+        pred_values = forecast['yhat'].iloc[-n_test:].values
+        
+        rmse = np.sqrt(mean_squared_error(test, pred_values))
+        
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_params = params
+    except:
+        continue
 
-print(f"Meilleurs params Prophet : {best_params}")
 print(f"RMSE Prophet Optimisé : {best_rmse:.4f}")
 
-# 1. RENDRE LA SÉRIE STATIONNAIRE (Indispensable pour XGBoost sur données avec tendance)
+
+# ==============================================================================
+# 2. XGBOOST RÉCURSIF (Correction du Lag 4)
+# ==============================================================================
+
+# A. Préparation (Différenciation)
 df_ml = pd.DataFrame(ts_ecart.copy())
 df_ml.columns = ['y']
-# On prédit la variation (diff), pas la valeur absolue
-df_ml['y_diff'] = df_ml['y'].diff() 
+df_ml['y_diff'] = df_ml['y'].diff()
 
-# 2. Feature Engineering sur la Différence
-df_ml['lag_1'] = df_ml['y_diff'].shift(1)
-df_ml['lag_2'] = df_ml['y_diff'].shift(2)
-df_ml['lag_4'] = df_ml['y_diff'].shift(4) # Saisonnalité
+# B. Feature Engineering
+# On a besoin d'accéder jusqu'à t-4, donc on crée les colonnes pour l'entrainement
+for i in range(1, 5): # Créer lag_1, lag_2, lag_3, lag_4
+    df_ml[f'lag_{i}'] = df_ml['y_diff'].shift(i)
 
 df_ml = df_ml.dropna()
 
-# 3. Split Train/Test
+# C. Split Train/Test
 train_size = len(df_ml) - n_test
-X = df_ml[['lag_1', 'lag_2', 'lag_4']]
+
+# Sélection des features UTILES pour le modèle (on peut ignorer lag_3 ici si on veut)
+features_cols = ['lag_1', 'lag_2', 'lag_4']
+X = df_ml[features_cols]
 y = df_ml['y_diff']
 
 X_train, y_train = X.iloc[:train_size], y.iloc[:train_size]
 X_test, y_test = X.iloc[train_size:], y.iloc[train_size:]
 
-# 4. Entraînement (RandomizedSearch est très bien, gardez-le)
+# D. Entraînement (RandomizedSearch)
+param_dist = {
+    'n_estimators': randint(100, 1000), # Réduit pour aller plus vite
+    'learning_rate': uniform(0.01, 0.2),
+    'max_depth': randint(2, 6),         # Profondeur réduite pour éviter l'overfitting sur petites séries
+    'subsample': uniform(0.6, 0.4),
+    'colsample_bytree': uniform(0.6, 0.4)
+}
+
+base_model = XGBRegressor(objective='reg:squarederror', random_state=42, n_jobs=-1)
+
+rs = RandomizedSearchCV(
+    estimator=base_model,
+    param_distributions=param_dist,
+    n_iter=20, # Réduit pour le test
+    scoring='neg_root_mean_squared_error',
+    cv=TimeSeriesSplit(n_splits=3),
+    verbose=0,
+    n_jobs=-1,
+    random_state=42
+)
+
 rs.fit(X_train, y_train)
 best_xgb = rs.best_estimator_
 
-# 5. PRÉVISION RÉCURSIVE (Sans triche)
-# On récupère la dernière fenêtre connue du Train
-last_window = X_train.iloc[-1].values 
-# last_window = [lag_1, lag_2, lag_4]
+# E. PRÉVISION RÉCURSIVE (Correction du Buffer)
+# On récupère les 4 dernières valeurs réelles connues du Train pour initialiser le buffer
+# Buffer = [y_diff_t-1, y_diff_t-2, y_diff_t-3, y_diff_t-4]
+# Note : df_ml contient tout l'historique jusqu'à la fin, il faut prendre juste avant le test
+last_train_idx = train_size - 1
+history_buffer = [
+    df_ml['y_diff'].iloc[last_train_idx],     # lag_1
+    df_ml['y_diff'].iloc[last_train_idx - 1], # lag_2
+    df_ml['y_diff'].iloc[last_train_idx - 2], # lag_3 (Utile pour le futur lag_4 !)
+    df_ml['y_diff'].iloc[last_train_idx - 3]  # lag_4
+]
 
 predictions_diff = []
-current_lags = last_window.copy()
 
 for i in range(n_test):
-    # Prédire la variation pour le pas suivant
-    # Reshape car predict attend un tableau 2D
-    pred_diff = best_xgb.predict(current_lags.reshape(1, -1))[0]
+    # 1. Construire le vecteur X pour la prédiction (On prend lag 1, 2 et 4)
+    # history_buffer[0] est lag_1, history_buffer[1] est lag_2, history_buffer[3] est lag_4
+    current_features = np.array([[
+        history_buffer[0], 
+        history_buffer[1], 
+        history_buffer[3]
+    ]])
+    
+    # 2. Prédire
+    pred_diff = best_xgb.predict(current_features)[0]
     predictions_diff.append(pred_diff)
     
-    # Mettre à jour les lags pour le tour suivant (Shift manuel)
-    # lag_1 devient la prédiction qu'on vient de faire !
-    # lag_2 devient l'ancien lag_1, etc.
-    new_lags = np.array([pred_diff, current_lags[0], current_lags[2]]) 
-    # Note : lag_4 est plus complexe à mettre à jour en récursif strict, 
-    # ici on simplifie ou on récupère l'historique plus loin.
-    current_lags = new_lags
+    # 3. Mettre à jour le buffer (Glissement)
+    # On insère la nouvelle prédiction au début (nouveau lag_1)
+    # On supprime le dernier élément (ancien lag_4 qui sort de la fenêtre)
+    history_buffer.insert(0, pred_diff)
+    history_buffer.pop() 
 
-# 6. RECONSTRUCTION (Diff -> Niveau)
-# On repart de la dernière valeur réelle connue du Train
+# F. Reconstruction (Diff -> Niveau)
 last_real_value = train.iloc[-1]
 pred_xgb_levels = []
 current_val = last_real_value
