@@ -1,3 +1,165 @@
-df_analyse = merge.sort_values("Periode").set_index("Periode")
-df_analyse['Dif'] = df_analyse['Indice de prix (CL)'] - df_analyse['Indice de prix (INSEE) - Base 2020']
-ts_ecart = df_analyse.groupby('Periode')['Dif'].mean()
+
+import pandas as pd
+import numpy as np
+import itertools
+import warnings
+import logging
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from prophet import Prophet
+
+# --- CONFIGURATION ---
+warnings.filterwarnings("ignore")
+# Rendre Prophet silencieux
+logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+logging.getLogger('prophet').setLevel(logging.WARNING)
+
+# ==============================================================================
+# 1. PRÉPARATION DES DONNÉES
+# ==============================================================================
+
+# Forcer la fréquence trimestrielle pour statsmodels
+ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
+
+print(f"   Série chargée : {len(ts_ecart)} trimestres du {ts_ecart.index[0]} au {ts_ecart.index[-1]}")
+
+# ==============================================================================
+# 2. OPTIMISATION SARIMA (Grid Search AIC)
+# ==============================================================================
+print("\n2. Recherche des meilleurs paramètres SARIMA (Grid Search)...")
+
+# Plages de recherche (petites pour la rapidité, augmentables si besoin)
+p = q = range(0, 5)
+d = [1] # On sait que la série dérive (ADF False) -> d=1
+P = Q = range(0, 4)
+D = [0, 1] 
+s = [4] # Trimestriel
+
+pdq = list(itertools.product(p, d, q))
+seasonal_pdq = list(itertools.product(P, D, Q, s))
+
+best_aic = float("inf")
+best_order = (1, 1, 0) # Valeur par défaut de sécurité
+best_seasonal_order = (0, 0, 0, 4)
+
+# On utilise les 3/4 des données pour le calibrage
+train_calibration = ts_ecart.iloc[:int(len(ts_ecart)*0.75)]
+
+counter = 0
+total_iter = len(pdq) * len(seasonal_pdq)
+
+for param in pdq:
+    for param_seasonal in seasonal_pdq:
+        try:
+            mod = ARIMA(train_calibration,
+                        order=param,
+                        seasonal_order=param_seasonal,
+                        enforce_stationarity=False,
+                        enforce_invertibility=False)
+            results = mod.fit()
+            
+            if results.aic < best_aic:
+                best_aic = results.aic
+                best_order = param
+                best_seasonal_order = param_seasonal
+        except:
+            continue
+        counter += 1
+
+print(f"   🏆 Meilleur SARIMA trouvé : Order={best_order}, Seasonal={best_seasonal_order} (AIC={best_aic:.2f})")
+
+
+# ==============================================================================
+# 3. LE TOURNOI : CROSS-VALIDATION (Robustesse)
+# ==============================================================================
+print("\n3. Démarrage de la Cross-Validation (Comparaison des modèles)...")
+
+# Configuration de la CV
+n_splits = 6
+test_horizon = 4 # On prédit 1 an à chaque coupure
+tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_horizon)
+
+results_cv = {
+    'SARIMA Opti': [],
+    'DES (Holt)': [],
+    'TES (Holt-Winters)': [],
+    'Prophet': []
+}
+
+fold = 1
+for train_index, test_index in tscv.split(ts_ecart):
+    
+    # Découpage
+    cv_train = ts_ecart.iloc[train_index]
+    cv_test = ts_ecart.iloc[test_index]
+    
+    # --- A. SARIMA (Avec les paramètres optimisés trouvés en étape 2) ---
+    try:
+        model_sarima = ARIMA(cv_train, order=best_order, seasonal_order=best_seasonal_order, 
+                             enforce_stationarity=False, enforce_invertibility=False)
+        fit_sarima = model_sarima.fit()
+        pred_sarima = fit_sarima.forecast(steps=test_horizon)
+        results_cv['SARIMA Opti'].append(np.sqrt(mean_squared_error(cv_test, pred_sarima)))
+    except:
+        results_cv['SARIMA Opti'].append(np.nan)
+
+    # --- B. DES (Holt - Tendance seule) ---
+    try:
+        model_des = ExponentialSmoothing(cv_train, trend='add', seasonal=None, 
+                                         damped_trend=True, initialization_method="estimated").fit()
+        pred_des = model_des.forecast(steps=test_horizon)
+        results_cv['DES (Holt)'].append(np.sqrt(mean_squared_error(cv_test, pred_des)))
+    except:
+        results_cv['DES (Holt)'].append(np.nan)
+
+    # --- C. TES (Holt-Winters - Saisonnier) ---
+    try:
+        model_tes = ExponentialSmoothing(cv_train, trend='add', seasonal='add', seasonal_periods=4, 
+                                         damped_trend=True, initialization_method="estimated").fit()
+        pred_tes = model_tes.forecast(steps=test_horizon)
+        results_cv['TES (Holt-Winters)'].append(np.sqrt(mean_squared_error(cv_test, pred_tes)))
+    except:
+        results_cv['TES (Holt-Winters)'].append(np.nan)
+
+    # --- D. Prophet ---
+    try:
+        # Préparation dataframe Prophet
+        df_prophet_cv = pd.DataFrame({'ds': cv_train.index.to_timestamp(), 'y': cv_train.values})
+        
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, 
+                    changepoint_prior_scale=0.05)
+        m.fit(df_prophet_cv)
+        
+        future = m.make_future_dataframe(periods=test_horizon, freq='Q')
+        forecast = m.predict(future)
+        pred_prophet = forecast['yhat'].iloc[-test_horizon:].values
+        
+        results_cv['Prophet'].append(np.sqrt(mean_squared_error(cv_test, pred_prophet)))
+    except:
+        results_cv['Prophet'].append(np.nan)
+        
+    print(f"   Round {fold}/{n_splits} terminé.")
+    fold += 1
+
+# ==============================================================================
+# 4. RÉSULTATS FINAUX
+# ==============================================================================
+
+df_results = pd.DataFrame(results_cv)
+summary = pd.DataFrame({
+    'RMSE Moyen': df_results.mean(),
+    'Stabilité (Std)': df_results.std(),
+    'Meilleur Score': df_results.min(),
+    'Pire Score': df_results.max()
+})
+
+print("\n" + "="*60)
+print("🏆 CLASSEMENT FINAL (Basé sur le RMSE Moyen)")
+print("="*60)
+# Tri du meilleur au pire (RMSE le plus bas en premier)
+print(summary.sort_values("RMSE Moyen"))
+
+best_model_name = summary['RMSE Moyen'].idxmin()
+print(f"\n✅ Le modèle recommandé est : {best_model_name}")
