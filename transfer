@@ -1,16 +1,22 @@
-## 📊 Analyse des Déterminants de l'Écart : Impact de la Volumétrie ($\ln(\text{NB\_BIENS})$)
 
-L'objectif était de vérifier si la liquidité du marché (représentée par la volumétrie de transactions, $\ln(\text{NB\_BIENS})$) est une variable explicative de la dérive de l'écart ($\text{CL} - \text{INSEE}$).
+Nous avons constaté un écart dont la cause n'a pas pu être expliquée. Cependant, nous allons tenter de le corriger.
 
-| Métrique | Observation | Conclusion Économique |
-| :--- | :--- | :--- |
-| **Coefficient $\beta$** | **Quasi Nul** ($\approx 0.00$ à $0.05$) | L'impact économique de la volumétrie sur l'écart est **négligeable**. Le changement d'une unité de volume ne modifie presque pas le biais. |
-| **$R^2$** | **Proche de $0$** (voire négatif) | Le modèle n'explique **aucune variance** significative de la série des écarts. La volumétrie ne capte pas les facteurs qui font fluctuer le biais. |
-| **Corrélation (Pearson)** | **Faible** ($\leq |0.4|$ pour la majorité des zones). | Il n'existe pas de relation linéaire simple entre la liquidité et le biais. |
-| **$P\text{-value}$** | **Majoritairement $< 0.05$** | **Significativité trompeuse.** L'effet est détectable statistiquement (car la taille d'échantillon est grande), mais l'effet réel est de magnitude nulle. |
 
-### Synthèse et Conclusion
 
-1.  **Désalignement Statistique/Économique :** La $P\text{-value}$ a indiqué une dépendance ($p < 0.05$), mais la valeur du coefficient ($\beta$) prouve que cette dépendance est **trop faible pour être économiquement significative**.
-2.  **Volumétrie (NB\_BIENS) :** Elle est jugée **non pertinente** comme déterminant de l'écart. L'écart est donc probablement déterminé par d'autres variables externes (taux d'intérêt, confiance des ménages) ou par la qualité des biens vendus dans l'échantillon CL.
-3.  **Conséquence pour le Modèle :** Le modèle de correction du biais (Holt-Winters) ne doit **pas** être enrichi par la variable $\ln(\text{NB\_BIENS})$ car cela n'ajouterait que du bruit et de la complexité inutile.
+Pour ce faire, nous allons utiliser des **méthodes de séries temporelles**.  
+Il n'est pas pertinent d'appliquer une simple moyenne de l'écart comme correctif pour chaque périmètre, car cela introduirait un biais trop important.  
+À la place, nous allons mettre en place un **écart dynamique**.
+
+## Méthodologie
+
+1. **Sélection des modèles**  
+   Nous allons comparer **trois approches de séries temporelles**.
+
+2. **Échantillons**  
+   - **Train** : le reste de la base (hors validation).
+   - **Validation** : les deux dernières années.
+
+3. **Processus**  
+   - Entraîner les modèles sur l'échantillon *train*.
+   - Évaluer leurs performances sur l'échantillon *validation*.
+   - Sélectionner la meilleure approche pour appliquer la correction.
