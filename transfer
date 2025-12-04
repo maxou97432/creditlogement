@@ -1,27 +1,37 @@
-## 🔄 Modèle à Correction d'Erreur (ECM)
 
-L’objectif de l'ECM est d’examiner s’il existe un mécanisme de **rappel** qui contraint les écarts entre les indices CL et INSEE à revenir vers un équilibre de long terme.
+# Analyse de l'impact de la Volumétrie sur l'Écart
 
-### Anatomie du Modèle Estimé
 
-Le modèle ECM permet de prédire la variation de l'indice INSEE ($\Delta \text{INSEE}_t$) en fonction des chocs immédiats ($\Delta \text{CL}_t$) et du déséquilibre passé ($\text{Écart}_{t-1}$).
+### 1. Corrélation (Pearson)
+- Les corrélations sont **faibles** (proches de 0) et parfois **négatives** (ex. Lille-MAI : -0,40).
+-  Il n’existe pas de relation linéaire forte entre le volume et l’écart.
 
-Le modèle estimé est le suivant :
 
-$$\Delta \text{INSEE}_t = \alpha + \beta_1 \Delta \text{CL}_t + \gamma \cdot (\text{CL}_{t-1} - \text{INSEE}_{t-1}) + \epsilon_t$$
 
-| Terme | Symbole | Rôle Économétrique |
-| :--- | :--- | :--- |
-| **$\beta_1$** | $0.96$ | **Impact à Court Terme** : Mesure la transmission immédiate du choc (un mouvement de 1 point de CL cause un mouvement de 0.96 point de INSEE). |
-| **$\gamma$** | $0.475$ | **Vitesse d'Ajustement (Force de Rappel)** : Mesure la proportion du déséquilibre passé qui est résorbée au trimestre $t$. |
-| $(\text{CL}_{t-1} - \text{INSEE}_{t-1})$ | | **Terme de Correction d'Erreur (ECT)** : Le déséquilibre constaté à $t-1$. |
+### 2. Significativité (p-value)
+- La majorité des p-values < 0,05 → **statistiquement significatif**.
+- Cependant cette significativité est probablement due à la taille des échantillons, pas à un effet réel.
 
-### Interprétation des Résultats
 
-1.  **Mécanisme de Co-intégration ($\gamma$) :**
-    * Le coefficient $\gamma$ est **positif et hautement significatif** ($\approx +0.475$).
-    * Puisque l'écart est défini $\text{CL} - \text{INSEE}$, un écart positif (CL est trop haut) est corrigé par une accélération de l'INSEE ($\Delta \text{INSEE}_t > 0$).
-    * **Conclusion :** Cela prouve l'existence d'une **force de rappel** forte. L'indice CL agit comme le **pôle d'attraction** vers lequel l'indice INSEE est mécaniquement contraint de converger.
 
-2.  **Vitesse d'Ajustement :**
-    * La magnitude de $\gamma$ ($\mathbf{0.475}$) signifie que **$47.5\%$ du déséquilibre** est corrigé et résorbé par l'indice INSEE dès le trimestre suivant. C'est une vitesse de convergence très rapide.
+### 3. Impact Volume (Beta)
+- Les coefficients Beta sont **quasi nuls** (≈ 0).
+- **Interprétation :** Même si l’effet est détectable statistiquement, il est **négligeable**.
+
+
+
+### 4. R²
+- R² proche de 0 ou négatif → le modèle n’explique **aucune variance**.
+- La volumétrie seule n’est pas un bon prédicteur de l’écart.
+
+
+
+### Synthèse
+- **Statistiquement :** Oui, significatif dans la plupart des cas.
+- **Économiquement :** Impact très faible, pas de lien réel.
+- **Corrélation faible :** Pas de relation linéaire forte.
+
+Le nombre de bien ne semble alors pas être une varaible explicative de l'écart entre les indices
+
+
+
