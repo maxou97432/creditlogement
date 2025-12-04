@@ -1,105 +1,421 @@
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import plotly.io as pio
-import warnings
 
-# Configuration
-warnings.filterwarnings("ignore")
-pio.renderers.default = "notebook" 
+fais moi des stats sur les modèles gagnants: 
+========================================================
+ANALYSE DU SEGMENT : ('75', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
 
-corrected_data = [] 
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.562585          0.89886
+SARIMA Opti           1.572230          1.10322
+   ✅ Vainqueur : TES (Holt-Winters)
 
-# Groupement par zone et type de bien
-grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+========================================================
+ANALYSE DU SEGMENT : ('77', 'APT')
+========================================================
+   Série chargée : 38 trimestres du 2015Q1 au 2024Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
 
-print("🚀 Démarrage de la correction historique (Validation Holt-Winters)...")
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.709801         0.525770
+SARIMA Opti           1.950432         0.783173
+   ✅ Vainqueur : TES (Holt-Winters)
 
-for name, group in grouped:
-    zone, type_bien = name
-    
-    # 1. Préparation des données
-    # On s'assure que les dates sont l'index
-    group = group.sort_values("Periode").set_index("Periode")
-    
-    # On initialise la colonne corrigée
-    group['Indice de prix (CL) - Corrigé TES'] = np.nan
-    
-    # Série de l'écart (Biais)
-    ts_ecart = group['Dif'].dropna()
-    
-    # Si besoin de forcer la fréquence (Trimestriel Début)
-    if not ts_ecart.empty:
-        try:
-            ts_ecart.index.freq = 'QS'
-        except:
-            pass
-    
-    if len(ts_ecart) > 12:
-        try:
-            # 2. Modélisation TES (Holt-Winters)
-            model = ExponentialSmoothing(
-                ts_ecart, 
-                trend='add', 
-                seasonal='add', 
-                seasonal_periods=4, 
-                damped_trend=True, 
-                initialization_method="estimated"
-            )
-            model_fit = model.fit()
-            
-            # 3. Calcul de la Correction Historique
-            # On récupère les valeurs que le modèle a "lissées" sur le passé
-            ecart_modelise = model_fit.fittedvalues
-            
-            # Alignement de sécurité sur l'index du groupe
-            ecart_modelise = ecart_modelise.reindex(group.index)
-            
-            # APPLICATION DE LA CORRECTION
-            # Indice Corrigé = Indice Brut - Biais Modélisé
-            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé TES'] = cl_corrected_history
-            
-            # 4. Visualisation (Historique pur)
-            fig = go.Figure()
+========================================================
+ANALYSE DU SEGMENT : ('77', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
 
-            # A. Historique INSEE (La Cible)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='INSEE (Référence)',
-                line=dict(color='black', width=3)
-            ))
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.004607         1.329089
+SARIMA Opti           2.308713         1.097275
+   ✅ Vainqueur : TES (Holt-Winters)
 
-            # B. Historique CL Brut (Le Problème)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='CL (Brut)',
-                line=dict(color='red', width=1, dash='dot')
-            ))
+========================================================
+ANALYSE DU SEGMENT : ('78', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
 
-            # C. Historique CL Corrigé (La Solution)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL) - Corrigé TES'],
-                mode='lines', name='CL Corrigé (TES)',
-                line=dict(color='blue', width=2)
-            ))
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.598474         0.940817
+SARIMA Opti           1.652991         0.856878
+   ✅ Vainqueur : TES (Holt-Winters)
 
-            fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Validation de la Correction",
-                yaxis_title="Indice (Base 2020 = 100)",
-                template="plotly_white",
-                height=500,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            
-            fig.show()
-            
-        except Exception as e:
-            print(f"⚠️ Echec TES pour {name} : {e}")
-            
-    corrected_data.append(group.reset_index())
+========================================================
+ANALYSE DU SEGMENT : ('78', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
 
-# Reconstitution du DataFrame final avec les données corrigées
-merge_corrected = pd.concat(corrected_data, ignore_index=True)
-print("\nTraitement terminé. Les données corrigées sont dans 'merge_corrected'.")
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.933199         0.752291
+SARIMA Opti           2.007697         0.925757
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('91', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.847896         0.849444
+SARIMA Opti           2.092916         0.653716
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('91', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.995838         1.052513
+SARIMA Opti           2.063679         1.012373
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('92', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.544394         1.160632
+SARIMA Opti           1.616031         0.685165
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('92', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    3.068836         1.213693
+SARIMA Opti           3.477288         1.674014
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('93', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.502359         0.746227
+TES (Holt-Winters)    1.710331         0.286308
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('93', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.614658         0.525242
+SARIMA Opti           2.756413         0.899052
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.724540         0.708559
+SARIMA Opti           1.853403         0.813156
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.850700         0.577157
+SARIMA Opti           2.212347         0.675178
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.659645         0.933245
+SARIMA Opti           1.663311         0.921724
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.048267         0.895060
+SARIMA Opti           2.335023         1.039831
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.202855         1.248825
+TES (Holt-Winters)    2.583474         1.382966
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    3.006721         1.306815
+SARIMA Opti         349.360465       772.134341
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('LILLE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.376037         0.479856
+SARIMA Opti           1.499614         0.858719
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('LYON', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.965105         1.153857
+TES (Holt-Winters)    2.065659         1.035923
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('MARSEILLE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.271658         1.793349
+SARIMA Opti           3.102159         1.871543
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.510452         1.701803
+SARIMA Opti          72.873194       155.258307
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(1, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.326731         0.735332
+SARIMA Opti           2.381803         1.327667
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.470704         0.826868
+SARIMA Opti           5.007355         5.977559
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           3.264145         1.832609
+TES (Holt-Winters)    3.379036         2.628115
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.324602         1.401703
+SARIMA Opti           1.998188         1.726122
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.748055         1.426559
+TES (Holt-Winters)    1.995835         0.723549
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.798800          1.55897
+TES (Holt-Winters)    2.036971          0.85494
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.030933         1.654694
+TES (Holt-Winters)    2.121310         1.541026
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.392060         0.883590
+SARIMA Opti           1.997381         0.624355
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                       RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)       2.362493         0.618443
+SARIMA Opti         157062.948970    351197.862017
+   ✅ Vainqueur : TES (Holt-Winters)
