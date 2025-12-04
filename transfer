@@ -1,23 +1,29 @@
-## 📝 Formules Complètes du Modèle TES (Holt-Winters Additif)
+# 📉 Phase de Backtesting et Visualisation
 
-Le Modèle de Triple Lissage Exponentiel (TES) est défini par les équations suivantes, où $\alpha$, $\beta$, et $\gamma$ sont les coefficients de lissage (entre 0 et 1), et $m=4$ est la période saisonnière.
+L'objectif de cette phase est de valider l'efficacité du modèle **TES (Triple Lissage Exponentiel)** en le soumettant à un **backtesting historique**. Le modèle est ajusté sur la série des écarts ($\text{CL} - \text{INSEE}$), puis nous reconstruisons la courbe corrigée sur l'ensemble de l'historique pour évaluer visuellement la réduction du biais.
 
-### 1. Mise à Jour du Niveau (Level)
-Le nouveau niveau ($\ell_t$) est calculé en corrigeant l'observation $y_t$ par l'ancien facteur saisonnier, puis en lissant ce résultat avec l'ancienne projection de niveau et tendance :
+## 1. Principe de la Correction Historique (Backtesting)
 
-$$\ell_t = \alpha (y_t - s_{t-m}) + (1-\alpha)(\ell_{t-1} + b_{t-1})$$
+Le backtesting consiste à simuler l'application du correctif en temps réel sur le passé. Pour chaque trimestre $t$, le modèle calcule un biais ajusté ($\hat{E}_t$) en utilisant uniquement les données antérieures à $t$ :
 
-### 2. Mise à Jour de la Tendance (Trend)
-La nouvelle tendance ($b_t$) est calculée en lissant la variation récente du niveau ($\ell_t - \ell_{t-1}$) avec l'ancienne estimation de la tendance :
+$$\text{Indice Corrigé}_t = \text{Indice CL}_t - \hat{E}_t$$
 
-$$b_t = \beta (\ell_t - \ell_{t-1}) + (1-\beta)b_{t-1}$$
+* **Donnée de Référence (Cible) :** L'Indice INSEE (Ligne Noire), qui représente la réalité du marché final.
+* **Résultat Attendu :** La courbe corrigée doit coller significativement mieux à la courbe INSEE que la courbe CL brute.
 
-### 3. Mise à Jour de la Saisonnalité (Seasonal)
-Le nouveau facteur saisonnier ($s_t$) est calculé en lissant la décomposition saisonnière actuelle ($y_t - \ell_t$) avec l'ancien facteur saisonnier :
+## 2. Construction des Courbes de Preuve
 
-$$s_t = \gamma (y_t - \ell_t) + (1-\gamma)s_{t-m}$$
+Chaque graphique généré compare trois séries sur une seule période historique par segment ($\text{Zone} \times \text{Type de Bien}$) :
 
-### 4. Formule de Prévision (Forecast)
-La prévision finale est la somme des trois composantes projetées :
+| Série | Rôle | Description Visuelle |
+| :--- | :--- | :--- |
+| **Indice INSEE** | **Référence ('Vérité terrain')** | Ligne **Noire** et épaisse. |
+| **Indice CL Brut** | **Indice Biaisé** | Ligne **Rouge** et fine (montre la dérive/l'écart). |
+| **Indice CL Corrigé (TES)** | **La Solution** | Ligne **Bleue** et épaisse (démontre l'efficacité du modèle). |
 
-$$\hat{y}_{t+h} = \ell_t + h b_t + s_{t+h-m}$$
+## 3. Interprétation Visuelle
+
+La visualisation permet de valider le succès de la modélisation à deux niveaux :
+
+1.  **Réduction du Biais (Niveau) :** La Ligne Bleue (CL Corrigé) devrait osciller beaucoup plus près de la Ligne Noire (INSEE) que la Ligne Rouge (CL Brut), prouvant que le modèle **TES** a réussi à neutraliser le biais structurel (les 1.5 - 2 points d'écart moyen).
+2.  **Absorption de la Saisonnalité :** L'écart entre la Ligne Bleue et la Ligne Noire doit être du **pur bruit** (aléatoire), prouvant que la composante cyclique (saisonnalité) a été entièrement capturée et retirée du modèle.
