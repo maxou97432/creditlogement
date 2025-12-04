@@ -1,176 +1,540 @@
-import pandas as pd
-import numpy as np
-import itertools
-import warnings
-import logging
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from prophet import Prophet
 
-# --- CONFIGURATION ---
-warnings.filterwarnings("ignore")
-logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
-logging.getLogger('prophet').setLevel(logging.WARNING)
+========================================================
+ANALYSE DU SEGMENT : ('75', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
 
-# --- BOUCLE SUR CHAQUE SEGMENT ---
-unique_segments = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.562585         0.898860
+SARIMA Opti           1.572230         1.103220
+DES (Holt)            1.717278         0.805377
+Prophet Opti          2.535408         0.783309
+   ✅ Vainqueur : TES (Holt-Winters)
 
-for segment_name, segment_data in unique_segments:
-    print(f"\n========================================================")
-    print(f"ANALYSE DU SEGMENT : {segment_name}")
-    print(f"========================================================")
+========================================================
+ANALYSE DU SEGMENT : ('77', 'APT')
+========================================================
+   Série chargée : 38 trimestres du 2015Q1 au 2024Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-    # 1. PRÉPARATION DES DONNÉES
-    df_analyse = segment_data.sort_values("Periode").set_index("Periode")
-    
-    if 'Dif' not in df_analyse.columns:
-        df_analyse['Dif'] = df_analyse['Indice de prix (CL)'] - df_analyse['Indice de prix (INSEE) - Base 2020']
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.709801         0.525770
+DES (Holt)            1.801753         0.759019
+SARIMA Opti           1.950432         0.783173
+Prophet Opti          2.422439         2.278280
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    ts_ecart = df_analyse['Dif'].dropna()
-    ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
+========================================================
+ANALYSE DU SEGMENT : ('77', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
 
-    print(f"   Série chargée : {len(ts_ecart)} trimestres du {ts_ecart.index[0]} au {ts_ecart.index[-1]}")
-    
-    if len(ts_ecart) < 16: # Besoin de minimum 16 points pour CV 5 splits + horizon 4
-        print("   ⚠️ Série trop courte pour l'analyse complète. Passage au segment suivant.")
-        continue
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.004607         1.329089
+SARIMA Opti           2.308713         1.097275
+DES (Holt)            3.242708         0.309172
+Prophet Opti          4.134382         1.502382
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    # ==============================================================================
-    # 2. OPTIMISATION SARIMA (Grid Search AIC)
-    # ==============================================================================
-    print("   2. Optimisation SARIMA...")
-    
-    p = q = range(0, 3) 
-    d = [1]
-    P = Q = range(0, 2)
-    D = [0, 1]
-    s = [4]
+========================================================
+ANALYSE DU SEGMENT : ('78', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-    pdq = list(itertools.product(p, d, q))
-    seasonal_pdq = list(itertools.product(P, D, Q, s))
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.598474         0.940817
+SARIMA Opti           1.652991         0.856878
+DES (Holt)            2.025933         1.234170
+Prophet Opti          2.061836         1.315954
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    best_aic = float("inf")
-    best_order = (1, 1, 0)
-    best_seasonal_order = (0, 0, 0, 4)
-    
-    train_calibration = ts_ecart.iloc[:int(len(ts_ecart)*0.75)] # Calibration sur le passé
+========================================================
+ANALYSE DU SEGMENT : ('78', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-    for param in pdq:
-        for param_seasonal in seasonal_pdq:
-            try:
-                mod = ARIMA(train_calibration, order=param, seasonal_order=param_seasonal,
-                            enforce_stationarity=False, enforce_invertibility=False)
-                results = mod.fit()
-                if results.aic < best_aic:
-                    best_aic = results.aic
-                    best_order = param
-                    best_seasonal_order = param_seasonal
-            except:
-                continue
-                
-    print(f"      -> SARIMA Optimal : Order={best_order}, Seasonal={best_seasonal_order}")
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.933199         0.752291
+SARIMA Opti           2.007697         0.925757
+DES (Holt)            2.751734         1.290953
+Prophet Opti          3.112773         1.398098
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    # ==============================================================================
-    # 3. OPTIMISATION PROPHET (Grid Search Rapide sur CV interne)
-    # ==============================================================================
-    print("   3. Optimisation Prophet...")
-    # On optimise Prophet sur une validation croisée interne avant le tournoi final
-    
-    prophet_params_grid = {
-        'changepoint_prior_scale': [0.01, 0.05, 0.1, 0.5],
-        'seasonality_prior_scale': [0.1, 1.0, 10.0]
-    }
-    
-    df_prophet_tuning = pd.DataFrame({'ds': train_calibration.index.to_timestamp(), 'y': train_calibration.values})
-    
-    best_prophet_rmse = float('inf')
-    best_prophet_params = {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 10.0} # Defaut
-    
-    # Grid search manuel simple sur Prophet (Hold-out interne)
-    for cp_scale in prophet_params_grid['changepoint_prior_scale']:
-        for seas_scale in prophet_params_grid['seasonality_prior_scale']:
-            try:
-                m = Prophet(changepoint_prior_scale=cp_scale, seasonality_prior_scale=seas_scale, 
-                            yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-                m.fit(df_prophet_tuning)
-                # Test sur la fin du set de calibration (simulé)
-                future = m.make_future_dataframe(periods=4, freq='Q')
-                fcst = m.predict(future)
-                # On compare juste la dernière année ajustée (in-sample fit quality proxy)
-                rmse_proxy = np.sqrt(mean_squared_error(df_prophet_tuning['y'][-4:], fcst['yhat'][-4:]))
-                
-                if rmse_proxy < best_prophet_rmse:
-                    best_prophet_rmse = rmse_proxy
-                    best_prophet_params = {'changepoint_prior_scale': cp_scale, 'seasonality_prior_scale': seas_scale}
-            except:
-                continue
-                
-    print(f"      -> Prophet Optimal : {best_prophet_params}")
+========================================================
+ANALYSE DU SEGMENT : ('91', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
 
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.847896         0.849444
+Prophet Opti          1.864173         1.635989
+DES (Holt)            1.970838         1.032770
+SARIMA Opti           2.092916         0.653716
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    # ==============================================================================
-    # 4. LE TOURNOI : CROSS-VALIDATION (Robustesse)
-    # ==============================================================================
-    print("   4. Tournoi Cross-Validation...")
+========================================================
+ANALYSE DU SEGMENT : ('91', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-    n_splits = 5
-    test_horizon = 4
-    tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_horizon)
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.995838         1.052513
+SARIMA Opti           2.063679         1.012373
+Prophet Opti          2.324318         1.484489
+DES (Holt)            2.559973         1.088152
+   ✅ Vainqueur : TES (Holt-Winters)
 
-    results_cv = {'SARIMA Opti': [], 'DES (Holt)': [], 'TES (Holt-Winters)': [], 'Prophet Opti': []}
+========================================================
+ANALYSE DU SEGMENT : ('92', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-    for train_index, test_index in tscv.split(ts_ecart):
-        cv_train = ts_ecart.iloc[train_index]
-        cv_test = ts_ecart.iloc[test_index]
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.544394         1.160632
+SARIMA Opti           1.616031         0.685165
+Prophet Opti          1.972593         1.038802
+DES (Holt)            2.411248         1.231799
+   ✅ Vainqueur : TES (Holt-Winters)
 
-        # A. SARIMA
-        try:
-            mod = ARIMA(cv_train, order=best_order, seasonal_order=best_seasonal_order, 
-                        enforce_stationarity=False, enforce_invertibility=False).fit()
-            pred = mod.forecast(steps=test_horizon)
-            results_cv['SARIMA Opti'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['SARIMA Opti'].append(np.nan)
+========================================================
+ANALYSE DU SEGMENT : ('92', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
 
-        # B. DES (Holt)
-        try:
-            mod = ExponentialSmoothing(cv_train, trend='add', seasonal=None, damped_trend=True, initialization_method="estimated").fit()
-            pred = mod.forecast(steps=test_horizon)
-            results_cv['DES (Holt)'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['DES (Holt)'].append(np.nan)
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    3.068836         1.213693
+DES (Holt)            3.347889         1.019681
+SARIMA Opti           3.477288         1.674014
+Prophet Opti          4.028877         1.296565
+   ✅ Vainqueur : TES (Holt-Winters)
 
-        # C. TES (Holt-Winters)
-        try:
-            mod = ExponentialSmoothing(cv_train, trend='add', seasonal='add', seasonal_periods=4, damped_trend=True, initialization_method="estimated").fit()
-            pred = mod.forecast(steps=test_horizon)
-            results_cv['TES (Holt-Winters)'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['TES (Holt-Winters)'].append(np.nan)
+========================================================
+ANALYSE DU SEGMENT : ('93', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 10.0}
+   4. Tournoi Cross-Validation...
 
-        # D. Prophet Optimisé
-        try:
-            df_cv = pd.DataFrame({'ds': cv_train.index.to_timestamp(), 'y': cv_train.values})
-            m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False, **best_prophet_params)
-            m.fit(df_cv)
-            future = m.make_future_dataframe(periods=test_horizon, freq='Q')
-            fcst = m.predict(future)
-            pred = fcst['yhat'].iloc[-test_horizon:].values
-            results_cv['Prophet Opti'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['Prophet Opti'].append(np.nan)
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.502359         0.746227
+TES (Holt-Winters)    1.710331         0.286308
+DES (Holt)            2.619426         0.960608
+Prophet Opti          2.716806         1.422323
+   ✅ Vainqueur : SARIMA Opti
 
-    # ==============================================================================
-    # 5. RÉSULTATS FINAUX DU SEGMENT
-    # ==============================================================================
-    df_results = pd.DataFrame(results_cv)
-    summary = pd.DataFrame({
-        'RMSE Moyen': df_results.mean(),
-        'Stabilité (Std)': df_results.std()
-    }).sort_values("RMSE Moyen")
-    
-    print("\n   🏆 CLASSEMENT DU SEGMENT :")
-    print(summary)
-    print(f"   ✅ Vainqueur : {summary.index[0]}")
+========================================================
+ANALYSE DU SEGMENT : ('93', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.614658         0.525242
+DES (Holt)            2.537764         1.051176
+Prophet Opti          2.634072         1.194487
+SARIMA Opti           2.756413         0.899052
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.724540         0.708559
+SARIMA Opti           1.853403         0.813156
+Prophet Opti          2.223212         1.493700
+DES (Holt)            2.332730         0.885974
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.850700         0.577157
+SARIMA Opti           2.212347         0.675178
+DES (Holt)            2.738723         1.158471
+Prophet Opti          3.032181         1.149675
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.659645         0.933245
+SARIMA Opti           1.663311         0.921724
+DES (Holt)            2.128753         0.770114
+Prophet Opti          2.829909         1.329924
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.048267         0.895060
+SARIMA Opti           2.335023         1.039831
+DES (Holt)            2.879593         1.805904
+Prophet Opti          2.974771         1.395593
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.202855         1.248825
+TES (Holt-Winters)    2.583474         1.382966
+DES (Holt)            2.780171         1.651236
+Prophet Opti          2.961490         1.957872
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    3.006721         1.306815
+DES (Holt)            4.106273         0.563267
+Prophet Opti          5.966259         2.919689
+SARIMA Opti         349.360465       772.134341
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('LILLE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.376037         0.479856
+SARIMA Opti           1.499614         0.858719
+Prophet Opti          1.796663         1.150287
+DES (Holt)            2.182485         1.045724
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('LYON', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 10.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.965105         1.153857
+TES (Holt-Winters)    2.065659         1.035923
+Prophet Opti          2.756761         1.537540
+DES (Holt)            2.822699         1.299991
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('MARSEILLE', 'APT')
+========================================================
+   Série chargée : 39 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+Prophet Opti          2.114217         1.991828
+TES (Holt-Winters)    2.943041         2.125323
+DES (Holt)            3.132376         2.414546
+SARIMA Opti           3.662469         2.263811
+   ✅ Vainqueur : Prophet Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.510452         1.701803
+DES (Holt)            2.627440         1.693804
+Prophet Opti          3.028580         1.012290
+SARIMA Opti          72.873194       155.258307
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.326731         0.735332
+SARIMA Opti           2.381803         1.327667
+DES (Holt)            2.825981         1.215118
+Prophet Opti          3.297732         1.915929
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.470704         0.826868
+DES (Holt)            1.710366         0.879703
+Prophet Opti          2.054826         1.240531
+SARIMA Opti           5.007355         5.977559
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+Prophet Opti          3.033997         2.556525
+SARIMA Opti           3.264145         1.832609
+TES (Holt-Winters)    3.379036         2.628115
+DES (Holt)            3.515142         2.560720
+   ✅ Vainqueur : Prophet Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.324602         1.401703
+SARIMA Opti           1.998188         1.726122
+DES (Holt)            2.422059         1.563322
+Prophet Opti          3.354288         1.791262
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.748055         1.426559
+TES (Holt-Winters)    1.995835         0.723549
+DES (Holt)            2.659502         1.284118
+Prophet Opti          3.176440         1.270727
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 10.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.798800         1.558970
+TES (Holt-Winters)    2.036971         0.854940
+DES (Holt)            2.918787         1.304667
+Prophet Opti          3.567283         1.997296
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 0.1}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.030933         1.654694
+TES (Holt-Winters)    2.121310         1.541026
+DES (Holt)            3.140802         1.640942
+Prophet Opti          3.850119         2.196563
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'APT')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.392060         0.883590
+SARIMA Opti           1.997381         0.624355
+DES (Holt)            2.102043         1.122545
+Prophet Opti          3.142490         1.738995
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'MAI')
+========================================================
+   Série chargée : 41 trimestres du 2015Q1 au 2025Q1
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Optimisation Prophet...
+      -> Prophet Optimal : {'changepoint_prior_scale': 0.5, 'seasonality_prior_scale': 1.0}
+   4. Tournoi Cross-Validation...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                       RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)       2.362493         0.618443
+DES (Holt)               2.741619         0.463139
+Prophet Opti             3.230973         1.588874
+SARIMA Opti         157062.948970    351197.862017
+   ✅ Vainqueur : TES (Holt-Winters)
