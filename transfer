@@ -1,22 +1,36 @@
+# 📉 Stratégie de Correction du Biais par Modélisation Dynamique
 
-Nous avons constaté un écart dont la cause n'a pas pu être expliquée. Cependant, nous allons tenter de le corriger.
+Nous avons constaté un écart structurel entre les deux indices dont la cause n'a pu être expliquée par la volumétrie. Cependant, nous allons tenter de le corriger.
 
+Il n'est pas pertinent d'appliquer une simple moyenne historique de l'écart comme correctif pour chaque périmètre, car cela introduirait un biais trop important. L'analyse par le **Test ADF** a en effet montré que l'écart est **non-stationnaire** (il dérive).
 
+À la place, nous allons modéliser cette dérive en mettant en place un **écart dynamique**.
 
-Pour ce faire, nous allons utiliser des **méthodes de séries temporelles**.  
-Il n'est pas pertinent d'appliquer une simple moyenne de l'écart comme correctif pour chaque périmètre, car cela introduirait un biais trop important.  
-À la place, nous allons mettre en place un **écart dynamique**.
+## Méthodologie du Duel (Cross-Validation)
 
-## Méthodologie
+Pour déterminer le meilleur modèle capable de prédire l'évolution future de l'écart, nous avons mis en place une compétition entre les familles de modèles les plus robustes, validée par **Cross-Validation Temporelle**.
 
-1. **Sélection des modèles**  
-   Nous allons comparer **trois approches de séries temporelles**.
+### 1. Les Modèles Sélectionnés (Candidats)
+Nous avons comparé trois approches de séries temporelles capables de gérer la **saisonnalité** et la **tendance (drift)** :
 
-2. **Échantillons**  
-   - **Train** : le reste de la base (hors validation).
-   - **Validation** : les deux dernières années.
+* **SARIMA Optimisé :** Modèle paramétrique rigoureux.
+* **TES (Holt-Winters) :** Modèle par lissage qui capture le niveau, la tendance et la saisonnalité.
+* **Prophet :** Modèle bayésien flexible, conçu pour gérer les ruptures de tendance.
 
-3. **Processus**  
-   - Entraîner les modèles sur l'échantillon *train*.
-   - Évaluer leurs performances sur l'échantillon *validation*.
-   - Sélectionner la meilleure approche pour appliquer la correction.
+### 2. Échantillons et Évaluation
+Pour garantir la robustesse des modèles, l'évaluation est faite en **Out-of-Sample** (hors de l'échantillon d'entraînement) :
+
+| Échantillon | Rôle | Métrique |
+| :--- | :--- | :--- |
+| **Train** | Le reste de la base (historique glissant). | **Entraînement des coefficients.** |
+| **Validation** | Les deux dernières années de données (fenêtre de test). | **Sélection du Vainqueur** (via **RMSE**). |
+
+### 3. Processus de Validation
+Le processus consiste à :
+
+1.  **Optimiser les hyperparamètres** (ARIMA, Prophet) par minimisation de l'AIC.
+2.  **Entraîner les modèles** sur l'échantillon *train* (historique).
+3.  **Évaluer la performance** sur l'échantillon *validation*.
+4.  **Sélectionner** le modèle présentant le **RMSE Moyen le plus faible** et la meilleure stabilité (écart-type du RMSE).
+
+Ce processus garantit que la correction dynamique choisie est la plus efficace pour neutraliser le biais sur l'ensemble des conditions économiques passées.
