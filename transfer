@@ -58,8 +58,12 @@ for name, group in grouped:
             
             # --- A. Correction Historique ---
             # On récupère le biais que le modèle aurait prédit dans le passé
-            ecart_modelise = model_fit.fittedvalues.reindex(group.index)
-            
+            fitted_prediction = model_fit.predict(
+                start = ts_ecart.index.min(),
+                end = ts_ecart.index.max(),
+                dynamic = False
+            )
+            ecart_modelise = fitted_prediction.reindex(group.index)
             # On crée la courbe corrigée : CL Brut - Biais Modélisé
             cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
             group['Indice de prix (CL) - Corrigé Holt'] = cl_corrected_history
