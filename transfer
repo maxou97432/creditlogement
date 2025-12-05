@@ -1,72 +1,17 @@
-# --- 1. NETTOYAGE RADICAL DES CLÉS ---
 
-# A. Forcer les Départements/Zones en Texte (String) pour éviter le conflit Int/Str
-df_final['VAL_MAILLE_GEO'] = df_final['VAL_MAILLE_GEO'].astype(str).str.strip().str.upper()
-insee_final['VAL_MAILLE_GEO'] = insee_final['VAL_MAILLE_GEO'].astype(str).str.strip().str.upper()
+--- DIAGNOSTIC POUR 77 au 2025Q2 ---
+Ligne dans CL ? : OUI
+  -> Clés CL : ['77' 'APT' '2025Q2']
+Ligne dans INSEE ? : NON
 
-# B. Nettoyer les Types de biens
-df_final['CD_TYPE_BIEN'] = df_final['CD_TYPE_BIEN'].astype(str).str.strip().str.upper()
-insee_final['CD_TYPE_BIEN'] = insee_final['CD_TYPE_BIEN'].astype(str).str.strip().str.upper()
+--- ANALYSE DES ÉCHECS DE FUSION (Dernier Trimestre) ---
+    VAL_MAILLE_GEO CD_TYPE_BIEN Periode_Key     _merge
+41              01          APT      2025Q2  left_only
+84              01          MAI      2025Q2  left_only
+127             02          APT      2025Q2  left_only
+170             02          MAI      2025Q2  left_only
+213             03          APT      2025Q2  left_only
 
-# C. Création de la clé de Période (Format YYYYQx)
-# On force dayfirst=True pour éviter la confusion 01/06 (Juin) vs 06/01 (Janvier)
-df_final['Periode'] = pd.to_datetime(df_final['Periode'], dayfirst=True) 
-insee_final['Periode'] = pd.to_datetime(insee_final['Periode'], dayfirst=True)
-
-df_final['Periode_Key'] = df_final['Periode'].dt.to_period('Q').astype(str)
-insee_final['Periode_Key'] = insee_final['Periode'].dt.to_period('Q').astype(str)
-
-# --- 2. DIAGNOSTIC AVANT FUSION (LE JUGEMENT DE VÉRITÉ) ---
-
-# On regarde spécifiquement ce qui se passe pour le 77 en 2025Q2 (votre exemple)
-zone_test = "77"
-periode_test = "2025Q2"
-
-print(f"\n--- DIAGNOSTIC POUR {zone_test} au {periode_test} ---")
-
-# Est-ce que la ligne existe dans CL ?
-check_cl = df_final[
-    (df_final['VAL_MAILLE_GEO'] == zone_test) & 
-    (df_final['Periode_Key'] == periode_test)
-]
-print(f"Ligne dans CL ? : {'OUI' if not check_cl.empty else 'NON'}")
-if not check_cl.empty:
-    print(f"  -> Clés CL : {check_cl[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']].values[0]}")
-
-# Est-ce que la ligne existe dans INSEE ?
-check_insee = insee_final[
-    (insee_final['VAL_MAILLE_GEO'] == zone_test) & 
-    (insee_final['Periode_Key'] == periode_test)
-]
-print(f"Ligne dans INSEE ? : {'OUI' if not check_insee.empty else 'NON'}")
-if not check_insee.empty:
-    print(f"  -> Clés INSEE : {check_insee[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']].values[0]}")
-
-
-# --- 3. FUSION AVEC INDICATEUR (POUR VOIR LES REJETS) ---
-
-merge = pd.merge(
-    df_final, 
-    insee_final.drop(columns=['Periode']), 
-    how="outer", # On garde TOUT pour voir ce qui ne matche pas
-    on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
-    indicator=True # Crée une colonne '_merge' qui dit d'où vient la ligne
-)
-
-# Analyse des échecs sur la dernière période
-print("\n--- ANALYSE DES ÉCHECS DE FUSION (Dernier Trimestre) ---")
-echecs = merge[
-    (merge['_merge'] != 'both') & 
-    (merge['Periode_Key'] == '2025Q2')
-]
-
-if not echecs.empty:
-    print(echecs[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', '_merge']].head())
-    print("\nLégende :")
-    print("left_only = Présent dans CL mais PAS dans INSEE (Erreur de clé côté INSEE ?)")
-    print("right_only = Présent dans INSEE mais PAS dans CL (Erreur de clé côté CL ?)")
-else:
-    print("Aucun échec de fusion sur 2025Q2 ! (Si vous ne voyez rien, c'est que le Inner Join marche maintenant)")
-
-# On repasse en inner pour la suite si tout va bien
-merge = merge[merge['_merge'] == 'both'].drop(columns=['_merge'])
+Légende :
+left_only = Présent dans CL mais PAS dans INSEE (Erreur de clé côté INSEE ?)
+right_only = Présent dans INSEE mais PAS dans CL (Erreur de clé côté CL ?)
