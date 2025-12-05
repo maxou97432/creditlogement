@@ -1,98 +1,132 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import plotly.io as pio
-import warnings
+import sys
 
-# Configuration
-warnings.filterwarnings("ignore")
-pio.renderers.default = "notebook" 
+# --- Chargement des données ---
+try:
+    prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_CITY.csv")
+    prix_m2_univ_elem_complet_DEPT = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_DEPT.csv")
+    prix_m2_univ_elem_complet_REGION = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_REGION.csv")
+    prix_m2_univ_elem_complet_PROVINCE = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_PROVINCE.csv")
+except FileNotFoundError as e:
+    print(f"Erreur de lecture de fichier : {e}")
+    sys.exit(1)
 
-# --- Initialisation ---
-n_forecast = 2 
-corrected_data = [] 
-future_adjustments = [] 
-grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-print("🚀 Démarrage de la modélisation TES (Holt-Winters)...")
+dfs_to_concat = [
+    prix_m2_univ_elem_complet_CITY,
+    prix_m2_univ_elem_complet_DEPT,
+    prix_m2_univ_elem_complet_REGION,
+    prix_m2_univ_elem_complet_PROVINCE
+]
 
-for name, group in grouped:
-    zone, type_bien = name
+df_final = pd.concat(dfs_to_concat, ignore_index = True)
+df_final = df_final[df_final['DIC_NAME'] != "prix_m2_3m"]
+df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
+
+# --- Calcul de l'indice CL ---
+mask_2020 = df_final["Periode"].astype(str).str[:4] == "2020"
+if not df_final.loc[mask_2020, "prix_mm_value"].empty:
+    pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
     
-    # 1. Préparation des données
-    group = group.sort_values("Periode").set_index("Periode")
-    group['Indice de prix (CL) - Corrigé TES'] = np.nan # Nom de la colonne corrigée
-    
-    ts_ecart = group['Dif'].dropna()
-    last_cl_value = group['Indice de prix (CL)'].iloc[-1]
-    last_date = group.index[-1]
-    
-    # On force la fréquence pour statsmodels (QS = Quarter Start)
-    if not ts_ecart.empty:
+    df_final["Indice de prix (CL)"] = ((df_final["prix_mm_value"] / df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)) * 100 ).round(2)
+
+else:
+    print("Attention: Aucune donnée trouvée pour 2020")
+    df_final["Indice de prix (CL)"] = np.nan
+
+# --- Préparation des données INSEE ---
+types_biens = ['APT', 'MAI']
+perimetre_insee= ['92', '93', '94', '95', '91','75', '78', '77', "MARSEILLE", "LYON", "LILLE",'NORD-PAS-DE-CALAIS','PACA','RHONE-ALPES','PROVINCE','AUVERGNE','IDF']
+insee_to_concat = []
+
+for perimetre in perimetre_insee:
+    for type_b in types_biens:
         try:
-            ts_ecart.index = ts_ecart.index.asfreq('QS') # Assure la fréquence pour le modèle
-        except:
-            pass
-    
-    if len(ts_ecart) > 12:
-        try:
-            # 2. Modélisation TES (Holt-Winters Saisonnier)
-            # seasonal='add' : Utilise l'addition (formule de TES)
-            # seasonal_periods=4 : Cycle trimestriel
-            model = ExponentialSmoothing(
-                ts_ecart, 
-                trend='add', 
-                seasonal='add', 
-                seasonal_periods=4, 
-                damped_trend=True, 
-                initialization_method="estimated"
-            )
-            model_fit = model.fit()
-            
-            # 3. Calcul de la Correction Historique
-            ecart_modelise = model_fit.fittedvalues
-            ecart_modelise = ecart_modelise.reindex(group.index)
-            
-            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
-            group['Indice de prix (CL) - Corrigé TES'] = cl_corrected_history # Stockage de la courbe bleue
-            
-            # 4. Visualisation (Historique + Forecast Table Prep)
-            
-            fig = go.Figure()
-
-            # Historique INSEE (Noir)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
-                mode='lines', name='INSEE (Réalité)', line=dict(color='black', width=3)
-            ))
-
-            # Historique CL Brut (Rouge Pointillé)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL)'],
-                mode='lines', name='CL (Brut)', line=dict(color='red', width=1, dash='dot')
-            ))
-
-            # Historique CL Corrigé TES (Bleu)
-            fig.add_trace(go.Scatter(
-                x=group.index, y=group['Indice de prix (CL) - Corrigé TES'],
-                mode='lines', name='CL Corrigé (TES)', line=dict(color='blue', width=2)
-            ))
-            
-            fig.add_vline(x=last_date, line_width=1, line_dash="dash", line_color="gray")
-            
-            fig.update_layout(
-                title=f"<b>{zone} - {type_bien}</b> : Validation Historique TES",
-                yaxis_title="Indice (Base 2020 = 100)", template="plotly_white", height=500
-            )
-            
-            fig.show()
-            
+            # NOTE: Changement des différents fichiers INSEE
+            valeurs_trimestrielles = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\table_rapport (2025)\valeurs_trimestrielles_{perimetre}_{type_b}.csv", sep = ';')
+        except FileNotFoundError:
+            continue
         except Exception as e:
-            print(f"⚠️ Echec TES pour {name}: {e}")
-            
-    corrected_data.append(group.reset_index())
+            print(f"Erreur de lecture pour {perimetre}_{type_b}: {e}")
+            continue
 
-# Reconstitution
-merge_corrected = pd.concat(corrected_data, ignore_index=True)
-print("\nTraitement terminé. Le modèle utilisé est le Triple Lissage Exponentiel (TES) Saisonnier.")
+        valeurs_trimestrielles = valeurs_trimestrielles[4:]
+        # La colonne 'Indice de prix (INSEE)' est la deuxième colonne (index 1) après le slicing
+        valeurs_trimestrielles = valeurs_trimestrielles.rename(columns={valeurs_trimestrielles.columns[1]: 'Indice de prix (INSEE)'})
+        valeurs_trimestrielles['Indice de prix (INSEE)'] = pd.to_numeric(valeurs_trimestrielles['Indice de prix (INSEE)'], errors='coerce')
+        
+        # Création de la colonne de Période cohérente 
+        valeurs_trimestrielles['Year'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('-')[0]))
+        valeurs_trimestrielles['Quarter'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('T')[-1]))
+        valeurs_trimestrielles["Date code"] = (valeurs_trimestrielles['Year'].astype(str) + 'Q' + valeurs_trimestrielles["Quarter"].astype(str))
+        
+       
+        # Création de la colonne de fusion sur base du début de trimestre
+        valeurs_trimestrielles["Periode"] = pd.PeriodIndex(valeurs_trimestrielles["Date code"],freq = "Q").to_timestamp(how="start")
+        
+        valeurs_trimestrielles["VAL_MAILLE_GEO"] = perimetre
+        valeurs_trimestrielles["CD_TYPE_BIEN"] = type_b
+        valeurs_trimestrielles = valeurs_trimestrielles.drop(columns=["Libellé","Year","Quarter","Date code"])
+        insee_to_concat.append(valeurs_trimestrielles)
+
+if insee_to_concat:
+    insee_final = pd.concat(insee_to_concat, ignore_index = True)
+    insee_final = insee_final.drop(columns=["Codes"], errors='ignore')
+    colonnes = ['VAL_MAILLE_GEO',"CD_TYPE_BIEN",'Periode','Indice de prix (INSEE)']
+    insee_final = insee_final[colonnes]
+    insee_final["VAL_MAILLE_GEO"]=insee_final["VAL_MAILLE_GEO"].replace({"RHONE-ALPES":"RHÔNE-ALPES","PACA":"PROVENCE-ALPES-CÔTE D'AZUR","IDF":"ÎLE-DE-FRANCE"})
+else:
+    print("Attention: Aucun fichier INSEE n'a pu être chargé.")
+    sys.exit(1)
+
+
+# --- Calcul de l'indice INSEE ---
+
+df_final["Periode"] = pd.to_datetime(df_final["Periode"])
+insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
+
+mask_2020 = insee_final["Periode"].astype(str).str[:4] == "2020"
+if not insee_final.loc[mask_2020, "Indice de prix (INSEE)"].empty:
+    mean_pivot_2020_insee = insee_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["Indice de prix (INSEE)"].mean()
+    
+    insee_final["Indice de prix (INSEE) - Base 2020"] = ((insee_final["Indice de prix (INSEE)"] / insee_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(mean_pivot_2020_insee)) * 100 ).round(2)
+else:
+    print("Attention: Aucune donnée trouvée pour 2020. L'Indice de prix (CL) ne peut pas être calculé.")
+    insee_final["Indice de prix (CL)"] = np.nan
+
+ 
+# Nettoyage 
+for df in (df_final, insee_final):
+    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+df_final['Periode_Merge'] = df_final['Periode'].dt.to_period('Q').dt.start_time
+insee_final['Periode_Merge'] = insee_final['Periode'].dt.to_period('Q').dt.start_time
+
+
+print("--- Vérification des données avant fusion ---")
+print(f"VAL_MAILLE_GEO (CL) : {df_final['VAL_MAILLE_GEO'].unique()}")
+print(f"VAL_MAILLE_GEO (INSEE) : {insee_final['VAL_MAILLE_GEO'].unique()}")
+print(f"Périodes (CL) - Exemples : {df_final['Periode_Merge'].head().tolist()}")
+print(f"Périodes (INSEE) - Exemples : {insee_final['Periode_Merge'].head().tolist()}")
+print(f"Taille de df_final : {len(df_final)}")
+print(f"Taille de insee_final : {len(insee_final)}")
+print("------------------------------------------")
+
+
+# --- Fusion ---
+merge = pd.merge(df_final, 
+                 insee_final.drop(columns=['Periode']), # On enlève l'ancienne colonne de période INSEE
+                 how = "inner",
+                 left_on = ["VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode_Merge"],
+                 right_on = ["VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode_Merge"])
+
+# Renommer la colonne 'Periode_Merge' pour qu'elle s'appelle 'Periode'
+merge = merge.rename(columns={'Periode_Merge': 'Periode'})
+merge = merge.drop(columns=['prix_mm_value'], errors='ignore')
+
+merge = merge.loc[:, ~merge.columns.duplicated()]
+merge = merge.sort_values(["VAL_MAILLE_GEO", "Periode"])
+print(merge)
