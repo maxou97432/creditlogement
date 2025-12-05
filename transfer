@@ -1,17 +1,420 @@
 
---- DIAGNOSTIC POUR 77 au 2025Q2 ---
-Ligne dans CL ? : OUI
-  -> Clés CL : ['77' 'APT' '2025Q2']
-Ligne dans INSEE ? : NON
+========================================================
+ANALYSE DU SEGMENT : ('75', 'APT')
+========================================================
+   Série chargée : 43 trimestres du 2015Q1 au 2025Q3
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
 
---- ANALYSE DES ÉCHECS DE FUSION (Dernier Trimestre) ---
-    VAL_MAILLE_GEO CD_TYPE_BIEN Periode_Key     _merge
-41              01          APT      2025Q2  left_only
-84              01          MAI      2025Q2  left_only
-127             02          APT      2025Q2  left_only
-170             02          MAI      2025Q2  left_only
-213             03          APT      2025Q2  left_only
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.377264         0.617285
+SARIMA Opti           1.527463         0.548083
+   ✅ Vainqueur : TES (Holt-Winters)
 
-Légende :
-left_only = Présent dans CL mais PAS dans INSEE (Erreur de clé côté INSEE ?)
-right_only = Présent dans INSEE mais PAS dans CL (Erreur de clé côté CL ?)
+========================================================
+ANALYSE DU SEGMENT : ('77', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.477263         0.795852
+SARIMA Opti           1.593495         1.055735
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('77', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.780983         1.219212
+TES (Holt-Winters)    2.436733         1.817939
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('78', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.239771         0.903076
+SARIMA Opti           1.364281         0.598600
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('78', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.663652         1.125333
+TES (Holt-Winters)    1.775713         0.814335
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('91', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.539030         0.631560
+SARIMA Opti           1.723482         0.648629
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('91', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.706010         1.178754
+SARIMA Opti           1.728837         1.038237
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('92', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.355208         0.791892
+SARIMA Opti           1.514703         0.725729
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('92', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    3.051400         0.392273
+SARIMA Opti           3.565192         1.399768
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('93', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.475812         0.536585
+TES (Holt-Winters)    1.580333         0.725146
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('93', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.295905         0.516561
+SARIMA Opti           1.631537         1.076666
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.783620         0.877850
+SARIMA Opti           1.859473         0.772778
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('94', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.923510         1.280659
+SARIMA Opti           2.080484         1.305772
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.354873         1.137180
+SARIMA Opti           1.563667         1.027065
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('95', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.463403         1.060004
+SARIMA Opti           1.669717         0.933438
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.095426         1.218624
+SARIMA Opti           2.293308         1.645504
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('AUVERGNE', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.981959         1.694578
+SARIMA Opti           3.183059         1.156389
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('LILLE', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(2, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.544913         0.837624
+TES (Holt-Winters)    1.558332         0.821447
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('LYON', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.683420         0.832964
+SARIMA Opti           1.982089         0.791460
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('MARSEILLE', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.291631         2.083420
+SARIMA Opti           2.856801         1.804507
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.207378         1.100255
+SARIMA Opti           2.959574         0.839781
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('NORD-PAS-DE-CALAIS', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.917861         1.916667
+TES (Holt-Winters)    2.024214         1.841161
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(1, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.249642         0.992682
+SARIMA Opti           1.469691         1.024931
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ("PROVENCE-ALPES-CÔTE D'AZUR", 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.188176         1.122167
+TES (Holt-Winters)    2.874906         1.318647
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.022279         0.530499
+SARIMA Opti           1.321417         0.489170
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('PROVINCE', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    2.054321         0.915841
+SARIMA Opti           2.079209         1.019252
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(1, 1, 2), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+TES (Holt-Winters)    1.721330         0.867158
+SARIMA Opti           1.791466         1.242935
+   ✅ Vainqueur : TES (Holt-Winters)
+
+========================================================
+ANALYSE DU SEGMENT : ('RHÔNE-ALPES', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           2.395316         1.366835
+TES (Holt-Winters)    2.609255         1.880013
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'APT')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 0), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.931181         1.290006
+TES (Holt-Winters)    1.972220         0.933517
+   ✅ Vainqueur : SARIMA Opti
+
+========================================================
+ANALYSE DU SEGMENT : ('ÎLE-DE-FRANCE', 'MAI')
+========================================================
+   Série chargée : 42 trimestres du 2015Q1 au 2025Q2
+   2. Optimisation SARIMA...
+      -> SARIMA Optimal : Order=(0, 1, 1), Seasonal=(0, 1, 1, 4)
+   3. Estimation du meilleur modèle...
+
+   🏆 CLASSEMENT DU SEGMENT :
+                    RMSE Moyen  Stabilité (Std)
+SARIMA Opti           1.445576         1.072889
+TES (Holt-Winters)    1.580045         0.829870
+   ✅ Vainqueur : SARIMA Opti
