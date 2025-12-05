@@ -1,53 +1,134 @@
-{
-	"name": "DateParseError",
-	"message": "Unknown datetime string format, unable to parse: PERIODE",
-	"stack": "---------------------------------------------------------------------------
-AttributeError                            Traceback (most recent call last)
-File pandas/_libs/tslibs/period.pyx:1589, in pandas._libs.tslibs.period._extract_ordinal()
+import pandas as pd
+import numpy as np
+import sys
 
-AttributeError: 'str' object has no attribute 'ordinal'
+# --- Chargement des données ---
+try:
+    prix_m2_univ_elem_complet_CITY = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_CITY.csv")
+    prix_m2_univ_elem_complet_DEPT = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_DEPT.csv")
+    prix_m2_univ_elem_complet_REGION = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_REGION.csv")
+    prix_m2_univ_elem_complet_PROVINCE = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_PROVINCE.csv")
+except FileNotFoundError as e:
+    print(f"Erreur de lecture de fichier : {e}")
+    sys.exit(1)
 
-During handling of the above exception, another exception occurred:
 
-DateParseError                            Traceback (most recent call last)
-Cell In[60], line 129
-    127 # Renommer la colonne 'Periode_Merge' pour qu'elle s'appelle 'Periode'
-    128 merge = merge.rename(columns={'Periode_Merge': 'Periode'})
---> 129 merge[\"Periode\"] = pd.PeriodIndex(merge['Periode'],freq='Q').to_timestamp()
-    130 merge = merge.drop(columns=['prix_mm_value'], errors='ignore')
-    132 merge = merge.loc[:, ~merge.columns.duplicated()]
+dfs_to_concat = [
+    prix_m2_univ_elem_complet_CITY,
+    prix_m2_univ_elem_complet_DEPT,
+    prix_m2_univ_elem_complet_REGION,
+    prix_m2_univ_elem_complet_PROVINCE
+]
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\indexes\\period.py:314, in PeriodIndex.__new__(cls, data, ordinal, freq, dtype, copy, name, **fields)
-    311         raise ValueError(\"Cannot pass both data and ordinal\")
-    312     else:
-    313         # don't pass copy here, since we copy later.
---> 314         data = period_array(data=data, freq=freq)
-    316 if copy:
-    317     data = data.copy()
+df_final = pd.concat(dfs_to_concat, ignore_index = True)
+df_final = df_final[df_final['DIC_NAME'] != "prix_m2_3m"]
+df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\arrays\\period.py:1126, in period_array(data, freq, copy)
-   1124     freq = libperiod.extract_freq(data)
-   1125 dtype = PeriodDtype(freq)
--> 1126 return PeriodArray._from_sequence(data, dtype=dtype)
+# --- Calcul de l'indice CL ---
+mask_2020 = df_final["Periode"].astype(str).str[:4] == "2020"
+if not df_final.loc[mask_2020, "prix_mm_value"].empty:
+    pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
+    
+    df_final["Indice de prix (CL)"] = ((df_final["prix_mm_value"] / df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)) * 100 ).round(2)
 
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\arrays\\period.py:304, in PeriodArray._from_sequence(cls, scalars, dtype, copy)
-    301 periods = np.asarray(scalars, dtype=object)
-    303 freq = freq or libperiod.extract_freq(periods)
---> 304 ordinals = libperiod.extract_ordinals(periods, freq)
-    305 dtype = PeriodDtype(freq)
-    306 return cls(ordinals, dtype=dtype)
+else:
+    print("Attention: Aucune donnée trouvée pour 2020")
+    df_final["Indice de prix (CL)"] = np.nan
 
-File pandas/_libs/tslibs/period.pyx:1563, in pandas._libs.tslibs.period.extract_ordinals()
+# --- Préparation des données INSEE ---
+types_biens = ['APT', 'MAI']
+perimetre_insee= ['92', '93', '94', '95', '91','75', '78', '77', "MARSEILLE", "LYON", "LILLE",'NORD-PAS-DE-CALAIS','PACA','RHONE-ALPES','PROVINCE','AUVERGNE','IDF']
+insee_to_concat = []
 
-File pandas/_libs/tslibs/period.pyx:1598, in pandas._libs.tslibs.period._extract_ordinal()
+for perimetre in perimetre_insee:
+    for type_b in types_biens:
+        try:
+            # NOTE: Changement des différents fichiers INSEE
+            valeurs_trimestrielles = pd.read_csv(rf"N:\uflumth\indicateur_marche\univers_elementaire\TI\table_rapport (2025)\valeurs_trimestrielles_{perimetre}_{type_b}.csv", sep = ';')
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"Erreur de lecture pour {perimetre}_{type_b}: {e}")
+            continue
 
-File pandas/_libs/tslibs/period.pyx:2782, in pandas._libs.tslibs.period.Period.__new__()
+        valeurs_trimestrielles = valeurs_trimestrielles[4:]
+        # La colonne 'Indice de prix (INSEE)' est la deuxième colonne (index 1) après le slicing
+        valeurs_trimestrielles = valeurs_trimestrielles.rename(columns={valeurs_trimestrielles.columns[1]: 'Indice de prix (INSEE)'})
+        valeurs_trimestrielles['Indice de prix (INSEE)'] = pd.to_numeric(valeurs_trimestrielles['Indice de prix (INSEE)'], errors='coerce')
+        
+        # Création de la colonne de Période cohérente 
+        valeurs_trimestrielles['Year'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('-')[0]))
+        valeurs_trimestrielles['Quarter'] = valeurs_trimestrielles['Libellé'].apply(lambda x: int(x.split('T')[-1]))
+        valeurs_trimestrielles["Date code"] = (valeurs_trimestrielles['Year'].astype(str) + 'Q' + valeurs_trimestrielles["Quarter"].astype(str))
+        
+       
+        # Création de la colonne de fusion sur base du début de trimestre
+        valeurs_trimestrielles["Periode"] = pd.PeriodIndex(valeurs_trimestrielles["Date code"],freq = "Q").to_timestamp(how="start")
+        
+        valeurs_trimestrielles["VAL_MAILLE_GEO"] = perimetre
+        valeurs_trimestrielles["CD_TYPE_BIEN"] = type_b
+        valeurs_trimestrielles = valeurs_trimestrielles.drop(columns=["Libellé","Year","Quarter","Date code"])
+        insee_to_concat.append(valeurs_trimestrielles)
 
-File pandas/_libs/tslibs/period.pyx:2774, in pandas._libs.tslibs.period.Period.__new__()
+if insee_to_concat:
+    insee_final = pd.concat(insee_to_concat, ignore_index = True)
+    insee_final = insee_final.drop(columns=["Codes"], errors='ignore')
+    colonnes = ['VAL_MAILLE_GEO',"CD_TYPE_BIEN",'Periode','Indice de prix (INSEE)']
+    insee_final = insee_final[colonnes]
+    insee_final["VAL_MAILLE_GEO"]=insee_final["VAL_MAILLE_GEO"].replace({"RHONE-ALPES":"RHÔNE-ALPES","PACA":"PROVENCE-ALPES-CÔTE D'AZUR","IDF":"ÎLE-DE-FRANCE"})
+else:
+    print("Attention: Aucun fichier INSEE n'a pu être chargé.")
+    sys.exit(1)
 
-File pandas/_libs/tslibs/parsing.pyx:442, in pandas._libs.tslibs.parsing.parse_datetime_string_with_reso()
 
-File pandas/_libs/tslibs/parsing.pyx:666, in pandas._libs.tslibs.parsing.dateutil_parse()
+# --- Calcul de l'indice INSEE ---
 
-DateParseError: Unknown datetime string format, unable to parse: PERIODE"
-}
+df_final["Periode"] = pd.to_datetime(df_final["Periode"])
+insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
+
+mask_2020 = insee_final["Periode"].astype(str).str[:4] == "2020"
+if not insee_final.loc[mask_2020, "Indice de prix (INSEE)"].empty:
+    mean_pivot_2020_insee = insee_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["Indice de prix (INSEE)"].mean()
+    
+    insee_final["Indice de prix (INSEE) - Base 2020"] = ((insee_final["Indice de prix (INSEE)"] / insee_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(mean_pivot_2020_insee)) * 100 ).round(2)
+else:
+    print("Attention: Aucune donnée trouvée pour 2020. L'Indice de prix (CL) ne peut pas être calculé.")
+    insee_final["Indice de prix (CL)"] = np.nan
+
+ 
+# Nettoyage 
+for df in (df_final, insee_final):
+    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+df_final['Periode_Merge'] = df_final["Periode"].dt.to_period('Q').astype(str)
+insee_final['Periode_Merge'] = insee_final["Periode"].dt.to_period('Q').astype(str)
+
+
+
+
+print("--- Vérification des données avant fusion ---")
+print(f"VAL_MAILLE_GEO (CL) : {df_final['VAL_MAILLE_GEO'].unique()}")
+print(f"VAL_MAILLE_GEO (INSEE) : {insee_final['VAL_MAILLE_GEO'].unique()}")
+print(f"Périodes (CL) - Exemples : {df_final['Periode_Merge'].head().tolist()}")
+print(f"Périodes (INSEE) - Exemples : {insee_final['Periode_Merge'].head().tolist()}")
+print(f"Taille de df_final : {len(df_final)}")
+print(f"Taille de insee_final : {len(insee_final)}")
+print("------------------------------------------")
+
+
+# --- Fusion ---
+merge = pd.merge(df_final, 
+                 insee_final.drop(columns=['Periode']), # On enlève l'ancienne colonne de période INSEE
+                 how = "inner",
+                 left_on = ["VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode_Merge"],
+                 right_on = ["VAL_MAILLE_GEO","CD_TYPE_BIEN","Periode_Merge"])
+
+# Renommer la colonne 'Periode_Merge' pour qu'elle s'appelle 'Periode'
+merge = merge.rename(columns={'Periode_Merge': 'Periode'})
+merge["Periode"] = pd.PeriodIndex(merge['Periode'],freq='Q').to_timestamp()
+merge = merge.drop(columns=['prix_mm_value'], errors='ignore')
+
+merge = merge.loc[:, ~merge.columns.duplicated()]
+merge = merge.sort_values(["VAL_MAILLE_GEO", "Periode"])
+print(merge)
