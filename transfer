@@ -1,29 +1,153 @@
-# 📉 Phase de Backtesting et Visualisation
 
-L'objectif de cette phase est de valider l'efficacité du modèle **TES (Triple Lissage Exponentiel)** en le soumettant à un **backtesting historique**. Le modèle est ajusté sur la série des écarts ($\text{CL} - \text{INSEE}$), puis nous reconstruisons la courbe corrigée sur l'ensemble de l'historique pour évaluer visuellement la réduction du biais.
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+import plotly.io as pio
+import warnings
 
-## 1. Principe de la Correction Historique (Backtesting)
+# Configuration
+warnings.filterwarnings("ignore")
+pio.renderers.default = "notebook" 
 
-Le backtesting consiste à simuler l'application du correctif en temps réel sur le passé. Pour chaque trimestre $t$, le modèle calcule un biais ajusté ($\hat{E}_t$) en utilisant uniquement les données antérieures à $t$ :
 
-$$\text{Indice Corrigé}_t = \text{Indice CL}_t - \hat{E}_t$$
+n_forecast = 2 # Nombre de trimestres à prédire (T+1, T+2)
+corrected_data = [] # stocker historique
+future_adjustments = []
 
-* **Donnée de Référence (Cible) :** L'Indice INSEE (Ligne Noire), qui représente la réalité du marché final.
-* **Résultat Attendu :** La courbe corrigée doit coller significativement mieux à la courbe INSEE que la courbe CL brute.
 
-## 2. Construction des Courbes de Preuve
+grouped = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
 
-Chaque graphique généré compare trois séries sur une seule période historique par segment ($\text{Zone} \times \text{Type de Bien}$) :
+print("Démarrage de la modélisation Holt (Backtest + Prévision)...")
 
-| Série | Rôle | Description Visuelle |
-| :--- | :--- | :--- |
-| **Indice INSEE** | **Référence ('Vérité terrain')** | Ligne **Noire** et épaisse. |
-| **Indice CL Brut** | **Indice Biaisé** | Ligne **Rouge** et fine (montre la dérive/l'écart). |
-| **Indice CL Corrigé (TES)** | **La Solution** | Ligne **Bleue** et épaisse (démontre l'efficacité du modèle). |
+for name, group in grouped:
+    zone, type_bien = name
+    
+    # 1. Préparation des données
+    
+    group = group.sort_values("Periode").set_index("Periode")
+    
+    # On initialise la colonne corrigée à NaN 
+    group['Indice de prix (CL) - Corrigé Holt'] = np.nan
+    
+    # Série de l'écart (Biais)
+    ts_ecart = group['Dif'].dropna()
+    
+    # On a besoin de la dernière valeur connue de CL pour projeter les courbes
+    last_cl_value = group['Indice de prix (CL)'].iloc[-1]
+    last_date = group.index[-1]
+    
+    # On ne lance le modèle que si on a assez de points (ex: > 8 trimestres)
+    if len(ts_ecart) > 8:
+        try:
+            # =================================================================
+            # 2. Modélisation (Lissage de Holt)
+            # =================================================================
+            model = ExponentialSmoothing(
+                ts_ecart, 
+                trend='add', 
+                seasonal='add', 
+                damped_trend=True, 
+                initialization_method="estimated"
+            )
+            model_fit = model.fit()
+            
+            # =================================================================
+            # 3. Calculs : Passé (Backtest) et Futur (Forecast)
+            # =================================================================
+            
+            # --- A. Correction Historique ---
+            # On récupère le biais que le modèle aurait prédit dans le passé
+            ecart_modelise = model_fit.fittedvalues.reindex(group.index)
+            
+            # On crée la courbe corrigée : CL Brut - Biais Modélisé
+            cl_corrected_history = group['Indice de prix (CL)'] - ecart_modelise
+            group['Indice de prix (CL) - Corrigé Holt'] = cl_corrected_history
+            
+            # --- B. Prévision Future ---
+            # On prédit le biais pour les prochains trimestres
+            forecast_bias = model_fit.forecast(n_forecast)
+            
+            # Calcul des intervalles de confiance (basé sur l'erreur standard résiduelle)
+            sigma = np.std(model_fit.resid)
+            confidence_interval = [1.96 * sigma * np.sqrt(step) for step in range(1, n_forecast + 1)]
+            
+            # Projection de l'indice INSEE (CL constant - Biais futur)
+            
+            pred_values = last_cl_value - forecast_bias
+            upper_bound = pred_values + confidence_interval
+            lower_bound = pred_values - confidence_interval
+            
+            # Dates futures
+            future_dates = [last_date + pd.DateOffset(months=3*i) for i in range(1, n_forecast+1)]
+            
+            
+            future_adjustments.append({
+                "Zone": zone,
+                "Type": type_bien,
+                "Ajustement T+1": round(forecast_bias.iloc[0], 2),
+                "Ajustement T+2": round(forecast_bias.iloc[1], 2),
+                "Marge Erreur": round(confidence_interval[0], 2)
+            })
 
-## 3. Interprétation Visuelle
+            # =================================================================
+            # 4. Visualisation 
+            # =================================================================
+            
+            fig = go.Figure()
 
-La visualisation permet de valider le succès de la modélisation à deux niveaux :
+            # Historique : Indice de prix INSEE (Noir)
+            fig.add_trace(go.Scatter(
+                x=group.index, y=group['Indice de prix (INSEE) - Base 2020'],
+                mode='lines', name='Indice de prix (INSEE) ',
+                line=dict(color='black', width=3)
+            ))
 
-1.  **Réduction du Biais (Niveau) :** La Ligne Bleue (CL Corrigé) devrait osciller beaucoup plus près de la Ligne Noire (INSEE) que la Ligne Rouge (CL Brut), prouvant que le modèle **TES** a réussi à neutraliser le biais structurel (les 1.5 - 2 points d'écart moyen).
-2.  **Absorption de la Saisonnalité :** L'écart entre la Ligne Bleue et la Ligne Noire doit être du **pur bruit** (aléatoire), prouvant que la composante cyclique (saisonnalité) a été entièrement capturée et retirée du modèle.
+            # Historique : Indice de prix Cl (Rouge Pointillé) -> Montre la dérive
+            fig.add_trace(go.Scatter(
+                x=group.index, y=group['Indice de prix (CL)'],
+                mode='lines', name='Indice de prix (CL)',
+                line=dict(color='red', width=1, dash='dot')
+            ))
+
+            # Historique : Indice de prix CL Corrigé (Bleu) -> Montre l'efficacité du modèle
+            fig.add_trace(go.Scatter(
+                x=group.index, y=cl_corrected_history,
+                mode='lines', name='Indice de prix CL Corrigé',
+                line=dict(color='blue', width=2)
+            ))
+
+            
+
+            # Mise en page
+
+            fig.update_layout(
+                title=f"<b>{zone} - {type_bien}</b> : Correction Dynamique - Base 2020",
+                yaxis_title="Indice (Base 2020 = 100)",
+                template="plotly_white",
+                height=550,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            
+            fig.show()
+            
+        except Exception as e:
+            print(f"⚠️ Echec de la modélisation pour {name}: {e}")
+            
+
+    corrected_data.append(group.reset_index())
+
+merge_corrected = pd.concat(corrected_data, ignore_index=True)
+
+# --- Affichage des forecast ---
+if future_adjustments:
+    df_previsions = pd.DataFrame(future_adjustments)
+    print("\n" + "="*80)
+    print("AJUSTEMENTS À APPLIQUER")
+    print("Formule : Indice INSEE Prévu = Indice CL du trimestre - Ajustement")
+    print("="*80)
+
+    pd.set_option('display.max_rows', None)
+    print(df_previsions)
+else:
+    print("\nAucune prévision n'a pu être générée (pas assez de données).")
