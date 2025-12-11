@@ -3,18 +3,26 @@ import numpy as np
 import sys
 import os
 
-# --- FONCTION UTILITAIRE : CHARGEMENT ET PRÉPARATION ---
+# =============================================================================
+# 1. FONCTIONS UTILITAIRES
+# =============================================================================
+
 def load_and_prep_cl_data(base_path, label_version):
     """Charge, nettoie et calcule l'indice CL pour un dossier donné."""
+    print(f"Chargement de {label_version} depuis : {base_path} ...")
     try:
         dfs = []
         for suffix in ["CITY", "DEPT", "REGION", "PROVINCE"]:
             file_path = os.path.join(base_path, f"prix_m2_univ_elem_complet_{suffix}.csv")
             if os.path.exists(file_path):
                 dfs.append(pd.read_csv(file_path))
+            else:
+                # print(f"  Fichier non trouvé : {suffix}") # Optionnel
+                pass
         
         if not dfs:
-            raise FileNotFoundError(f"Aucun fichier trouvé dans {base_path}")
+            print(f"  ERREUR : Aucun fichier trouvé pour {label_version}")
+            return None
             
         df = pd.concat(dfs, ignore_index=True)
         
@@ -26,124 +34,155 @@ def load_and_prep_cl_data(base_path, label_version):
         df["Periode"] = pd.to_datetime(df["Periode"], dayfirst=True) # Important: dayfirst
         mask_2020 = df["Periode"].dt.year == 2020
         
+        col_name = f"Indice CL ({label_version})"
+        
         if not df.loc[mask_2020].empty:
             pivot_2020 = df.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
-            df[f"Indice CL ({label_version})"] = (
+            df[col_name] = (
                 (df["prix_mm_value"] / 
                  df.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020)
                 ) * 100 
             ).round(2)
         else:
-            df[f"Indice CL ({label_version})"] = np.nan
+            df[col_name] = np.nan
             
-        # Nettoyage Clés
+        # Nettoyage Clés pour la fusion
         df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
         df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
         df['Periode_Key'] = df["Periode"].dt.to_period('Q').astype(str)
         
-        return df
+        return df[[ 'VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', col_name ]]
         
     except Exception as e:
-        print(f"Erreur chargement {label_version}: {e}")
+        print(f"  Erreur chargement {label_version}: {e}")
         return None
 
-# --- 1. CHARGEMENT DES DEUX VERSIONS ---
+# =============================================================================
+# 2. CHARGEMENT DES BASES CL (V1 et V2)
+# =============================================================================
 
-# Chemins (A adapter si besoin)
 path_v1 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee"
 path_v2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande"
 
-print("--- Chargement V1 (Standard) ---")
 df_v1 = load_and_prep_cl_data(path_v1, "V1")
-
-print("--- Chargement V2 (Avec Demandes) ---")
 df_v2 = load_and_prep_cl_data(path_v2, "V2")
 
 if df_v1 is None or df_v2 is None:
-    sys.exit("Arrêt critique : Échec du chargement des bases CL.")
+    sys.exit("Arrêt critique : Une des bases CL n'a pas pu être chargée.")
 
-# --- 2. PRÉPARATION INSEE (Code existant optimisé) ---
-# ... (Je reprends votre bloc de chargement INSEE tel quel, il est bon) ...
-# [INSERER VOTRE BLOC DE CHARGEMENT INSEE ICI JUSQU'A LA LIGNE 'insee_final[...] = ...']
-# Pour la démo, je suppose que 'insee_final' est prêt et contient 'Indice de prix (INSEE) - Base 2020'
-# Et qu'il a la colonne 'Periode_Key' prête.
+# =============================================================================
+# 3. CHARGEMENT ET PRÉPARATION INSEE (Le bloc manquant)
+# =============================================================================
 
-# (Rappel rapide du nettoyage clé INSEE pour être sûr)
+print("Chargement des données INSEE...")
+types_biens = ['APT', 'MAI']
+perimetre_insee = ['92', '93', '94', '95', '91','75', '78', '77', "MARSEILLE", "LYON", "LILLE",'NORD-PAS-DE-CALAIS','PACA','RHONE-ALPES','PROVINCE','AUVERGNE','IDF']
+insee_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\table_rapport (2025)"
+insee_to_concat = []
+
+for perimetre in perimetre_insee:
+    for type_b in types_biens:
+        try:
+            file_p = os.path.join(insee_path, f"valeurs_trimestrielles_{perimetre}_{type_b}.csv")
+            # Lecture
+            valeurs_trimestrielles = pd.read_csv(file_p, sep=';')
+            
+            # Nettoyage (Slicing des premières lignes)
+            valeurs_trimestrielles = valeurs_trimestrielles[3:].copy()
+            
+            # Renommage colonne indice
+            col_indice = valeurs_trimestrielles.columns[1]
+            valeurs_trimestrielles = valeurs_trimestrielles.rename(columns={col_indice: 'Indice de prix (INSEE)'})
+            
+            # Conversion numérique
+            valeurs_trimestrielles['Indice de prix (INSEE)'] = pd.to_numeric(
+                valeurs_trimestrielles['Indice de prix (INSEE)'], errors='coerce'
+            )
+            
+            # Parsing Date
+            valeurs_trimestrielles['Year'] = valeurs_trimestrielles['Libellé'].astype(str).apply(lambda x: x.split('-')[0])
+            valeurs_trimestrielles['Quarter'] = valeurs_trimestrielles['Libellé'].astype(str).apply(lambda x: x.split('T')[-1])
+            
+            valeurs_trimestrielles["Date code"] = valeurs_trimestrielles['Year'] + 'Q' + valeurs_trimestrielles["Quarter"]
+            valeurs_trimestrielles["Periode"] = pd.PeriodIndex(valeurs_trimestrielles["Date code"], freq="Q").to_timestamp()
+            
+            valeurs_trimestrielles["VAL_MAILLE_GEO"] = perimetre
+            valeurs_trimestrielles["CD_TYPE_BIEN"] = type_b
+            
+            insee_to_concat.append(valeurs_trimestrielles[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]])
+            
+        except Exception as e:
+            continue
+
+if insee_to_concat:
+    insee_final = pd.concat(insee_to_concat, ignore_index=True)
+    # Harmonisation Noms
+    insee_final["VAL_MAILLE_GEO"] = insee_final["VAL_MAILLE_GEO"].replace({
+        "RHONE-ALPES": "RHÔNE-ALPES",
+        "PACA": "PROVENCE-ALPES-CÔTE D'AZUR",
+        "IDF": "ÎLE-DE-FRANCE"
+    })
+else:
+    sys.exit("Erreur : Aucun fichier INSEE chargé.")
+
+# Calcul Base 2020 INSEE
+mask_2020_insee = insee_final["Periode"].dt.year == 2020
+pivot_2020_insee = insee_final.loc[mask_2020_insee].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["Indice de prix (INSEE)"].mean()
+insee_final["Indice INSEE (Base 2020)"] = (
+    (insee_final["Indice de prix (INSEE)"] / 
+     insee_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_insee)
+    ) * 100 
+).round(2)
+
+# Nettoyage clés INSEE
 insee_final["VAL_MAILLE_GEO"] = insee_final["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
 insee_final["CD_TYPE_BIEN"] = insee_final["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
-insee_final['Periode_Key'] = pd.to_datetime(insee_final["Periode"]).dt.to_period('Q').astype(str)
+insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
 
+# =============================================================================
+# 4. FUSIONS ET CALCULS COMPARATIFS
+# =============================================================================
 
-# --- 3. FUSION DOUBLE ---
+print("Fusion des données...")
 
-# On fusionne V1 avec INSEE
+# Fusion V1
 merge_v1 = pd.merge(
-    df_v1[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice CL (V1)']], 
-    insee_final[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice de prix (INSEE) - Base 2020']], 
+    df_v1, 
+    insee_final[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice INSEE (Base 2020)']], 
     how="inner",
     on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
 )
 
-# On fusionne V2 avec INSEE
+# Fusion V2
 merge_v2 = pd.merge(
-    df_v2[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice CL (V2)']], 
-    insee_final[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice de prix (INSEE) - Base 2020']], 
+    df_v2, 
+    insee_final[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key', 'Indice INSEE (Base 2020)']], 
     how="inner",
     on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
 )
 
-# --- 4. CALCUL DES STATS COMPARATIVES ---
-
-def calculate_metrics(df, col_cl, col_insee, label):
-    """Calcule RMSE et Corrélation pour un dataframe fusionné"""
-    df['Dif'] = df[col_cl] - df[col_insee]
-    
-    # RMSE
+def get_stats(df, col_cl):
+    df['Dif'] = df[col_cl] - df['Indice INSEE (Base 2020)']
     rmse = np.sqrt(np.mean(df['Dif']**2))
-    
-    # Corrélation
-    corr = df[col_cl].corr(df[col_insee])
-    
-    # Biais Moyen (Absolu pour voir l'ampleur de l'erreur)
-    biais_moyen = df['Dif'].abs().mean()
-    
-    return pd.Series({
-        f'RMSE_{label}': rmse,
-        f'Corr_{label}': corr,
-        f'Biais_Abs_{label}': biais_moyen
-    })
+    corr = df[col_cl].corr(df['Indice INSEE (Base 2020)'])
+    return pd.Series({'RMSE': rmse, 'Correlation': corr})
 
-# Calcul par Segment
-stats_v1 = merge_v1.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(
-    lambda x: calculate_metrics(x, 'Indice CL (V1)', 'Indice de prix (INSEE) - Base 2020', 'V1')
-).reset_index()
+# Calcul des stats par groupe
+stats_v1 = merge_v1.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(lambda x: get_stats(x, 'Indice CL (V1)')).reset_index()
+stats_v2 = merge_v2.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(lambda x: get_stats(x, 'Indice CL (V2)')).reset_index()
 
-stats_v2 = merge_v2.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(
-    lambda x: calculate_metrics(x, 'Indice CL (V2)', 'Indice de prix (INSEE) - Base 2020', 'V2')
-).reset_index()
+# Comparaison finale
+comparaison = pd.merge(stats_v1, stats_v2, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"], suffixes=('_V1', '_V2'))
 
-# --- 5. TABLEAU FINAL : LE DUEL ---
-comparaison_finale = pd.merge(stats_v1, stats_v2, on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
-
-# Ajout des indicateurs de victoire (V2 est-elle meilleure ?)
-comparaison_finale['RMSE_Gain'] = comparaison_finale['RMSE_V1'] - comparaison_finale['RMSE_V2'] 
-# Si positif -> V1 avait plus d'erreur -> V2 gagne
-
-comparaison_finale['Corr_Gain'] = comparaison_finale['Corr_V2'] - comparaison_finale['Corr_V1']
-# Si positif -> V2 est plus corrélée -> V2 gagne
+# Calcul du Gain (Positif = V2 est meilleure)
+comparaison['Gain_RMSE'] = comparaison['RMSE_V1'] - comparaison['RMSE_V2'] 
+comparaison['Gain_Corr'] = comparaison['Correlation_V2'] - comparaison['Correlation_V1']
 
 print("\n" + "="*80)
-print("🏁 RÉSULTATS DU DUEL : Base Standard (V1) vs Base + Demandes (V2)")
+print(" RÉSULTATS COMPARATIFS : Base Standard (V1) vs Base + Demande (V2)")
 print("="*80)
-
-print("\n--- Moyenne Globale des Améliorations ---")
-print(f"Gain Moyen RMSE : {comparaison_finale['RMSE_Gain'].mean():.4f} points (Positif = V2 meilleure)")
-print(f"Gain Moyen Corrélation : {comparaison_finale['Corr_Gain'].mean():.4f} (Positif = V2 meilleure)")
-
-print("\n--- Détail par Segment (Top 10 Gains RMSE) ---")
-print(comparaison_finale.sort_values('RMSE_Gain', ascending=False)[
-    ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'RMSE_V1', 'RMSE_V2', 'RMSE_Gain']
-].head(10))
-
-# Export pour analyse
-# comparaison_finale.to_csv("comparaison_v1_v2.csv", sep=";", index=False)
+print(f"Gain Moyen RMSE global : {comparaison['Gain_RMSE'].mean():.4f} (Si > 0, V2 réduit l'erreur)")
+print(f"Gain Moyen Corrélation : {comparaison['Gain_Corr'].mean():.4f} (Si > 0, V2 suit mieux la tendance)")
+print("-" * 80)
+print("Détail des améliorations (Top 10 Gains RMSE) :")
+print(comparaison.sort_values("Gain_RMSE", ascending=False).head(10))
