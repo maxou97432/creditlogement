@@ -1,58 +1,53 @@
-\section{Comparaison des bases de données et choix méthodologique}
 
-\subsection{La base historique : \texttt{df\_transac\_clean}}
-Les travaux préliminaires de cette étude ont été réalisés sur la base de données \texttt{df\_transac\_clean}, issue des modèles de \textit{CL-ESTIM}. Cette base résulte d’un processus de fusion complexe entre deux sources majeures :
+L’application de la méthode par ``univers élémentaires'' aux seules opérations CL conduit à des résultats très proches de ceux obtenus avec l’ensemble DVF+CL.
+
+Graphiquement, les trajectoires issues des seules données CL conservent les mêmes inflexions que celles obtenues avec la base DVF+CL : hausse marquée jusqu’en 2020--2021, suivi d’un retournement à Paris et Lyon ; progression régulière à Marseille et Rennes ; convergence générale vers les mêmes niveaux de prix en fin de période. Les écarts absolus restent faibles (de l’ordre de $\pm 2$ à $\pm 3\%$), et la dynamique temporelle demeure parfaitement cohérente.
+
+Les taux de couverture des séries LPI/IAD par les intervalles de confiance à 95\% issus de la méthode sont les suivants :
 \begin{itemize}
-    \item La base publique \textbf{DVF} (Demande de Valeurs Foncières), recensant l’exhaustivité des transactions immobilières françaises.
-    \item La base interne \textbf{CL OPERATION}, regroupant les financements de Crédit Logement.
+    \item \textbf{46,99\%} pour les séries en moyenne glissante 3 mois ;
+    \item \textbf{29,97\%} pour les séries en moyenne glissante 12 mois.
 \end{itemize}
 
-L'objectif de cette fusion était de maximiser le volume de données en complétant les informations manquantes de Crédit Logement par celles de la DVF via un algorithme de \textit{matching} (score de similarité). Bien que cette méthode ait permis de constituer un historique massif de \textbf{9\,557\,711 transactions} sur la période 2015-2025, elle présente certaines limites structurelles :
-\begin{itemize}
-    \item Un taux de données manquantes global d'environ 3,92 \%, nécessitant des imputations.
-    \item Une incertitude liée au processus de réconciliation (matching) entre les deux sources.
-    \item Une hétérogénéité dans le renseignement des variables clés (ex: surface terrain).
-\end{itemize}
+Ces niveaux sont quasiment identiques à ceux obtenus avec la base complète, ce qui traduit une \textbf{bonne stabilité du modèle}, même en présence d’un volume plus restreint de transactions. La cohérence des résultats montre que les données de Crédit Logement reflètent bien les dynamiques de marché des grandes métropoles.
 
-\subsection{La nouvelle base d'étude : Priorité à la qualité de la donnée}
-Afin de garantir la robustesse des modèles économétriques (notamment les modèles de lissage exponentiel et SARIMA présentés ultérieurement), nous avons opéré une restriction drastique du périmètre d'analyse. La nouvelle base de données retenue privilégie la fiabilité de l'information sur l'exhaustivité du volume.
+================================================================================
+ RÉSULTATS COMPARATIFS : Base Standard (V1) vs Base + Demande (V2)
+================================================================================
+Gain Moyen RMSE global : -54.1067 (V2 augmente l'erreur)
+Gain Moyen Corrélation : -0.0033 (V2 suit moins bien la tendance)
+--------------------------------------------------------------------------------
+Détail des améliorations (Top 10 Gains RMSE) :
+            Ville     RMSE_V1  Correlation_V1     RMSE_V2  Correlation_V2  \
+3            LYON  447.127069        0.941384  292.124850        0.950212   
+2           LILLE  207.997834        0.985778  121.956932        0.983615   
+11  SAINT-ETIENNE  247.042551        0.931725  175.717450        0.929175   
+6          NANTES  208.109251        0.968370  152.841600        0.968936   
+0        BORDEAUX  212.321139        0.951497  178.753962        0.948196   
+7            NICE  168.565754        0.967932  138.857189        0.969952   
+12     STRASBOURG  120.190714        0.967304  120.403190        0.967298   
+10         RENNES  201.442968        0.962984  225.408835        0.964766   
+9           REIMS  141.766229        0.900135  206.331670        0.903427   
+1        LE HAVRE   92.249067        0.936202  193.206781        0.923846   
+4       MARSEILLE  162.915664        0.923894  308.781051        0.932158   
+14       TOULOUSE  108.417667        0.962958  308.014313        0.968560   
+13         TOULON  240.009405        0.876769  443.820799        0.836440   
+8           PARIS  264.175609        0.977450  470.095020        0.967236   
+5     MONTPELLIER  149.518963        0.927118  447.137335        0.918620   
 
-\subsubsection{Statistiques descriptives de la nouvelle base}
-Cette base couvre la période allant de janvier 2014 à janvier 2026. Elle se caractérise par une complétude parfaite des variables cibles :
-\begin{itemize}
-    \item \textbf{Volume total :} 2\,299\,905 transactions certifiées.
-    \item \textbf{Prix au m² :} Aucune donnée manquante (0 \textit{NaN}). La moyenne s'établit à 3\,830 \euro/m² avec une médiane à 3\,224 \euro/m².
-    \item \textbf{Surface habitable :} Aucune donnée manquante. Surface médiane de 76 m².
-\end{itemize}
-
-La répartition typologique est équilibrée, assurant une représentativité statistique suffisante pour les analyses segmentées :
-\begin{itemize}
-    \item \textbf{Appartements :} 54 \% du volume (dont 559\,420 petits logements de 1-2 pièces).
-    \item \textbf{Maisons :} 46 \% du volume (dont 528\,343 maisons de 5 pièces et plus).
-\end{itemize}
-
-\subsection{Synthèse comparative}
-Le tableau ci-dessous résume le changement de paradigme opéré entre l'ancienne approche (Base Fusionnée) et l'approche actuelle (Base Qualifiée).
-
-\begin{table}[h!]
-\centering
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{@{}lll@{}}
-\toprule
-\textbf{Critère} & \textbf{Ancienne Base (\texttt{df\_transac\_clean})} & \textbf{Nouvelle Base (Retenue)} \\ \midrule
-\textbf{Source} & Fusion DVF + CL (Matching probabiliste) & Données internes certifiées (ou DVF filtré strict) \\
-\textbf{Volume (2015-2025)} & $\approx$ 9,6 Millions de transactions & $\approx$ 2,3 Millions de transactions \\
-\textbf{Couverture Marché} & Exhaustivité nationale ($\approx$ 100\% du marché) & Échantillon qualifié ($\approx$ 24\% du volume initial) \\
-\textbf{Qualité Prix/m²} & Valeurs parfois reconstruites ou imputées & \textbf{100 \% renseigné} (Donnée brute fiable) \\
-\textbf{Qualité Surface} & Taux de renseignement $\approx$ 80 \% & \textbf{100 \% renseigné} \\
-\textbf{Philosophie} & \textit{Big Data} (Accepter le bruit pour le volume) & \textit{Smart Data} (Réduire le bruit pour la précision) \\ \bottomrule
-\end{tabular}%
-}
-\caption{Comparaison structurelle entre la base historique et la base d'étude actuelle.}
-\label{tab:comparaison_bases}
-\end{table}
-
-\paragraph{Justification du choix final}
-Bien que le volume de transactions soit divisé par quatre, la nouvelle base offre une \textbf{densité d'information parfaite} sur les variables explicatives critiques (Prix, Surface, Localisation). L'absence de valeurs manquantes supprime les biais d'imputation qui pourraient fausser les modèles de séries temporelles sensibles aux ruptures (comme Holt-Winters). La médiane temporelle située en juillet 2020 indique par ailleurs une excellente couverture de la période post-Covid, cruciale pour l'analyse des dynamiques récentes du marché.
-
-\end{latex}
+     Gain_RMSE  Gain_Corr  
+3   155.002219   0.008829  
+2    86.040902  -0.002163  
+11   71.325101  -0.002551  
+6    55.267651   0.000565  
+0    33.567177  -0.003301  
+7    29.708565   0.002020  
+12   -0.212476  -0.000006  
+10  -23.965866   0.001782  
+9   -64.565441   0.003292  
+1  -100.957714  -0.012356  
+4  -145.865387   0.008264  
+14 -199.596646   0.005602  
+13 -203.811394  -0.040329  
+8  -205.919410  -0.010214  
+5  -297.618372  -0.008498  
