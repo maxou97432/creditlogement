@@ -1,14 +1,8 @@
-# Configuration des chemins
 current_dir = os.getcwd()
 parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
 sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
-CONFIG = {
-    'input_file': "base_complete_filtree.parquet",
-    'output_dir': os.path.join(current_dir, 'correction base_demande'),
-output_path_maj = os.path.join(CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
-    df_maj[cols_export].to_csv(output_path_maj, index=False)
-    print(f"Sauvegardé: {output_path_maj}")
 
-Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\prix_m2_univ_elem_complet_DEPT.csv
-Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\prix_m2_univ_elem_MAJ_DEPT.csv
-Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\stat_volumeterie_DEPT.csv
+
+output_file_png = os.path.join(current_dir, f"carte_prix_m2_CITY_{type_bien}_V2.png")
+plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
+print(f"Génération terminée pour {type_bien}")
