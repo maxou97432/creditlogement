@@ -1,18 +1,24 @@
-Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py", line 413, in <module>
-    prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande\prix_m2_univ_elem_MAJ_CITY.csv")                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\io\parsers\readers.py", line 1026, in read_csv
-    return _read(filepath_or_buffer, kwds)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\io\parsers\readers.py", line 620, in _read
-    parser = TextFileReader(filepath_or_buffer, **kwds)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\io\parsers\readers.py", line 1620, in __init__
-    self._engine = self._make_engine(f, self.engine)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\io\parsers\readers.py", line 1880, in _make_engine
-    self.handles = get_handle(
-                   ^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\io\common.py", line 873, in get_handle
-    handle = open(
-             ^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: 'N:\\uflumth\\indicateur_marche\\univers_elementaire\\TI\\correction base_demande\\prix_m2_univ_elem_MAJ_CITY.csv'
+# --- CORRECTION : Utilisation directe des données en mémoire ---
+# On évite de relire le fichier CSV pour ne pas avoir d'erreur de chemin
+
+if 'res_villes' in locals() and res_villes is not None:
+    # 1. On prend le résultat calculé juste avant
+    df_temp = res_villes.copy()
+    
+    # 2. On ne garde que la dernière date (comme le fait le fichier MAJ)
+    last_date = df_temp["Periode"].max()
+    prix_m2_univ_elem_MAJ_CITY = df_temp[df_temp["Periode"] == last_date].copy()
+    
+    # 3. On renomme la colonne pour que la suite du code (carte) fonctionne
+    prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY.rename(columns={"Periode": "DT_MAJ_PM2"})
+    
+    print(f"Données pour la carte chargées depuis la mémoire (Date : {last_date})")
+
+else:
+    print("ERREUR CRITIQUE : Les résultats 'res_villes' sont vides. Impossible de générer la carte.")
+    # Fallback de secours si tu veux vraiment lire le fichier (avec le bon chemin dynamique)
+    try:
+        path_csv = os.path.join(CONFIG['output_dir'], "prix_m2_univ_elem_MAJ_CITY.csv")
+        prix_m2_univ_elem_MAJ_CITY = pd.read_csv(path_csv)
+    except:
+        sys.exit("Arrêt : Fichier introuvable et pas de données en mémoire.")
