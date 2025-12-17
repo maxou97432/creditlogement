@@ -1,24 +1,50 @@
-# --- CORRECTION : Utilisation directe des données en mémoire ---
-# On évite de relire le fichier CSV pour ne pas avoir d'erreur de chemin
+import pandas as pd
+import os
+import sys
 
-if 'res_villes' in locals() and res_villes is not None:
-    # 1. On prend le résultat calculé juste avant
-    df_temp = res_villes.copy()
-    
-    # 2. On ne garde que la dernière date (comme le fait le fichier MAJ)
-    last_date = df_temp["Periode"].max()
-    prix_m2_univ_elem_MAJ_CITY = df_temp[df_temp["Periode"] == last_date].copy()
-    
-    # 3. On renomme la colonne pour que la suite du code (carte) fonctionne
-    prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY.rename(columns={"Periode": "DT_MAJ_PM2"})
-    
-    print(f"Données pour la carte chargées depuis la mémoire (Date : {last_date})")
+# CHEMINS
+BASE_DIR = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande"
+INPUT_FILE = os.path.join(BASE_DIR, "transac+demandes_filtree2.parquet")
 
+print(f"🔍 INSPECTION DU FICHIER : {INPUT_FILE}")
+
+if not os.path.exists(INPUT_FILE):
+    print("❌ ERREUR CRITIQUE : Le fichier d'entrée n'existe pas !")
+    sys.exit()
+
+# 1. Chargement
+df = pd.read_parquet(INPUT_FILE)
+print(f"✅ Fichier chargé. Dimensions brutes : {df.shape}")
+
+# 2. Vérification de la colonne DEMANDE
+if "DEMANDE" not in df.columns:
+    print("❌ LA COLONNE 'DEMANDE' EST ABSENTE DU FICHIER !")
+    print("   Colonnes disponibles :", df.columns.tolist())
 else:
-    print("ERREUR CRITIQUE : Les résultats 'res_villes' sont vides. Impossible de générer la carte.")
-    # Fallback de secours si tu veux vraiment lire le fichier (avec le bon chemin dynamique)
-    try:
-        path_csv = os.path.join(CONFIG['output_dir'], "prix_m2_univ_elem_MAJ_CITY.csv")
-        prix_m2_univ_elem_MAJ_CITY = pd.read_csv(path_csv)
-    except:
-        sys.exit("Arrêt : Fichier introuvable et pas de données en mémoire.")
+    print("✅ Colonne 'DEMANDE' présente.")
+    counts = df["DEMANDE"].value_counts(dropna=False)
+    print("\n--- Répartition des valeurs DEMANDE ---")
+    print(counts)
+    
+    # 3. Simulation du filtre
+    nb_transac = len(df[df["DEMANDE"] == 0])
+    print(f"\n--- TEST DU FILTRE (DEMANDE == 0) ---")
+    print(f"Nombre de lignes restantes : {nb_transac}")
+    
+    if nb_transac == 0:
+        print("🚨 ALERTE ROUGE : Le filtre vide intégralement la base !")
+        print("   Explication : Votre fichier ne contient que des 'Demandes' (1) et aucune 'Transaction' (0).")
+        print("   Solution : Vérifiez la création de 'transac+demandes_filtree2.parquet' en amont.")
+    else:
+        print("✅ Le filtre semble OK. Le problème vient de la sauvegarde.")
+
+# 4. Vérification du dossier de sortie
+print(f"\n--- TEST D'ÉCRITURE ---")
+test_path = os.path.join(BASE_DIR, "test_write.txt")
+try:
+    with open(test_path, 'w') as f:
+        f.write("Test ok")
+    print(f"✅ Écriture réussie dans {BASE_DIR}")
+    os.remove(test_path) # Nettoyage
+except Exception as e:
+    print(f"❌ IMPOSSIBLE D'ÉCRIRE DANS LE DOSSIER : {e}")
