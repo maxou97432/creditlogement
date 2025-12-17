@@ -1,8 +1,57 @@
-current_dir = os.getcwd()
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
+    # 3. Completing Missing Months
+    def complete_months(g):
+        g = g.sort_values("Periode").set_index("Periode")
+        idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+        g = g.reindex(idx)
+        for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+            g[col] = g[col].ffill().bfill()
+        g["nb_transac"] = g["nb_transac"].fillna(0)
+        # g["prix_moyen"] stays NaN
+        return g.reset_index().rename(columns={"index": "Periode"})
 
+    univers_complet = (
+        univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(complete_months)
+    )
 
-output_file_png = os.path.join(current_dir, f"carte_prix_m2_CITY_{type_bien}_V2.png")
-plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
-print(f"Génération terminée pour {type_bien}")
+    # 4. Calculating Structural Weights (2015-2025)
+    poids_global = (
+        univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum().rename(columns={"nb_transac": "poids_total"})
+    )
+    poids_global["poids_relatif"] = poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
+    
+    univers_complet = univers_complet.merge(poids_global, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
+
+    # 5. Calculating Indicators I_3m & I_12m
+    typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+    
+    univers_complet["I_3m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    univers_complet["I_12m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+
+    # 6. Weighted Moving Averages Function
+    def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice):
+        result = []
+        g = g.sort_values("Periode")
+        periodes = g["Periode"].unique()
+        
+        for i, periode in enumerate(periodes):
+            start_idx = max(0, i - window + 1)
+            periodes_fenetre = periodes[start_idx:i+1]
+            df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
+            
+            df_actif = df_fenetre[(df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)].copy()
+            
+            if len(df_actif) == 0:
+                result.append({"Periode": periode, "prix_mm": np.nan})
+                continue
+            
+            total_poids = df_actif["poids_relatif"].sum()
+            if total_poids > 0:
+                poids_norm = df_actif["poids_relatif"] / total_poids
+                prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
+            else:
+                prix_mm = np.nan
+            result.append({"Periode": periode, "prix_mm": prix_mm})
+        return pd.DataFrame(result)
