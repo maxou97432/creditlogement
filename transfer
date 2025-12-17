@@ -1,50 +1,14 @@
-import pandas as pd
-import os
-import sys
+# Configuration des chemins
+current_dir = os.getcwd()
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
+CONFIG = {
+    'input_file': "base_complete_filtree.parquet",
+    'output_dir': os.path.join(current_dir, 'correction base_demande'),
+output_path_maj = os.path.join(CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
+    df_maj[cols_export].to_csv(output_path_maj, index=False)
+    print(f"Sauvegardé: {output_path_maj}")
 
-# CHEMINS
-BASE_DIR = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande"
-INPUT_FILE = os.path.join(BASE_DIR, "transac+demandes_filtree2.parquet")
-
-print(f"🔍 INSPECTION DU FICHIER : {INPUT_FILE}")
-
-if not os.path.exists(INPUT_FILE):
-    print("❌ ERREUR CRITIQUE : Le fichier d'entrée n'existe pas !")
-    sys.exit()
-
-# 1. Chargement
-df = pd.read_parquet(INPUT_FILE)
-print(f"✅ Fichier chargé. Dimensions brutes : {df.shape}")
-
-# 2. Vérification de la colonne DEMANDE
-if "DEMANDE" not in df.columns:
-    print("❌ LA COLONNE 'DEMANDE' EST ABSENTE DU FICHIER !")
-    print("   Colonnes disponibles :", df.columns.tolist())
-else:
-    print("✅ Colonne 'DEMANDE' présente.")
-    counts = df["DEMANDE"].value_counts(dropna=False)
-    print("\n--- Répartition des valeurs DEMANDE ---")
-    print(counts)
-    
-    # 3. Simulation du filtre
-    nb_transac = len(df[df["DEMANDE"] == 0])
-    print(f"\n--- TEST DU FILTRE (DEMANDE == 0) ---")
-    print(f"Nombre de lignes restantes : {nb_transac}")
-    
-    if nb_transac == 0:
-        print("🚨 ALERTE ROUGE : Le filtre vide intégralement la base !")
-        print("   Explication : Votre fichier ne contient que des 'Demandes' (1) et aucune 'Transaction' (0).")
-        print("   Solution : Vérifiez la création de 'transac+demandes_filtree2.parquet' en amont.")
-    else:
-        print("✅ Le filtre semble OK. Le problème vient de la sauvegarde.")
-
-# 4. Vérification du dossier de sortie
-print(f"\n--- TEST D'ÉCRITURE ---")
-test_path = os.path.join(BASE_DIR, "test_write.txt")
-try:
-    with open(test_path, 'w') as f:
-        f.write("Test ok")
-    print(f"✅ Écriture réussie dans {BASE_DIR}")
-    os.remove(test_path) # Nettoyage
-except Exception as e:
-    print(f"❌ IMPOSSIBLE D'ÉCRIRE DANS LE DOSSIER : {e}")
+Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\prix_m2_univ_elem_complet_DEPT.csv
+Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\prix_m2_univ_elem_MAJ_DEPT.csv
+Sauvegardé: N:\uflumth\indicateur_marche\univers_elementaire\correction base_demande\stat_volumeterie_DEPT.csv
