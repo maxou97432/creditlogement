@@ -1,370 +1,232 @@
 import sys
 import os
-
-
-import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-from fonctions import (DateOffset,
-                         ImportRecentData,
-                         CalcMetaNum,
-                         EffectifsParMailleGeo,
-                         DefMailleGeoCITY,
-                         DetectAno
-)
-from fonctions import detect_ano_ml as detect_ano_ml_fct
-import numpy as np
-
-import pandas as pd
 import time
-from fonctions import Connector
-import param_general as params
-import os
+import logging
+import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.io as pio
 
-pio.renderers.default = "png"  
-# Dossier de sortie
-output_dir = os.path.join(os.path.dirname(__file__), "correction base_demande")
-os.makedirs(output_dir, exist_ok=True)
+# Configuration de l'environnement
+current_dir = os.getcwd()
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
 
+# Ajout des chemins personnalisés (à adapter selon votre structure)
+sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
 
+# Imports de vos modules personnalisés
+from fonctions import Connector
+from fonctions import detect_ano_ml as detect_ano_ml_fct
+import param_general as params
 
+# Configuration Plotly
+pio.renderers.default = "browser"  # 'png' nécessite Kaleido, 'browser' ou 'notebook' est plus sûr pour dev
+
+# Configuration des dossiers
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "correction base_demande")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
+
+# =============================================================================
+# 1. IMPORTATION ET CONCATÉNATION
+# =============================================================================
+print("--- 1. Importation des données ---")
+start_time = time.time()
 
 co = Connector()
 
-################ Importation de la base ################
-start_time = time.time()
-
-base_clean = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
+# Chargement Base Transactions
+base_clean = pd.read_parquet(os.path.join(DATA_PATH, "df_transac_clean.parquet"))
 base_clean["DEMANDE"] = 0
-demandes = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_demandes_clean.parquet")
+
+# Chargement Base Demandes
+demandes = pd.read_parquet(os.path.join(DATA_PATH, "df_demandes_clean.parquet"))
 demandes["DEMANDE"] = 1
-df = pd.concat([base_clean, demandes], axis = 0)
+
+# Fusion
+df = pd.concat([base_clean, demandes], axis=0)
+
 end_time = time.time()
-print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+print(f"✓ Données chargées en {end_time - start_time:.2f} s. Total lignes : {len(df):,}")
 
+# =============================================================================
+# 2. ENRICHISSEMENT GÉOGRAPHIQUE (BAN)
+# =============================================================================
+print("\n--- 2. Enrichissement BAN (Codes IRIS) ---")
+# Récupération SQL
+df_ban = co.read_sql(f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
 
-
-################ Fusion avec la base BAN_ENRICHI contenant les codes IRIS ################
-df_ban = co.read_sql(
-            f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
+# Fusion (Left join pour garder toutes les transactions)
 cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
-cl_data = cl_data.copy()
 
+# =============================================================================
+# 3. FILTRAGE PRÉALABLE (CRITIQUE : AVANT ML)
+# =============================================================================
+print("\n--- 3. Restrictions du périmètre d'étude ---")
+# On filtre AVANT le ML pour :
+# 1. Ne pas fausser le ML avec des prix de travaux (TVX) ou des rachats (RAC)
+# 2. Gagner du temps de calcul
+
+# A. Restriction Source CL
+cl_data = cl_data[cl_data["SOURCE"] == "CL"]
+
+# B. Restriction Métropole (01-95 + 2A/2B)
+dept = cl_data["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
+metropole_set = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
+mask_metro = dept.isin(metropole_set)
+cl_data = cl_data[mask_metro]
+
+# C. Restriction Nature Opération (Exclusion TVX, RAC)
+cl_data["CD_NATUR_OP"] = cl_data["CD_NATUR_OP"].fillna("Non renseigné")
+mask_valid_op = (~cl_data["CD_NATUR_OP"].isin(["TVX", "RAC"]))
+cl_data = cl_data[mask_valid_op]
+
+print(f"✓ Périmètre restreint (CL + Métropole + Hors Tx). Lignes restantes : {len(cl_data):,}")
+
+# =============================================================================
+# 4. DÉTECTION D'ANOMALIES (ML)
+# =============================================================================
+print("\n--- 4. Détection d'anomalies (Algorithme ML) ---")
 start_time = time.time()
-base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years = 12) #Algorithme de détection d'anomalies, détaillé dans fonctions.py
-                                                                           #On prend 11 ans ici de sorte à pouvoir calculer les prix pour 2015
 
-####### Nouveau filtre de la base
-# Restriction aux données de Crédit Logement
-base_ml_full = base_ml_full[base_ml_full["SOURCE"] == "CL"]
+# L'algo ne tourne maintenant que sur les données pertinentes
+base_ml_filtered, outliers = detect_ano_ml_fct(input_df=cl_data, n_years=12)
 
-# Restriction aux opérations de France métropolitaine (département 01 à 95)
-dept = base_ml_full["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
-metropole = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
-mask_metro = dept.isin(metropole)
-
-
-# Restriction aux opérations correspondant à une transaction (exclure les RAC (et les TVX ?)
-base_ml_full = base_ml_full[mask_metro]
-base_ml_full = base_ml_full[(base_ml_full["CD_NATUR_OP"] != "TVX") & (base_ml_full["CD_NATUR_OP"] != "RAC")]
-base_ml_full["CD_NATUR_OP"].fillna("Non renseigné",inplace = True)
 end_time = time.time()
-print(f"Temps de détections d'anomalies : {end_time - start_time:.2f} secondes")
+print(f"✓ ML terminé en {end_time - start_time:.2f} s")
+print(f"  - Biens valides : {len(base_ml_filtered):,}")
+print(f"  - Outliers rejetés : {len(outliers):,}")
 
-# periode_reference: paramètre permettant de choisir le mois de référence 
-base_ml_full["DATE"] = pd.to_datetime(base_ml_full["DATE"], errors="coerce")
-periode_reference = None # à changer en fonction de la plage de temps souhaitée
-ref_date = periode_reference or base_ml_full["DATE"].max()
+# =============================================================================
+# 5. FILTRE TEMPOREL & ENRICHISSEMENT BÂTIMENT (BAT)
+# =============================================================================
+print("\n--- 5. Enrichissement Bâtiment & Filtre Date ---")
 
-date_max = ref_date
-date_min = pd.Timestamp("2014-01-01") ##### à réadapter en fonction
+# A. Filtre Date
+base_ml_filtered["DATE"] = pd.to_datetime(base_ml_filtered["DATE"], errors="coerce")
+DATE_MIN = pd.Timestamp("2014-01-01")
+DATE_MAX = base_ml_filtered["DATE"].max() # Ou définir une date fixe
 
-base_ml = base_ml_full[(base_ml_full["DATE"] >= date_min) & (base_ml_full["DATE"] < date_max)]
+base_ml = base_ml_filtered[(base_ml_filtered["DATE"] >= DATE_MIN) & (base_ml_filtered["DATE"] < DATE_MAX)].copy()
+
+# B. Fusion BAT (Année construction)
+start_time = time.time()
 df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
-start_time = time.time()
-
-################ Fusion avec la base BAT_ENRICHI contenant les années de construction ################
 base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
+
 end_time = time.time()
-print(f"Temps de fusion avec BAT_ENRICHIE : {end_time - start_time:.2f} secondes")
+print(f"✓ Fusion BAT terminée en {end_time - start_time:.2f} s")
 
+# =============================================================================
+# 6. CRÉATION DE VARIABLES (Neuf/Ancien & Typologie)
+# =============================================================================
+print("\n--- 6. Feature Engineering ---")
 
-start_time = time.time()
+# A. Correction Année Construction pour VEFA
+mask_vefa = base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement"
+base_ml.loc[mask_vefa, "annee_construction"] = base_ml.loc[mask_vefa, "DATE"].dt.year
 
-# Définition de la variable BIEN_NEUF
-base_ml.loc[
-    base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
-    "annee_construction"
-] = base_ml["DATE"].dt.year
-
-
+# B. Variable BIEN_NEUF
 base_ml["BIEN_NEUF"] = np.where(
-        (base_ml["NATURE_MUTATION"]  == "Vente en l'état futur d'achèvement")
-        | (base_ml["CD_NATUR_OP"] == "AQN")
-        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
-        "NEUF",
-        "ANCIEN",
-    )
+    (base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement") |
+    (base_ml["CD_NATUR_OP"] == "AQN") |
+    (abs(base_ml["YEAR"].astype(float) - base_ml["annee_construction"]) <= 2),
+    "NEUF",
+    "ANCIEN"
+)
+base_ml = base_ml.drop(columns=["NATURE_MUTATION"])
 
-end_time = time.time()
-print(f"Temps de traitement variable BIEN_NEUF : {end_time - start_time:.2f} secondes")
-base_ml = base_ml.drop(
-        columns=["NATURE_MUTATION"]
-    )
-
-base_ml = base_ml.copy()
+# C. Variable NB_PIECES_RANGE
 base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
 
+# Définition des bins
+bins_apt = [0, 2, 4, np.inf]
+labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"]
 
-bins_apt   = [0, 2, 4, np.inf]
-labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
-
-bins_mai   = [0, 4, np.inf]
+bins_mai = [0, 4, np.inf]
 labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
 
-
-
-mask_apt = base_ml["TYPE_BIEN"].eq("APT")
-mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+# Application vectorisée
+base_ml["NB_PIECES_RANGE"] = np.nan # Init
+mask_apt = base_ml["TYPE_BIEN"] == "APT"
+mask_mai = base_ml["TYPE_BIEN"] == "MAI"
 
 base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_apt, "NB_PIECES"],
-    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
+    base_ml.loc[mask_apt, "NB_PIECES"], bins=bins_apt, labels=labels_apt, include_lowest=True
 ).astype(str)
 
 base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_mai, "NB_PIECES"],
-    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
+    base_ml.loc[mask_mai, "NB_PIECES"], bins=bins_mai, labels=labels_mai, include_lowest=True
 ).astype(str)
 
-base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
-
+# Gestion des NaN convertis en string "nan" par astype(str) ou restés NaN
+base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].replace("nan", np.nan)
 base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
 base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
 
-base_ml.to_parquet(os.path.join(output_dir, "transac+demandes_filtree2.parquet"), index=False)
+# =============================================================================
+# 7. EXPORT
+# =============================================================================
+output_path = os.path.join(OUTPUT_DIR, "transac+demandes_filtree2.parquet")
+base_ml.to_parquet(output_path, index=False)
+print(f"\n✓ Fichier sauvegardé : {output_path}")
 
+# =============================================================================
+# 8. ANALYSE DES OUTLIERS & STATS
+# =============================================================================
+# Fonctions d'analyse (Regroupées pour clarté)
 
-
-
-############### Statistiques sur les anomalies ###############
-colonnes = ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]
-
-def analyse_generale_outliers(data_mauvais, data_recent):
-    total = len(data_mauvais) + len(data_recent)
-    print("STATISTIQUES GÉNÉRALES")
-    print("-" * 80)
-    print(f"Nombre total de biens sur 2015-2025 : {total:,}")
-    print(f"Biens valides : {len(data_recent):,} ({len(data_recent)/total*100:.2f}%)")
-    print(f"Outliers détectés : {len(data_mauvais):,} ({len(data_mauvais)/total*100:.2f}%)")
-    print()
+def run_full_analysis(df_outliers, df_valid):
+    print("\n" + "="*80)
+    print(" RAPPORT D'ANOMALIES")
+    print("="*80)
     
+    total = len(df_outliers) + len(df_valid)
+    print(f"Total Transactions analysées : {total:,}")
+    print(f"Taux de rejet : {len(df_outliers)/total:.2%}")
     
-    print("Prix au m² - Outliers :")
-    print(f"  Min : {data_mauvais['Prix_m2'].min():,.0f} €")
-    print(f"  Max : {data_mauvais['Prix_m2'].max():,.0f} €")
-    print(f"  Médiane : {data_mauvais['Prix_m2'].median():,.0f} €")
-    print(f"  Moyenne : {data_mauvais['Prix_m2'].mean():,.0f} €")
-    print()
-
-
-def classifier_outliers(data_mauvais, data_recent):
-    print("CLASSIFICATION DES OUTLIERS")
-    print("-" * 80)
+    # Classification simplifiée des outliers
+    # On compare le prix outlier à la médiane de l'année/ville/type du dataset valide
+    medianes = df_valid.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+    medianes = medianes.rename(columns={'Prix_m2': 'mediane_ref'})
     
-    medianes = data_recent.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
-    medianes.rename(columns={'Prix_m2': 'mediane'}, inplace=True)
+    df_outliers = df_outliers.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
     
-    data_outliers_class = data_mauvais.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
+    conditions = [
+        (df_outliers['Prix_m2'] < 200),
+        (df_outliers['Prix_m2'] > 20000),
+        (df_outliers['Prix_m2'] < df_outliers['mediane_ref'] / 4),
+        (df_outliers['Prix_m2'] > df_outliers['mediane_ref'] * 4)
+    ]
+    choices = ['Prix < 200€', 'Prix > 20k€', 'Prix < Mediane/4', 'Prix > Mediane*4']
     
-    def classifier(row):
-        prix = row['Prix_m2']
-        if pd.isna(row['mediane']):
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            else:
-                return 'Groupe insuffisant'
-        else:
-            mediane = row['mediane']
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            elif prix < mediane / 4:
-                return 'Prix < médiane/4'
-            elif prix > 4 * mediane:
-                return 'Prix > 4×médiane'
-            else:
-                return 'Autre'
+    df_outliers['Type_Anomalie'] = np.select(conditions, choices, default='Autre écart stat')
     
-    data_outliers_class['type_anomalie'] = data_outliers_class.apply(classifier, axis=1)
+    print("\nRépartition des anomalies :")
+    print(df_outliers['Type_Anomalie'].value_counts())
     
-    repartition = data_outliers_class['type_anomalie'].value_counts()
-    print("\nRépartition par type d'anomalie :")
-    for anomalie, count in repartition.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {anomalie:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    return data_outliers_class
+    print("\nTop 5 Villes avec anomalies :")
+    print(df_outliers['ville_'].value_counts().head(5))
 
+# Lancement de l'analyse
+run_full_analysis(outliers, base_ml)
 
-def analyse_geo_outliers(data_outliers_class):
-    print("RÉPARTITION GÉOGRAPHIQUE")
-    print("-" * 80)
-    
-    print("\nTop 10 départements avec le plus d'outliers :")
-    top_dept = data_outliers_class['LIBELLE_DEPT'].value_counts().head(10)
-    for dept, count in top_dept.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Top 10 villes avec le plus d'outliers :")
-    top_ville = data_outliers_class['ville_'].value_counts().head(10)
-    for ville, count in top_ville.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-
-
-def analyse_typologie_outliers(data_outliers_class):
-    print("RÉPARTITION PAR TYPE DE BIEN")
-    print("-" * 80)
-    
-    print("\nPar type de bien :")
-    type_bien = data_outliers_class['TYPE_BIEN'].value_counts()
-    for tb, count in type_bien.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {tb:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Par année :")
-    annee = data_outliers_class['YEAR'].value_counts().sort_index()
-    for year, count in annee.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {year} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-
-
-def analyse_sources_outliers(data_outliers_class):
-
-    print("ANALYSE PAR SOURCE DE DONNÉES")
-    print("-" * 80)
-    
-    print("\nPar source :")
-    source = data_outliers_class['SOURCE'].value_counts()
-    for src, count in source.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {src:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-
-
-def exemples_outliers(data_outliers_class):
-    print("=" * 80)
-    print("EXEMPLES D'OUTLIERS EXTRÊMES")
-    print("=" * 80)
-    
-    print("\n5 prix au m² les plus bas :")
-    cols_display = ['ville_', 'TYPE_BIEN', 'Prix_m2', 'NB_SURF_HAB', 'NB_PIECES', 'type_anomalie']
-    print(data_outliers_class.nsmallest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
-    
-    print("5 prix au m² les plus hauts :")
-    print(data_outliers_class.nlargest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
-
-
-
-
-def analyser_outliers_complet(data_mauvais, data_recent):
-    analyse_generale_outliers(data_mauvais, data_recent)
-    data_outliers_class = classifier_outliers(data_mauvais, data_recent)
-    analyse_geo_outliers(data_outliers_class)
-    analyse_typologie_outliers(data_outliers_class)
-    analyse_sources_outliers(data_outliers_class)
-    exemples_outliers(data_outliers_class)
-    return data_outliers_class
-
-data_outliers_classified = analyser_outliers_complet(outliers,base_ml_full)
-
-
-base_ml[(base_ml["CD_NATUR_OP"] != "TVX") & (base_ml["CD_NATUR_OP"] != "RAC")]
-dept = base_ml["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
-metropole = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
-mask_metro = dept.isin(metropole)
-
-base_ml_metro = base_ml[mask_metro]
-base_ml_metro
-by_year = base_ml_metro.groupby("YEAR")["ID"].count().reset_index(name="Nombre de transactions")
-
-# Évolution annuelle du nombre de transactions
+# =============================================================================
+# 9. GRAPHIQUE FINAL (Evolution Transactions)
+# =============================================================================
+by_year = base_ml.groupby("YEAR")["ID"].count().reset_index(name="Nombre de transactions")
 total_tx = by_year["Nombre de transactions"].sum()
 
 fig = px.bar(
     by_year.sort_values("YEAR"),
-    x="YEAR",
-    y="Nombre de transactions",
+    x="YEAR", y="Nombre de transactions",
     text="Nombre de transactions",
-    color="Nombre de transactions",
-    color_continuous_scale="Viridis",
-    title=f"Évolution annuelle du nombre de transactions (Total 2015–2026 : {total_tx:,})"
+    color="Nombre de transactions", color_continuous_scale="Viridis",
+    title=f"Évolution annuelle des transactions valides (Total : {total_tx:,})"
 )
-
 fig.update_traces(textposition="outside")
-fig.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Nombre de transactions",
-    title_x=0.5,
-    plot_bgcolor="white",
-    xaxis_tickmode="linear",  
-    coloraxis_showscale=False
-)
-
+fig.update_layout(height=600, template="plotly_white")
 fig.show()
 
-
-
-
-
-
-# Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) par source
-
-# Comptage par CD_NATUR_OP
-df_grouped = (
-    base_ml_metro
-    .groupby(["CD_NATUR_OP"])["ID"]
-    .count()
-    .reset_index(name="Nombre_nature_op")
-)
-
-# Total global (scalaire)
-total = base_ml["ID"].count()
-
-# Pourcentage (sans colonne 'Total' et sans merge)
-df_grouped["Pourcentage"] = df_grouped["Nombre_nature_op"] / total * 100
-
-# Exemple de graphique adapté (pas de YEAR)
-import plotly.express as px
-
-fig = px.bar(
-    df_grouped,
-    x="CD_NATUR_OP",
-    y="Pourcentage",
-    text_auto=".1f",
-    labels={"CD_NATUR_OP": "Nature opération", "Pourcentage": "Pourcentage (%)"},
-    title="Répartition par nature d'opération (pourcentage global)"
-)
-fig.update_layout(yaxis_ticksuffix=" %")
-fig.show()
+print("\n--- Fin du traitement ---")
