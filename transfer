@@ -1,53 +1,370 @@
+import sys
+import os
 
-L’application de la méthode par ``univers élémentaires'' aux seules opérations CL conduit à des résultats très proches de ceux obtenus avec l’ensemble DVF+CL.
 
-Graphiquement, les trajectoires issues des seules données CL conservent les mêmes inflexions que celles obtenues avec la base DVF+CL : hausse marquée jusqu’en 2020--2021, suivi d’un retournement à Paris et Lyon ; progression régulière à Marseille et Rennes ; convergence générale vers les mêmes niveaux de prix en fin de période. Les écarts absolus restent faibles (de l’ordre de $\pm 2$ à $\pm 3\%$), et la dynamique temporelle demeure parfaitement cohérente.
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+from datetime import datetime
+import logging
+import math
+from datetime import timedelta, datetime
+from dateutil.relativedelta import relativedelta
+from fonctions import (DateOffset,
+                         ImportRecentData,
+                         CalcMetaNum,
+                         EffectifsParMailleGeo,
+                         DefMailleGeoCITY,
+                         DetectAno
+)
+from fonctions import detect_ano_ml as detect_ano_ml_fct
+import numpy as np
 
-Les taux de couverture des séries LPI/IAD par les intervalles de confiance à 95\% issus de la méthode sont les suivants :
-\begin{itemize}
-    \item \textbf{46,99\%} pour les séries en moyenne glissante 3 mois ;
-    \item \textbf{29,97\%} pour les séries en moyenne glissante 12 mois.
-\end{itemize}
+import pandas as pd
+import time
+from fonctions import Connector
+import param_general as params
+import os
+import plotly.express as px
+import plotly.io as pio
 
-Ces niveaux sont quasiment identiques à ceux obtenus avec la base complète, ce qui traduit une \textbf{bonne stabilité du modèle}, même en présence d’un volume plus restreint de transactions. La cohérence des résultats montre que les données de Crédit Logement reflètent bien les dynamiques de marché des grandes métropoles.
+pio.renderers.default = "png"  
+# Dossier de sortie
+output_dir = os.path.join(os.path.dirname(__file__), "correction base_demande")
+os.makedirs(output_dir, exist_ok=True)
 
-================================================================================
- RÉSULTATS COMPARATIFS : Base Standard (V1) vs Base + Demande (V2)
-================================================================================
-Gain Moyen RMSE global : -54.1067 (V2 augmente l'erreur)
-Gain Moyen Corrélation : -0.0033 (V2 suit moins bien la tendance)
---------------------------------------------------------------------------------
-Détail des améliorations (Top 10 Gains RMSE) :
-            Ville     RMSE_V1  Correlation_V1     RMSE_V2  Correlation_V2  \
-3            LYON  447.127069        0.941384  292.124850        0.950212   
-2           LILLE  207.997834        0.985778  121.956932        0.983615   
-11  SAINT-ETIENNE  247.042551        0.931725  175.717450        0.929175   
-6          NANTES  208.109251        0.968370  152.841600        0.968936   
-0        BORDEAUX  212.321139        0.951497  178.753962        0.948196   
-7            NICE  168.565754        0.967932  138.857189        0.969952   
-12     STRASBOURG  120.190714        0.967304  120.403190        0.967298   
-10         RENNES  201.442968        0.962984  225.408835        0.964766   
-9           REIMS  141.766229        0.900135  206.331670        0.903427   
-1        LE HAVRE   92.249067        0.936202  193.206781        0.923846   
-4       MARSEILLE  162.915664        0.923894  308.781051        0.932158   
-14       TOULOUSE  108.417667        0.962958  308.014313        0.968560   
-13         TOULON  240.009405        0.876769  443.820799        0.836440   
-8           PARIS  264.175609        0.977450  470.095020        0.967236   
-5     MONTPELLIER  149.518963        0.927118  447.137335        0.918620   
 
-     Gain_RMSE  Gain_Corr  
-3   155.002219   0.008829  
-2    86.040902  -0.002163  
-11   71.325101  -0.002551  
-6    55.267651   0.000565  
-0    33.567177  -0.003301  
-7    29.708565   0.002020  
-12   -0.212476  -0.000006  
-10  -23.965866   0.001782  
-9   -64.565441   0.003292  
-1  -100.957714  -0.012356  
-4  -145.865387   0.008264  
-14 -199.596646   0.005602  
-13 -203.811394  -0.040329  
-8  -205.919410  -0.010214  
-5  -297.618372  -0.008498  
+
+
+co = Connector()
+
+################ Importation de la base ################
+start_time = time.time()
+
+base_clean = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
+base_clean["DEMANDE"] = 0
+demandes = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_demandes_clean.parquet")
+demandes["DEMANDE"] = 1
+df = pd.concat([base_clean, demandes], axis = 0)
+end_time = time.time()
+print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+
+
+
+################ Fusion avec la base BAN_ENRICHI contenant les codes IRIS ################
+df_ban = co.read_sql(
+            f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
+cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
+cl_data = cl_data.copy()
+
+start_time = time.time()
+base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years = 12) #Algorithme de détection d'anomalies, détaillé dans fonctions.py
+                                                                           #On prend 11 ans ici de sorte à pouvoir calculer les prix pour 2015
+
+####### Nouveau filtre de la base
+# Restriction aux données de Crédit Logement
+base_ml_full = base_ml_full[base_ml_full["SOURCE"] == "CL"]
+
+# Restriction aux opérations de France métropolitaine (département 01 à 95)
+dept = base_ml_full["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
+metropole = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
+mask_metro = dept.isin(metropole)
+
+
+# Restriction aux opérations correspondant à une transaction (exclure les RAC (et les TVX ?)
+base_ml_full = base_ml_full[mask_metro]
+base_ml_full = base_ml_full[(base_ml_full["CD_NATUR_OP"] != "TVX") & (base_ml_full["CD_NATUR_OP"] != "RAC")]
+base_ml_full["CD_NATUR_OP"].fillna("Non renseigné",inplace = True)
+end_time = time.time()
+print(f"Temps de détections d'anomalies : {end_time - start_time:.2f} secondes")
+
+# periode_reference: paramètre permettant de choisir le mois de référence 
+base_ml_full["DATE"] = pd.to_datetime(base_ml_full["DATE"], errors="coerce")
+periode_reference = None # à changer en fonction de la plage de temps souhaitée
+ref_date = periode_reference or base_ml_full["DATE"].max()
+
+date_max = ref_date
+date_min = pd.Timestamp("2014-01-01") ##### à réadapter en fonction
+
+base_ml = base_ml_full[(base_ml_full["DATE"] >= date_min) & (base_ml_full["DATE"] < date_max)]
+df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
+start_time = time.time()
+
+################ Fusion avec la base BAT_ENRICHI contenant les années de construction ################
+base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
+end_time = time.time()
+print(f"Temps de fusion avec BAT_ENRICHIE : {end_time - start_time:.2f} secondes")
+
+
+start_time = time.time()
+
+# Définition de la variable BIEN_NEUF
+base_ml.loc[
+    base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
+    "annee_construction"
+] = base_ml["DATE"].dt.year
+
+
+base_ml["BIEN_NEUF"] = np.where(
+        (base_ml["NATURE_MUTATION"]  == "Vente en l'état futur d'achèvement")
+        | (base_ml["CD_NATUR_OP"] == "AQN")
+        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
+        "NEUF",
+        "ANCIEN",
+    )
+
+end_time = time.time()
+print(f"Temps de traitement variable BIEN_NEUF : {end_time - start_time:.2f} secondes")
+base_ml = base_ml.drop(
+        columns=["NATURE_MUTATION"]
+    )
+
+base_ml = base_ml.copy()
+base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
+
+
+bins_apt   = [0, 2, 4, np.inf]
+labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
+
+bins_mai   = [0, 4, np.inf]
+labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
+
+
+
+mask_apt = base_ml["TYPE_BIEN"].eq("APT")
+mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+
+base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_apt, "NB_PIECES"],
+    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
+).astype(str)
+
+base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_mai, "NB_PIECES"],
+    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
+).astype(str)
+
+base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
+
+base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
+base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
+
+base_ml.to_parquet(os.path.join(output_dir, "transac+demandes_filtree2.parquet"), index=False)
+
+
+
+
+############### Statistiques sur les anomalies ###############
+colonnes = ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]
+
+def analyse_generale_outliers(data_mauvais, data_recent):
+    total = len(data_mauvais) + len(data_recent)
+    print("STATISTIQUES GÉNÉRALES")
+    print("-" * 80)
+    print(f"Nombre total de biens sur 2015-2025 : {total:,}")
+    print(f"Biens valides : {len(data_recent):,} ({len(data_recent)/total*100:.2f}%)")
+    print(f"Outliers détectés : {len(data_mauvais):,} ({len(data_mauvais)/total*100:.2f}%)")
+    print()
+    
+    
+    print("Prix au m² - Outliers :")
+    print(f"  Min : {data_mauvais['Prix_m2'].min():,.0f} €")
+    print(f"  Max : {data_mauvais['Prix_m2'].max():,.0f} €")
+    print(f"  Médiane : {data_mauvais['Prix_m2'].median():,.0f} €")
+    print(f"  Moyenne : {data_mauvais['Prix_m2'].mean():,.0f} €")
+    print()
+
+
+def classifier_outliers(data_mauvais, data_recent):
+    print("CLASSIFICATION DES OUTLIERS")
+    print("-" * 80)
+    
+    medianes = data_recent.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+    medianes.rename(columns={'Prix_m2': 'mediane'}, inplace=True)
+    
+    data_outliers_class = data_mauvais.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
+    
+    def classifier(row):
+        prix = row['Prix_m2']
+        if pd.isna(row['mediane']):
+            if prix < 200:
+                return 'Prix < 200€'
+            elif prix > 20000:
+                return 'Prix > 20000€'
+            else:
+                return 'Groupe insuffisant'
+        else:
+            mediane = row['mediane']
+            if prix < 200:
+                return 'Prix < 200€'
+            elif prix > 20000:
+                return 'Prix > 20000€'
+            elif prix < mediane / 4:
+                return 'Prix < médiane/4'
+            elif prix > 4 * mediane:
+                return 'Prix > 4×médiane'
+            else:
+                return 'Autre'
+    
+    data_outliers_class['type_anomalie'] = data_outliers_class.apply(classifier, axis=1)
+    
+    repartition = data_outliers_class['type_anomalie'].value_counts()
+    print("\nRépartition par type d'anomalie :")
+    for anomalie, count in repartition.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {anomalie:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+    return data_outliers_class
+
+
+def analyse_geo_outliers(data_outliers_class):
+    print("RÉPARTITION GÉOGRAPHIQUE")
+    print("-" * 80)
+    
+    print("\nTop 10 départements avec le plus d'outliers :")
+    top_dept = data_outliers_class['LIBELLE_DEPT'].value_counts().head(10)
+    for dept, count in top_dept.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+    print("Top 10 villes avec le plus d'outliers :")
+    top_ville = data_outliers_class['ville_'].value_counts().head(10)
+    for ville, count in top_ville.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
+    print()
+
+
+def analyse_typologie_outliers(data_outliers_class):
+    print("RÉPARTITION PAR TYPE DE BIEN")
+    print("-" * 80)
+    
+    print("\nPar type de bien :")
+    type_bien = data_outliers_class['TYPE_BIEN'].value_counts()
+    for tb, count in type_bien.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {tb:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+    print("Par année :")
+    annee = data_outliers_class['YEAR'].value_counts().sort_index()
+    for year, count in annee.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {year} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+
+
+def analyse_sources_outliers(data_outliers_class):
+
+    print("ANALYSE PAR SOURCE DE DONNÉES")
+    print("-" * 80)
+    
+    print("\nPar source :")
+    source = data_outliers_class['SOURCE'].value_counts()
+    for src, count in source.items():
+        pct = count / len(data_outliers_class) * 100
+        print(f"  {src:20s} : {count:5d} ({pct:5.2f}%)")
+    print()
+    
+
+
+def exemples_outliers(data_outliers_class):
+    print("=" * 80)
+    print("EXEMPLES D'OUTLIERS EXTRÊMES")
+    print("=" * 80)
+    
+    print("\n5 prix au m² les plus bas :")
+    cols_display = ['ville_', 'TYPE_BIEN', 'Prix_m2', 'NB_SURF_HAB', 'NB_PIECES', 'type_anomalie']
+    print(data_outliers_class.nsmallest(5, 'Prix_m2')[cols_display].to_string(index=False))
+    print()
+    
+    print("5 prix au m² les plus hauts :")
+    print(data_outliers_class.nlargest(5, 'Prix_m2')[cols_display].to_string(index=False))
+    print()
+
+
+
+
+def analyser_outliers_complet(data_mauvais, data_recent):
+    analyse_generale_outliers(data_mauvais, data_recent)
+    data_outliers_class = classifier_outliers(data_mauvais, data_recent)
+    analyse_geo_outliers(data_outliers_class)
+    analyse_typologie_outliers(data_outliers_class)
+    analyse_sources_outliers(data_outliers_class)
+    exemples_outliers(data_outliers_class)
+    return data_outliers_class
+
+data_outliers_classified = analyser_outliers_complet(outliers,base_ml_full)
+
+
+base_ml[(base_ml["CD_NATUR_OP"] != "TVX") & (base_ml["CD_NATUR_OP"] != "RAC")]
+dept = base_ml["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
+metropole = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
+mask_metro = dept.isin(metropole)
+
+base_ml_metro = base_ml[mask_metro]
+base_ml_metro
+by_year = base_ml_metro.groupby("YEAR")["ID"].count().reset_index(name="Nombre de transactions")
+
+# Évolution annuelle du nombre de transactions
+total_tx = by_year["Nombre de transactions"].sum()
+
+fig = px.bar(
+    by_year.sort_values("YEAR"),
+    x="YEAR",
+    y="Nombre de transactions",
+    text="Nombre de transactions",
+    color="Nombre de transactions",
+    color_continuous_scale="Viridis",
+    title=f"Évolution annuelle du nombre de transactions (Total 2015–2026 : {total_tx:,})"
+)
+
+fig.update_traces(textposition="outside")
+fig.update_layout(
+    xaxis_title="Année",
+    yaxis_title="Nombre de transactions",
+    title_x=0.5,
+    plot_bgcolor="white",
+    xaxis_tickmode="linear",  
+    coloraxis_showscale=False
+)
+
+fig.show()
+
+
+
+
+
+
+# Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) par source
+
+# Comptage par CD_NATUR_OP
+df_grouped = (
+    base_ml_metro
+    .groupby(["CD_NATUR_OP"])["ID"]
+    .count()
+    .reset_index(name="Nombre_nature_op")
+)
+
+# Total global (scalaire)
+total = base_ml["ID"].count()
+
+# Pourcentage (sans colonne 'Total' et sans merge)
+df_grouped["Pourcentage"] = df_grouped["Nombre_nature_op"] / total * 100
+
+# Exemple de graphique adapté (pas de YEAR)
+import plotly.express as px
+
+fig = px.bar(
+    df_grouped,
+    x="CD_NATUR_OP",
+    y="Pourcentage",
+    text_auto=".1f",
+    labels={"CD_NATUR_OP": "Nature opération", "Pourcentage": "Pourcentage (%)"},
+    title="Répartition par nature d'opération (pourcentage global)"
+)
+fig.update_layout(yaxis_ticksuffix=" %")
+fig.show()
