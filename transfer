@@ -63,13 +63,50 @@ CONFIG = {
 
 os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
+def load_and_preprocess_data():
+    """Charge et prétraite les données initiales."""
+    print("Chargement des données...")
+    df = pd.read_parquet(CONFIG['input_file'])
+    
+    # Renommage et nettoyage initial
+    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
+    df = df.dropna(subset=["CITY", "CP", "DEPT"])
+    
+    # Conversion des dates
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    # Ajout colonne REGION
+    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
+    df['REGION'] = df['DEPT'].map(CONFIG['dep_to_region'])
+    
+    return df
 
-# Chemins des données (conservés)
-prix_m2_univ_elem_complet_REGION = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_complet_REGION.csv")
+def apply_nice_correction(df):
+    """Applique la correction spécifique pour Nice."""
+    if "IRIS" in df.columns:
+        mask_nice = df["IRIS"].str[:5].isin(CONFIG['codes_insee_nice'])
+        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+        df.loc[mask_nice, "CITY"] = "NICE"
+    return df
 
+def complete_months(g, col):
+    """Complète les mois manquants."""
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    # Forward fill et Backward fill pour les colonnes catégorielles
+    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[i] = g[i].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    # g["prix_moyen"] reste NaN là où il n'y a pas de données
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
 
 def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
-    """Aggrège les données au niveau national."""
+    """Calcule la moyenne mobile pondérée."""
     result = []
     g = g.sort_values("Periode")
     periodes = g["Periode"].unique()
@@ -315,6 +352,7 @@ if __name__ == "__main__":
     start_global = datetime.now()
     
     # 1. Chargement des données
+    base_ml = load_and_preprocess_data()
     
     # 2. Traitement PROVINCE
 
@@ -335,11 +373,18 @@ if __name__ == "__main__":
     save_results(res_villes, "CITY") 
     
     # 4. Traitement DEPARTEMENTS
-    res_dept = process_maille(base_ml, "DEPT", "DEPT")
+    res_dept = process_maille(base_ml,  "DEPT", "DEPT")
     save_results(res_dept, "DEPT")
     
     # 5. Traitement REGIONS
     res_region = process_maille(base_ml, "REGION", "REGION")
     save_results(res_region, "REGION")
+
+    # 6. Traitement NATIONAL
+    df_national = base_ml.copy()
+    df_national["PAYS"] = "FRANCE"
+    res_national = process_maille(df_national, "PAYS", "NATIONAL")
+    save_results(res_national, "NATIONAL")
+
 
     print(f"\nTraitement global terminé en {datetime.now() - start_global}")
