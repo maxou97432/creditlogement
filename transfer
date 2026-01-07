@@ -1,8 +1,334 @@
-(.venv) PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe n:/uflumth/indicateur_marche/univers_elementaire/TI/calc_prix_m2_univ_elem.py
-Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\calc_prix_m2_univ_elem.py", line 17, in <module>
-    from fonctions import load_and_preprocess_data, process_maille, save_results, apply_nice_correction
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\fonctions.py", line 12, in <module>
-    current_dir = os.path.dirname(__file__)
-                  ^^
-NameError: name 'os' is not defined
+
+#############################################################################################
+#############################################################################################
+                                #Fonctions Univ-Elem#
+
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
+
+def load_and_preprocess_data():
+    """Charge et prétraite les données initiales."""
+    print("Chargement des données...")
+    df = pd.read_parquet(params.CONFIG['input_file'])
+    
+    # Renommage et nettoyage initial
+    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
+    df = df.dropna(subset=["CITY", "CP", "DEPT"])
+    
+    # Conversion des dates
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    # Ajout colonne REGION
+    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
+    df['REGION'] = df['DEPT'].map(params.CONFIG['dep_to_region'])
+    
+    return df
+
+def apply_nice_correction(df):
+    """Applique la correction spécifique pour Nice."""
+    if "IRIS" in df.columns:
+        mask_nice = df["IRIS"].str[:5].isin(params.CONFIG['codes_insee_nice'])
+        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+        df.loc[mask_nice, "CITY"] = "NICE"
+    return df
+
+def complete_months(g, col):
+    """Complète les mois manquants."""
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    # Forward fill et Backward fill pour les colonnes catégorielles
+    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[i] = g[i].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    # g["prix_moyen"] reste NaN là où il n'y a pas de données
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
+    """Calcule la moyenne mobile pondérée."""
+    result = []
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        # Optimisation: ne traiter que les mois trimestriels (3, 6, 9, 12)
+        if pd.Timestamp(periode).month % 3 != 0:
+            continue
+            
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
+        
+        # Filtre sur la fenêtre temporelle
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)]
+        
+        # Filtre sur les données actives (prix existant et indicateur valide)
+        mask_actif = (df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)
+        df_actif = df_fenetre[mask_actif]
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_univers": 0
+            })
+            continue
+        
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            # Calcul de la moyenne pondérée
+            prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
+        else:
+            prix_mm = np.nan
+            
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": len(df_actif),
+            "nb_univers": df_actif.groupby(typokeys).ngroups
+        })
+    
+    return pd.DataFrame(result)
+
+def process_maille(df, maille_col, maille_name, filter_func=None, df_structure_ref = None):
+    """Fonction générique pour traiter une maille géographique."""
+    print(f"\n--- Traitement de la maille : {maille_name} ---")
+    start_time = datetime.now()
+    
+    # Filtrage spécifique si nécessaire
+    df_work = df.copy()
+    if filter_func:
+        df_work = filter_func(df_work)
+        
+    if df_work.empty:
+        print(f"Aucune donnée pour la maille {maille_name} après filtrage.")
+        return None
+
+    # Nettoyage de la colonne maille
+    if df_work[maille_col].dtype == 'object':
+        df_work[maille_col] = df_work[maille_col].astype(str).str.strip().str.upper()
+
+    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    
+    # 1. Agrégation mensuelle
+    univers_mensuel = (
+        df_work.groupby(dims, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_median=("Prix_m2", "median"),
+            prix_moyen=("Prix_m2", "mean"),
+        )
+        .reset_index()
+    )
+    
+    # Nettoyage post-agrégation
+    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    
+    # Filtre cohérence Pièces/Type 
+    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
+    univers_mensuel = univers_mensuel[mask_coherence].drop(columns=["PB"])
+
+    # 2. Complétion des mois
+    print("Complétion des mois manquants...")
+    univers_complet = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(lambda g: complete_months(g, maille_col))
+    )
+    
+    # 3. Calcul des poids structurels
+    
+    
+
+    if df_structure_ref is not None:
+        print("--- Application de la structure de marché globale ---")
+        univers_complet = univers_complet.merge(
+            df_structure_ref, on = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how = "left"
+        )
+        univers_complet = univers_complet.rename(columns={"poids_relatif_imposes" : "poids_relatif"})
+        univers_complet = univers_complet.dropna(subset=['poids_relatif'])
+    
+    else:
+        poids_global = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum()
+        .rename(columns={"nb_transac": "poids_total"})
+    )
+    poids_global["poids_relatif"] = (
+        poids_global.groupby(maille_col)["poids_total"].transform(lambda x: x / x.sum())
+    )
+    
+    univers_complet = univers_complet.merge(
+        poids_global,
+        on=[maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+        how="left"
+    )
+
+    # 4. Calcul des indicatrices
+    typokeys = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+    
+    univers_complet["I_3m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    )
+    univers_complet["I_12m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+    )
+    
+    # 5. Calcul des moyennes mobiles pondérées
+    print("Calcul des moyennes mobiles...")
+    resultats_mm = []
+    
+
+    groupes_calcul = univers_complet.groupby([maille_col, 'TYPE_BIEN'])
+    
+    for (maille_val, type_bien), df_groupe in groupes_calcul:
+        # MM 3 mois
+        mm_3m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=3, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_3m', 
+            typokeys=typokeys
+        )
+        mm_3m["DIC_NAME"] = "prix_m2_3m"
+        mm_3m = mm_3m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # MM 12 mois
+        mm_12m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=12, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_12m', 
+            typokeys=typokeys
+        )
+        mm_12m["DIC_NAME"] = "prix_m2_12m"
+        mm_12m = mm_12m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # Consolidation
+        mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
+        mm_type["VAL_MAILLE_GEO"] = maille_val
+        mm_type["TYPE_MAILLE"] = maille_col 
+        mm_type["CD_TYPE_BIEN"] = type_bien
+        
+        resultats_mm.append(mm_type)
+    
+    if not resultats_mm:
+        return None
+        
+    final_df = pd.concat(resultats_mm, ignore_index=True)
+    
+    # Nettoyage final et calcul taux inflation
+    final_df = final_df.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    
+    # Calcul inflation 
+    final_df["TAUX_INFL_12M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=4) 
+    final_df["TAUX_INFL_3M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=1)
+
+    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
+    return final_df
+
+def save_results(df, suffixe_fichier):
+    """Sauvegarde les résultats dans différents fichiers CSV."""
+    if df is None or df.empty:
+        print(f"Aucune donnée à sauvegarder pour {suffixe_fichier}")
+        return
+
+    # 1. Base complète (filtrée sur date)
+    df_complet = df.copy()
+    df_complet["Periode"] = pd.to_datetime(df_complet["Periode"])
+    df_complet = df_complet[df_complet["Periode"] >= "2015-03-01"]
+    
+    output_path = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_complet_{suffixe_fichier}.csv")
+    df_complet.to_csv(output_path, index=False)
+    print(f"Sauvegardé: {output_path}")
+
+    # 2. Dernière période (MAJ)
+    df_maj = df_complet.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    df_maj = df_maj[df_maj["Periode"] == df_maj["Periode"].max()]
+    df_maj = df_maj.rename(columns={"Periode": "DT_MAJ_PM2"})
+    
+    cols_export = ["DIC_NAME", "CD_TYPE_BIEN", "TYPE_MAILLE", "VAL_MAILLE_GEO", "DT_MAJ_PM2", "NB_BIENS", "prix_mm_value", "TAUX_INFL_3M", "TAUX_INFL_12M"]
+    # Vérification que les colonnes existent
+    cols_export = [c for c in cols_export if c in df_maj.columns]
+    
+    output_path_maj = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
+    df_maj[cols_export].to_csv(output_path_maj, index=False)
+    print(f"Sauvegardé: {output_path_maj}")
+
+    # 3. Statistiques de volumétrie
+    df_vol = df.copy()
+    df_vol["Periode"] = pd.to_datetime(df_vol["Periode"])
+    df_vol = df_vol[df_vol["Periode"] >= "2017-03-01"]
+    
+    df_min = df_vol.groupby(["VAL_MAILLE_GEO", "DIC_NAME"], as_index=False)["NB_BIENS"].min()
+    df_pivot = df_min.pivot(index='VAL_MAILLE_GEO', columns='DIC_NAME', values='NB_BIENS')
+    df_pivot.columns.name = None
+    df_pivot = df_pivot.reset_index()
+    df_pivot.rename(columns={"prix_m2_3m": "NB_BIENS (3m)", "prix_m2_12m": "NB_BIENS (12m)"}, inplace=True)
+    
+    output_path_vol = os.path.join(params.CONFIG['output_dir'], f"stat_volumeterie_{suffixe_fichier}.csv")
+    df_pivot.to_csv(output_path_vol, index=False)
+    print(f"Sauvegardé: {output_path_vol}")
+
+# --- Fonctions de filtrage spécifiques ---
+
+def filter_province(df):
+    """Filtre pour créer la maille PROVINCE."""
+    mask_idf = df["DEPT"].isin(params.CONFIG['idf_depts'])
+    df_prov = df.copy()
+    df_prov.loc[~mask_idf, "PROVINCE_CODE"] = "PROVINCE"
+    # On ne garde que les lignes province
+    return df_prov[df_prov["PROVINCE_CODE"] == "PROVINCE"]
+
+def filter_villes_top15(df):
+    """Filtre pour les 15 plus grandes villes."""
+    # Application de la correction Nice 
+    df = apply_nice_correction(df)
+    return df[df["CITY"].isin(params.CONFIG['top15_cities'])]
+
+def filter_villes_cp(df):
+    """Filtre pour les arrondissements (CP) des grandes villes."""
+    return df[df["CITY"].isin(params.CONFIG['villes_arrondissements'])]
+
+
+
+def get_structure_reference(df,maille_col):
+    """
+    Permet d'extraire la structure du marché (poids de chaque univers élémentaire sur l'ensemble de la période)
+    à partir de la base de référence (CL+DVF)
+    """
+
+    print(f"---Extraction de la structure de marché ({maille_col}) ---")
+
+    df_work = df.copy()
+    if df_work[maille_col].dtype == "object":
+        df_work[maille_col] = df_work[maille_col].astype(str).str.upper().str.strip()
+
+        dims = [maille_col, "BIEN_NEUF","TYPE_BIEN","NB_PIECE_RANGE"]
+
+        # on compte le volume total sur toute la période
+
+        structure = (
+            df_work.groupby(dims, dropna = False).size().reset_index(name="volume_reference")
+        )
+
+        structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
+        structure["PB"] = structure["NB_PIECE_RANGE"].astype(str).str.strip().str[:3].str.upper()
+        mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
+        structure = structure[mask_coherence].drop(columns=["PB"])
+
+        structure["poids_relatif_imposes"] = (
+            structure.groupby(maille_col)["volume_reference"].transfrom(lambda x : x / x.sum())
+        )
+
+        return structure[[maille_col,"BIEN_NEUF","TYPE_BIEN","NB_PIECE_RANGE","poids_relatif_imposes"]]
