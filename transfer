@@ -1,149 +1,238 @@
+"""
+    SCRIPT D'ANALYSE ET DE VISUALISATION (V2 vs LPI)
+    ------------------------------------------------
+    Ce script :
+    1. Charge les résultats V1 et V2 déjà calculés (CSV).
+    2. Compare ces résultats avec le référentiel marché LPI-IAD.
+    3. Génère les cartes de France avec VOTRE style graphique précis.
+"""
+
+import sys
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe 
+import geopandas as gpd
+from shapely.geometry import Point
+from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
+import plotly.graph_objects as go
+import plotly.io as pio
+import locale
+
+# --- CONFIGURATION ---
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+try:
+    import param_general as params
+except ImportError:
+    class params:
+        CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
+
+# CHEMINS (A ADAPTER SI BESOIN)
+PATH_RESULTATS_V1 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee"
+PATH_RESULTATS_V2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande"
+PATH_LPI = r"N:\uflumth\indicateur_marche\LPI-IAD donnees (v2).xlsx"
+
+# GÉOGRAPHIE
+PATH_GEOJSON = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole-version-simplifiee.geojson" 
+PATH_GPS = r'N:\uflujek\commune_france_gps.csv'
+PATH_COMMUNES = r"N:\uflujek\Commune_france.xlsx" # Si besoin pour merge, sinon GPS suffit
+
+# Config Graphique
+pio.renderers.default = "browser"
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
 
 # =============================================================================
-# --- PALETTE DE COULEURS & POLICE ---
+# 1. FONCTION DE CHARGEMENT ROBUSTE
 # =============================================================================
+def load_cl_results(base_path, version_label):
+    print(f"--- Chargement {version_label} depuis {base_path} ---")
+    dfs = []
+    suffixes = ["CITY", "DEPT", "REGION", "PROVINCE", "NATIONAL"]
+    
+    for suffix in suffixes:
+        # Priorité aux fichiers hybrides/restreints pour V2, standards pour V1
+        patterns = [
+            f"prix_m2_univ_elem_MAJ_{suffix}_HYBRIDE.csv",
+            f"prix_m2_univ_elem_MAJ_{suffix}_RESTREINT.csv",
+            f"prix_m2_univ_elem_MAJ_{suffix}.csv"
+        ]
+        found = False
+        for p in patterns:
+            fpath = os.path.join(base_path, p)
+            if os.path.exists(fpath):
+                print(f"   -> Trouvé : {p}")
+                df = pd.read_csv(fpath)
+                # Standardisation Colonne Géo
+                if "VAL_MAILLE_GEO" not in df.columns:
+                    # Tente de trouver la colonne géo (Ville, DEPT, etc.)
+                    cols_pot = [c for c in df.columns if c in ["Ville", "DEPT", "REGION", "PROVINCE_CODE"]]
+                    if cols_pot:
+                        df = df.rename(columns={cols_pot[0]: "VAL_MAILLE_GEO"})
+                
+                df['MAILLE_TYPE'] = suffix
+                dfs.append(df)
+                found = True
+                break
+    
+    if not dfs: return None
+    full_df = pd.concat(dfs, ignore_index=True)
+    
+    # Nettoyage Date
+    if "DT_MAJ_PM2" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["DT_MAJ_PM2"], errors='coerce')
+    elif "Periode" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["Periode"], errors='coerce')
+        
+    col_prix = "prix_mm_value"
+    full_df = full_df.rename(columns={col_prix: f"Prix_M2_{version_label}"})
+    return full_df
+
+# =============================================================================
+# 2. PRÉPARATION DES DONNÉES POUR LA CARTE
+# =============================================================================
+
+# A. Chargement V2 (Cible pour la carte)
+df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
+if df_v2 is None: sys.exit("Erreur: Pas de données V2.")
+
+# B. Préparation du DataFrame 'df_prix_m2' comme dans votre script original
+# On filtre pour ne garder que les villes (CITY)
+prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
+
+# On renomme pour coller à votre code graphique
+df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
+df_prix_m2 = df_prix_m2.rename(columns={
+    f"Prix_M2_V2": "prix_mm_value",
+    "Periode": "DT_MAJ_PM2" # Votre code graphique utilise cette colonne pour la date
+})
+
+# Standardisation Noms
+df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.upper().str.strip()
+df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+    "HAVRE": "LE HAVRE", "SAINT ETIENNE": "ST ETIENNE", "ST-ETIENNE": "ST ETIENNE"
+})
+
+# C. Chargement GPS
+df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
+df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper().str.strip()
+
+# =============================================================================
+# 3. CODE GRAPHIQUE (VOTRE STYLE EXACT)
+# =============================================================================
+print("\n--- Génération des Cartes (Style Personnalisé) ---")
+
+# --- PALETTE DE COULEURS & POLICE ---
 CL_TURQUOISE = '#A8DADC' 
 CL_BLACK = '#1D3557' 
 CL_LIGHT_GREY = '#F5F5DC' 
 CL_BLUE_3M = '#000000' 
 CL_RED_12M = '#CB4735' 
 
-NOM_POLICE_CL = 'Century Gothic' 
-plt.rcParams['font.family'] = 'sans-serif' 
-plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+# Police (Tentative de chargement safe)
+try:
+    NOM_POLICE_CL = 'Century Gothic' 
+    plt.rcParams['font.family'] = 'sans-serif' 
+    plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+except:
+    pass
+
 plt.rcParams['font.weight'] = 'medium' 
 TITRE_FONT_WEIGHT = 'heavy' 
 
 TAUX_FONT_SIZE = 11
 DEFAULT_FONT_SIZE = 20
-
 TARGET_CRS = "EPSG:2154"
 
-# =============================================================================
-# --- PRÉPARATION DES DONNÉES ---
-# =============================================================================
-
-prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
-df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
-df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
-df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
-    "HAVRE": "LE HAVRE",
-    "SAINT ETIENNE": "ST ETIENNE"})
-
-
-
-# =============================================================================
-# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION ---
-# =============================================================================
-
+# --- PRÉPARATION GEOJSON ---
 try:
-    france_gdf = gpd.read_file(geojson_path)
+    france_gdf = gpd.read_file(PATH_GEOJSON)
     dissolved_france = france_gdf.dissolve(by=None)
-    
-    # 1. Projeter et extraire la géométrie du MultiPolygon
     france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
     
-    # 2. Séparer les différents polygones (continent et îles)
-    geometries_list = []
-    if france_geometry.geom_type == 'MultiPolygon':
-        geometries_list = list(france_geometry.geoms)
-    else:
-        geometries_list = [france_geometry]
-
-    # 3. Trouver le plus grand polygone (le continent)
-    if geometries_list:
-        # Trier par aire (surface) et prendre le plus grand (le continent)
-        geometries_list.sort(key=lambda x: x.area, reverse=True)
-        france_outline_geometry = geometries_list[0]
-        print("INFO: La Corse et les îles mineures ont été exclues.")
-    else:
-        raise ValueError("Aucune géométrie de contour trouvée après dissolution.")
-        
+    geometries_list = list(france_geometry.geoms) if france_geometry.geom_type == 'MultiPolygon' else [france_geometry]
+    geometries_list.sort(key=lambda x: x.area, reverse=True)
+    france_outline_geometry = geometries_list[0]
+    
 except Exception as e:
-    print(f"!!! Échec critique lors du chargement ou de la projection du GeoJSON: {e}")
+    print(f"!!! Échec GeoJSON: {e}")
     sys.exit(1)
 
-# =============================================================================
-# --- CRÉATION DE LA CARTE MATPLOTLIB ---
-# =============================================================================
-
-types_bien = ['APT', 'MAI']
-
-# --- DEFINITION DES OFFSETS EN MÈTRES (m) ---
-X_OFFSET_DEFAULT = 3000 # 3 km
-Y_OFFSET_DEFAULT = 3000 # 3 km
-
-# Offsets manuels conservés
+# --- OFFSETS ---
+X_OFFSET_DEFAULT = 3000
+Y_OFFSET_DEFAULT = 3000
 CUSTOM_LABEL_OFFSETS = {
     'MONTPELLIER': {'x': -5000, 'y': 60000}, 
     'MARSEILLE':   {'x': -5000,  'y': -5000},
     'TOULON':      {'x': 5000,  'y': -10000},
     'NICE':        {'x': 30000, 'y': 3000}, 
     'GRENOBLE':    {'x': 5000, 'y': -10000},   
-    'ST ETIENNE':    {'x': -30000, 'y': -0},
+    'ST ETIENNE':  {'x': -30000, 'y': -0},
     'LE HAVRE':    {'x': 10000, 'y': -0},
-
     'BORDEAUX':    {'x': 5000,  'y': 0},  
     'NANTES':      {'x': 5000,  'y': 0},  
     'RENNES':      {'x': 5000,  'y': 0},  
     'LILLE':       {'x': 0,   'y': -10000}, 
     'STRASBOURG':  {'x': -5000, 'y': 0},  
-    
     'PARIS':       {'x': 5000, 'y': 3000},
     'LYON':        {'x': 6000, 'y': 60000}, 
     'TOULOUSE':    {'x': -5000, 'y': 3000}, 
 }
 
+types_bien = ['APT', 'MAI']
+type_bien_labels = {"APT": "APPARTEMENTS", "MAI": "MAISONS"}
 
-type_bien_labels = {
-    "APT": "APPARTEMENTS",
-    "MAI": "MAISONS"
-}
-
+# --- BOUCLE DE PLOT ---
 for type_bien in types_bien:
-    print(f"\n--- Génération de la carte pour le type de bien : {type_bien} ---")
+    print(f"   -> Carte : {type_bien}")
     
-    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
-    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper()
+    # Filtre sur Type et Métrique
+    df_prix_filtre = df_prix_m2[
+        (df_prix_m2["CD_TYPE_BIEN"] == type_bien) & 
+        (df_prix_m2["DIC_NAME"] == "prix_m2_12m")
+    ].copy()
+    
+    # Merge GPS
     df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
     
-    df_map = df_map[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']].copy()
+    # Sécurité colonnes
+    cols_needed = ['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']
+    # On ajoute les colonnes manquantes en NaN si besoin
+    for c in ["TAUX_INFL_3M", 'TAUX_INFL_12M']:
+        if c not in df_map.columns: df_map[c] = np.nan
+            
+    df_map = df_map[cols_needed].copy()
     df_map = df_map.dropna(subset=['latitude', 'longitude'])
     df_map = df_map.drop_duplicates(subset='label', keep='first')
     
     if df_map.empty: continue
         
     geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
-    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
-    gdf = gdf.to_crs(TARGET_CRS) 
+    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS) 
     
-    # --- DESSIN DE LA CARTE ---
+    # --- DESSIN ---
     fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
     fig.set_facecolor(CL_TURQUOISE) 
     
-    geometries_to_plot = [france_outline_geometry]
-    if france_outline_geometry.geom_type == 'MultiPolygon':
-        geometries_to_plot = list(france_outline_geometry.geoms)
-
-    for geom in geometries_to_plot:
-        x, y = geom.exterior.xy
-        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
-        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
+    # Fond
+    x, y = france_outline_geometry.exterior.xy
+    ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
+    ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
     
     xmin, ymin, xmax, ymax = france_outline_geometry.bounds
     ax.set_xlim(xmin - 5000, xmax + 5000) 
     ax.set_ylim(ymin - 5000, ymax + 5000)
 
-    # --- AJOUT DES ÉTIQUETTES ---
-    
-    # Espacement vertical réduit à 9 km (pour compacter 4 lignes)
+    # --- ÉTIQUETTES ---
     LINE_SPACING = 15000 
-    
     halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
 
     for idx, row in gdf.iterrows():
-        x_coord = row.geometry.x 
-        y_coord = row.geometry.y 
+        x_coord, y_coord = row.geometry.x, row.geometry.y
         city_label = row['label'] 
         
         if city_label in CUSTOM_LABEL_OFFSETS:
@@ -153,113 +242,81 @@ for type_bien in types_bien:
             x_offset_city = X_OFFSET_DEFAULT
             y_offset_city = Y_OFFSET_DEFAULT
 
-        ville = str(row['label']).upper()
+        ville = str(city_label).upper()
         prix_val = row['prix_mm_value']
         prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
         ti_3m = row['TAUX_INFL_3M']
         ti_12m = row['TAUX_INFL_12M']
         
-        # Ancrage du texte
+        # Ancrage
         anchor_x = x_coord + x_offset_city
         anchor_y = y_coord + y_offset_city
-        
         ha_box_align = 'right' if x_offset_city < 0 else 'left'
         va_align = 'top' 
         
-        # 1. Nom de la Ville (Ligne 1) 
+        # 1. Nom
         ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='normal', zorder=4, 
-                path_effects=halo_effect) 
+                color=CL_BLACK, weight='normal', zorder=4, path_effects=halo_effect) 
         
-        # 2. Prix M2 (Ligne 2) 
-        prix_y = anchor_y - 1.5 *LINE_SPACING 
+        # 2. Prix
+        prix_y = anchor_y - 1.5 * LINE_SPACING 
         ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='bold', zorder=4,
-                path_effects=halo_effect) 
+                color=CL_BLACK, weight='bold', zorder=4, path_effects=halo_effect) 
         
-        # 3. Taux d'inflation 3M (Ligne 3) - BLEU
+        # 3. Evolutions (Packer)
         ti_3m_y = prix_y - LINE_SPACING 
-        
-        if pd.notna(ti_3m):
-            text_3m = f"{ti_3m:+.1%}".replace('.', ',')
-        else:
-            text_3m = "N/A"
-
-        
-        # 4. Taux d'inflation 12M (Ligne 4) - ROUGE
         ti_12m_y = ti_3m_y - LINE_SPACING 
         
-        if pd.notna(ti_12m):
-            text_12m = f"{ti_12m:+.1%}".replace('.', ',')
-        else:
-            text_12m = "N/A"
+        text_3m = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
+        text_12m = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
 
-        # Dessin du 12M (ROUGE) - utilise la même ancre et le même alignement que les autres lignes
-        
-        
-        
-        
-        
-        
-        
-        # Construire les deux TextArea avec style
-        ta_3m = TextArea(text_3m, textprops=dict(
-            fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'
-        ))
-        ta_12m = TextArea(text_12m, textprops=dict(
-            fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'
-        ))
+        ta_3m = TextArea(text_3m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'))
+        ta_12m = TextArea(text_12m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'))
 
-        # Packer horizontal: 3M puis 12M, avec un espacement (sep) en pixels
-        # Ajuste 'sep' pour augmenter/diminuer l’espace entre les deux taux
-        hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)  # sep=8px par ex.
+        hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)
         
         box_x_align = 1.0 if ha_box_align == "right" else 0.0
-        # Placer le bloc au bon endroit (en unités de données)
-        ab = AnnotationBbox(
-            hpack,
-            (anchor_x, ti_12m_y),     # coordonnées données (comme tes autres lignes)
-            xybox=(0, 0),
-            xycoords='data',
-            boxcoords='offset points',   # le packer est géré en pixels
-            frameon=False,
-            box_alignment=(box_x_align, 0.5)       # ancrage du bloc: gauche / milieu vertical
-        )
-
+        # On place le packer sur la ligne du 12m pour l'alignement vertical (ajusté via box_alignment)
+        ab = AnnotationBbox(hpack, (anchor_x, ti_12m_y), xybox=(0, 0), xycoords='data', 
+                            boxcoords='offset points', frameon=False, 
+                            box_alignment=(box_x_align, 0.5))
         ax.add_artist(ab)
 
-
-        # 5. Point Ville
+        # 5. Point
         ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
                 markeredgecolor='white', markeredgewidth=0.5) 
 
     # --- FINALISATION ---
     ax.axis('off')
     title_text = f"LES PRIX DES {type_bien_labels[type_bien]} DANS LES 16 PLUS GRANDES VILLES"
-    ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT,bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
+    ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', 
+                 weight=TITRE_FONT_WEIGHT, bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
 
-    # LÉGENDE
-    
-
-
-
+    # Légende & Date
     fig.text(0.04, 0.05, "LEGENDE\nPrix/m² moyen sur 12 mois\nNoir: Evolution sur 3 mois\nRouge: Evolution sur 12 mois",
-         ha='left', va='bottom', fontsize=20,
-         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-    locale.setlocale(locale.LC_TIME, 'French_France')
-    df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
-    date_texte = df_prix_m2["DT_MAJ_PM2"].iloc[-1].strftime("%B %Y").upper()
-    fig.text(0.04, 0.02, f"CREDIT LOGEMENET - {date_texte}",
-         ha='left', va='bottom', fontsize=12)
-
-
+             ha='left', va='bottom', fontsize=20,
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
     
-    output_file_png = os.path.join(params.CONFIG["output_dir"], f"carte_prix_m2_CITY_{type_bien}_V2.png")
+    try:
+        locale.setlocale(locale.LC_TIME, 'fr_FR.UTF-8') # Tentative Linux/Mac
+    except:
+        try:
+            locale.setlocale(locale.LC_TIME, 'French_France') # Tentative Windows
+        except:
+            pass # Fallback défaut
+
+    if not df_prix_m2.empty:
+        last_dt = df_prix_m2["DT_MAJ_PM2"].max()
+        date_texte = last_dt.strftime("%B %Y").upper()
+    else:
+        date_texte = "DATE INCONNUE"
+
+    fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_texte}", ha='left', va='bottom', fontsize=12)
+    
+    # Sauvegarde
+    output_file_png = os.path.join(params.CONFIG["output_dir"], f"carte_prix_m2_CITY_{type_bien}_V2_HYBRIDE.png")
     plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
-    print(f"Génération terminée pour {type_bien}")
+    plt.close()
+    print(f"   -> Sauvegardé : {output_file_png}")
 
-
-
-# Configuration
-pio.renderers.default = "notebook"
-logging.getLogger("cmdstanpy").disabled = True
+print("\n=== ANALYSE TERMINÉE ===")
