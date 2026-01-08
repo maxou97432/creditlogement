@@ -323,3 +323,16 @@ for type_bien in types_bien:
     print(f"   -> Sauvegardé : {output_file_png}")
 
 print("\n=== ANALYSE TERMINÉE ===")
+
+
+
+(.venv) PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe n:/uflumth/indicateur_marche/univers_elementaire/TI/test.py
+--- Chargement V2 depuis N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande ---
+Traceback (most recent call last):
+  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\test.py", line 95, in <module>
+    df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\test.py", line 73, in load_cl_results
+    df['MAILLE_TYPE'] = suffix
+    ^^
+UnboundLocalError: cannot access local variable 'df' where it is not associated with a value
