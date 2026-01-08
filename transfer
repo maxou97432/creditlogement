@@ -1,365 +1,51 @@
-
-path_base_v1 = r"N:\uflumth\indicateur_marche\univers_elementaire\base_complete_filtree.parquet"
-path_base_v2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande\transac+demandes_filtree.parquet"
-path_lpi_v2 = r"N:\uflumth\indicateur_marche\LPI-IAD donnees (v2).xlsx"
-
-top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", "NICE", "STRASBOURG", "NANTES", "MONTPELLIER",
-         "TOULON", "REIMS", "SAINT-ETIENNE", "LE HAVRE"]
-
 # =============================================================================
-# 1. FUNCTION: PROCESS DATASET
+# 4. COMPARAISON LPI-IAD (STATS)
 # =============================================================================
-def process_dataset(df, label, is_v2=False):
-    
-    print(f"\n--- Traitement du dataset : {label} ---")
-    
-    # 1. Standardisation & Filtering
-    if is_v2:
-
-        df = df[df["DEMANDE"] == 0] 
-        
-    df = df.rename(columns={"ville_": "Ville"})
-    df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-    df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
-    
-    # Filter Top 15
-    df["Ville"] = df["Ville"].replace({
-    "HAVRE": "LE HAVRE",
-    "SAINT ETIENNE": "SAINT-ETIENNE"})
-
-    df = df[df["Ville"].isin(top15)]
-    df = df.dropna(subset=["DATE", "Ville", "TYPE_BIEN"])
-    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
-
-    # 2. Aggregation Mensuelle
-    keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
-    univers_mensuel = (
-        df.groupby(keys, dropna=False)
-        .agg(
-            nb_transac=("ID", "size"),
-            prix_moyen=("Prix_m2", "mean"),
-            # prix_median=("Prix_m2", "median"), # Not used later, saving memory
-            # surface_moyenne=("NB_SURF_HAB", "mean") # Not used later
-        )
-        .reset_index()
-    )
-    
-    # Cleaning types
-    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
-    mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
-    univers_mensuel = univers_mensuel.loc[~mask].drop(columns="PB")
-
-    # 3. Completing Missing Months
-    def complete_months(g):
-        g = g.sort_values("Periode").set_index("Periode")
-        idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
-        g = g.reindex(idx)
-        for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
-            g[col] = g[col].ffill().bfill()
-        g["nb_transac"] = g["nb_transac"].fillna(0)
-        # g["prix_moyen"] stays NaN
-        return g.reset_index().rename(columns={"index": "Periode"})
-
-    univers_complet = (
-        univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
-        .apply(complete_months)
-    )
-
-    # 4. Calculating Structural Weights (2015-2025)
-    poids_global = (
-        univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
-        .sum().rename(columns={"nb_transac": "poids_total"})
-    )
-    poids_global["poids_relatif"] = poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
-    
-    univers_complet = univers_complet.merge(poids_global, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
-
-    # 5. Calculating Indicators I_3m & I_12m
-    typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
-    
-    univers_complet["I_3m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
-    univers_complet["I_12m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
-
-    # 6. Weighted Moving Averages Function
-    def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice):
-        result = []
-        g = g.sort_values("Periode")
-        periodes = g["Periode"].unique()
-        
-        for i, periode in enumerate(periodes):
-            start_idx = max(0, i - window + 1)
-            periodes_fenetre = periodes[start_idx:i+1]
-            df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
-            
-            df_actif = df_fenetre[(df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)].copy()
-            
-            if len(df_actif) == 0:
-                result.append({"Periode": periode, "prix_mm": np.nan})
-                continue
-            
-            total_poids = df_actif["poids_relatif"].sum()
-            if total_poids > 0:
-                poids_norm = df_actif["poids_relatif"] / total_poids
-                prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
-            else:
-                prix_mm = np.nan
-            result.append({"Periode": periode, "prix_mm": prix_mm})
-        return pd.DataFrame(result)
-
-    # 7. Apply Moving Average per City
-    resultats_mm = []
-    for ville in univers_complet["Ville"].unique():
-        df_ville = univers_complet[univers_complet["Ville"] == ville].copy()
-        
-        # 3 Months
-        mm_3m = calcule_moyenne_mobile_ponderee(df_ville, 3, 'prix_moyen', 'I_3m')
-        mm_3m = mm_3m.rename(columns={"prix_mm": f"prix_mm_3m ({label})"})
-        
-        # 12 Months
-        mm_12m = calcule_moyenne_mobile_ponderee(df_ville, 12, 'prix_moyen', 'I_12m')
-        mm_12m = mm_12m.rename(columns={"prix_mm": f"prix_mm_12m ({label})"})
-        
-        # Merge
-        mm_ville = mm_3m.merge(mm_12m, on="Periode", how="outer")
-        mm_ville["Ville"] = ville
-        resultats_mm.append(mm_ville)
-        
-    return pd.concat(resultats_mm, ignore_index=True)
-
-
-# =============================================================================
-# 2. LOAD & PROCESS V1 AND V2
-# =============================================================================
-
-# --- Load Raw Data ---
-print("Loading Base V1...")
-try:
-    base_raw_v1 = pd.read_parquet(path_base_v1)
-except Exception as e:
-    sys.exit(f"Erreur chargement V1: {e}")
-
-print("Loading Base V2...")
-try:
-    base_raw_v2 = pd.read_parquet(path_base_v2)
-except Exception as e:
-    sys.exit(f"Erreur chargement V2: {e}")
-
-# --- Process ---
-df_res_v1 = process_dataset(base_raw_v1, "V1", is_v2=False)
-df_res_v2 = process_dataset(base_raw_v2, "V2", is_v2=True)
-
-
-
-# --- Merge V1 & V2 Results ---
-# Merge on Ville & Periode
-merge_cl = pd.merge(df_res_v1, df_res_v2, on=["Ville", "Periode"], how="outer")
-
-
-# =============================================================================
-# 3. LOAD & MERGE LPI/IAD DATA
-# =============================================================================
-print("\n--- Chargement LPI/IAD ---")
+print("\n--- Comparaison LPI-IAD ---")
 
 try:
-    lpiiad2 = pd.read_excel(path_lpi_v2, sheet_name="V2")
-    lpiiad2 = lpiiad2.drop(lpiiad2.index[0:2])
-    lpiiad2 = lpiiad2.rename(columns={"Tableau 1" : "DATE", "Unnamed: 1" : "Ville", "Unnamed: 2" : "Prix moyen glissant 12 mois - LPI/IAD"})
-    lpiiad2["Ville"] = lpiiad2["Ville"].str.strip().str.upper()
+    # 1. Chargement V1 (Standard)
+    df_v1 = load_cl_results(PATH_RESULTATS_V1, "V1")
     
-    df_top15_lpi = lpiiad2[lpiiad2["Ville"].isin(top15)].copy()
-    df_top15_lpi["DATE"] = pd.to_datetime(df_top15_lpi["DATE"], errors="coerce")
-    df_top15_lpi["Prix moyen glissant 12 mois - LPI/IAD"] = pd.to_numeric(df_top15_lpi["Prix moyen glissant 12 mois - LPI/IAD"], errors='coerce')
+    # 2. Chargement LPI
+    lpi_df = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
+    lpi_df = lpi_df.iloc[:, :3] # Garde les 3 premières colonnes (Date, Ville, Prix)
+    lpi_df.columns = ["Periode", "VAL_MAILLE_GEO", "Prix_LPI"]
     
+    lpi_df["Periode"] = pd.to_datetime(lpi_df["Periode"], errors='coerce')
+    lpi_df["VAL_MAILLE_GEO"] = lpi_df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    lpi_df["Prix_LPI"] = pd.to_numeric(lpi_df["Prix_LPI"], errors='coerce')
+    
+    # 3. Fusion
+    if df_v1 is not None and df_v2 is not None:
+        # On ne garde que les données 'Ville' et '12 mois'
+        v1_city = df_v1[(df_v1["MAILLE_TYPE"] == "CITY") & (df_v1["DIC_NAME"] == "prix_m2_12m")].copy()
+        v2_city = df_v2[(df_v2["MAILLE_TYPE"] == "CITY") & (df_v2["DIC_NAME"] == "prix_m2_12m")].copy()
+        
+        # Merge V1 + V2
+        merge_cl = pd.merge(v1_city, v2_city[["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN", "Prix_M2_V2"]], 
+                            on=["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN"], how="inner")
+        
+        # Merge avec LPI
+        final_comp = pd.merge(merge_cl, lpi_df, on=["VAL_MAILLE_GEO", "Periode"], how="inner")
+        
+        # 4. Calcul Stats
+        def get_stats(g):
+            rmse_v1 = np.sqrt(((g['Prix_M2_V1'] - g['Prix_LPI'])**2).mean())
+            rmse_v2 = np.sqrt(((g['Prix_M2_V2'] - g['Prix_LPI'])**2).mean())
+            corr_v1 = g['Prix_M2_V1'].corr(g['Prix_LPI'])
+            corr_v2 = g['Prix_M2_V2'].corr(g['Prix_LPI'])
+            return pd.Series({'RMSE_V1': rmse_v1, 'RMSE_V2': rmse_v2, 'Corr_V1': corr_v1, 'Corr_V2': corr_v2})
+
+        stats = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(get_stats).reset_index()
+        stats["Gain_RMSE"] = stats["RMSE_V1"] - stats["RMSE_V2"]
+        
+        print("\nTOP 10 AMÉLIORATIONS (RMSE V2 < V1) :")
+        print(stats.sort_values("Gain_RMSE", ascending=False).head(10))
+        
+        stats.to_csv(os.path.join(params.CONFIG['output_dir'], "Comparatif_LPI_Stats.csv"), index=False)
+
 except Exception as e:
-    print(f"Erreur chargement LPI: {e}. Continuation sans LPI.")
-    df_top15_lpi = pd.DataFrame(columns=["Ville", "DATE", "Prix moyen glissant 12 mois - LPI/IAD"])
+    print(f"Erreur lors de la comparaison LPI : {e}")
 
-# Final Merge
-merge_cl = merge_cl.rename(columns={"Periode": "DATE"})
-merge_cl["DATE"] = pd.to_datetime(merge_cl["DATE"], errors="coerce")
-
-final_fusion = pd.merge(df_top15_lpi, merge_cl, on=["Ville", "DATE"], how="right")
-
-# Rename columns for clarity in plots
-final_fusion = final_fusion.rename(columns={
-    "prix_mm_12m (V1)": "Prix moyen glissant 12 mois - Univ Elem (V1)",
-    "prix_mm_12m (V2)": "Prix moyen glissant 12 mois - Univ Elem (V2)"
-})
-
-# Filter date limit
-final_fusion = final_fusion[final_fusion["DATE"] < "2025-09-01"]
-
-
-# =============================================================================
-# 4. PROPHET & VISUALIZATION (Comparison V1 vs V2 vs LPI)
-# =============================================================================
-print("\n--- Génération des graphiques et stats ---")
-
-cols_to_plot = [
-    "Prix moyen glissant 12 mois - Univ Elem (V1)",
-    "Prix moyen glissant 12 mois - Univ Elem (V2)",
-    "Prix moyen glissant 12 mois - LPI/IAD"
-]
-colors = ["#4C72B0", "#FF0000", "#DD8452"] # Blue (V1), Red (V2), Orange (LPI)
-
-# Global stats counters
-score_v1_total = 0
-score_v2_total = 0
-nb_villes = len(final_fusion["Ville"].dropna().unique())
-
-for ville in final_fusion["Ville"].dropna().unique():
-    df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
-    
-    if df_ville.empty: continue
-
-    # --- A. Prophet Forecasting (Optional but kept from original) ---
-    fig = go.Figure()
-    
-    # We interpolate to fill gaps for plotting/prophet
-    df_ville_interp = df_ville.set_index("DATE")[cols_to_plot].resample("MS").interpolate(method="linear").reset_index()
-
-    for i, col in enumerate(cols_to_plot):
-        if col not in df_ville_interp.columns or df_ville_interp[col].isna().all():
-            continue
-
-        # Prepare for Prophet
-        df_prophet = df_ville_interp[["DATE", col]].rename(columns={"DATE": "ds", col: "y"}).dropna()
-        
-        if len(df_prophet) < 5: continue # Skip if too few points
-
-        m = Prophet(changepoint_prior_scale=0.5)
-        m.fit(df_prophet)
-        future = m.make_future_dataframe(periods=12, freq="MS")
-        forecast = m.predict(future)
-
-        # Plot Historical
-        fig.add_trace(go.Scatter(
-            x=df_prophet["ds"], y=df_prophet["y"],
-            mode="lines+markers", name=col,
-            line=dict(color=colors[i], width=2)
-        ))
-        
-        # Plot Forecast (Future only)
-        last_date = df_prophet["ds"].max()
-        forecast_future = forecast[forecast["ds"] > last_date]
-        if not forecast_future.empty:
-            # Connect the lines
-            first_pred = pd.DataFrame({'ds': [last_date], 'yhat': [df_prophet.iloc[-1]['y']]})
-            forecast_chain = pd.concat([first_pred, forecast_future[['ds', 'yhat']]])
-            
-            fig.add_trace(go.Scatter(
-                x=forecast_chain["ds"], y=forecast_chain["yhat"],
-                mode="lines", name=f"Prévision - {col}",
-                line=dict(color=colors[i], dash="dot", width=1.5),
-                showlegend=False
-            ))
-
-    fig.update_layout(
-        title=f"Comparaison V1 vs V2 vs LPI – {ville}",
-        xaxis_title="Date", yaxis_title="Prix au m²",
-        template="plotly_white", height=500,
-        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
-    )
-
-
-
-    # --- B. Statistical Comparison (Confidence Intervals) ---
-    
-    # Rolling Std Dev for Confidence Intervals
-    df_ville_interp["std_12m_v1"] = df_ville_interp["Prix moyen glissant 12 mois - Univ Elem (V1)"].rolling(12, min_periods=3).std()
-    df_ville_interp["std_12m_v2"] = df_ville_interp["Prix moyen glissant 12 mois - Univ Elem (V2)"].rolling(12, min_periods=3).std()
-    
-    # Calculate ICs (95%)
-    for v in ["v1", "v2"]:
-        col_name = f"Prix moyen glissant 12 mois - Univ Elem ({v.upper()})"
-        df_ville_interp[f"IC_inf_{v}"] = df_ville_interp[col_name] - 1.96 * df_ville_interp[f"std_12m_{v}"]
-        df_ville_interp[f"IC_sup_{v}"] = df_ville_interp[col_name] + 1.96 * df_ville_interp[f"std_12m_{v}"]
-
-    # Calculate LPI Match Percentage
-    lpi_col = "Prix moyen glissant 12 mois - LPI/IAD"
-    
-    if lpi_col in df_ville_interp.columns:
-        # Match V1
-        in_IC_v1 = (df_ville_interp[lpi_col] >= df_ville_interp["IC_inf_v1"]) & (df_ville_interp[lpi_col] <= df_ville_interp["IC_sup_v1"])
-        pct_v1 = in_IC_v1.mean() * 100
-        score_v1_total += pct_v1
-        
-        # Match V2
-        in_IC_v2 = (df_ville_interp[lpi_col] >= df_ville_interp["IC_inf_v2"]) & (df_ville_interp[lpi_col] <= df_ville_interp["IC_sup_v2"])
-        pct_v2 = in_IC_v2.mean() * 100
-        score_v2_total += pct_v2
-        
-        # --- Visualization IC ---
-        fig_ic = go.Figure()
-        
-        # V1 Area
-        fig_ic.add_trace(go.Scatter(
-            x=pd.concat([df_ville_interp["DATE"], df_ville_interp["DATE"][::-1]]),
-            y=pd.concat([df_ville_interp["IC_sup_v1"], df_ville_interp["IC_inf_v1"][::-1]]),
-            fill="toself", fillcolor="rgba(76,114,176,0.2)", line=dict(color="rgba(0,0,0,0)"),
-            name="IC 95% (V1)"
-        ))
-        
-        # V2 Area
-        fig_ic.add_trace(go.Scatter(
-            x=pd.concat([df_ville_interp["DATE"], df_ville_interp["DATE"][::-1]]),
-            y=pd.concat([df_ville_interp["IC_sup_v2"], df_ville_interp["IC_inf_v2"][::-1]]),
-            fill="toself", fillcolor="rgba(255,0,0,0.2)", line=dict(color="rgba(0,0,0,0)"),
-            name="IC 95% (V2)"
-        ))
-        
-        # Lines
-        fig_ic.add_trace(go.Scatter(x=df_ville_interp["DATE"], y=df_ville_interp["Prix moyen glissant 12 mois - Univ Elem (V1)"], 
-                                    mode='lines', name='Univ Elem (V1)', line=dict(color=colors[0])))
-        fig_ic.add_trace(go.Scatter(x=df_ville_interp["DATE"], y=df_ville_interp["Prix moyen glissant 12 mois - Univ Elem (V2)"], 
-                                    mode='lines', name='Univ Elem (V2)', line=dict(color=colors[1])))
-        fig_ic.add_trace(go.Scatter(x=df_ville_interp["DATE"], y=df_ville_interp[lpi_col], 
-                                    mode='lines+markers', name='LPI/IAD', line=dict(color=colors[2], dash='dot')))
-
-        # Annotations
-        fig_ic.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99, text=f"Match LPI (V1): {pct_v1:.1f}%", showarrow=False, bgcolor="rgba(255,255,255,0.8)")
-        fig_ic.add_annotation(xref="paper", yref="paper", x=0.01, y=0.94, text=f"Match LPI (V2): {pct_v2:.1f}%", showarrow=False, bgcolor="rgba(255,255,255,0.8)")
-
-        fig_ic.update_layout(title=f"Validité Statistique V1 vs V2 - {ville}", height=500, template="plotly_white")
-        fig_ic.write_html(os.path.join(params.CONFIG['output_dir'], f"Validité Statistique V1 vs V2 - {ville}.html"))
-
-# --- Global Result ---
-print("\n" + "="*80)
-print(" RÉSULTATS GLOBAUX COMPARATIFS")
-print("="*80)
-if nb_villes > 0:
-    print(f"Correspondance moyenne LPI (V1) : {score_v1_total / nb_villes:.2f} %")
-    print(f"Correspondance moyenne LPI (V2) : {score_v2_total / nb_villes:.2f} %")
-else:
-    print("Aucune ville traitée.")
-
-
-def get_stats(df, col_cl):
-    df['Dif'] = df[col_cl] - df['Prix moyen glissant 12 mois - LPI/IAD']
-    rmse = np.sqrt(np.mean(df['Dif']**2))
-    corr = df[col_cl].corr(df['Prix moyen glissant 12 mois - LPI/IAD'])
-    return pd.Series({'RMSE': rmse, 'Correlation': corr})
-
-# Calcul des stats par groupe
-stats_v1 = final_fusion.groupby(["Ville"]).apply(lambda x: get_stats(x, 'Prix moyen glissant 12 mois - Univ Elem (V1)')).reset_index()
-stats_v2 = final_fusion.groupby(["Ville"]).apply(lambda x: get_stats(x, 'Prix moyen glissant 12 mois - Univ Elem (V2)')).reset_index()
-
-# Comparaison finale
-comparaison2 = pd.merge(stats_v1, stats_v2, on=["Ville"], suffixes=('_V1', '_V2'))
-
-# Calcul du Gain (Positif = V2 est meilleure)
-comparaison2['Gain_RMSE'] = comparaison2['RMSE_V1'] - comparaison2['RMSE_V2'] 
-comparaison2['Gain_Corr'] = comparaison2['Correlation_V2'] - comparaison2['Correlation_V1']
-
-print("\n" + "="*80)
-print(" RÉSULTATS COMPARATIFS : Base Standard (V1) vs Base + Demande (V2)")
-print("="*80)
-print(f"Gain Moyen RMSE global : {comparaison2['Gain_RMSE'].mean():.4f} ")
-print(f"Gain Moyen Corrélation : {comparaison2['Gain_Corr'].mean():.4f} ")
-print("-" * 80)
-print("Détail des améliorations (Top 10 Gains RMSE) :")
-print(comparaison2.sort_values("Gain_RMSE", ascending=False))
-output_path_vol = os.path.join(params.CONFIG['output_dir'], f"Comparaison des bases - LPI-IAD.csv")
-comparaison2.to_csv(output_path_vol, index=False)
+print("\n=== ANALYSE TERMINÉE ===")
