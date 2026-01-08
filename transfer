@@ -1,17 +1,31 @@
-(.venv) PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe n:/uflumth/indicateur_marche/univers_elementaire/TI/test.py
---- Chargement V2 depuis N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande ---
-   -> Trouvé : prix_m2_univ_elem_MAJ_CITY.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_DEPT.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_REGION.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_PROVINCE.csv
+# ... (Votre code précédent pour la locale) ...
+    try:
+        locale.setlocale(locale.LC_TIME, 'fr_FR.UTF-8') 
+    except:
+        try:
+            locale.setlocale(locale.LC_TIME, 'French_France') 
+        except:
+            pass 
 
---- Génération des Cartes (Style Personnalisé) ---
-   -> Carte : APT
-Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\test.py", line 310, in <module>
-    date_texte = last_dt.strftime("%B %Y").upper()
-                 ^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\core\generic.py", line 6321, in __getattr__
-    return object.__getattribute__(self, name)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: 'Series' object has no attribute 'strftime'. Did you mean: 'at_time'?
+    if not df_prix_m2.empty:
+        # CORRECTION ICI : 
+        # 1. On s'assure qu'il n'y a pas de doublons de noms de colonnes
+        df_prix_m2 = df_prix_m2.loc[:, ~df_prix_m2.columns.duplicated()]
+        
+        # 2. On force la conversion en Datetime (au cas où ce serait resté du texte)
+        df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
+        
+        # 3. On prend le max (qui sera maintenant un Timestamp unique)
+        last_dt = df_prix_m2["DT_MAJ_PM2"].max()
+        
+        # 4. Sécurité si la date est nulle (NaT)
+        if pd.notna(last_dt):
+            date_texte = last_dt.strftime("%B %Y").upper()
+        else:
+            date_texte = "DATE INCONNUE"
+    else:
+        date_texte = "DATE INCONNUE"
+
+    fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_texte}", ha='left', va='bottom', fontsize=12)
+    
+    # ... (La suite pour la sauvegarde reste identique) ...
