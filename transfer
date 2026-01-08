@@ -1,51 +1,13 @@
-# =============================================================================
-# 4. COMPARAISON LPI-IAD (STATS)
-# =============================================================================
-print("\n--- Comparaison LPI-IAD ---")
+--- Chargement V1 depuis N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee ---
+   -> Trouvé : prix_m2_univ_elem_MAJ_CITY_RESTREINT.csv
+   -> Trouvé : prix_m2_univ_elem_MAJ_DEPT_RESTREINT.csv
+   -> Trouvé : prix_m2_univ_elem_MAJ_REGION_RESTREINT.csv
+   -> Trouvé : prix_m2_univ_elem_MAJ_PROVINCE_RESTREINT.csv
+   [INFO] Manquant : prix_m2_univ_elem_MAJ_NATIONAL_RESTREINT.csv
+n:\uflumth\indicateur_marche\univers_elementaire\TI\test.py:378: FutureWarning:
 
-try:
-    # 1. Chargement V1 (Standard)
-    df_v1 = load_cl_results(PATH_RESULTATS_V1, "V1")
-    
-    # 2. Chargement LPI
-    lpi_df = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
-    lpi_df = lpi_df.iloc[:, :3] # Garde les 3 premières colonnes (Date, Ville, Prix)
-    lpi_df.columns = ["Periode", "VAL_MAILLE_GEO", "Prix_LPI"]
-    
-    lpi_df["Periode"] = pd.to_datetime(lpi_df["Periode"], errors='coerce')
-    lpi_df["VAL_MAILLE_GEO"] = lpi_df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    lpi_df["Prix_LPI"] = pd.to_numeric(lpi_df["Prix_LPI"], errors='coerce')
-    
-    # 3. Fusion
-    if df_v1 is not None and df_v2 is not None:
-        # On ne garde que les données 'Ville' et '12 mois'
-        v1_city = df_v1[(df_v1["MAILLE_TYPE"] == "CITY") & (df_v1["DIC_NAME"] == "prix_m2_12m")].copy()
-        v2_city = df_v2[(df_v2["MAILLE_TYPE"] == "CITY") & (df_v2["DIC_NAME"] == "prix_m2_12m")].copy()
-        
-        # Merge V1 + V2
-        merge_cl = pd.merge(v1_city, v2_city[["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN", "Prix_M2_V2"]], 
-                            on=["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN"], how="inner")
-        
-        # Merge avec LPI
-        final_comp = pd.merge(merge_cl, lpi_df, on=["VAL_MAILLE_GEO", "Periode"], how="inner")
-        
-        # 4. Calcul Stats
-        def get_stats(g):
-            rmse_v1 = np.sqrt(((g['Prix_M2_V1'] - g['Prix_LPI'])**2).mean())
-            rmse_v2 = np.sqrt(((g['Prix_M2_V2'] - g['Prix_LPI'])**2).mean())
-            corr_v1 = g['Prix_M2_V1'].corr(g['Prix_LPI'])
-            corr_v2 = g['Prix_M2_V2'].corr(g['Prix_LPI'])
-            return pd.Series({'RMSE_V1': rmse_v1, 'RMSE_V2': rmse_v2, 'Corr_V1': corr_v1, 'Corr_V2': corr_v2})
+DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
 
-        stats = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(get_stats).reset_index()
-        stats["Gain_RMSE"] = stats["RMSE_V1"] - stats["RMSE_V2"]
-        
-        print("\nTOP 10 AMÉLIORATIONS (RMSE V2 < V1) :")
-        print(stats.sort_values("Gain_RMSE", ascending=False).head(10))
-        
-        stats.to_csv(os.path.join(params.CONFIG['output_dir'], "Comparatif_LPI_Stats.csv"), index=False)
+Erreur lors de la comparaison LPI : cannot insert CD_TYPE_BIEN, already exists
 
-except Exception as e:
-    print(f"Erreur lors de la comparaison LPI : {e}")
-
-print("\n=== ANALYSE TERMINÉE ===")
+=== ANALYSE TERMINÉE ===
