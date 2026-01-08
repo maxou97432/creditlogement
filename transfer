@@ -1,61 +1,36 @@
-def load_cl_results(base_path, version_label):
-    print(f"--- Chargement {version_label} depuis {base_path} ---")
-    dfs = []
-    suffixes = ["CITY", "DEPT", "REGION", "PROVINCE", "NATIONAL"]
-    
-    for suffix in suffixes:
-        # LOGIQUE DE PRIORITÉ SÉPARÉE
-        if version_label == "V1":
-            # Pour V1, on ne veut QUE le standard (sans suffixe RESTREINT/HYBRIDE)
-            # On cherche exactement "prix_m2_univ_elem_MAJ_XXX.csv"
-            possible_names = [f"prix_m2_univ_elem_MAJ_{suffix}.csv"]
-        else:
-            # Pour V2, on veut la version modifiée (Hybride ou Restreinte)
-            possible_names = [
-                f"prix_m2_univ_elem_MAJ_{suffix}_HYBRIDE.csv",
-                f"prix_m2_univ_elem_MAJ_{suffix}_RESTREINT.csv"
-            ]
-        
-        found = False
-        for fname in possible_names:
-            fpath = os.path.join(base_path, fname)
-            if os.path.exists(fpath):
-                print(f"   -> Trouvé : {fname}")
-                try:
-                    df = pd.read_csv(fpath)
-                    # Standardisation Colonne Géo
-                    if "VAL_MAILLE_GEO" not in df.columns:
-                        cols_pot = [c for c in df.columns if c in ["Ville", "DEPT", "REGION", "PROVINCE_CODE"]]
-                        if cols_pot:
-                            df = df.rename(columns={cols_pot[0]: "VAL_MAILLE_GEO"})
-                    
-                    df['MAILLE_TYPE'] = suffix
-                    dfs.append(df)
-                    found = True
-                    break 
-                except Exception as e:
-                    print(f"   /!\\ Erreur lecture {fname}: {e}")
-        
-        if not found and version_label == "V2": 
-            # On accepte que le National manque parfois, mais on le signale
-            print(f"   [INFO] Fichier manquant pour maille : {suffix}")
 
-    if not dfs: return None
-    full_df = pd.concat(dfs, ignore_index=True)
-    
-    # Nettoyage Date
-    if "DT_MAJ_PM2" in full_df.columns:
-        full_df["Periode"] = pd.to_datetime(full_df["DT_MAJ_PM2"], errors='coerce')
-    elif "Periode" in full_df.columns:
-        full_df["Periode"] = pd.to_datetime(full_df["Periode"], errors='coerce')
-        
-    col_prix = "prix_mm_value"
-    if col_prix in full_df.columns:
-        full_df = full_df.rename(columns={col_prix: f"Prix_M2_{version_label}"})
-        
-    return full_df
+# =============================================================================
+# 4. COMPARAISON LPI-IAD (STATS)
+# =============================================================================
+print("\n--- Comparaison LPI-IAD ---")
 
-# 4. Calcul Stats
+try:
+    # 1. Chargement V1 (Standard)
+    df_v1 = load_cl_results(PATH_RESULTATS_V1, "V1")
+    
+    # 2. Chargement LPI
+    lpi_df = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
+    lpi_df = lpi_df.iloc[:, :3] # Garde les 3 premières colonnes (Date, Ville, Prix)
+    lpi_df.columns = ["Periode", "VAL_MAILLE_GEO", "Prix_LPI"]
+    
+    lpi_df["Periode"] = pd.to_datetime(lpi_df["Periode"], errors='coerce')
+    lpi_df["VAL_MAILLE_GEO"] = lpi_df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    lpi_df["Prix_LPI"] = pd.to_numeric(lpi_df["Prix_LPI"], errors='coerce')
+    
+    # 3. Fusion
+    if df_v1 is not None and df_v2 is not None:
+        # On ne garde que les données 'Ville' et '12 mois'
+        v1_city = df_v1[(df_v1["MAILLE_TYPE"] == "CITY") & (df_v1["DIC_NAME"] == "prix_m2_12m")].copy()
+        v2_city = df_v2[(df_v2["MAILLE_TYPE"] == "CITY") & (df_v2["DIC_NAME"] == "prix_m2_12m")].copy()
+        
+        # Merge V1 + V2
+        merge_cl = pd.merge(v1_city, v2_city[["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN", "Prix_M2_V2"]], 
+                            on=["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN"], how="inner")
+        
+        # Merge avec LPI
+        final_comp = pd.merge(merge_cl, lpi_df, on=["VAL_MAILLE_GEO", "Periode"], how="inner")
+        
+        # 4. Calcul Stats
         def get_stats(g):
             rmse_v1 = np.sqrt(((g['Prix_M2_V1'] - g['Prix_LPI'])**2).mean())
             rmse_v2 = np.sqrt(((g['Prix_M2_V2'] - g['Prix_LPI'])**2).mean())
@@ -63,8 +38,6 @@ def load_cl_results(base_path, version_label):
             corr_v2 = g['Prix_M2_V2'].corr(g['Prix_LPI'])
             return pd.Series({'RMSE_V1': rmse_v1, 'RMSE_V2': rmse_v2, 'Corr_V1': corr_v1, 'Corr_V2': corr_v2})
 
-        # --- CORRECTION CRITIQUE ICI ---
-        # On ajoute include_groups=False pour éviter le conflit de colonnes avec Pandas récent
         try:
             stats = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"], include_groups=False).apply(get_stats).reset_index()
         except TypeError:
@@ -77,3 +50,6 @@ def load_cl_results(base_path, version_label):
         print(stats.sort_values("Gain_RMSE", ascending=False).head(10))
         
         stats.to_csv(os.path.join(params.CONFIG['output_dir'], "Comparatif_LPI_Stats.csv"), index=False)
+
+except Exception as e:
+    print(f"Erreur lors de la comparaison LPI : {e}")
