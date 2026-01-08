@@ -1,14 +1,18 @@
 (.venv) PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe "n:/uflumth/indicateur_marche/univers_elementaire/TI/comparaison V1 vs V2.py"
 Chargement des données...
 Chargement des données...
+---Extraction de la structure de marché (REGION) ---
+
+--- Traitement de la maille : REGION_RESTREINT ---
+Complétion des mois manquants...
+n:\uflumth\indicateur_marche\univers_elementaire\TI\fonctions.py:901: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(lambda g: complete_months(g, maille_col))
+--- Application de la structure de marché globale ---
 Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py", line 54, in <module>
-    base_ml_restreint = load_and_preprocess_data(specific_path = FILE_RESTREINT)
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\fonctions.py", line 781, in load_and_preprocess_data
-    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\core\generic.py", line 6321, in __getattr__
-    return object.__getattribute__(self, name)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: 'DataFrame' object has no attribute 'str'. Did you mean: 'std'?
+  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py", line 60, in <module>
+    res_region = process_maille(base_ml_restreint, "REGION", "REGION_RESTREINT", df_structure_ref= struc_region)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\fonctions.py", line 924, in process_maille
+    poids_global.groupby(maille_col)["poids_total"].transform(lambda x: x / x.sum())
+    ^^^^^^^^^^^^
+UnboundLocalError: cannot access local variable 'poids_global' where it is not associated with a value
