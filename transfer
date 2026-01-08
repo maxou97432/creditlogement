@@ -1,13 +1,79 @@
---- Chargement V1 depuis N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee ---
-   -> Trouvé : prix_m2_univ_elem_MAJ_CITY_RESTREINT.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_DEPT_RESTREINT.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_REGION_RESTREINT.csv
-   -> Trouvé : prix_m2_univ_elem_MAJ_PROVINCE_RESTREINT.csv
-   [INFO] Manquant : prix_m2_univ_elem_MAJ_NATIONAL_RESTREINT.csv
-n:\uflumth\indicateur_marche\univers_elementaire\TI\test.py:378: FutureWarning:
+def load_cl_results(base_path, version_label):
+    print(f"--- Chargement {version_label} depuis {base_path} ---")
+    dfs = []
+    suffixes = ["CITY", "DEPT", "REGION", "PROVINCE", "NATIONAL"]
+    
+    for suffix in suffixes:
+        # LOGIQUE DE PRIORITÉ SÉPARÉE
+        if version_label == "V1":
+            # Pour V1, on ne veut QUE le standard (sans suffixe RESTREINT/HYBRIDE)
+            # On cherche exactement "prix_m2_univ_elem_MAJ_XXX.csv"
+            possible_names = [f"prix_m2_univ_elem_MAJ_{suffix}.csv"]
+        else:
+            # Pour V2, on veut la version modifiée (Hybride ou Restreinte)
+            possible_names = [
+                f"prix_m2_univ_elem_MAJ_{suffix}_HYBRIDE.csv",
+                f"prix_m2_univ_elem_MAJ_{suffix}_RESTREINT.csv"
+            ]
+        
+        found = False
+        for fname in possible_names:
+            fpath = os.path.join(base_path, fname)
+            if os.path.exists(fpath):
+                print(f"   -> Trouvé : {fname}")
+                try:
+                    df = pd.read_csv(fpath)
+                    # Standardisation Colonne Géo
+                    if "VAL_MAILLE_GEO" not in df.columns:
+                        cols_pot = [c for c in df.columns if c in ["Ville", "DEPT", "REGION", "PROVINCE_CODE"]]
+                        if cols_pot:
+                            df = df.rename(columns={cols_pot[0]: "VAL_MAILLE_GEO"})
+                    
+                    df['MAILLE_TYPE'] = suffix
+                    dfs.append(df)
+                    found = True
+                    break 
+                except Exception as e:
+                    print(f"   /!\\ Erreur lecture {fname}: {e}")
+        
+        if not found and version_label == "V2": 
+            # On accepte que le National manque parfois, mais on le signale
+            print(f"   [INFO] Fichier manquant pour maille : {suffix}")
 
-DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+    if not dfs: return None
+    full_df = pd.concat(dfs, ignore_index=True)
+    
+    # Nettoyage Date
+    if "DT_MAJ_PM2" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["DT_MAJ_PM2"], errors='coerce')
+    elif "Periode" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["Periode"], errors='coerce')
+        
+    col_prix = "prix_mm_value"
+    if col_prix in full_df.columns:
+        full_df = full_df.rename(columns={col_prix: f"Prix_M2_{version_label}"})
+        
+    return full_df
 
-Erreur lors de la comparaison LPI : cannot insert CD_TYPE_BIEN, already exists
+# 4. Calcul Stats
+        def get_stats(g):
+            rmse_v1 = np.sqrt(((g['Prix_M2_V1'] - g['Prix_LPI'])**2).mean())
+            rmse_v2 = np.sqrt(((g['Prix_M2_V2'] - g['Prix_LPI'])**2).mean())
+            corr_v1 = g['Prix_M2_V1'].corr(g['Prix_LPI'])
+            corr_v2 = g['Prix_M2_V2'].corr(g['Prix_LPI'])
+            return pd.Series({'RMSE_V1': rmse_v1, 'RMSE_V2': rmse_v2, 'Corr_V1': corr_v1, 'Corr_V2': corr_v2})
 
-=== ANALYSE TERMINÉE ===
+        # --- CORRECTION CRITIQUE ICI ---
+        # On ajoute include_groups=False pour éviter le conflit de colonnes avec Pandas récent
+        try:
+            stats = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"], include_groups=False).apply(get_stats).reset_index()
+        except TypeError:
+            # Fallback pour les vieilles versions de Pandas qui ne connaissent pas include_groups
+            stats = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).apply(get_stats).reset_index()
+        
+        stats["Gain_RMSE"] = stats["RMSE_V1"] - stats["RMSE_V2"]
+        
+        print("\nTOP 10 AMÉLIORATIONS (RMSE V2 < V1) :")
+        print(stats.sort_values("Gain_RMSE", ascending=False).head(10))
+        
+        stats.to_csv(os.path.join(params.CONFIG['output_dir'], "Comparatif_LPI_Stats.csv"), index=False)
