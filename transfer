@@ -1,2 +1,101 @@
-Periode,prix_mm_value,NB_BIENS,nb_univers,DIC_NAME,VAL_MAILLE_GEO,TYPE_MAILLE,CD_TYPE_BIEN,TAUX_INFL_12M,TAUX_INFL_3M
-2015-03-01,3291.4206827937423,24,6,prix_m2_12m,BORDEAUX,CITY,APT,,0.008008888494586142
+# =============================================================================
+# 4. COMPARAISON LPI-IAD (STATS) - VERSION CORRIGÉE FORMAT
+# =============================================================================
+print("\n--- Comparaison LPI-IAD ---")
+
+try:
+    # 1. Chargement V1 (Standard)
+    if 'df_v1' not in locals() or df_v1 is None:
+        df_v1 = load_cl_results(PATH_RESULTATS_V1, "V1")
+    
+    # 2. Chargement & Nettoyage LPI (C'est ici qu'on règle le problème de format)
+    print("   -> Chargement et normalisation LPI...")
+    lpi_df = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
+    
+    # ON RENOMME BRUTALEMENT LES 3 PREMIÈRES COLONNES (Pour ignorer les noms d'origine)
+    # On suppose l'ordre : Date | Ville | Prix
+    lpi_df = lpi_df.iloc[:, :3] 
+    lpi_df.columns = ["Periode", "VAL_MAILLE_GEO", "Prix_LPI"]
+    
+    # Nettoyage Date et Ville pour que ça matche avec V1/V2
+    lpi_df["Periode"] = pd.to_datetime(lpi_df["Periode"], errors='coerce')
+    lpi_df["VAL_MAILLE_GEO"] = lpi_df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    lpi_df["VAL_MAILLE_GEO"] = lpi_df["VAL_MAILLE_GEO"].replace({
+        "ST ETIENNE": "ST ETIENNE",
+        "SAINT ETIENNE": "ST ETIENNE",
+        "SAINT-ETIENNE": "ST ETIENNE",
+        "HAVRE": "LE HAVRE"
+    })
+    lpi_df["Prix_LPI"] = pd.to_numeric(lpi_df["Prix_LPI"], errors='coerce')
+    lpi_df = lpi_df.dropna() # On vire les lignes vides
+
+    # 3. Préparation V1 et V2
+    if df_v1 is not None and df_v2 is not None:
+        # On filtre V1 et V2 pour ne garder que ce qui est comparable (Ville + 12 mois)
+        # On standardise aussi les noms de villes dans V1/V2
+        def prep_cl(df):
+            d = df[(df["MAILLE_TYPE"] == "CITY") & (df["DIC_NAME"] == "prix_m2_12m")].copy()
+            d["VAL_MAILLE_GEO"] = d["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+            d["VAL_MAILLE_GEO"] = d["VAL_MAILLE_GEO"].replace({
+                "SAINT ETIENNE": "ST ETIENNE", "SAINT-ETIENNE": "ST ETIENNE", "HAVRE": "LE HAVRE"
+            })
+            return d
+
+        v1_city = prep_cl(df_v1)
+        v2_city = prep_cl(df_v2)
+        
+        # 4. Fusion V1 + V2 (sur Ville, Date ET Type de bien)
+        cols_merge = ["VAL_MAILLE_GEO", "Periode", "CD_TYPE_BIEN"]
+        
+        # On renomme les colonnes prix avant fusion pour éviter les conflits
+        v1_clean = v1_city[cols_merge + ["Prix_M2_V1"]]
+        v2_clean = v2_city[cols_merge + ["Prix_M2_V2"]]
+        
+        merge_cl = pd.merge(v1_clean, v2_clean, on=cols_merge, how="inner")
+        
+        # 5. Fusion avec LPI
+        # ATTENTION : LPI n'a pas de colonne "CD_TYPE_BIEN". 
+        # On fusionne sur Ville et Date. Cela va dupliquer les lignes LPI pour chaque type (APT et MAI).
+        final_comp = pd.merge(merge_cl, lpi_df, on=["VAL_MAILLE_GEO", "Periode"], how="inner")
+        
+        print(f"   -> Lignes communes trouvées : {len(final_comp)}")
+
+        # 6. Calcul Stats
+        stats_list = []
+        # On groupe par Ville ET par Type de bien pour voir qui matche le mieux
+        grouped = final_comp.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+        
+        for (geo, type_b), group in grouped:
+            if len(group) < 2: continue # Pas assez de points pour corr
+            
+            rmse_v1 = np.sqrt(((group['Prix_M2_V1'] - group['Prix_LPI'])**2).mean())
+            rmse_v2 = np.sqrt(((group['Prix_M2_V2'] - group['Prix_LPI'])**2).mean())
+            corr_v1 = group['Prix_M2_V1'].corr(group['Prix_LPI'])
+            corr_v2 = group['Prix_M2_V2'].corr(group['Prix_LPI'])
+            
+            stats_list.append({
+                "VAL_MAILLE_GEO": geo,
+                "CD_TYPE_BIEN": type_b,
+                "RMSE_V1": round(rmse_v1, 2),
+                "RMSE_V2": round(rmse_v2, 2),
+                "Gain_RMSE": round(rmse_v1 - rmse_v2, 2), # Positif = V2 meilleure
+                "Corr_V1": round(corr_v1, 4),
+                "Corr_V2": round(corr_v2, 4)
+            })
+            
+        if stats_list:
+            stats = pd.DataFrame(stats_list)
+            
+            # On affiche surtout les APPARTEMENTS (APT) car c'est souvent la ref LPI dans les grandes villes
+            print("\n=== RÉSULTATS COMPARATIFS (APPARTEMENTS) ===")
+            print(stats[stats["CD_TYPE_BIEN"] == "APT"].sort_values("Gain_RMSE", ascending=False).head(10))
+            
+            outfile = os.path.join(params.CONFIG['output_dir'], "Comparatif_LPI_Stats.csv")
+            stats.to_csv(outfile, index=False)
+            print(f"\nStats complètes sauvegardées : {outfile}")
+        else:
+            print("   /!\\ Pas de correspondance trouvée (Vérifiez les dates ou les noms de villes).")
+
+except Exception as e:
+    print(f"Erreur lors de la comparaison LPI : {e}")
+    # import traceback; traceback.print_exc() # Décommenter pour voir l'erreur exacte
