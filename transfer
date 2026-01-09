@@ -1,166 +1,117 @@
-
-""" Ce fichier a pour but de créer et traiter la deuxième version de la base de données
-    On reprend la bdd df_transac_clean qu'on vient fusionner à la base df_demande_clean;
-    On ne garde ensuite que les données de Crédit Logement, issues de France héxagonale, 
-    et on retire les transactions RAC et TVX
-"""
-import sys
-import os
-import time
-import logging
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.io as pio
-from fonctions import Connector
-from fonctions import detect_ano_ml as detect_ano_ml_fct
-import param_generaux as params
-
-pio.renderers.default = "browser"  
-# Configuration de l'environnement
-current_dir = os.getcwd()
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
-
-
-
-# Configuration des dossiers
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "correction base_demande")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
-
 # =============================================================================
-# 1. IMPORTATION ET CONCATÉNATION
+# 8. CALCUL DES PRIX SUR LA BASE RESTREINTE (V2_STRUCT uniquement)
 # =============================================================================
-print("--- 1. Importation des données ---")
-start_time = time.time()
+print("\n" + "="*80)
+print(" CALCUL DES PRIX V2_STRUCT (Poids V1 sur Base Restreinte)")
+print("="*80)
 
-co = Connector()
+# Chemins
+path_base_v1 = r"N:\uflumth\indicateur_marche\univers_elementaire\base_complete_filtree.parquet"
+path_base_v2 = output_path  # La base qu'on vient de créer
 
-# Chargement Base Transactions
-base_clean = pd.read_parquet(os.path.join(DATA_PATH, "df_transac_clean.parquet"))
-base_clean["DEMANDE"] = 0
+top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", 
+         "NICE", "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", 
+         "SAINT-ETIENNE", "LE HAVRE"]
 
-# Chargement Base Demandes
-demandes = pd.read_parquet(os.path.join(DATA_PATH, "df_demandes_clean.parquet"))
-demandes["DEMANDE"] = 1
+# -----------------------------------------------------------------------------
+# 8.1 EXTRACTION STRUCTURE DE MARCHÉ V1
+# -----------------------------------------------------------------------------
+print("\nChargement V1 pour extraction structure...")
+raw_v1 = pd.read_parquet(path_base_v1)
+df_v1_clean = raw_v1.rename(columns={"ville_": "Ville"})
+df_v1_clean["Ville"] = df_v1_clean["Ville"].astype(str).str.strip().str.upper()
+df_v1_clean["Ville"] = df_v1_clean["Ville"].replace({"HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"})
+df_v1_clean = df_v1_clean[df_v1_clean["Ville"].isin(top15)]
 
-# Fusion
-df = pd.concat([base_clean, demandes], axis=0)
+# Calcul des poids par univers
+dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+structure_v1 = df_v1_clean.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
+structure_v1["TYPE_BIEN"] = structure_v1["TYPE_BIEN"].astype(str).str.strip().str.upper()
+structure_v1["PB"] = structure_v1["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+structure_v1 = structure_v1[structure_v1["TYPE_BIEN"] == structure_v1["PB"]].drop(columns=["PB"])
+structure_v1["poids_structure"] = structure_v1.groupby("Ville")["volume_ref"].transform(lambda x: x / x.sum())
+structure_v1 = structure_v1[["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "poids_structure"]]
+print(f"✓ Structure V1 extraite : {len(structure_v1)} univers élémentaires")
 
-end_time = time.time()
-print(f"✓ Données chargées en {end_time - start_time:.2f} s. Total lignes : {len(df):,}")
+# -----------------------------------------------------------------------------
+# 8.2 CALCUL DES PRIX V2_STRUCT
+# -----------------------------------------------------------------------------
+print("\nTraitement V2_STRUCT...")
+raw_v2 = pd.read_parquet(path_base_v2)
 
-# =============================================================================
-# 2. ENRICHISSEMENT GÉOGRAPHIQUE (BAN)
-# =============================================================================
-print("\n--- 2. Enrichissement BAN (Codes IRIS) ---")
-# Récupération SQL
-df_ban = co.read_sql(f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
+# Filtrage DEMANDE == 0
+if "DEMANDE" in raw_v2.columns:
+    raw_v2 = raw_v2[raw_v2["DEMANDE"] == 0]
 
-# Fusion (Left join pour garder toutes les transactions)
-cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
+# Nettoyage
+raw_v2 = raw_v2.rename(columns={"ville_": "Ville"})
+raw_v2["DATE"] = pd.to_datetime(raw_v2["DATE"], errors="coerce")
+raw_v2["Ville"] = raw_v2["Ville"].astype(str).str.strip().str.upper()
+raw_v2["Ville"] = raw_v2["Ville"].replace({"HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"})
+raw_v2 = raw_v2[raw_v2["Ville"].isin(top15)]
+raw_v2 = raw_v2.dropna(subset=["DATE", "Ville", "TYPE_BIEN"])
+raw_v2["Periode"] = raw_v2["DATE"].dt.to_period("M").dt.to_timestamp()
 
-# =============================================================================
-# 3. Restrictions du périmètre d'étude
-# =============================================================================
-print("\n--- 3. Restrictions du périmètre d'étude ---")
+# Agrégation mensuelle
+keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+univers_mensuel = raw_v2.groupby(keys, dropna=False).agg(
+    nb_transac=("ID", "size"), prix_moyen=("Prix_m2", "mean")
+).reset_index()
 
-# A. Restriction Source CL
-cl_data = cl_data[cl_data["SOURCE"] == "CL"]
+# Nettoyage cohérence Type/Pièces
+univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+univers_mensuel = univers_mensuel[univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]].drop(columns="PB")
 
-# B. Restriction Métropole
-dept = cl_data["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
-metropole_set = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
-mask_metro = dept.isin(metropole_set)
-cl_data = cl_data[mask_metro]
+# Complétion mois manquants
+def complete_months(g):
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[col] = g[col].ffill().bfill()
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    return g.reset_index().rename(columns={"index": "Periode"})
 
-# C. Restriction Nature Opération (Exclusion TVX, RAC)
-cl_data["CD_NATUR_OP"] = cl_data["CD_NATUR_OP"].fillna("Non renseigné")
-mask_valid_op = (~cl_data["CD_NATUR_OP"].isin(["TVX", "RAC"]))
-cl_data = cl_data[mask_valid_op]
-cl_data = cl_data[cl_data["DATE"] < "2026-01-01"]
-print(f"✓ Périmètre restreint. Lignes restantes : {len(cl_data):,}")
+univers_complet = univers_mensuel.groupby(
+    ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False
+).apply(complete_months)
 
+# Application des poids V1
+univers_complet = univers_complet.merge(structure_v1, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
+univers_complet = univers_complet.rename(columns={"poids_structure": "poids_relatif"})
+univers_complet = univers_complet.dropna(subset=["poids_relatif"])
 
+# Indicatrices
+typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+univers_complet["I_12m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(
+    lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
 
+# Moyenne mobile pondérée 12 mois
+resultats = []
+for ville in univers_complet["Ville"].unique():
+    df_v = univers_complet[univers_complet["Ville"] == ville].sort_values("Periode")
+    periodes = df_v["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        start = max(0, i - 11)
+        df_fenetre = df_v[df_v["Periode"].isin(periodes[start:i+1])]
+        df_actif = df_fenetre[(df_fenetre["prix_moyen"].notna()) & (df_fenetre["I_12m"] == 1)]
+        
+        if len(df_actif) > 0 and df_actif["poids_relatif"].sum() > 0:
+            prix_mm = np.average(df_actif["prix_moyen"], weights=df_actif["poids_relatif"])
+        else:
+            prix_mm = np.nan
+        
+        resultats.append({"Ville": ville, "Periode": periode, "prix_mm_12m": prix_mm})
 
-# =============================================================================
-# 5. FILTRE TEMPOREL & ENRICHISSEMENT BÂTIMENT (BAT)
-# =============================================================================
-print("\n--- 5. Enrichissement Bâtiment & Filtre Date ---")
+res_v2_struct = pd.DataFrame(resultats)
 
-# A. Filtre Date
-cl_data["DATE"] = pd.to_datetime(cl_data["DATE"], errors="coerce")
-DATE_MIN = pd.Timestamp("2014-01-01")
-DATE_MAX = cl_data["DATE"].max() # Ou définir une date fixe
-
-base_ml = cl_data[(cl_data["DATE"] >= DATE_MIN) & (cl_data["DATE"] < DATE_MAX)].copy()
-
-# B. Fusion BAT (Année construction)
-start_time = time.time()
-df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
-base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
-
-end_time = time.time()
-print(f"✓ Fusion BAT terminée en {end_time - start_time:.2f} s")
-print(f"✓ Lignes restantes : {len(base_ml):,}")
-
-# =============================================================================
-# 6. CRÉATION DE VARIABLES (Neuf/Ancien & Typologie)
-# =============================================================================
-print("\n--- 6. Feature Engineering ---")
-
-# A. Correction Année Construction
-mask_vefa = base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement"
-base_ml.loc[mask_vefa, "annee_construction"] = base_ml.loc[mask_vefa, "DATE"].dt.year
-
-# B. Variable BIEN_NEUF
-base_ml["BIEN_NEUF"] = np.where(
-    (base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement") |
-    (base_ml["CD_NATUR_OP"] == "AQN") |
-    (abs(base_ml["YEAR"].astype(float) - base_ml["annee_construction"]) <= 2),
-    "NEUF",
-    "ANCIEN"
-)
-base_ml = base_ml.drop(columns=["NATURE_MUTATION"])
-
-# C. Variable NB_PIECES_RANGE
-base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
-
-bins_apt = [0, 2, 4, np.inf]
-labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"]
-
-bins_mai = [0, 4, np.inf]
-labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
-
-base_ml["NB_PIECES_RANGE"] = np.nan 
-mask_apt = base_ml["TYPE_BIEN"] == "APT"
-mask_mai = base_ml["TYPE_BIEN"] == "MAI"
-
-base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_apt, "NB_PIECES"], bins=bins_apt, labels=labels_apt, include_lowest=True
-).astype(str)
-
-base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_mai, "NB_PIECES"], bins=bins_mai, labels=labels_mai, include_lowest=True
-).astype(str)
-
-# Gestion des NaN convertis en string "nan"
-base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].replace("nan", np.nan)
-base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
-base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
-
-# =============================================================================
-# 7. EXPORT
-# =============================================================================
-colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT", 
-                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
-                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES_RANGE", 
-                        "CODE_POSTAL", "BIEN_NEUF"]
-
-base_ml = base_ml[colonnes_finales]
-output_path = os.path.join(OUTPUT_DIR, "transac+demandes_filtree.parquet")
-base_ml.to_parquet(output_path, index=False)
-print(f"\n✓ Fichier sauvegardé : {output_path}")
+# -----------------------------------------------------------------------------
+# 8.3 EXPORT
+# -----------------------------------------------------------------------------
+output_prix = os.path.join(OUTPUT_DIR, "prix_V2_STRUCT.csv")
+res_v2_struct.to_csv(output_prix, index=False)
+print(f"\n✓ Prix V2_STRUCT sauvegardés : {output_prix}")
+print(f"  - {res_v2_struct['Ville'].nunique()} villes, {len(res_v2_struct)} lignes")
