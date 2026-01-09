@@ -1,4 +1,3 @@
-
 """
     SCRIPT D'ANALYSE ET DE VISUALISATION (V2 vs LPI)
     ------------------------------------------------
@@ -31,7 +30,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 try:
-    import param_generaux as params
+    import param_general as params
 except ImportError:
     class params:
         CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
@@ -137,8 +136,8 @@ def clean_base(df, top_cities):
     # Ville
     df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
     df["Ville"] = df["Ville"].replace({
-    "HAVRE": "LE HAVRE",
-    "SAINT ETIENNE": "SAINT-ETIENNE"})
+        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE", "ST ETIENNE": "SAINT-ETIENNE"
+    })
     
     # Filtre Top 15
     df = df[df["Ville"].isin(top_cities)]
@@ -752,6 +751,8 @@ if __name__ == "__main__":
                 chain = pd.concat([pd.DataFrame({'ds': [last_date], 'yhat': [df_p.iloc[-1]['y']]}), forecast_fut[['ds', 'yhat']]])
                 fig.add_trace(go.Scatter(x=chain["ds"], y=chain["yhat"], mode="lines", name=f"Prev {col}", line=dict(color=colors[i], dash="dot"), showlegend=False))
 
+        fig.update_layout(title=f"Comparaison V1 vs V2_STRUCT vs LPI – {ville}", template="plotly_white")
+        fig.write_html(os.path.join(params.CONFIG['output_dir'], f"Graph_Prix_V1_V2STRUCT_{ville}.html"))
 
         # --- Stats IC ---
         lpi_col = "Prix moyen glissant 12 mois - LPI/IAD"
@@ -812,31 +813,86 @@ if __name__ == "__main__":
         print(f"Correspondance moyenne LPI (V1)        : {score_v1_total/nb_villes:.1%}")
         print(f"Correspondance moyenne LPI (V2_STRUCT) : {score_v2_struct_total/nb_villes:.1%}")
     
-    # Calcul RMSE
+    # Fonctions de calcul des métriques
     def calc_rmse(g, col):
+        """RMSE absolu en €/m²"""
         lpi = "Prix moyen glissant 12 mois - LPI/IAD"
         if col in g.columns and lpi in g.columns:
-            return np.sqrt(((g[col] - g[lpi])**2).mean())
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                return np.sqrt(((valid[col] - valid[lpi])**2).mean())
+        return np.nan
+    
+    def calc_rmse_relative(g, col):
+        """RMSE relatif en % du prix moyen (pour comparaison entre villes)"""
+        lpi = "Prix moyen glissant 12 mois - LPI/IAD"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                rmse = np.sqrt(((valid[col] - valid[lpi])**2).mean())
+                mean_price = valid[lpi].mean()
+                if mean_price > 0:
+                    return (rmse / mean_price) * 100  # En %
+        return np.nan
+    
+    def calc_correlation(g, col):
+        """Corrélation avec LPI"""
+        lpi = "Prix moyen glissant 12 mois - LPI/IAD"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 5:
+                return valid[col].corr(valid[lpi])
         return np.nan
 
+    # Calcul des statistiques par ville
     stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
+        # RMSE Absolu (€/m²)
         "RMSE_V1": calc_rmse(x, "Prix moyen glissant 12 mois - Univ Elem (V1)"),
-        "RMSE_V2_STRUCT": calc_rmse(x, "Prix moyen glissant 12 mois - Univ Elem (V2_STRUCT)")
+        "RMSE_V2_STRUCT": calc_rmse(x, "Prix moyen glissant 12 mois - Univ Elem (V2_STRUCT)"),
+        # RMSE Relatif (%)
+        "RMSE_REL_V1": calc_rmse_relative(x, "Prix moyen glissant 12 mois - Univ Elem (V1)"),
+        "RMSE_REL_V2_STRUCT": calc_rmse_relative(x, "Prix moyen glissant 12 mois - Univ Elem (V2_STRUCT)"),
+        # Corrélation
+        "CORR_V1": calc_correlation(x, "Prix moyen glissant 12 mois - Univ Elem (V1)"),
+        "CORR_V2_STRUCT": calc_correlation(x, "Prix moyen glissant 12 mois - Univ Elem (V2_STRUCT)"),
+        # Prix moyen LPI (pour contexte)
+        "Prix_Moyen_LPI": x["Prix moyen glissant 12 mois - LPI/IAD"].mean()
     })).reset_index()
     
+    # Calcul des gains (positif = V2_STRUCT meilleur)
     stats["Gain_RMSE"] = stats["RMSE_V1"] - stats["RMSE_V2_STRUCT"]
+    stats["Gain_RMSE_REL"] = stats["RMSE_REL_V1"] - stats["RMSE_REL_V2_STRUCT"]
+    stats["Gain_CORR"] = stats["CORR_V2_STRUCT"] - stats["CORR_V1"]
     
+    # Affichage des résultats
     print("\n" + "="*80)
     print(" RÉSULTATS COMPARATIFS : V1 vs V2_STRUCT")
     print("="*80)
-    print(f"\nGain Moyen RMSE (V2_STRUCT vs V1) : {stats['Gain_RMSE'].mean():.4f}")
-    print("-" * 80)
-    print("\nDétail par ville :")
-    print(stats.sort_values("Gain_RMSE", ascending=False))
+    
+    print("\n📊 RMSE ABSOLU (€/m²) :")
+    print(f"   V1        : {stats['RMSE_V1'].mean():.2f} €/m²")
+    print(f"   V2_STRUCT : {stats['RMSE_V2_STRUCT'].mean():.2f} €/m²")
+    print(f"   Gain      : {stats['Gain_RMSE'].mean():.2f} €/m² {'✅' if stats['Gain_RMSE'].mean() > 0 else '❌'}")
+    
+    print("\n📊 RMSE RELATIF (% du prix moyen) - Comparable entre villes :")
+    print(f"   V1        : {stats['RMSE_REL_V1'].mean():.2f} %")
+    print(f"   V2_STRUCT : {stats['RMSE_REL_V2_STRUCT'].mean():.2f} %")
+    print(f"   Gain      : {stats['Gain_RMSE_REL'].mean():.2f} pts {'✅' if stats['Gain_RMSE_REL'].mean() > 0 else '❌'}")
+    
+    print("\n📊 CORRÉLATION avec LPI :")
+    print(f"   V1        : {stats['CORR_V1'].mean():.4f}")
+    print(f"   V2_STRUCT : {stats['CORR_V2_STRUCT'].mean():.4f}")
+    print(f"   Gain      : {stats['Gain_CORR'].mean():.4f} {'✅' if stats['Gain_CORR'].mean() > 0 else '❌'}")
+    
+    print("\n" + "-" * 80)
+    print("\nDétail par ville (trié par Gain RMSE Relatif) :")
+    cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_V1", "RMSE_V2_STRUCT", "Gain_RMSE", 
+                    "RMSE_REL_V1", "RMSE_REL_V2_STRUCT", "Gain_RMSE_REL", "CORR_V1", "CORR_V2_STRUCT"]
+    print(stats[cols_display].sort_values("Gain_RMSE_REL", ascending=False).to_string(index=False))
     
     # Sauvegarde
     output_path = os.path.join(params.CONFIG['output_dir'], "Comparaison_V1_V2STRUCT_LPI.csv")
     stats.to_csv(output_path, index=False)
-    print(f"\nRésultats sauvegardés dans : {output_path}")
+    print(f"\n✓ Résultats sauvegardés dans : {output_path}")
 
     print("\n=== ANALYSE TERMINÉE ===")
