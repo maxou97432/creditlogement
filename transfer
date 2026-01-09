@@ -30,7 +30,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 try:
-    import param_generaux as params
+    import param_general as params
 except ImportError:
     class params:
         CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
@@ -234,29 +234,32 @@ def process_dataset_restreint(df, label, df_structure=None):
     univers_complet["I_3m"] = univers_complet.groupby(typokeys)["nb_transac"].transform(lambda s: (s.rolling(3, min_periods=3).sum() > 0).astype(int))
     univers_complet["I_12m"] = univers_complet.groupby(typokeys)["nb_transac"].transform(lambda s: (s.rolling(12, min_periods=12).sum() > 0).astype(int))
 
-    # 5. Calcul Moyenne Mobile Pondérée 
-    
-    def calc_mm(g, window, col_prix, col_indic):
+    # 5. Calcul Moyenne Mobile Pondérée (Fonction Interne Optimisée)
+    def calc_mm(g, window, col_indic):
         result = []
         g = g.sort_values("Periode")
         periodes = g["Periode"].unique()
+        
         for i, periode in enumerate(periodes):
             start = max(0, i - window + 1)
-            df_fenetre = g[g["Periode"].isin(periodes[start:i+1])]
-            df_actif = df_fenetre[(df_fenetre[col_prix].notna()) & (df_fenetre[col_indic] == 1)]
-            if len(df_actif) == 0:
+            fenetre = g.iloc[start : i+1] # Astuce: iloc plus rapide que isin
+            
+            # On ne garde que les segments qui ont un prix ET assez de volume (Indicatrice)
+            actifs = fenetre[(fenetre["prix_moyen"].notna()) & (fenetre[col_indic] == 1)]
+            
+            if len(actifs) == 0:
                 result.append({"Periode": periode, "prix_mm": np.nan})
                 continue
-            total_poids = df_actif["poids_relatif"].sum()
-            if total_poids > 0:
-                # RENORMALISATION : les poids des segments actifs doivent sommer à 1
-                poids_renorm = df_actif["poids_relatif"] / total_poids
-                prix_mm = np.average(df_actif[col_prix], weights=poids_renorm)
+            
+            # Renormalisation des poids sur les segments actifs
+            poids_sum = actifs["poids_relatif"].sum()
+            if poids_sum > 0:
+                prix = np.average(actifs["prix_moyen"], weights=actifs["poids_relatif"])
             else:
-                prix_mm = np.nan
-            result.append({"Periode": periode, "prix_mm": prix_mm})
+                prix = np.nan
+            
+            result.append({"Periode": periode, "prix_mm": prix})
         return pd.DataFrame(result)
-
 
     # 6. Exécution par Ville (Agrégation tous types confondus pour coller à LPI)
     res_final = []
@@ -314,7 +317,7 @@ if __name__ == "__main__":
     # =============================================================================
     # 3. CODE GRAPHIQUE 
     # =============================================================================
-    print("\n--- Génération des Cartes ---")
+    print("\n--- Génération des Cartes (Style Personnalisé) ---")
 
     # --- PALETTE DE COULEURS & POLICE ---
     CL_TURQUOISE = '#A8DADC' 
@@ -620,7 +623,9 @@ if __name__ == "__main__":
                     continue
                 total_poids = df_actif["poids_relatif"].sum()
                 if total_poids > 0:
-                    prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
+                    # RENORMALISATION : les poids des segments actifs doivent sommer à 1
+                    poids_renorm = df_actif["poids_relatif"] / total_poids
+                    prix_mm = np.average(df_actif[col_prix], weights=poids_renorm)
                 else:
                     prix_mm = np.nan
                 result.append({"Periode": periode, "prix_mm": prix_mm})
@@ -748,6 +753,8 @@ if __name__ == "__main__":
                 chain = pd.concat([pd.DataFrame({'ds': [last_date], 'yhat': [df_p.iloc[-1]['y']]}), forecast_fut[['ds', 'yhat']]])
                 fig.add_trace(go.Scatter(x=chain["ds"], y=chain["yhat"], mode="lines", name=f"Prev {col}", line=dict(color=colors[i], dash="dot"), showlegend=False))
 
+        fig.update_layout(title=f"Comparaison V1 vs V2_STRUCT vs LPI – {ville}", template="plotly_white")
+        fig.write_html(os.path.join(params.CONFIG['output_dir'], f"Graph_Prix_V1_V2STRUCT_{ville}.html"))
 
         # --- Stats IC ---
         lpi_col = "Prix moyen glissant 12 mois - LPI/IAD"
@@ -856,7 +863,7 @@ if __name__ == "__main__":
     
     # Calcul des gains (positif = V2_STRUCT meilleur)
     stats["Gain_RMSE"] = stats["RMSE_V1"] - stats["RMSE_V2_STRUCT"]
-    stats["Gain_RMSE_RELATIF"] = stats["RMSE_REL_V1"] - stats["RMSE_REL_V2_STRUCT"]
+    stats["Gain_RMSE_REL"] = stats["RMSE_REL_V1"] - stats["RMSE_REL_V2_STRUCT"]
     stats["Gain_CORR"] = stats["CORR_V2_STRUCT"] - stats["CORR_V1"]
     
     # Affichage des résultats
@@ -867,23 +874,23 @@ if __name__ == "__main__":
     print("\n📊 RMSE ABSOLU (€/m²) :")
     print(f"   V1        : {stats['RMSE_V1'].mean():.2f} €/m²")
     print(f"   V2_STRUCT : {stats['RMSE_V2_STRUCT'].mean():.2f} €/m²")
-    print(f"   Gain      : {stats['Gain_RMSE'].mean():.2f} €/m² {'Amélioration' if stats['Gain_RMSE'].mean() > 0 else 'Dégradation'}")
+    print(f"   Gain      : {stats['Gain_RMSE'].mean():.2f} €/m² {'✅' if stats['Gain_RMSE'].mean() > 0 else '❌'}")
     
     print("\n📊 RMSE RELATIF (% du prix moyen) - Comparable entre villes :")
     print(f"   V1        : {stats['RMSE_REL_V1'].mean():.2f} %")
     print(f"   V2_STRUCT : {stats['RMSE_REL_V2_STRUCT'].mean():.2f} %")
-    print(f"   Gain      : {stats['Gain_RMSE_RELATIF'].mean():.2f} pts {'Amélioration' if stats['Gain_RMSE_RELATIF'].mean() > 0 else 'Dégradation'}")
+    print(f"   Gain      : {stats['Gain_RMSE_REL'].mean():.2f} pts {'✅' if stats['Gain_RMSE_REL'].mean() > 0 else '❌'}")
     
     print("\n📊 CORRÉLATION avec LPI :")
     print(f"   V1        : {stats['CORR_V1'].mean():.4f}")
     print(f"   V2_STRUCT : {stats['CORR_V2_STRUCT'].mean():.4f}")
-    print(f"   Gain      : {stats['Gain_CORR'].mean():.4f} {'Amélioration' if stats['Gain_CORR'].mean() > 0 else 'Dégradation'}")
+    print(f"   Gain      : {stats['Gain_CORR'].mean():.4f} {'✅' if stats['Gain_CORR'].mean() > 0 else '❌'}")
     
     print("\n" + "-" * 80)
     print("\nDétail par ville (trié par Gain RMSE Relatif) :")
     cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_V1", "RMSE_V2_STRUCT", "Gain_RMSE", 
-                    "RMSE_REL_V1", "RMSE_REL_V2_STRUCT", "Gain_RMSE_RELATIF", "CORR_V1", "CORR_V2_STRUCT"]
-    print(stats[cols_display].sort_values("Gain_RMSE_RELATIF", ascending=False).to_string(index=False))
+                    "RMSE_REL_V1", "RMSE_REL_V2_STRUCT", "Gain_RMSE_REL", "CORR_V1", "CORR_V2_STRUCT"]
+    print(stats[cols_display].sort_values("Gain_RMSE_REL", ascending=False).to_string(index=False))
     
     # Sauvegarde
     output_path = os.path.join(params.CONFIG['output_dir'], "Comparaison_V1_V2STRUCT_LPI.csv")
