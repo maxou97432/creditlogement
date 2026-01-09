@@ -542,20 +542,41 @@ if __name__ == "__main__":
         sys.exit(f"Erreur chargement V2: {e}")
 
     # -------------------------------------------------------------------------
-    # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1)
+    # B.2 PRÉPARATION DES DONNÉES (comme dans comparaison.py)
     # -------------------------------------------------------------------------
-    # Nettoyage V1 pour extraction structure
-    df_v1_clean = clean_base(raw_v1, params.CONFIG['top15_cities'])
-    structure_v1 = get_structure_reference_city(df_v1_clean)
+    # Nettoyage léger de V1 pour extraction de structure uniquement
+    df_v1_for_struct = raw_v1.copy()
+    df_v1_for_struct = df_v1_for_struct.rename(columns={"ville_": "Ville"})
+    df_v1_for_struct["Ville"] = df_v1_for_struct["Ville"].astype(str).str.strip().str.upper()
+    df_v1_for_struct["Ville"] = df_v1_for_struct["Ville"].replace({
+        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"
+    })
+    df_v1_for_struct = df_v1_for_struct[df_v1_for_struct["Ville"].isin(params.CONFIG['top15_cities'])]
+    
+    # Extraction structure de marché V1
+    structure_v1 = get_structure_reference_city(df_v1_for_struct)
     
     # -------------------------------------------------------------------------
-    # B.3 CALCUL DES PRIX GLISSANTS
+    # B.3 CALCUL DES PRIX GLISSANTS (avec données brutes)
     # -------------------------------------------------------------------------
-    # V1 : Poids internes (structure propre V1)
+    # V1 : Poids internes - on utilise clean_base comme avant
+    df_v1_clean = clean_base(raw_v1, params.CONFIG['top15_cities'])
     res_v1 = process_dataset_restreint(df_v1_clean, "V1", df_structure=None)
     
     # V2_STRUCT : Poids EXTERNES (structure V1 appliquée à V2)
-    df_v2_clean = clean_base(raw_v2, params.CONFIG['top15_cities'])
+    # On utilise clean_base mais SANS le dropna sur NB_PIECES_RANGE
+    df_v2_clean = raw_v2.copy()
+    if "ville_" in df_v2_clean.columns: 
+        df_v2_clean = df_v2_clean.rename(columns={"ville_": "Ville"})
+    df_v2_clean["DATE"] = pd.to_datetime(df_v2_clean["DATE"], errors="coerce")
+    df_v2_clean["Ville"] = df_v2_clean["Ville"].astype(str).str.strip().str.upper()
+    df_v2_clean["Ville"] = df_v2_clean["Ville"].replace({
+        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"
+    })
+    df_v2_clean = df_v2_clean[df_v2_clean["Ville"].isin(params.CONFIG['top15_cities'])]
+    df_v2_clean = df_v2_clean.dropna(subset=["DATE", "Ville", "TYPE_BIEN"])  # Sans NB_PIECES_RANGE
+    df_v2_clean["Periode"] = df_v2_clean["DATE"].dt.to_period("M").dt.to_timestamp()
+    
     res_v2_struct = process_dataset_restreint(df_v2_clean, "V2_STRUCT", df_structure=structure_v1)
     
     # Fusion des résultats
