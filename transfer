@@ -520,12 +520,127 @@ if __name__ == "__main__":
         plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
         plt.close()
         print(f"   -> Sauvegardé : {output_file_png}")
-
     # =============================================================================
     # B. COMPARAISON V1 vs V2_STRUCT vs LPI (Structure de marché)
     # =============================================================================
     print("\n=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===")
     
+    # On importe les fonctions de comparaison.py pour avoir exactement la même logique
+    import importlib.util
+    comparaison_path = os.path.join(current_dir, "comparaison.py")
+    
+    # Si comparaison.py n'est pas disponible, on utilise une version locale
+    # Définition locale des fonctions identiques à comparaison.py
+    
+    top15_local = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", 
+                   "NICE", "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", 
+                   "SAINT-ETIENNE", "LE HAVRE"]
+    
+    def get_structure_ref_local(df):
+        """Extrait la structure du marché (poids) - identique à comparaison.py"""
+        print("\n--- Extraction de la Structure de Marché (V1) ---")
+        dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+        structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
+        structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.strip().str.upper()
+        structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+        structure = structure[structure["TYPE_BIEN"] == structure["PB"]].drop(columns=["PB"])
+        structure["poids_structure"] = structure.groupby("Ville")["volume_ref"].transform(lambda x: x / x.sum())
+        return structure[["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "poids_structure"]]
+
+    def process_dataset_local(df, label, is_v2=False, df_structure=None):
+        """Calcule les prix glissants - identique à comparaison.py"""
+        print(f"\n--- Traitement du dataset : {label} ---")
+        
+        # 1. Standardisation
+        if is_v2 and "DEMANDE" in df.columns:
+            df = df[df["DEMANDE"] == 0]
+        
+        df = df.rename(columns={"ville_": "Ville"})
+        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+        df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
+        df["Ville"] = df["Ville"].replace({"HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"})
+        df = df[df["Ville"].isin(top15_local)]
+        df = df.dropna(subset=["DATE", "Ville", "TYPE_BIEN"])  # PAS de NB_PIECES_RANGE ici !
+        df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+
+        # 2. Agrégation mensuelle
+        keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+        univers_mensuel = df.groupby(keys, dropna=False).agg(
+            nb_transac=("ID", "size"), prix_moyen=("Prix_m2", "mean")
+        ).reset_index()
+        
+        # Nettoyage cohérence
+        univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+        univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+        univers_mensuel = univers_mensuel[univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]].drop(columns="PB")
+
+        # 3. Complétion mois manquants
+        def complete_months_local(g):
+            g = g.sort_values("Periode").set_index("Periode")
+            idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+            g = g.reindex(idx)
+            for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+                g[col] = g[col].ffill().bfill()
+            g["nb_transac"] = g["nb_transac"].fillna(0)
+            return g.reset_index().rename(columns={"index": "Periode"})
+
+        univers_complet = univers_mensuel.groupby(
+            ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False
+        ).apply(complete_months_local)
+
+        # 4. Application des poids
+        if df_structure is not None:
+            print("   -> Application des poids STRUCTURE (V1)")
+            univers_complet = univers_complet.merge(df_structure, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
+            univers_complet = univers_complet.rename(columns={"poids_structure": "poids_relatif"})
+            univers_complet = univers_complet.dropna(subset=["poids_relatif"])
+        else:
+            print("   -> Calcul des poids INTERNES")
+            poids_global = univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"].sum()
+            poids_global = poids_global.rename(columns={"nb_transac": "poids_total"})
+            poids_global["poids_relatif"] = poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
+            univers_complet = univers_complet.merge(poids_global, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
+
+        # 5. Indicatrices
+        typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+        univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+        univers_complet["I_3m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(
+            lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+        univers_complet["I_12m"] = univers_complet.groupby(typokeys, group_keys=False)["nb_transac"].transform(
+            lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+
+        # 6. Moyenne mobile pondérée
+        def calc_mm_local(g, window, col_prix, col_indic):
+            result = []
+            g = g.sort_values("Periode")
+            periodes = g["Periode"].unique()
+            for i, periode in enumerate(periodes):
+                start = max(0, i - window + 1)
+                df_fenetre = g[g["Periode"].isin(periodes[start:i+1])]
+                df_actif = df_fenetre[(df_fenetre[col_prix].notna()) & (df_fenetre[col_indic] == 1)]
+                if len(df_actif) == 0:
+                    result.append({"Periode": periode, "prix_mm": np.nan})
+                    continue
+                total_poids = df_actif["poids_relatif"].sum()
+                if total_poids > 0:
+                    prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
+                else:
+                    prix_mm = np.nan
+                result.append({"Periode": periode, "prix_mm": prix_mm})
+            return pd.DataFrame(result)
+
+        # 7. Exécution par ville
+        resultats_mm = []
+        for ville in univers_complet["Ville"].unique():
+            df_v = univers_complet[univers_complet["Ville"] == ville].copy()
+            mm_3m = calc_mm_local(df_v, 3, 'prix_moyen', 'I_3m').rename(columns={"prix_mm": f"prix_mm_3m ({label})"})
+            mm_12m = calc_mm_local(df_v, 12, 'prix_moyen', 'I_12m').rename(columns={"prix_mm": f"prix_mm_12m ({label})"})
+            mm_ville = mm_3m.merge(mm_12m, on="Periode", how="outer")
+            mm_ville["Ville"] = ville
+            resultats_mm.append(mm_ville)
+        
+        return pd.concat(resultats_mm, ignore_index=True)
+
     # -------------------------------------------------------------------------
     # B.1 CHARGEMENT DES DONNÉES BRUTES
     # -------------------------------------------------------------------------
@@ -542,42 +657,21 @@ if __name__ == "__main__":
         sys.exit(f"Erreur chargement V2: {e}")
 
     # -------------------------------------------------------------------------
-    # B.2 PRÉPARATION DES DONNÉES (comme dans comparaison.py)
+    # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - avec fonctions locales
     # -------------------------------------------------------------------------
-    # Nettoyage léger de V1 pour extraction de structure uniquement
     df_v1_for_struct = raw_v1.copy()
     df_v1_for_struct = df_v1_for_struct.rename(columns={"ville_": "Ville"})
     df_v1_for_struct["Ville"] = df_v1_for_struct["Ville"].astype(str).str.strip().str.upper()
-    df_v1_for_struct["Ville"] = df_v1_for_struct["Ville"].replace({
-        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"
-    })
-    df_v1_for_struct = df_v1_for_struct[df_v1_for_struct["Ville"].isin(params.CONFIG['top15_cities'])]
+    df_v1_for_struct["Ville"] = df_v1_for_struct["Ville"].replace({"HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"})
+    df_v1_for_struct = df_v1_for_struct[df_v1_for_struct["Ville"].isin(top15_local)]
     
-    # Extraction structure de marché V1
-    structure_v1 = get_structure_reference_city(df_v1_for_struct)
+    structure_v1 = get_structure_ref_local(df_v1_for_struct)
     
     # -------------------------------------------------------------------------
-    # B.3 CALCUL DES PRIX GLISSANTS (avec données brutes)
+    # B.3 CALCUL DES PRIX GLISSANTS - avec fonctions locales identiques à comparaison.py
     # -------------------------------------------------------------------------
-    # V1 : Poids internes - on utilise clean_base comme avant
-    df_v1_clean = clean_base(raw_v1, params.CONFIG['top15_cities'])
-    res_v1 = process_dataset_restreint(df_v1_clean, "V1", df_structure=None)
-    
-    # V2_STRUCT : Poids EXTERNES (structure V1 appliquée à V2)
-    # On utilise clean_base mais SANS le dropna sur NB_PIECES_RANGE
-    df_v2_clean = raw_v2.copy()
-    if "ville_" in df_v2_clean.columns: 
-        df_v2_clean = df_v2_clean.rename(columns={"ville_": "Ville"})
-    df_v2_clean["DATE"] = pd.to_datetime(df_v2_clean["DATE"], errors="coerce")
-    df_v2_clean["Ville"] = df_v2_clean["Ville"].astype(str).str.strip().str.upper()
-    df_v2_clean["Ville"] = df_v2_clean["Ville"].replace({
-        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"
-    })
-    df_v2_clean = df_v2_clean[df_v2_clean["Ville"].isin(params.CONFIG['top15_cities'])]
-    df_v2_clean = df_v2_clean.dropna(subset=["DATE", "Ville", "TYPE_BIEN"])  # Sans NB_PIECES_RANGE
-    df_v2_clean["Periode"] = df_v2_clean["DATE"].dt.to_period("M").dt.to_timestamp()
-    
-    res_v2_struct = process_dataset_restreint(df_v2_clean, "V2_STRUCT", df_structure=structure_v1)
+    res_v1 = process_dataset_local(raw_v1, "V1", is_v2=False, df_structure=None)
+    res_v2_struct = process_dataset_local(raw_v2, "V2_STRUCT", is_v2=True, df_structure=structure_v1)
     
     # Fusion des résultats
     merge_cl = pd.merge(res_v1, res_v2_struct, on=["Ville", "Periode"], how="outer")
