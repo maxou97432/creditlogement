@@ -1,3 +1,19 @@
+N_YEARS = 3  # pour le modele ML
+VAR_NUM = ["Prix_m2"]  # pour le modele TI
+# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
+N_MIN = 30  # pour les deux modeles
+
+# Méthode de détection d'anomalies (la même pour les deux modèles)
+# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
+# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
+# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
+OUTLIER_MODE = "mult"
+# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
+COEFF_ECART = 4
+PRIX_M2_MIN = 200
+PRIX_M2_MAX = 20000
+
+
 class DetectAno:
 
     def __init__(self, meta_num_all, var_num):
@@ -75,7 +91,7 @@ class DetectAno:
                 axis=1,
             )
             mask_anomalie = X["Ano_" + var] == 1
-            X.loc[mask_anomalie, "OUTLIER_REASON"] = X.loc[mask_anomalie, "OUTLIER_REASON"].apply(lambda x: (x + "|" + var + "hors_limites") if x else( var + "hors_limites"))
+            X.loc[mask_anomalie, "OUTLIER_REASON"] = X.loc[mask_anomalie, "OUTLIER_REASON"].apply(lambda x: (x + "|" + var + "_hors_limites") if x else( var + "_hors_limites"))
         
         nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
         nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
@@ -109,6 +125,46 @@ class DetectAno:
             f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
         )
 
+        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
+            #Calcul des médianes par groupe
+
+            medianes = X.groupby(["YEAR","ville_","TYPE_BIEN"])["Prix_m2"].median().reset_index()
+            medianes.rename(columns={"Prix_m2":"prix_m2_median"}, inplace = True)
+            X = X.merge(medianes, on = ["YEAR","ville_","TYPE_BIEN"], how = "left")
+
+            # Critère 1: Prix < médiane / 4
+            mask_inf = (X["Prix_m2"].notna()) & (X["Prix_m2"] < X["prix_m2_median"] / 4) 
+            X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(lambda x : (x + "|Prix_m2_inf_mediane/4") if x else "|Prix_m2_inf_mediane/4")
+
+            # Critère 2: Prix > médiane * 4
+            mask_sup = (X["Prix_m2"].notna()) & (X["Prix_m2"] > X["prix_m2_median"] * 4) 
+            X.loc[mask_inf, "OUTLIER_REASON"] = X.loc[mask_inf, "OUTLIER_REASON"].apply(lambda x : (x + "|Prix_m2_sup_mediane*4") if x else "|Prix_m2_sup_mediane*4" )
+
+            # Critère 3: Prix < 20
+            mask_20 = (X["Prix_m2"].notna()) & (X["Prix_m2"] < 20) 
+            X.loc[mask_20, "OUTLIER_REASON"] = X.loc[mask_20, "OUTLIER_REASON"].apply(lambda x : (x + "|Prix_m2_inf_20") if x else "|Prix_m2_inf_20" )
+            
+            # Critère 4: Prix > 20 000
+            mask_20000 = (X["Prix_m2"].notna()) & (X["Prix_m2"] > 20 000) 
+            X.loc[mask_20000, "OUTLIER_REASON"] = X.loc[mask_20000, "OUTLIER_REASON"].apply(lambda x : (x + "|Prix_m2_sup_20000") if x else "|Prix_m2_sup_20000")
+
+
+            # On combine tous les masques
+            mask_final = mask_inf | mask_sup | mask_20 | mask_20000
+            
+            # Stats avant suppression
+            nb_avant_supression = X["Prix_m2"].notna().sum()    
+
+            # On applique les filtres
+            X.loc[mask_final, 'Prix_m2'] = np.nan
+            X.loc[mask_final, 'NB_SURF_HAB'] = np.nan
+
+            # Stats après supression
+            nb_apres_supression = X["Prix_m2"].notna().sum()
+            nb_suppr = nb_avant_supression - nb_apres_supression
+
+            print(f"{nb_suppr} anomalies supprimées avec les critères médianes/prix")
+            X.drop(columns=['prix_m2_median'],inplace = True, errors = 'ignore')
         # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
         X["ratio_val_mt_op"] = np.nan
         X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
@@ -253,3 +309,494 @@ def detect_ano_ml(input_df, n_years=None):
     
 
     return data_recent, data_mauvais
+
+   
+   
+
+#df = pd.read_parquet("Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
+#base_ml = detect_ano_ml(input_df=df, date_min = None, date_max = None, type_bien = None)
+#base_ml.to_csv(r"N:\uflumth\indicateur_marche\prix_m2\my_cl_estim\prez\base_ml_output.csv", index =  False, encoding = "utf-8")
+
+
+class Connector(object):
+    """Classe permettant de lire et écrire des données."""
+
+    def __init__(self):
+        self.engine_read = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="read",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+        self.engine_write = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="write",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+
+    def read_excel(self, input_path, skiprows=None):
+        try:
+            data = pd.read_excel(input_path, skiprows=skiprows)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_csv(self, input_path, sep=","):
+        try:
+            data = pd.read_csv(input_path, sep=sep, low_memory=False)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_pkl(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PKL}"
+            if os.path.isfile(f"{input_path}{params.EXT_PKL}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PKL}"
+        )
+        try:
+            data = pd.read_pickle(input_path)
+        except:
+            try:
+                with open(input_path, "rb") as file:
+                    data = pickle.load(file)
+            except FileNotFoundError:
+                sys.exit()
+        return data
+
+    def write_pkl(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PKL}"
+        try:
+            data.to_pickle(output_path)
+        except:
+            try:
+                with open(output_path, "wb") as file:
+                    pickle.dump(data, file)
+            except:  # if the directory doesn't exist
+                sys.exit()
+
+    def read_parquet(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PARQUET}"
+            if os.path.isfile(f"{input_path}{params.EXT_PARQUET}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PARQUET}"
+        )
+        try:
+            data = pd.read_parquet(input_path)
+        except:
+            sys.exit()
+        return data
+
+    def write_parquet(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PARQUET}"
+        try:
+            data.to_parquet(output_path)
+        except:
+            sys.exit()
+
+    def read_sql(self, query):
+        data = pd.read_sql_query(query, self.engine_read)
+
+        return data
+
+    def write_sql(self, data, table, chunksize=None):
+        # chunksize < 2100 / nb_colonnes
+        chunksize = chunksize or round(2000 / len(data.columns))
+        data.reset_index(inplace=True, drop=True)
+
+        data.to_sql(
+            name=table,
+            con=self.engine_write,
+            schema=params.SCHEMA,
+            if_exists="append",
+            index=False,
+            chunksize=chunksize,
+        )
+
+    def delete_sql(self, table):
+        with self.engine_read.begin() as conn:
+            conn.execute(f"TRUNCATE TABLE {table}")
+
+
+def connect_sql(
+    server=params.SERVEUR,
+    database=params.DATABASE,
+    id=params.PROD_ID,
+    pwd=params.PROD_PWD,
+    usage="read",
+    conn_params_optional=None
+):
+    conn_params = "DRIVER={SQL Server};" f"SERVER={server};DATABASE={database};"
+    conn_params_optional = conn_params_optional or {}
+    for key, val in conn_params_optional.items():
+        conn_params += f"{key}={val};"
+    if pwd is not None:
+        conn_params += f"UID={id};PWD={pwd};"
+    conn_params = urllib.parse.quote_plus(conn_params)
+    create_engine_kwargs = {"fast_executemany": True}
+    if usage != "write":
+        create_engine_kwargs["isolation_level"] = "AUTOCOMMIT"
+    engine = create_engine(
+        "mssql+pyodbc:///?odbc_connect={}".format(conn_params), **create_engine_kwargs
+    )
+    return engine
+
+
+def _add_suffixe(path):
+    if params.TEST_MODE and params.N_ROWS is not None:
+        path = f"{path}{params.SUFF_TEST_MODE}"
+    return path
+
+
+
+
+
+
+
+#############################################################################################
+#############################################################################################
+                                #Fonctions Univ-Elem#
+
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
+
+def load_and_preprocess_data(specific_path = None):
+    """Charge et prétraite les données initiales."""
+    print("Chargement des données...")
+    if specific_path is not None:
+        fichier = specific_path
+    else:
+        fichier = params.CONFIG['input_file']
+
+    try:
+        df = pd.read_parquet(fichier)
+    except FileNotFoundError:
+        print(f"Le fichier {fichier} est introuvable")
+    
+    
+    # Renommage et nettoyage initial
+    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
+    df = df.dropna(subset=["CITY", "CP", "DEPT"])
+    
+    # Conversion des dates
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    # Ajout colonne REGION
+    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
+    df['REGION'] = df['DEPT'].map(params.CONFIG['dep_to_region'])
+    
+    return df
+
+def apply_nice_correction(df):
+    """Applique la correction spécifique pour Nice."""
+    if "IRIS" in df.columns:
+        mask_nice = df["IRIS"].str[:5].isin(params.CONFIG['codes_insee_nice'])
+        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+        df.loc[mask_nice, "CITY"] = "NICE"
+    return df
+
+def complete_months(g, col):
+    """Complète les mois manquants."""
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    # Forward fill et Backward fill pour les colonnes catégorielles
+    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[i] = g[i].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    # g["prix_moyen"] reste NaN là où il n'y a pas de données
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
+    """Calcule la moyenne mobile pondérée."""
+    result = []
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        # Optimisation: ne traiter que les mois trimestriels (3, 6, 9, 12)
+        if pd.Timestamp(periode).month % 3 != 0:
+            continue
+            
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
+        
+        # Filtre sur la fenêtre temporelle
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)]
+        
+        # Filtre sur les données actives (prix existant et indicateur valide)
+        mask_actif = (df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)
+        df_actif = df_fenetre[mask_actif]
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_univers": 0
+            })
+            continue
+        
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            # Calcul de la moyenne pondérée
+            prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
+        else:
+            prix_mm = np.nan
+            
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": len(df_actif),
+            "nb_univers": df_actif.groupby(typokeys).ngroups
+        })
+    
+    return pd.DataFrame(result)
+
+def process_maille(df, maille_col, maille_name, filter_func=None, df_structure_ref = None):
+    """Fonction générique pour traiter une maille géographique."""
+    print(f"\n--- Traitement de la maille : {maille_name} ---")
+    start_time = datetime.now()
+    
+    # Filtrage spécifique si nécessaire
+    df_work = df.copy()
+    if filter_func:
+        df_work = filter_func(df_work)
+        
+    if df_work.empty:
+        print(f"Aucune donnée pour la maille {maille_name} après filtrage.")
+        return None
+
+    # Nettoyage de la colonne maille
+    if df_work[maille_col].dtype == 'object':
+        df_work[maille_col] = df_work[maille_col].astype(str).str.strip().str.upper()
+
+    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    
+    # 1. Agrégation mensuelle
+    univers_mensuel = (
+        df_work.groupby(dims, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_median=("Prix_m2", "median"),
+            prix_moyen=("Prix_m2", "mean"),
+        )
+        .reset_index()
+    )
+    
+    # Nettoyage post-agrégation
+    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    
+    # Filtre cohérence Pièces/Type 
+    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
+    univers_mensuel = univers_mensuel[mask_coherence].drop(columns=["PB"])
+
+    # 2. Complétion des mois
+    print("Complétion des mois manquants...")
+    univers_complet = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(lambda g: complete_months(g, maille_col))
+    )
+    
+    # 3. Calcul des poids structurels
+    
+    
+
+    if df_structure_ref is not None:
+        print("--- Application de la structure de marché globale ---")
+        univers_complet = univers_complet.merge(
+            df_structure_ref, on = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how = "left"
+        )
+        univers_complet = univers_complet.rename(columns={"poids_relatif_imposes" : "poids_relatif"})
+        univers_complet = univers_complet.dropna(subset=['poids_relatif'])
+    
+    else:
+        poids_global = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum()
+        .rename(columns={"nb_transac": "poids_total"})
+        )
+        poids_global["poids_relatif"] = (
+            poids_global.groupby(maille_col)["poids_total"].transform(lambda x: x / x.sum())
+            )
+    
+        univers_complet = univers_complet.merge(
+            poids_global,
+            on=[maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+            how="left"
+        )
+
+    # 4. Calcul des indicatrices
+    typokeys = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+    
+    univers_complet["I_3m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    )
+    univers_complet["I_12m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+    )
+    
+    # 5. Calcul des moyennes mobiles pondérées
+    print("Calcul des moyennes mobiles...")
+    resultats_mm = []
+    
+
+    groupes_calcul = univers_complet.groupby([maille_col, 'TYPE_BIEN'])
+    
+    for (maille_val, type_bien), df_groupe in groupes_calcul:
+        # MM 3 mois
+        mm_3m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=3, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_3m', 
+            typokeys=typokeys
+        )
+        mm_3m["DIC_NAME"] = "prix_m2_3m"
+        mm_3m = mm_3m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # MM 12 mois
+        mm_12m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=12, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_12m', 
+            typokeys=typokeys
+        )
+        mm_12m["DIC_NAME"] = "prix_m2_12m"
+        mm_12m = mm_12m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # Consolidation
+        mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
+        mm_type["VAL_MAILLE_GEO"] = maille_val
+        mm_type["TYPE_MAILLE"] = maille_col 
+        mm_type["CD_TYPE_BIEN"] = type_bien
+        
+        resultats_mm.append(mm_type)
+    
+    if not resultats_mm:
+        return None
+        
+    final_df = pd.concat(resultats_mm, ignore_index=True)
+    
+    # Nettoyage final et calcul taux inflation
+    final_df = final_df.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    
+    # Calcul inflation 
+    final_df["TAUX_INFL_12M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=4) 
+    final_df["TAUX_INFL_3M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=1)
+
+    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
+    return final_df
+
+def save_results(df, suffixe_fichier):
+    """Sauvegarde les résultats dans différents fichiers CSV."""
+    if df is None or df.empty:
+        print(f"Aucune donnée à sauvegarder pour {suffixe_fichier}")
+        return
+
+    # 1. Base complète (filtrée sur date)
+    df_complet = df.copy()
+    df_complet["Periode"] = pd.to_datetime(df_complet["Periode"])
+    df_complet = df_complet[df_complet["Periode"] >= "2015-03-01"]
+    
+    output_path = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_complet_{suffixe_fichier}.csv")
+    df_complet.to_csv(output_path, index=False)
+    print(f"Sauvegardé: {output_path}")
+
+    # 2. Dernière période (MAJ)
+    df_maj = df_complet.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    df_maj = df_maj[df_maj["Periode"] == df_maj["Periode"].max()]
+    df_maj = df_maj.rename(columns={"Periode": "DT_MAJ_PM2"})
+    
+    cols_export = ["DIC_NAME", "CD_TYPE_BIEN", "TYPE_MAILLE", "VAL_MAILLE_GEO", "DT_MAJ_PM2", "NB_BIENS", "prix_mm_value", "TAUX_INFL_3M", "TAUX_INFL_12M"]
+    # Vérification que les colonnes existent
+    cols_export = [c for c in cols_export if c in df_maj.columns]
+    
+    output_path_maj = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
+    df_maj[cols_export].to_csv(output_path_maj, index=False)
+    print(f"Sauvegardé: {output_path_maj}")
+
+    # 3. Statistiques de volumétrie
+    df_vol = df.copy()
+    df_vol["Periode"] = pd.to_datetime(df_vol["Periode"])
+    df_vol = df_vol[df_vol["Periode"] >= "2017-03-01"]
+    
+    df_min = df_vol.groupby(["VAL_MAILLE_GEO", "DIC_NAME"], as_index=False)["NB_BIENS"].min()
+    df_pivot = df_min.pivot(index='VAL_MAILLE_GEO', columns='DIC_NAME', values='NB_BIENS')
+    df_pivot.columns.name = None
+    df_pivot = df_pivot.reset_index()
+    df_pivot.rename(columns={"prix_m2_3m": "NB_BIENS (3m)", "prix_m2_12m": "NB_BIENS (12m)"}, inplace=True)
+    
+    output_path_vol = os.path.join(params.CONFIG['output_dir'], f"stat_volumeterie_{suffixe_fichier}.csv")
+    df_pivot.to_csv(output_path_vol, index=False)
+    print(f"Sauvegardé: {output_path_vol}")
+
+# --- Fonctions de filtrage spécifiques ---
+
+def filter_province(df):
+    """Filtre pour créer la maille PROVINCE."""
+    mask_idf = df["DEPT"].isin(params.CONFIG['idf_depts'])
+    df_prov = df.copy()
+    df_prov.loc[~mask_idf, "PROVINCE_CODE"] = "PROVINCE"
+    # On ne garde que les lignes province
+    return df_prov[df_prov["PROVINCE_CODE"] == "PROVINCE"]
+
+def filter_villes_top15(df):
+    """Filtre pour les 15 plus grandes villes."""
+    # Application de la correction Nice 
+    df = apply_nice_correction(df)
+    return df[df["CITY"].isin(params.CONFIG['top15_cities'])]
+
+def filter_villes_cp(df):
+    """Filtre pour les arrondissements (CP) des grandes villes."""
+    return df[df["CITY"].isin(params.CONFIG['villes_arrondissements'])]
+
+
+
+def get_structure_reference(df,maille_col):
+    """
+    Permet d'extraire la structure du marché (poids de chaque univers élémentaire sur l'ensemble de la période)
+    à partir de la base de référence (CL+DVF)
+    """
+
+    print(f"---Extraction de la structure de marché ({maille_col}) ---")
+
+    df_work = df.copy()
+    if df_work[maille_col].dtype == "object":
+        df_work[maille_col] = df_work[maille_col].astype(str).str.upper().str.strip()
+
+    dims = [maille_col, "BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE"]
+
+    # on compte le volume total sur toute la période
+
+    structure = (
+        df_work.groupby(dims, dropna = False).size().reset_index(name="volume_reference")
+    )
+
+    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
+    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
+    structure = structure[mask_coherence].drop(columns=["PB"])
+
+    structure["poids_relatif_imposes"] = (
+        structure.groupby(maille_col)["volume_reference"].transform(lambda x : x / x.sum())
+    )
+
+    return structure[[maille_col,"BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE","poids_relatif_imposes"]]
