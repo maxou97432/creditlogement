@@ -1,32 +1,4 @@
-
-for var in self.var_num:
-    logging.info("\t Topage des anomalies pour la variable " + var)
-    
-    # Créer les masques pour distinguer inf et sup
-    mask_inf = X[["year_geo_bien", var]].apply(
-        lambda x: (
-            x["year_geo_bien"] == x["year_geo_bien"]
-            and x[var] < dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
-        ),
-        axis=1,
-    )
-    
-    mask_sup = X[["year_geo_bien", var]].apply(
-        lambda x: (
-            x["year_geo_bien"] == x["year_geo_bien"]
-            and x[var] > dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
-        ),
-        axis=1,
-    )
-    
-    # Tracker séparément inf et sup
-    X.loc[mask_inf, "OUTLIER_REASON"] = X.loc[mask_inf, "OUTLIER_REASON"].apply(
-        lambda x: (x + f"|{var}_inf_mediane_div_{COEFF_ECART}") if x else f"{var}_inf_mediane_div_{COEFF_ECART}"
-    )
-    
-    X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(
-        lambda x: (x + f"|{var}_sup_mediane_mult_{COEFF_ECART}") if x else f"{var}_sup_mediane_mult_{COEFF_ECART}"
-    )
-    
-    # Créer la colonne Ano pour la suite du code
-    X["Ano_" + var] = (mask_inf | mask_sup).astype(int)
+    for reasons in outliers_df["OUTLIER_REASON"].dropna():
+        if str(reasons).strip() != "":
+            for reason in str(reasons).split("|"):
+                all_criteres.add(reason.strip())
