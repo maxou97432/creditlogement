@@ -1,187 +1,246 @@
+class DetectAno:
 
-for (zone, type_bien), group in merge_corrected.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']):
-    
-    insee = group['Indice de prix (INSEE) - Base 2020']
-    cl_brut = group['Indice de prix (CL)']
-    cl_corrige_exact = group['Indice de prix (CL) - Corrigé Holt']
-    cl_corrige_approx = group['Indice CL - Corrigé PROV/IDF']
-    
-    # RMSE
-    rmse_brut = calc_rmse(insee, cl_brut)
-    rmse_exact = calc_rmse(insee, cl_corrige_exact)
-    rmse_approx = calc_rmse(insee, cl_corrige_approx)
-    
-    # Gain (amélioration par rapport au brut)
-    gain_exact = rmse_brut - rmse_exact
-    gain_approx = rmse_brut - rmse_approx
-    
-    # Perte de précision (Approx vs Exact)
-    perte = rmse_approx - rmse_exact
-    
-    resultats.append({
-        'Zone': zone,
-        'Type': type_bien,
-        'RMSE_Brut': round(rmse_brut, 2),
-        'RMSE_Exact': round(rmse_exact, 2),
-        'RMSE_Approx_PROV_IDF': round(rmse_approx, 2),
-        'Gain_Exact': round(gain_exact, 2),
-        'Gain_Approx': round(gain_approx, 2),
-        'Perte_Precision': round(perte, 2),
-        'N_periodes': len(group)
-    })
+    def __init__(self, meta_num_all, var_num):
+        self.meta_num_all = meta_num_all
+        self.var_num = var_num
 
-df_validation = pd.DataFrame(resultats)
+    def fit(self, X, y=None):
+        return self
 
-# =============================================================================
-# 4. RÉSULTATS GLOBAUX
-# =============================================================================
+    def transform(self, X, y=None):
+        """Détection et suppression des anomalies
 
-print("\n--- Résultats globaux ---")
-print(f"RMSE moyen CL Brut          : {df_validation['RMSE_Brut'].mean():.2f}")
-print(f"RMSE moyen Coef EXACT       : {df_validation['RMSE_Exact'].mean():.2f}")
-print(f"RMSE moyen Approx PROV/IDF  : {df_validation['RMSE_Approx_PROV_IDF'].mean():.2f}")
-print(f"\nPerte de précision moyenne (Approx vs Exact) : {df_validation['Perte_Precision'].mean():.2f}")
-print(f"Amélioration vs Brut (Approx) : {df_validation['Gain_Approx'].mean():.2f}")
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
 
-print("\n--- Détail par zone (trié par perte de précision) ---")
-print(df_validation.sort_values('Perte_Precision')[
-    ['Zone', 'Type', 'RMSE_Brut', 'RMSE_Exact', 'RMSE_Approx_PROV_IDF', 'Perte_Precision', 'N_periodes']
-].to_string(index=False))
+        Returns
+        -------
+        dic_geo_meta: dict
+                      Dictionnaire contenant les informations nécessaires à la détection d'anomalies.
+        X: pandas.DataFrame
+           Dataframe
+        """
 
-# =============================================================================
-# 5. VISUALISATIONS
-# =============================================================================
+        start_time = datetime.now()
+        dic_geo_meta = {}
+        for i in self.meta_num_all.index:
+            meta_num = self.meta_num_all.loc[i, :].unstack(level=[0]).transpose()
+            meta_num.columns = [
+                "N",
+                "Mean",
+                "Std",
+                "Min",
+                "D1",
+                "Q1",
+                "Median",
+                "Q3",
+                "D9",
+                "Max",
+            ]
+            meta_num["IQR"] = meta_num["Q3"] - meta_num["Q1"]
+            if OUTLIER_MODE == "iqr":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Median"] - COEFF_ECART * meta_num["IQR"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Median"] + COEFF_ECART * meta_num["IQR"]
+                )
+            elif OUTLIER_MODE == "std":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Mean"] - COEFF_ECART * meta_num["Std"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Mean"] + COEFF_ECART * meta_num["Std"]
+                )
+            else:
+                meta_num["Lower_Limit"] = meta_num["Median"] / COEFF_ECART
+                meta_num["Upper_Limit"] = meta_num["Median"] * COEFF_ECART
+            dic_geo_meta[i] = meta_num
 
-print("\n--- Génération des graphiques ---")
+        for var in self.var_num:
+            logging.info("\t Topage des anomalies pour la variable " + var)
+            X["Ano_" + var] = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    0
+                    if x["year_geo_bien"] == x["year_geo_bien"]
+                    and dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
+                    < x[var]
+                    < dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
+                    else 1
+                ),
+                axis=1,
+            )
 
-# Sélection de quelques zones représentatives
-zones_a_visualiser = df_validation.nlargest(3, 'N_periodes')[['Zone', 'Type']].values
+        nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
 
-for zone, type_bien in zones_a_visualiser:
+        # Attention, on supprime les surfaces habitables alors que le pb peut provenir de la valeur foncière sous ou sur-estimée
+        if "Prix_m2" in self.var_num:
+            X.loc[(X["Ano_Prix_m2"] == 1), "NB_SURF_HAB"] = np.nan
+            X.loc[(X["Ano_Prix_m2"] == 1), "Prix_m2"] = np.nan
+        if "Prix_piece" in self.var_num:
+            X.loc[X["Ano_Prix_piece"] == 1, "NB_PIECES"] = np.nan
+        if "nb_m2_by_piece" in self.var_num:
+            X.loc[X["Ano_nb_m2_by_piece"] == 1, "NB_PIECES"] = np.nan
+            X.drop(columns=["Ano_nb_m2_by_piece"], inplace=True)
+
+        post_nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        post_nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        post_nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        nb_suppr_surf_hab = nb_nn_surf_hab - post_nb_nn_surf_hab
+        nb_suppr_prix_m2 = nb_nn_prix_m2 - post_nb_nn_prix_m2
+        nb_suppr_nb_pieces = nb_nn_nb_pieces - post_nb_nn_nb_pieces
+
+        logging.info(
+            f"\t \t {nb_suppr_surf_hab} anomalies supprimées sur le champ NB_SURF_HAB soit {round((nb_suppr_surf_hab/nb_nn_surf_hab)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_prix_m2} anomalies supprimées sur le champ Prix_m2 soit {round((nb_suppr_prix_m2/nb_nn_prix_m2)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
+        )
+
+        # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
+        X["ratio_val_mt_op"] = np.nan
+        X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
+            X["MT_OPE"] / X["VALEUR_FONCIERE"]
+        )
+        X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
+        X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
+
+        X.drop(columns=["ratio_val_mt_op"], inplace=True)
+        X.reset_index(drop=True, inplace=True)
+
+        return dic_geo_meta, X
     
-    data_zone = merge_corrected[
-        (merge_corrected['VAL_MAILLE_GEO'] == zone) & 
-        (merge_corrected['CD_TYPE_BIEN'] == type_bien)
-    ].sort_values('Periode')
-    
-    if len(data_zone) == 0:
-        continue
-    
-    fig = go.Figure()
-    
-    # INSEE (référence - noir épais)
-    fig.add_trace(go.Scatter(
-        x=data_zone['Periode'],
-        y=data_zone['Indice de prix (INSEE) - Base 2020'],
-        mode='lines+markers',
-        name='INSEE (référence)',
-        line=dict(color='black', width=3)
-    ))
-    
-    # CL Brut (rouge pointillé)
-    fig.add_trace(go.Scatter(
-        x=data_zone['Periode'],
-        y=data_zone['Indice de prix (CL)'],
-        mode='lines',
-        name='CL Brut',
-        line=dict(color='red', width=1, dash='dot')
-    ))
-    
-    # CL Corrigé avec PROVINCE/IDF (vert)
-    fig.add_trace(go.Scatter(
-        x=data_zone['Periode'],
-        y=data_zone['Indice CL - Corrigé PROV/IDF'],
-        mode='lines',
-        name='CL Corrigé (Approx PROV/IDF)',
-        line=dict(color='green', width=2)
-    ))
-    
-    # CL Corrigé avec coefficient EXACT (bleu pointillé)
-    fig.add_trace(go.Scatter(
-        x=data_zone['Periode'],
-        y=data_zone['Indice de prix (CL) - Corrigé Holt'],
-        mode='lines',
-        name='CL Corrigé (Coef EXACT)',
-        line=dict(color='blue', width=2, dash='dash')
-    ))
-    
-    fig.update_layout(
-        title=f"<b>Validation : {zone} - {type_bien}</b><br>Comparaison des méthodes de correction",
-        yaxis_title="Indice Base 2020 = 100",
-        template="plotly_white",
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+
+def detect_ano_ml(input_df, n_years=None):
+
+    logging.info("ML detection of anomalies starting")
+
+    # =============================================================================
+    # Import des données sur les N_YEARS dernières années
+    # =============================================================================
+
+    start_time = datetime.now()
+
+    importrecentdata = ImportRecentData(n_years=n_years, input_=input_df)
+    data_recent = importrecentdata.import_data_recent()
+    logging.info(
+        f"Base d'analyse filtrée sur les {params.N_YEARS} dernières années : {datetime.now()-start_time}\n"
     )
+  
+    data_original = input_df.copy()  
     
-    fig.show()
 
-# =============================================================================
-# 6. GRAPHIQUE SYNTHÉTIQUE : Distribution des erreurs
-# =============================================================================
+    data_recent["DATE"] = data_recent["DATE"].apply(lambda x: x.replace(day=1))
+    
+  
+    ids_avant_detection = set(data_recent["ID"])  # IDs qui entrent dans la détection
+    
+    # Import des données sur les N_YEARS dernières années
+    start_time = datetime.now()
+    logging.info(
+        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
+    )
 
-fig_synthese = go.Figure()
+    # =============================================================================
+    # Calculs des effectifs par ville et par Iris
+    # =============================================================================
+    step_time = datetime.now()
+    logging.info("workforce calculation")
+    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
+    )
+    step_time = datetime.now()
+    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
+    )
 
-# Histogramme des pertes de précision
-fig_synthese.add_trace(go.Histogram(
-    x=df_validation['Perte_Precision'],
-    name='Perte de précision (Approx vs Exact)',
-    nbinsx=15
-))
 
-fig_synthese.update_layout(
-    title="Distribution de la perte de précision<br>(Approx PROV/IDF vs Coefficient EXACT)",
-    xaxis_title="Perte de précision (RMSE)",
-    yaxis_title="Nombre de zones",
-    template="plotly_white"
-)
+    dict_geo_city = effectifsparVille.transform(data_recent)
 
-fig_synthese.show()
 
-# Courbe de comparaison RMSE
-fig_rmse = go.Figure()
 
-df_val_sorted = df_validation.sort_values('RMSE_Brut')
-x_zones = [f"{row['Zone']}-{row['Type']}" for _, row in df_val_sorted.iterrows()]
+    defmaillegeocity = DefMailleGeoCITY(
+        n_min=params.N_MIN,
+        dict_geo_city=dict_geo_city,
+        geo_bien="geo_bien_city",
+        by_year=0,
+    )
+    data_recent = defmaillegeocity.transform(data_recent)
 
-fig_rmse.add_trace(go.Scatter(
-    x=x_zones,
-    y=df_val_sorted['RMSE_Brut'],
-    mode='lines+markers',
-    name='CL Brut',
-    line=dict(color='red')
-))
+    logging.info("workforce calculation OK")
 
-fig_rmse.add_trace(go.Scatter(
-    x=x_zones,
-    y=df_val_sorted['RMSE_Approx_PROV_IDF'],
-    mode='lines+markers',
-    name='Approx PROV/IDF',
-    line=dict(color='green')
-))
+    # =============================================================================
+    # Calculs des statistiques descriptives par typologie de bien
+    # =============================================================================
 
-fig_rmse.add_trace(go.Scatter(
-    x=x_zones,
-    y=df_val_sorted['RMSE_Exact'],
-    mode='lines+markers',
-    name='Coefficient EXACT',
-    line=dict(color='blue')
-))
+    logging.info("statistics calculation")
+    step_time = datetime.now()
+    calcmetanumCity = CalcMetaNum(
+        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
+    )
+    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
+    logging.info(
+        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
+    )
 
-fig_rmse.update_layout(
-    title="Comparaison des RMSE par zone",
-    xaxis_title="Zones (triées par RMSE brut)",
-    yaxis_title="RMSE",
-    template="plotly_white",
-    xaxis={'tickangle': 45}
-)
+    # =============================================================================
+    # Détection et suppression des anomalies
+    # =============================================================================
+    logging.info("Detection and elimination of anomalies")
+    
 
-fig_rmse.show()
+    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
+    result = detectano.transform(data_recent)
+    
+    if isinstance(result, tuple):
+        _, data_recent = result
+    else:
+        data_recent = result
+    
+    nb_avant = len(data_recent)
+    data_recent = data_recent.dropna(subset=["Prix_m2"])
+    nb_apres = len(data_recent)
+    print(f"Nombre de lignes supprimées :{nb_avant - nb_apres}")
 
-print("\n" + "="*80)
-print("CONCLUSION")
-print("="*80)
-print(f"Perte de précision moyenne : {df_validation['Perte_Precision'].mean():.2f}")
-print(f"Amélioration vs Brut        : {df_validation['Gain_Approx'].mean():.2f}")
-print("\nL'approximation PROV/IDF permet une amélioration significative par rapport")
-print("au CL brut, avec une perte de précision acceptable par rapport au coef exact.")
-print("="*80)
+    data_recent.drop(columns=["year_geo_bien"], inplace=True, errors="ignore")
+    logging.info("Detection and elimination of anomalies OK")
+    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
+    
+    
+    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
+                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR","DEMANDE"]
+    
+    # Vérifier que toutes les colonnes existent
+    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
+    data_recent = data_recent[colonnes_disponibles]
+    
+    
+    ids_valides = set(data_recent["ID"])
+    
+    # Outliers = IDs entrés dans la détection MAIS rejetés
+    ids_outliers = ids_avant_detection - ids_valides
+    
+    # Récupérer les outliers depuis les données ORIGINALES
+    data_mauvais = data_original[
+        (data_original["ID"].isin(ids_outliers))
+    ].copy()
+    
+    # Ne garder que les colonnes disponibles
+    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
+    data_mauvais = data_mauvais[colonnes_communes]
+    
+
+    return data_recent, data_mauvais
