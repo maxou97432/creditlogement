@@ -1,7 +1,11 @@
-  Non_specifie                        : 272,476 (60.19%)
-  Prix_m2_inf_mediane_div_4           : 246,141 (54.38%)
-  Prix_m2_hors_limites                : 149,390 (33.00%)
-  Prix_m2_sup_mediane_mult_4          : 37,509 ( 8.29%)
-  Prix_m2_inf_200                     : 34,762 ( 7.68%)
-  Prix_m2_sup_20000                   : 13,678 ( 3.02%)
-  ratio_val_mt_op                     :     25 ( 0.01%)
+# Regarder des exemples d'outliers avec Non_specifie
+print("=== EXEMPLES OUTLIERS NON_SPECIFIE ===")
+non_spec = outliers[outliers["OUTLIER_REASON"] == "Non_specifie"]
+print(f"Nombre: {len(non_spec)}")
+print("\n5 exemples:")
+print(non_spec[["ID", "Prix_m2", "NB_SURF_HAB", "NB_PIECES", "SOURCE", "OUTLIER_REASON"]].head(5))
+
+print("\n=== STATS SUR CES OUTLIERS ===")
+print(f"Prix_m2 est NaN: {non_spec['Prix_m2'].isna().sum()} / {len(non_spec)}")
+print(f"NB_SURF_HAB est NaN: {non_spec['NB_SURF_HAB'].isna().sum()} / {len(non_spec)}")
+print(f"NB_PIECES est NaN: {non_spec['NB_PIECES'].isna().sum()} / {len(non_spec)}")
