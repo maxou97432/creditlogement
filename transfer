@@ -1,40 +1,3 @@
-
-
-
-import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-import numpy as np
-import pickle
-import os
-import pandas as pd
-import sys
-import param_generaux as params
-from sqlalchemy import create_engine
-import urllib
-
-
-
-N_YEARS = 3  # pour le modele ML
-VAR_NUM = ["Prix_m2"]  # pour le modele TI
-# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
-N_MIN = 30  # pour les deux modeles
-
-# Méthode de détection d'anomalies (la même pour les deux modèles)
-# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
-# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
-# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
-OUTLIER_MODE = "mult"
-# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
-COEFF_ECART = 4
-PRIX_M2_MIN = 200
-PRIX_M2_MAX = 20000
-
 class DetectAno:
 
     def __init__(self, meta_num_all, var_num):
@@ -130,10 +93,66 @@ class DetectAno:
             X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(
                 lambda x: (x + f"|{var}_sup_mediane_mult_{COEFF_ECART}") if x else f"{var}_sup_mediane_mult_{COEFF_ECART}"
             )
-  
+            # Marquer les anomalies détectées par les limites (inf/sup)
             X["Ano_" + var] = (mask_inf | mask_sup).astype(int)
+            mask_anomalie = X["Ano_" + var] == 1
+            X.loc[mask_anomalie, "OUTLIER_REASON"] = X.loc[mask_anomalie, "OUTLIER_REASON"].apply(
+                lambda x: (x + "|" + var + "_hors_limites") if x else (var + "_hors_limites")
+            )
         
-        
+        # =============================================================================
+        # Critères supplémentaires basés sur la médiane par groupe
+        # ✅ IMPORTANT : Appliquer AVANT de mettre Prix_m2 à NaN !
+        # =============================================================================
+        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
+            logging.info("\t Application des critères de filtrage basés sur la médiane")
+            
+            # Calculer les médianes par groupe (YEAR, ville_, TYPE_BIEN)
+            medianes = X.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+            medianes.rename(columns={'Prix_m2': 'mediane_prix_m2'}, inplace=True)
+            
+            # Merge pour avoir la médiane de chaque groupe sur chaque ligne
+            X = X.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
+            
+            # Critère 1: Prix < médiane / 4
+            mask_inf_med_div4 = (X['Prix_m2'] < X['mediane_prix_m2'] / 4) & X['Prix_m2'].notna()
+            X.loc[mask_inf_med_div4, 'OUTLIER_REASON'] = X.loc[mask_inf_med_div4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_mediane_div_4") if x else "Prix_m2_inf_mediane_div_4"
+            )
+            
+            # Critère 2: Prix > médiane * 4
+            mask_sup_med_mult4 = (X['Prix_m2'] > X['mediane_prix_m2'] * 4) & X['Prix_m2'].notna()
+            X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'] = X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_mediane_mult_4") if x else "Prix_m2_sup_mediane_mult_4"
+            )
+            
+            # Critère 3: Prix < 200€
+            mask_inf_200 = (X['Prix_m2'] < PRIX_M2_MIN) & X['Prix_m2'].notna()
+            X.loc[mask_inf_200, 'OUTLIER_REASON'] = X.loc[mask_inf_200, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_200") if x else "Prix_m2_inf_200"
+            )
+            
+            # Critère 4: Prix > 20,000€
+            mask_sup_20000 = (X['Prix_m2'] > PRIX_M2_MAX) & X['Prix_m2'].notna()
+            X.loc[mask_sup_20000, 'OUTLIER_REASON'] = X.loc[mask_sup_20000, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_20000") if x else "Prix_m2_sup_20000"
+            )
+            
+            # Marquer les anomalies détectées par ces critères
+            mask_median_criteria = mask_inf_med_div4 | mask_sup_med_mult4 | mask_inf_200 | mask_sup_20000
+            # Ensure 'Ano_Prix_m2' column exists before trying to update it
+            if "Ano_Prix_m2" not in X.columns:
+                X["Ano_Prix_m2"] = 0
+            X.loc[mask_median_criteria, "Ano_Prix_m2"] = 1  # ✅ Marquer comme anomalie
+            
+            logging.info(f"\t \t \t - Prix < médiane/4 : {mask_inf_med_div4.sum()}")
+            logging.info(f"\t \t \t - Prix > médiane*4 : {mask_sup_med_mult4.sum()}")
+            logging.info(f"\t \t \t - Prix < {PRIX_M2_MIN}€ : {mask_inf_200.sum()}")
+            logging.info(f"\t \t \t - Prix > {PRIX_M2_MAX}€ : {mask_sup_20000.sum()}")
+            
+            # Supprimer la colonne temporaire médiane
+            X.drop(columns=['mediane_prix_m2'], inplace=True, errors='ignore')
+
         nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
         nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
         nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
@@ -166,40 +185,17 @@ class DetectAno:
             f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
         )
 
-        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
-            #Calcul des médianes par groupe
-
-            # Critère 3: Prix < 20
-            mask_200 = (X["Prix_m2"].notna()) & (X["Prix_m2"] < PRIX_M2_MIN) 
-            X.loc[mask_200, "OUTLIER_REASON"] = X.loc[mask_200, "OUTLIER_REASON"].apply(lambda x : (x + "Prix_m2_inf_200") if x else "|Prix_m2_inf_200" )
-            
-            # Critère 4: Prix > 20 000
-            mask_20000 = (X["Prix_m2"].notna()) & (X["Prix_m2"] > PRIX_M2_MAX) 
-            X.loc[mask_20000, "OUTLIER_REASON"] = X.loc[mask_20000, "OUTLIER_REASON"].apply(lambda x : (x + "Prix_m2_sup_20000") if x else "|Prix_m2_sup_20000")
-
-
-            # On combine tous les masques
-            mask_final = mask_200 | mask_20000
-            
-            # Stats avant suppression
-            nb_supp = mask_final.sum()    
-
-            # On applique les filtres
-            X.loc[mask_final, 'Prix_m2'] = np.nan
-            X.loc[mask_final, 'NB_SURF_HAB'] = np.nan
-
-
-            print(f"{nb_supp} anomalies supprimées avec les critères des prix")
-            print(f"{mask_200.sum()} anomalies supprimées car Prix < 200")
-            print(f"{mask_20000.sum()} anomalies supprimées car Prix > 20000")
-
         # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
         X["ratio_val_mt_op"] = np.nan
         X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
             X["MT_OPE"] / X["VALEUR_FONCIERE"]
         )
-        mask_ratio = X["ratio_val_mt_op"] > 2
-        X.loc[mask_ratio,'OUTLIER_REASON'] = X.loc[mask_ratio, "OUTLIER_REASON"].apply(lambda x: (x + "|" + "ratio_val_mt_op") if x else "ratio_val_mt_op") 
+        
+        # Tracker les anomalies ratio_val_mt_op
+        mask_ratio_ano = X["ratio_val_mt_op"] > 2
+        X.loc[mask_ratio_ano, "OUTLIER_REASON"] = X.loc[mask_ratio_ano, "OUTLIER_REASON"].apply(
+            lambda x: (x + "|ratio_val_mt_op") if x else "ratio_val_mt_op"
+        )
         
         X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
         X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
