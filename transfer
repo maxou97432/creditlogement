@@ -1,23 +1,33 @@
-   -> Application des poids STRUCTURE (V1)
-Traceback (most recent call last):
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\core\indexes\base.py", line 3812, in get_loc
-    return self._engine.get_loc(casted_key)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
-  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
-  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
-  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
-KeyError: 'MAILLE_TYPE'
+    # ✅ DEBUG : Vérifier les données
+    print(f"\n[DEBUG] res_v2_struct shape: {res_v2_struct.shape}")
+    print(f"[DEBUG] res_v2_struct colonnes: {res_v2_struct.columns.tolist()}")
+    if len(res_v2_struct) > 0:
+        print(f"[DEBUG] Periodes min/max: {res_v2_struct['Periode'].min()} / {res_v2_struct['Periode'].max()}")
+    
+    # ✅ Préparer une copie pour la carte (dernière période uniquement)
+    res_v2_map = res_v2_struct[res_v2_struct["Periode"] == res_v2_struct["Periode"].max()].copy()
+    
+    print(f"[DEBUG] res_v2_map shape après filtre: {res_v2_map.shape}")
+    
+    # ✅ Si pas de données, on ne peut pas continuer
+    if len(res_v2_map) == 0:
+        print("⚠️ ERREUR: Aucune donnée pour la carte ! Vérifiez les données V2.")
+        # On garde l'ancien système
+        df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
+        if df_v2 is None:
+            sys.exit("Erreur: Pas de données V2.")
+        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
+    else:
+        # ✅ Adapter la structure pour la carte
+        res_v2_map = res_v2_map.rename(columns={
+            "Periode": "DT_MAJ_PM2",
+            "Ville": "VAL_MAILLE_GEO",
+            "prix_mm_12m (V2_STRUCT)": "prix_mm_value"
+        })
+        res_v2_map["MAILLE_TYPE"] = "CITY"  # Ajouter la colonne manquante
+        res_v2_map["CD_TYPE_BIEN"] = "APT"  # Type de bien
+        res_v2_map["DIC_NAME"] = "prix_m2_12m"  # Nom du dictionnaire
 
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py", line 451, in <module>
-    prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
-                                       ~~~~~^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\core\frame.py", line 4113, in __getitem__
-    indexer = self.columns.get_loc(key)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "N:\uflumth\indicateur_marche\univers_elementaire\.venv\Lib\site-packages\pandas\core\indexes\base.py", line 3819, in get_loc      
-    raise KeyError(key) from err
-KeyError: 'MAILLE_TYPE'
+        # A. Utiliser res_v2_map pour la carte
+        df_v2 = res_v2_map.copy()
+        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
