@@ -1,5 +1,7 @@
-import sys
-import os
+
+"""Ce fichier a pour but d'instancier le modèle de filtration d'anomalies de la base de données df_cleaned_data, ainsi que l'ensemble
+des fonctions utilisées pour le calcul des prix du m2 par méthode des univers élémentaires """
+
 
 
 import pandas as pd
@@ -10,598 +12,1165 @@ import logging
 import math
 from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
-from fonctions import (DateOffset,
-                         ImportRecentData,
-                         CalcMetaNum,
-                         EffectifsParMailleGeo,
-                         DefMailleGeoCITY,
-                         DetectAno
-)
-from fonctions import detect_ano_ml as detect_ano_ml_fct
 import numpy as np
-
-import pandas as pd
-import time
-from fonctions import Connector
-import param_generaux as params
+import pickle
 import os
+import pandas as pd
+import sys
+import param_generaux as params
+from sqlalchemy import create_engine
+import urllib
 
 
 
+N_YEARS = 3  # pour le modele ML
+VAR_NUM = ["Prix_m2"]  # pour le modele TI
+# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
+N_MIN = 30  # pour les deux modeles
+
+# Méthode de détection d'anomalies (la même pour les deux modèles)
+# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
+# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
+# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
+OUTLIER_MODE = "mult"
+# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
+COEFF_ECART = 4
+PRIX_M2_MIN = 200
+PRIX_M2_MAX = 20000
 
 
-co = Connector()
+class DateOffset:
+    def __init__(
+        self,
+        years=0,
+        months=0,
+        weeks=0,
+        days=0,
+        hours=0,
+        minutes=0,
+        seconds=0,
+        milliseconds=0,
+        microseconds=0,
+        year=None,
+        month=None,
+        day=None,
+        weekday=None,
+        hour=None,
+        minute=None,
+        second=None,
+        microsecond=None,
+    ):
+        self.relative = relativedelta(
+            years=years,
+            months=months,
+            weeks=weeks,
+            days=days,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            microseconds=microseconds + milliseconds * 1000
+        )
+        self.absolute = {
+            "year": year,
+            "month": month,
+            "day": day,
+            "weekday": weekday,
+            "hour": hour,
+            "minute": minute,
+            "second": second,
+            "microsecond": microsecond
+        }
 
-################ Importation de la base ################
-start_time = time.time()
-df = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
-end_time = time.time()
-print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+    def apply(self, date: datetime) -> datetime:
+        date = date + self.relative
+        date_dict = {k: v for k, v in self.absolute.items() if v is not None}
+        return date.replace(**date_dict)
+
+    def __rsub__(self, other):
+        # Permet d'utiliser : date - DateOffset(...)
+        return other - self.relative
+
+class ImportRecentData:
+    """Classe pour importer les données récentes.
+
+    Arguments
+    ---------
+    n_years: int
+        Nombre d'années les plus récentes à importer (n_years dernière(s))
+    """
+
+    def __init__(self, n_years, input_):
+        self.n_years = n_years
+        self.input_ = input_
+
+    def import_data_recent(self):
+        """Importe les données des n_years dernières années
+
+        Returns
+        -------
+        df: pandas.DataFrame
+            Dataframe des données sur les n_years dernières années.
+        """
+
+        df = self.input_.copy()
+        nb = int(self.n_years)
+        max_year = df["DATE"].dt.year.max()
+        prof_max =  pd.Timestamp(year= max_year- nb, month= 1, day= 1)
+        df = df[df["DATE"] >= prof_max].copy()
+        df.reset_index(drop=True, inplace=True)
+
+        return df
+
+class CalcMetaNum:
+
+    def __init__(self, n_years, geo_bien, var_num):
+        self.n_years = n_years
+        self.geo_bien = geo_bien
+        self.var_num = var_num
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Calculs des statistiques descriptives par typologie de bien
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        meta_num_all: pandas.DataFrame
+                      Dataframe contenant les statistiques descriptives par typologie de bien.
+        X: pandas.DataFrame
+           Dataframe enrichi de la colonne year_geo_bien.
+        """
+
+        if self.n_years == -1:
+            X["year_geo_bien"] = X["YEAR"] + X[self.geo_bien]
+
+        else:
+            n_months = self.n_years * 12
+            prof_max = X["DATE"].max() - DateOffset(months=n_months)
+
+            if self.n_years == 1:
+                X["year_geo_bien"] = X[self.geo_bien]
+            elif self.n_years == 2:
+                X["year_geo_bien"] = (
+                    (X["DATE"] >= prof_max + DateOffset(months=12))
+                    .astype("int8")
+                    .astype(str)
+                    + "_"
+                    + X[self.geo_bien]
+                )
+            else:
+                X["days"] =  X["DATE"] -  X["DATE"].min()
+                X["year"] = X.days // np.timedelta64(1, "Y")
+                X.loc[X.year < 0, "year"] = 0
+                X.loc[X.year >= self.n_years, "year"] = self.n_years - 1
+                X["year"] = X["year"].astype(int).astype(str)
+                X["year_geo_bien"] = X["year"] + "_" + X[self.geo_bien]
+                X.drop(columns=["days", "year"], inplace=True)
+
+        meta_num_all = X.groupby("year_geo_bien")[self.var_num].describe(
+            percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]
+        )
+
+        return meta_num_all, X
+    
+
+class EffectifsParMailleGeo:
+
+    def __init__(self, maille_geo):
+        self.maille_geo = maille_geo
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Calcul des effectifs par maille géographique
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        dict_geo: dict
+                  Dictionnaire contenant les effectifs calculés par maille géographique.
+        """
+
+        chunksize = 1000
+        X = X.replace(to_replace=[np.inf, -np.inf], value=[np.nan, np.nan], regex=False)
+        tap = (
+            X.loc[pd.notnull(X["Prix_m2"]), [self.maille_geo]]
+            .apply(lambda x: x.value_counts())
+            .stack()
+            .reset_index()
+        )
+
+        tap.columns = ["mod", "var", "N"]
+        tap.drop(columns="var", inplace=True)
+        dict_geo = tap.set_index("mod")["N"].to_dict()
+
+        if self.maille_geo == "ville_":
+            tap.rename(columns={"mod": "LL_VILLE", "N": "EFFECTIF_VILLE"}, inplace=True)
 
 
-################ Fusion avec la base BAN_ENRICHI contenant les codes IRIS ################
-df_ban = co.read_sql(
-            f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
-cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
-cl_data = cl_data.copy()
+        elif self.maille_geo == "code_iris":
+            tap.rename(columns={"mod": "CD_IRIS", "N": "EFFECTIF_IRIS"}, inplace=True)
 
-start_time = time.time()
-base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years = 12) #Algorithme de détection d'anomalies, détaillé dans fonctions.py
-                                                                           #On prend 12 ans ici de sorte à pouvoir calculer les prix pour 2015
-end_time = time.time()
-print(f"Temps de détections d'anomalies : {end_time - start_time:.2f} secondes")
+        return dict_geo
 
-# periode_reference: paramètre permettant de choisir le mois de référence 
-base_ml_full["DATE"] = pd.to_datetime(base_ml_full["DATE"], errors="coerce")
-periode_reference = None # à changer en fonction de la plage de temps souhaitée
-ref_date = periode_reference or base_ml_full["DATE"].max()
+class DefMailleGeoIRIS:
 
-date_max = ref_date
-date_min = pd.Timestamp("2014-01-01") ##### à réadapter en fonction
+    def __init__(self, n_min, dict_geo_city, dict_geo_iris, geo_bien, maille_geo_loc):
+        self.n_min = n_min
+        self.dict_geo_city = dict_geo_city
+        self.dict_geo_iris = dict_geo_iris
+        self.geo_bien = geo_bien
+        self.maille_geo_loc = maille_geo_loc
 
-base_ml = base_ml_full[(base_ml_full["DATE"] >= date_min) & (base_ml_full["DATE"] < date_max)]
-df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
-start_time = time.time()
+    def fit(self, X, y=None):
+        return self
 
-################ Fusion avec la base BAT_ENRICHI contenant les années de construction ################
-base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
-end_time = time.time()
-print(f"Temps de fusion avec BAT_ENRICHIE : {end_time - start_time:.2f} secondes")
+    def transform(self, X, y=None):
+        """Définition pour chaque opération de la maille géographique qui sera appliquée (iris, arrondissement, ville, ou département)
+           en fonction des effectifs calculés par type de maille géographique
+           MAILLE LA PLUS FINE : IRIS
 
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
 
-start_time = time.time()
+        Returns
+        -------
+        X: pandas.DataFrame
+            Dataframe
+        """
 
-# Définition de la variable BIEN_NEUF
-base_ml.loc[
-    base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
-    "annee_construction"
-] = base_ml["DATE"].dt.year
+        extract_iris = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR", "code_iris"]].apply(
+            lambda x: self.loc_min_count_iris(
+                x, self.dict_geo_city, self.dict_geo_iris, self.n_min
+            ),
+            axis=1,
+        )
+        X[[self.geo_bien, self.maille_geo_loc]] = pd.DataFrame(extract_iris.tolist())
 
+        return X
 
-base_ml["BIEN_NEUF"] = np.where(
-        (base_ml["NATURE_MUTATION"]  == "Vente en l'état futur d'achèvement")
-        | (base_ml["CD_NATUR_OP"] == "AQN")
-        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
-        "NEUF",
-        "ANCIEN",
+    def loc_min_count_iris(self, x, dict_geo_ville, dict_geo_iris, n_min):
+        """Choix de la maille géographique avec granularité la plus fine à l'iris"""
+        iris_n = dict_geo_iris.get(x[4])
+        city_n = dict_geo_ville.get(x[1])
+
+        if iris_n is None:
+            iris_n = np.nan
+        if city_n is None:
+            city_n = np.nan
+        if x[0] is None:
+            x[0] = "NAN"
+
+        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
+        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
+
+        if (not math.isnan(iris_n)) & (iris_n >= n_min):
+            return x[4], "IRIS"
+        elif (str(x[0])[:3] in ["750", "690"]) or (str(x[0]) in marseille_cp_prefix):
+            return x[0], "ARR"
+        elif (
+            (
+                str(x[0])[:3] not in ["750", "690"]
+                and (str(x[0]) not in marseille_cp_prefix)
+            )
+            & (not math.isnan(city_n))
+            & (city_n >= n_min)
+        ):
+            return x[1], "CITY"
+        else:
+            return x[2], "DEPT"
+          
+class DefMailleGeoCITY:
+
+    def __init__(self, n_min, dict_geo_city, geo_bien, by_year):
+        self.n_min = n_min
+        self.dict_geo_city = dict_geo_city
+        self.geo_bien = geo_bien
+        self.by_year = by_year
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Définition pour chaque opération de la maille géographique qui sera appliquée (arrondissement, ville, ou département)
+           en fonction des effectifs calculés par type de maille géographique
+           MAILLE LA PLUS FINE : ARRONDISSEMENT
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        X: pandas.DataFrame
+            Dataframe enrichi de la colonne maille_geo_loc_city.
+        """
+
+        extract_city = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR"]].apply(
+            lambda x: self.loc_min_count_city(x, self.dict_geo_city), axis=1
+        )
+        X[[self.geo_bien, "maille_geo_loc_city"]] = pd.DataFrame(extract_city.tolist())
+
+        del X["maille_geo_loc_city"]
+
+        return X
+
+    def loc_min_count_city(self, x, dict_geo):
+        """Choix de la maille géographique avec granularité la plus fine à la ville."""
+
+        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
+        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
+
+        if x[0] is not None:
+            # On conserve les CP pour Paris et Lyon
+            if (str(x[0])[:3] not in ["750", "690"]) and (
+                str(x[0]) not in marseille_cp_prefix
+            ):
+                if self.by_year == 0:
+                    city_n = dict_geo.get(x[1])
+                elif self.by_year == 1:
+                    city_n = dict_geo.get(x[3] + x[1])
+                if city_n is not None:
+                    return x[1], "CITY"
+            else:
+                return x[0], "ARR"
+        return x[2], "DEPT"
+class DetectAno:
+
+    def __init__(self, meta_num_all, var_num):
+        self.meta_num_all = meta_num_all
+        self.var_num = var_num
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Détection et suppression des anomalies
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        dic_geo_meta: dict
+                      Dictionnaire contenant les informations nécessaires à la détection d'anomalies.
+        X: pandas.DataFrame
+           Dataframe
+        """
+
+        start_time = datetime.now()
+        X['OUTLIER_REASON'] =  ""
+        dic_geo_meta = {}
+        for i in self.meta_num_all.index:
+            meta_num = self.meta_num_all.loc[i, :].unstack(level=[0]).transpose()
+            meta_num.columns = [
+                "N",
+                "Mean",
+                "Std",
+                "Min",
+                "D1",
+                "Q1",
+                "Median",
+                "Q3",
+                "D9",
+                "Max",
+            ]
+            meta_num["IQR"] = meta_num["Q3"] - meta_num["Q1"]
+            if OUTLIER_MODE == "iqr":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Median"] - COEFF_ECART * meta_num["IQR"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Median"] + COEFF_ECART * meta_num["IQR"]
+                )
+            elif OUTLIER_MODE == "std":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Mean"] - COEFF_ECART * meta_num["Std"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Mean"] + COEFF_ECART * meta_num["Std"]
+                )
+            else:
+                # Critère 1.
+                meta_num["Lower_Limit"] = meta_num["Median"] / COEFF_ECART
+
+                # Critère 2.
+                meta_num["Upper_Limit"] = meta_num["Median"] * COEFF_ECART
+            dic_geo_meta[i] = meta_num
+
+        
+        for var in self.var_num:
+            logging.info("\t Topage des anomalies pour la variable " + var)
+    
+            # Créer les masques pour distinguer inf et sup
+            mask_inf = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    x["year_geo_bien"] == x["year_geo_bien"]
+                    and x[var] < dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
+                ),
+                axis=1,
+            )
+    
+            mask_sup = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    x["year_geo_bien"] == x["year_geo_bien"]
+                    and x[var] > dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
+                ),
+                axis=1,
+            )
+    
+            # Tracker séparément inf et sup
+            X.loc[mask_inf, "OUTLIER_REASON"] = X.loc[mask_inf, "OUTLIER_REASON"].apply(
+                lambda x: (x + f"|{var}_inf_mediane_div_{COEFF_ECART}") if x else f"{var}_inf_mediane_div_{COEFF_ECART}"
+            )
+    
+            X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(
+                lambda x: (x + f"|{var}_sup_mediane_mult_{COEFF_ECART}") if x else f"{var}_sup_mediane_mult_{COEFF_ECART}"
+            )
+
+            #X["Ano_" + var] = (mask_inf | mask_sup).astype(int)
+        
+        # =============================================================================
+        # Critères supplémentaires basés sur la médiane par groupe
+        # =============================================================================
+        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
+            logging.info("\t Application des critères de filtrage basés sur la médiane")
+            
+            # Calculer les médianes par groupe (YEAR, ville_, TYPE_BIEN)
+            medianes = X.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+            medianes.rename(columns={'Prix_m2': 'mediane_prix_m2'}, inplace=True)
+            
+            # Merge pour avoir la médiane de chaque groupe sur chaque ligne
+            X = X.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
+            
+            # Critère 1: Prix < médiane / 4
+            mask_inf_med_div4 = (X['Prix_m2'] < X['mediane_prix_m2'] / 4) & X['Prix_m2'].notna()
+            X.loc[mask_inf_med_div4, 'OUTLIER_REASON'] = X.loc[mask_inf_med_div4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_mediane_div_4") if x else "Prix_m2_inf_mediane_div_4"
+            )
+            
+            # Critère 2: Prix > médiane * 4
+            mask_sup_med_mult4 = (X['Prix_m2'] > X['mediane_prix_m2'] * 4) & X['Prix_m2'].notna()
+            X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'] = X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_mediane_mult_4") if x else "Prix_m2_sup_mediane_mult_4"
+            )
+            
+            # Critère 3: Prix < 200€
+            mask_inf_200 = (X['Prix_m2'] < PRIX_M2_MIN) & X['Prix_m2'].notna()
+            X.loc[mask_inf_200, 'OUTLIER_REASON'] = X.loc[mask_inf_200, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_200") if x else "Prix_m2_inf_200"
+            )
+            
+            # Critère 4: Prix > 20,000€
+            mask_sup_20000 = (X['Prix_m2'] > PRIX_M2_MAX) & X['Prix_m2'].notna()
+            X.loc[mask_sup_20000, 'OUTLIER_REASON'] = X.loc[mask_sup_20000, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_20000") if x else "Prix_m2_sup_20000"
+            )
+            
+            # Marquer les anomalies détectées par ces critères
+            mask_median_criteria = mask_inf_med_div4 | mask_sup_med_mult4 | mask_inf_200 | mask_sup_20000
+            # Ensure 'Ano_Prix_m2' column exists before trying to update it
+            if "Ano_Prix_m2" not in X.columns:
+                X["Ano_Prix_m2"] = 0
+            X.loc[mask_median_criteria, "Ano_Prix_m2"] = 1  # anomalie
+            
+            logging.info(f"\t \t \t - Prix < médiane/4 : {mask_inf_med_div4.sum()}")
+            logging.info(f"\t \t \t - Prix > médiane*4 : {mask_sup_med_mult4.sum()}")
+            logging.info(f"\t \t \t - Prix < {PRIX_M2_MIN}€ : {mask_inf_200.sum()}")
+            logging.info(f"\t \t \t - Prix > {PRIX_M2_MAX}€ : {mask_sup_20000.sum()}")
+            
+            # Supprimer la colonne temporaire médiane
+            X.drop(columns=['mediane_prix_m2'], inplace=True, errors='ignore')
+
+        nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        # Attention, on supprime les surfaces habitables alors que le pb peut provenir de la valeur foncière sous ou sur-estimée
+        if "Prix_m2" in self.var_num:
+            X.loc[(X["Ano_Prix_m2"] == 1), "NB_SURF_HAB"] = np.nan
+            X.loc[(X["Ano_Prix_m2"] == 1), "Prix_m2"] = np.nan
+        if "Prix_piece" in self.var_num:
+            X.loc[X["Ano_Prix_piece"] == 1, "NB_PIECES"] = np.nan
+        if "nb_m2_by_piece" in self.var_num:
+            X.loc[X["Ano_nb_m2_by_piece"] == 1, "NB_PIECES"] = np.nan
+            X.drop(columns=["Ano_nb_m2_by_piece"], inplace=True)
+
+        post_nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        post_nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        post_nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        nb_suppr_surf_hab = nb_nn_surf_hab - post_nb_nn_surf_hab
+        nb_suppr_prix_m2 = nb_nn_prix_m2 - post_nb_nn_prix_m2
+        nb_suppr_nb_pieces = nb_nn_nb_pieces - post_nb_nn_nb_pieces
+
+        logging.info(
+            f"\t \t {nb_suppr_surf_hab} anomalies supprimées sur le champ NB_SURF_HAB soit {round((nb_suppr_surf_hab/nb_nn_surf_hab)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_prix_m2} anomalies supprimées sur le champ Prix_m2 soit {round((nb_suppr_prix_m2/nb_nn_prix_m2)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
+        )
+
+        # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
+        X["ratio_val_mt_op"] = np.nan
+        X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
+            X["MT_OPE"] / X["VALEUR_FONCIERE"]
+        )
+        
+        # Tracker les anomalies ratio_val_mt_op
+        mask_ratio_ano = X["ratio_val_mt_op"] > 2
+        X.loc[mask_ratio_ano, "OUTLIER_REASON"] = X.loc[mask_ratio_ano, "OUTLIER_REASON"].apply(
+            lambda x: (x + "|ratio_val_mt_op") if x else "ratio_val_mt_op"
+        )
+        
+        X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
+        X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
+
+        X.drop(columns=["ratio_val_mt_op"], inplace=True)
+        X.reset_index(drop=True, inplace=True)
+
+        return dic_geo_meta, X
+    
+
+def detect_ano_ml(input_df, n_years=None):
+
+    logging.info("ML detection of anomalies starting")
+
+    # =============================================================================
+    # Import des données sur les N_YEARS dernières années
+    # =============================================================================
+
+    start_time = datetime.now()
+
+    importrecentdata = ImportRecentData(n_years=n_years, input_=input_df)
+    data_recent = importrecentdata.import_data_recent()
+    logging.info(
+        f"Base d'analyse filtrée sur les {params.N_YEARS} dernières années : {datetime.now()-start_time}\n"
+    )
+  
+    data_original = input_df.copy()  
+    
+
+    data_recent["DATE"] = data_recent["DATE"].apply(lambda x: x.replace(day=1))
+    
+  
+    ids_avant_detection = set(data_recent["ID"])  # IDs qui entrent dans la détection
+    
+    # Import des données sur les N_YEARS dernières années
+    start_time = datetime.now()
+    logging.info(
+        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
     )
 
-end_time = time.time()
-print(f"Temps de traitement variable BIEN_NEUF : {end_time - start_time:.2f} secondes")
-base_ml = base_ml.drop(
-        columns=["NATURE_MUTATION", "CD_NATUR_OP"]
+    # =============================================================================
+    # Calculs des effectifs par ville et par Iris
+    # =============================================================================
+    step_time = datetime.now()
+    logging.info("workforce calculation")
+    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
+    )
+    step_time = datetime.now()
+    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
     )
 
-base_ml = base_ml.copy()
-base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
 
-
-bins_apt   = [0, 2, 4, np.inf]
-labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
-
-bins_mai   = [0, 4, np.inf]
-labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
+    dict_geo_city = effectifsparVille.transform(data_recent)
 
 
 
-mask_apt = base_ml["TYPE_BIEN"].eq("APT")
-mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+    defmaillegeocity = DefMailleGeoCITY(
+        n_min=params.N_MIN,
+        dict_geo_city=dict_geo_city,
+        geo_bien="geo_bien_city",
+        by_year=0,
+    )
+    data_recent = defmaillegeocity.transform(data_recent)
 
-base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_apt, "NB_PIECES"],
-    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
-).astype(str)
+    logging.info("workforce calculation OK")
 
-base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_mai, "NB_PIECES"],
-    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
-).astype(str)
+    # =============================================================================
+    # Calculs des statistiques descriptives par typologie de bien
+    # =============================================================================
 
-base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
+    logging.info("statistics calculation")
+    step_time = datetime.now()
+    calcmetanumCity = CalcMetaNum(
+        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
+    )
+    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
+    logging.info(
+        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
+    )
 
-base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
-base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
-
-base_ml.to_parquet("base_complete_filtree.parquet", index=False)
-
-
-
-
-
-############### Statistiques sur les anomalies ###############
-colonnes = ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]
-
-def analyse_generale_outliers(data_mauvais, data_recent):
-    total = len(data_mauvais) + len(data_recent)
-    print("STATISTIQUES GÉNÉRALES")
-    print("-" * 80)
-    print(f"Nombre total de biens sur 2015-2025 : {total:,}")
-    print(f"Biens valides : {len(data_recent):,} ({len(data_recent)/total*100:.2f}%)")
-    print(f"Outliers détectés : {len(data_mauvais):,} ({len(data_mauvais)/total*100:.2f}%)")
-    print()
-    
-    
-    print("Prix au m² - Outliers :")
-    print(f"  Min : {data_mauvais['Prix_m2'].min():,.0f} €")
-    print(f"  Max : {data_mauvais['Prix_m2'].max():,.0f} €")
-    print(f"  Médiane : {data_mauvais['Prix_m2'].median():,.0f} €")
-    print(f"  Moyenne : {data_mauvais['Prix_m2'].mean():,.0f} €")
-    print()
-
-
-def classifier_outliers(data_mauvais, data_recent):
-    print("CLASSIFICATION DES OUTLIERS")
-    print("-" * 80)
-    
-    medianes = data_recent.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
-    medianes.rename(columns={'Prix_m2': 'mediane'}, inplace=True)
-    
-    data_outliers_class = data_mauvais.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
-    
-    def classifier(row):
-        prix = row['Prix_m2']
-        if pd.isna(row['mediane']):
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            else:
-                return 'Autre'
-        else:
-            mediane = row['mediane']
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            elif prix < mediane / 4:
-                return 'Prix < médiane/4'
-            elif prix > 4 * mediane:
-                return 'Prix > 4×médiane'
-            else:
-                return 'Autre'
-    
-    data_outliers_class['type_anomalie'] = data_outliers_class.apply(classifier, axis=1)
-    
-    repartition = data_outliers_class['type_anomalie'].value_counts()
-    print("\nRépartition par type d'anomalie :")
-    for anomalie, count in repartition.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {anomalie:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    return data_outliers_class
-
-
-def analyse_geo_outliers(data_outliers_class):
-    print("RÉPARTITION GÉOGRAPHIQUE")
-    print("-" * 80)
-    
-    print("\nTop 10 départements avec le plus d'outliers :")
-    top_dept = data_outliers_class['LIBELLE_DEPT'].value_counts().head(10)
-    for dept, count in top_dept.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Top 10 villes avec le plus d'outliers :")
-    top_ville = data_outliers_class['ville_'].value_counts().head(10)
-    for ville, count in top_ville.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-
-
-def analyse_typologie_outliers(data_outliers_class):
-    print("RÉPARTITION PAR TYPE DE BIEN")
-    print("-" * 80)
-    
-    print("\nPar type de bien :")
-    type_bien = data_outliers_class['TYPE_BIEN'].value_counts()
-    for tb, count in type_bien.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {tb:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Par année :")
-    annee = data_outliers_class['YEAR'].value_counts().sort_index()
-    for year, count in annee.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {year} : {count:5d} ({pct:5.2f}%)")
-    print()
+    # =============================================================================
+    # Détection et suppression des anomalies
+    # =============================================================================
+    logging.info("Detection and elimination of anomalies")
     
 
-
-def analyse_sources_outliers(data_outliers_class):
-
-    print("ANALYSE PAR SOURCE DE DONNÉES")
-    print("-" * 80)
+    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
+    result = detectano.transform(data_recent)
     
-    print("\nPar source :")
-    source = data_outliers_class['SOURCE'].value_counts()
-    for src, count in source.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {src:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
+    if isinstance(result, tuple):
+        _, data_recent = result
+    else:
+        data_recent = result
+    
+    outlier_reasons = data_recent[['ID','OUTLIER_REASON']].copy()
+
+    nb_avant = len(data_recent)
+    data_recent = data_recent.dropna(subset=["Prix_m2"])
+    nb_apres = len(data_recent)
+    print(f"Nombre de lignes supprimées :{nb_avant - nb_apres}")
+
+    data_recent.drop(columns=["year_geo_bien","OUTLIER_REASON"], inplace=True, errors="ignore")
+    logging.info("Detection and elimination of anomalies OK")
+    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
+    
+    
+    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
+                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR","DEMANDE"]
+    
+    # Vérifier que toutes les colonnes existent
+    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
+    data_recent = data_recent[colonnes_disponibles]
+    
+    
+    ids_valides = set(data_recent["ID"])
+    
+    # Outliers = IDs entrés dans la détection MAIS rejetés
+    ids_outliers = ids_avant_detection - ids_valides
+    
+    # Récupérer les outliers depuis les données ORIGINALES
+    data_mauvais = data_original[
+        (data_original["ID"].isin(ids_outliers))
+    ].copy()
+    data_mauvais = data_mauvais.merge(outlier_reasons, on = 'ID', how = 'left')
+    # Ne garder que les colonnes disponibles
+    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
+    colonnes_communes.append("OUTLIER_REASON")
+    data_mauvais = data_mauvais[colonnes_communes]
     
 
+    return data_recent, data_mauvais
 
-def exemples_outliers(data_outliers_class):
-    print("=" * 80)
-    print("EXEMPLES D'OUTLIERS EXTRÊMES")
-    print("=" * 80)
-    
-    print("\n5 prix au m² les plus bas :")
-    cols_display = ['ville_', 'TYPE_BIEN', 'Prix_m2', 'NB_SURF_HAB', 'NB_PIECES', 'type_anomalie']
-    print(data_outliers_class.nsmallest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
-    
-    print("5 prix au m² les plus hauts :")
-    print(data_outliers_class.nlargest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
+   
+   
+
+#df = pd.read_parquet("Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
+#base_ml = detect_ano_ml(input_df=df, date_min = None, date_max = None, type_bien = None)
+#base_ml.to_csv(r"N:\uflumth\indicateur_marche\prix_m2\my_cl_estim\prez\base_ml_output.csv", index =  False, encoding = "utf-8")
 
 
+class Connector(object):
+    """Classe permettant de lire et écrire des données."""
+
+    def __init__(self):
+        self.engine_read = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="read",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+        self.engine_write = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="write",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+
+    def read_excel(self, input_path, skiprows=None):
+        try:
+            data = pd.read_excel(input_path, skiprows=skiprows)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_csv(self, input_path, sep=","):
+        try:
+            data = pd.read_csv(input_path, sep=sep, low_memory=False)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_pkl(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PKL}"
+            if os.path.isfile(f"{input_path}{params.EXT_PKL}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PKL}"
+        )
+        try:
+            data = pd.read_pickle(input_path)
+        except:
+            try:
+                with open(input_path, "rb") as file:
+                    data = pickle.load(file)
+            except FileNotFoundError:
+                sys.exit()
+        return data
+
+    def write_pkl(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PKL}"
+        try:
+            data.to_pickle(output_path)
+        except:
+            try:
+                with open(output_path, "wb") as file:
+                    pickle.dump(data, file)
+            except:  # if the directory doesn't exist
+                sys.exit()
+
+    def read_parquet(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PARQUET}"
+            if os.path.isfile(f"{input_path}{params.EXT_PARQUET}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PARQUET}"
+        )
+        try:
+            data = pd.read_parquet(input_path)
+        except:
+            sys.exit()
+        return data
+
+    def write_parquet(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PARQUET}"
+        try:
+            data.to_parquet(output_path)
+        except:
+            sys.exit()
+
+    def read_sql(self, query):
+        data = pd.read_sql_query(query, self.engine_read)
+
+        return data
+
+    def write_sql(self, data, table, chunksize=None):
+        # chunksize < 2100 / nb_colonnes
+        chunksize = chunksize or round(2000 / len(data.columns))
+        data.reset_index(inplace=True, drop=True)
+
+        data.to_sql(
+            name=table,
+            con=self.engine_write,
+            schema=params.SCHEMA,
+            if_exists="append",
+            index=False,
+            chunksize=chunksize,
+        )
+
+    def delete_sql(self, table):
+        with self.engine_read.begin() as conn:
+            conn.execute(f"TRUNCATE TABLE {table}")
 
 
-def analyser_outliers_complet(data_mauvais, data_recent):
-    analyse_generale_outliers(data_mauvais, data_recent)
-    data_outliers_class = classifier_outliers(data_mauvais, data_recent)
-    analyse_geo_outliers(data_outliers_class)
-    analyse_typologie_outliers(data_outliers_class)
-    analyse_sources_outliers(data_outliers_class)
-    exemples_outliers(data_outliers_class)
-    return data_outliers_class
+def connect_sql(
+    server=params.SERVEUR,
+    database=params.DATABASE,
+    id=params.PROD_ID,
+    pwd=params.PROD_PWD,
+    usage="read",
+    conn_params_optional=None
+):
+    conn_params = "DRIVER={SQL Server};" f"SERVER={server};DATABASE={database};"
+    conn_params_optional = conn_params_optional or {}
+    for key, val in conn_params_optional.items():
+        conn_params += f"{key}={val};"
+    if pwd is not None:
+        conn_params += f"UID={id};PWD={pwd};"
+    conn_params = urllib.parse.quote_plus(conn_params)
+    create_engine_kwargs = {"fast_executemany": True}
+    if usage != "write":
+        create_engine_kwargs["isolation_level"] = "AUTOCOMMIT"
+    engine = create_engine(
+        "mssql+pyodbc:///?odbc_connect={}".format(conn_params), **create_engine_kwargs
+    )
+    return engine
 
 
-def analyser_par_critere(outliers_df):
-    """Analyse la répartition des outliers par critère d'élimination"""
-    print("\n" + "="*80)
-    print("ANALYSE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Séparer les critères multiples (séparés par |)
-    criteres_list = []
-    for idx, row in outliers_df.iterrows():
-        reason_val = row["OUTLIER_REASON"]
-        if pd.notna(reason_val) and str(reason_val).strip() != "":
-            reasons = str(reason_val).split("|")
-        else:
-            reasons = ["Non_specifie"]
-
-        for reason in reasons:
-            criteres_list.append(reason.strip())
-    
-    criteres_counts = pd.Series(criteres_list).value_counts()
-    
-    print(f"\nNombre total d'outliers : {len(outliers_df):,}")
-    print(f"\nRépartition par critère (un outlier peut avoir plusieurs critères) :")
-    print("-" * 80)
-    for critere, count in criteres_counts.items():
-        pct = count / len(outliers_df) * 100
-        print(f"  {critere:35s} : {count:6,} ({pct:5.2f}%)")
-    
-    # Outliers avec critères multiples
-    outliers_multi = outliers_df[outliers_df["OUTLIER_REASON"].str.contains("|", na=False)]
-    pct_multi = len(outliers_multi) / len(outliers_df) * 100
-    print(f"\nOutliers avec critères multiples : {len(outliers_multi):,} ({pct_multi:.2f}%)")
-    print()
-    
-    return criteres_counts
+def _add_suffixe(path):
+    if params.TEST_MODE and params.N_ROWS is not None:
+        path = f"{path}{params.SUFF_TEST_MODE}"
+    return path
 
 
-def analyse_geo_par_critere(outliers_df):
-    """Analyse géographique des outliers par critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION GÉOGRAPHIQUE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere}")
-        print("-" * 80)
-        
-        # Top 5 départements
-        if "LIBELLE_DEPT" in subset.columns:
-            print(f"\nTop 5 départements ({len(subset):,} outliers) :")
-            top_dept = subset["LIBELLE_DEPT"].value_counts().head(5)
-            for dept, count in top_dept.items():
-                pct = count / len(subset) * 100
-                print(f"  {dept:35s} : {count:5,} ({pct:5.2f}%)")
-        
-        # Top 5 villes
-        if "ville_" in subset.columns:
-            print(f"\nTop 5 villes :")
-            top_ville = subset["ville_"].value_counts().head(5)
-            for ville, count in top_ville.items():
-                pct = count / len(subset) * 100
-                print(f"  {ville:35s} : {count:5,} ({pct:5.2f}%)")
-    print()
 
 
-def analyse_temporelle_par_critere(outliers_df):
-    """Analyse temporelle des outliers par critère"""
-    print("\n" + "="*80)
-    print("ÉVOLUTION TEMPORELLE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0 or "YEAR" not in subset.columns:
-            continue
-            
-        print(f"\nCritère : {critere}")
-        print("-" * 80)
-        
-        # Répartition par année
-        year_counts = subset["YEAR"].value_counts().sort_index()
-        print(f"\nÉvolution par année ({len(subset):,} outliers au total) :")
-        for year, count in year_counts.items():
-            pct = count / len(subset) * 100
-            bar_length = int(pct / 2)  # Barre visuelle
-            bar = "█" * bar_length
-            print(f"  {year} : {count:5,} ({pct:5.2f}%) {bar}")
-    print()
 
 
-def analyse_typologie_par_critere(outliers_df):
-    """Analyse typologique des outliers par critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION TYPOLOGIQUE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere} ({len(subset):,} outliers)")
-        print("-" * 80)
-        
-        # Par type de bien
-        if "TYPE_BIEN" in subset.columns:
-            print("\nPar type de bien :")
-            type_counts = subset["TYPE_BIEN"].value_counts()
-            for type_bien, count in type_counts.items():
-                pct = count / len(subset) * 100
-                print(f"  {type_bien:15s} : {count:5,} ({pct:5.2f}%)")
-        
-        # Par BIEN_NEUF si disponible
-        if "BIEN_NEUF" in subset.columns:
-            print("\nPar état (neuf/ancien) :")
-            neuf_counts = subset["BIEN_NEUF"].value_counts()
-            for etat, count in neuf_counts.items():
-                pct = count / len(subset) * 100
-                print(f"  {etat:15s} : {count:5,} ({pct:5.2f}%)")
-    print()
 
+#############################################################################################
+#############################################################################################
+                                #Fonctions Univ-Elem#
 
-def analyse_source_par_critere(outliers_df):
-    """Analyse des outliers par source et critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION PAR SOURCE DE DONNÉES ET CRITÈRE")
-    print("="*80)
-    
-    if "SOURCE" not in outliers_df.columns:
-        print("\nColonne SOURCE non disponible.")
-        return
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere} ({len(subset):,} outliers)")
-        print("-" * 80)
-        
-        source_counts = subset["SOURCE"].value_counts()
-        for source, count in source_counts.items():
-            pct = count / len(subset) * 100
-            print(f"  {source:20s} : {count:5,} ({pct:5.2f}%)")
-    print()
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
 
+def load_and_preprocess_data(specific_path = None):
+    """Charge et prétraite les données initiales."""
+    print("Chargement des données...")
+    if specific_path is not None:
+        fichier = specific_path
+    else:
+        fichier = params.CONFIG['input_file']
 
-def exemples_par_critere(outliers_df):
-    """Affiche des exemples concrets d'outliers pour chaque critère"""
-    print("\n" + "="*80)
-    print("EXEMPLES CONCRETS PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    cols_display = ["ville_", "TYPE_BIEN", "Prix_m2", "NB_SURF_HAB", "NB_PIECES", "YEAR", "OUTLIER_REASON"]
-    cols_available = [col for col in cols_display if col in outliers_df.columns]
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nExemples pour : {critere}")
-        print("-" * 80)
-        
-        # Prendre 5 exemples aléatoires
-        n_samples = min(5, len(subset))
-        samples = subset[cols_available].sample(n=n_samples, random_state=42)
-        print(samples.to_string(index=False))
-        print()
-
-
-def export_outliers_excel(outliers_df, filename="outliers_analysis.xlsx"):
-    """Exporte les outliers et analyses dans un fichier Excel multi-feuilles"""
-    print("\n" + "="*80)
-    print("EXPORT DES OUTLIERS")
-    print("="*80)
-    
     try:
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            # Feuille 1: Tous les outliers
-            outliers_df.to_excel(writer, sheet_name="Tous_les_outliers", index=False)
+        df = pd.read_parquet(fichier)
+    except FileNotFoundError:
+        print(f"Le fichier {fichier} est introuvable")
+    
+    
+    # Renommage et nettoyage initial
+    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
+    df = df.dropna(subset=["CITY", "CP", "DEPT"])
+    
+    # Conversion des dates
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    # Ajout colonne REGION
+    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
+    df['REGION'] = df['DEPT'].map(params.CONFIG['dep_to_region'])
+    
+    return df
+
+def apply_nice_correction(df):
+    """Applique la correction spécifique pour Nice."""
+    if "IRIS" in df.columns:
+        mask_nice = df["IRIS"].str[:5].isin(params.CONFIG['codes_insee_nice'])
+        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+        df.loc[mask_nice, "CITY"] = "NICE"
+    return df
+
+def complete_months(g, col):
+    """Complète les mois manquants."""
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    # Forward fill et Backward fill pour les colonnes catégorielles
+    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[i] = g[i].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    # g["prix_moyen"] reste NaN là où il n'y a pas de données
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
+    """Calcule la moyenne mobile pondérée."""
+    result = []
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        # Optimisation: ne traiter que les mois trimestriels (3, 6, 9, 12)
+        if pd.Timestamp(periode).month % 3 != 0:
+            continue
             
-            # Feuille 2: Statistiques par critère
-            criteres_list = []
-            for idx, row in outliers_df.iterrows():
-                reason_val = row["OUTLIER_REASON"]
-                if pd.notna(reason_val) and str(reason_val).strip() != "":
-                    reasons = str(reason_val).split("|")
-                else:
-                    reasons = ["Non_specifie"]
-                for reason in reasons:
-                    criteres_list.append(reason.strip())
-            
-            criteres_stats = pd.DataFrame({
-                "Critère": pd.Series(criteres_list).value_counts().index,
-                "Nombre": pd.Series(criteres_list).value_counts().values,
-                "Pourcentage": (pd.Series(criteres_list).value_counts().values / len(outliers_df) * 100).round(2)
-            })
-            criteres_stats.to_excel(writer, sheet_name="Stats_par_critere", index=False)
-            
-            # Feuille 3: Top départements
-            if "LIBELLE_DEPT" in outliers_df.columns:
-                top_dept = outliers_df["LIBELLE_DEPT"].value_counts().head(20).reset_index()
-                top_dept.columns = ["Département", "Nombre_outliers"]
-                top_dept.to_excel(writer, sheet_name="Top_departements", index=False)
-            
-            # Feuille 4: Évolution temporelle
-            if "YEAR" in outliers_df.columns:
-                temp_evolution = outliers_df["YEAR"].value_counts().sort_index().reset_index()
-                temp_evolution.columns = ["Année", "Nombre_outliers"]
-                temp_evolution.to_excel(writer, sheet_name="Evolution_temporelle", index=False)
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
         
-        print(f"\nFichier exporté avec succès : {filename}")
-        print(f"   Nombre total d'outliers : {len(outliers_df):,}")
-    except Exception as e:
-        print(f"\nErreur lors de l'export : {e}")
-    print()
-
-
-def rapport_complet_outliers(outliers_df, base_clean):
-    """Génère un rapport complet sur les outliers avec toutes les analyses"""
-    print("\n\n")
-    print("="*80)
-    print("=" * 30 + " RAPPORT COMPLET " + "=" * 34)
-    print("=" * 25 + " ANALYSE DES OUTLIERS " + "=" * 34)
-    print("="*80)
+        # Filtre sur la fenêtre temporelle
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)]
+        
+        # Filtre sur les données actives (prix existant et indicateur valide)
+        mask_actif = (df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)
+        df_actif = df_fenetre[mask_actif]
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_univers": 0
+            })
+            continue
+        
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            # Calcul de la moyenne pondérée
+            prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
+        else:
+            prix_mm = np.nan
+            
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": len(df_actif),
+            "nb_univers": df_actif.groupby(typokeys).ngroups
+        })
     
-    # Vue d'ensemble
-    total = len(outliers_df) + len(base_clean)
-    print(f"\nVUE D'ENSEMBLE")
-    print("-" * 80)
-    print(f"  Nombre total de biens traités    : {total:,}")
-    print(f"  Biens valides conservés           : {len(base_clean):,} ({len(base_clean)/total*100:.2f}%)")
-    print(f"  Outliers détectés et retirés      : {len(outliers_df):,} ({len(outliers_df)/total*100:.2f}%)")
+    return pd.DataFrame(result)
+
+def process_maille(df, maille_col, maille_name, filter_func=None, df_structure_ref = None):
+    """Fonction générique pour traiter une maille géographique."""
+    print(f"\n--- Traitement de la maille : {maille_name} ---")
+    start_time = datetime.now()
     
-    # Analyses détaillées
-    analyser_par_critere(outliers_df)
-    analyse_geo_par_critere(outliers_df)
-    analyse_temporelle_par_critere(outliers_df)
-    analyse_typologie_par_critere(outliers_df)
-    analyse_source_par_critere(outliers_df)
-    exemples_par_critere(outliers_df)
+    # Filtrage spécifique si nécessaire
+    df_work = df.copy()
+    if filter_func:
+        df_work = filter_func(df_work)
+        
+    if df_work.empty:
+        print(f"Aucune donnée pour la maille {maille_name} après filtrage.")
+        return None
+
+    # Nettoyage de la colonne maille
+    if df_work[maille_col].dtype == 'object':
+        df_work[maille_col] = df_work[maille_col].astype(str).str.strip().str.upper()
+
+    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
     
-    # Export Excel
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    filename = f"outliers_analysis_{timestamp}.xlsx"
-    export_outliers_excel(outliers_df, filename)
+    # 1. Agrégation mensuelle
+    univers_mensuel = (
+        df_work.groupby(dims, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_median=("Prix_m2", "median"),
+            prix_moyen=("Prix_m2", "mean"),
+        )
+        .reset_index()
+    )
     
-    print("="*80)
-    print("FIN DU RAPPORT")
-    print("="*80)
-    print("\n")
+    # Nettoyage post-agrégation
+    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
     
-    return outliers_df
+    # Filtre cohérence Pièces/Type 
+    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
+    univers_mensuel = univers_mensuel[mask_coherence].drop(columns=["PB"])
+
+    # 2. Complétion des mois
+    print("Complétion des mois manquants...")
+    univers_complet = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(lambda g: complete_months(g, maille_col))
+    )
+    
+    # 3. Calcul des poids structurels
+    
+    
+
+    if df_structure_ref is not None:
+        print("--- Application de la structure de marché globale ---")
+        univers_complet = univers_complet.merge(
+            df_structure_ref, on = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how = "left"
+        )
+        univers_complet = univers_complet.rename(columns={"poids_relatif_imposes" : "poids_relatif"})
+        univers_complet = univers_complet.dropna(subset=['poids_relatif'])
+    
+    else:
+        poids_global = (
+        univers_mensuel
+        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+        .sum()
+        .rename(columns={"nb_transac": "poids_total"})
+        )
+        poids_global["poids_relatif"] = (
+            poids_global.groupby(maille_col)["poids_total"].transform(lambda x: x / x.sum())
+            )
+    
+        univers_complet = univers_complet.merge(
+            poids_global,
+            on=[maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+            how="left"
+        )
+
+    # 4. Calcul des indicatrices
+    typokeys = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+    
+    univers_complet["I_3m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
+    )
+    univers_complet["I_12m"] = (
+        univers_complet.groupby(typokeys)["nb_transac"]
+        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
+    )
+    
+    # 5. Calcul des moyennes mobiles pondérées
+    print("Calcul des moyennes mobiles...")
+    resultats_mm = []
+    
+
+    groupes_calcul = univers_complet.groupby([maille_col, 'TYPE_BIEN'])
+    
+    for (maille_val, type_bien), df_groupe in groupes_calcul:
+        # MM 3 mois
+        mm_3m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=3, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_3m', 
+            typokeys=typokeys
+        )
+        mm_3m["DIC_NAME"] = "prix_m2_3m"
+        mm_3m = mm_3m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # MM 12 mois
+        mm_12m = calcule_moyenne_mobile_ponderee(
+            df_groupe, 
+            window=12, 
+            col_prix='prix_moyen', 
+            col_indicatrice='I_12m', 
+            typokeys=typokeys
+        )
+        mm_12m["DIC_NAME"] = "prix_m2_12m"
+        mm_12m = mm_12m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
+        
+        # Consolidation
+        mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
+        mm_type["VAL_MAILLE_GEO"] = maille_val
+        mm_type["TYPE_MAILLE"] = maille_col 
+        mm_type["CD_TYPE_BIEN"] = type_bien
+        
+        resultats_mm.append(mm_type)
+    
+    if not resultats_mm:
+        return None
+        
+    final_df = pd.concat(resultats_mm, ignore_index=True)
+    
+    # Nettoyage final et calcul taux inflation
+    final_df = final_df.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    
+    # Calcul inflation 
+    final_df["TAUX_INFL_12M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=4) 
+    final_df["TAUX_INFL_3M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=1)
+
+    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
+    return final_df
+
+def save_results(df, suffixe_fichier):
+    """Sauvegarde les résultats dans différents fichiers CSV."""
+    if df is None or df.empty:
+        print(f"Aucune donnée à sauvegarder pour {suffixe_fichier}")
+        return
+
+    # 1. Base complète (filtrée sur date)
+    df_complet = df.copy()
+    df_complet["Periode"] = pd.to_datetime(df_complet["Periode"])
+    df_complet = df_complet[df_complet["Periode"] >= "2015-03-01"]
+    
+    output_path = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_complet_{suffixe_fichier}.csv")
+    df_complet.to_csv(output_path, index=False)
+    print(f"Sauvegardé: {output_path}")
+
+    # 2. Dernière période (MAJ)
+    df_maj = df_complet.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    df_maj = df_maj[df_maj["Periode"] == df_maj["Periode"].max()]
+    df_maj = df_maj.rename(columns={"Periode": "DT_MAJ_PM2"})
+    
+    cols_export = ["DIC_NAME", "CD_TYPE_BIEN", "TYPE_MAILLE", "VAL_MAILLE_GEO", "DT_MAJ_PM2", "NB_BIENS", "prix_mm_value", "TAUX_INFL_3M", "TAUX_INFL_12M"]
+    # Vérification que les colonnes existent
+    cols_export = [c for c in cols_export if c in df_maj.columns]
+    
+    output_path_maj = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
+    df_maj[cols_export].to_csv(output_path_maj, index=False)
+    print(f"Sauvegardé: {output_path_maj}")
+
+    # 3. Statistiques de volumétrie
+    df_vol = df.copy()
+    df_vol["Periode"] = pd.to_datetime(df_vol["Periode"])
+    df_vol = df_vol[df_vol["Periode"] >= "2017-03-01"]
+    
+    df_min = df_vol.groupby(["VAL_MAILLE_GEO", "DIC_NAME"], as_index=False)["NB_BIENS"].min()
+    df_pivot = df_min.pivot(index='VAL_MAILLE_GEO', columns='DIC_NAME', values='NB_BIENS')
+    df_pivot.columns.name = None
+    df_pivot = df_pivot.reset_index()
+    df_pivot.rename(columns={"prix_m2_3m": "NB_BIENS (3m)", "prix_m2_12m": "NB_BIENS (12m)"}, inplace=True)
+    
+    output_path_vol = os.path.join(params.CONFIG['output_dir'], f"stat_volumeterie_{suffixe_fichier}.csv")
+    df_pivot.to_csv(output_path_vol, index=False)
+    print(f"Sauvegardé: {output_path_vol}")
+
+# --- Fonctions de filtrage spécifiques ---
+
+def filter_province(df):
+    """Filtre pour créer la maille PROVINCE."""
+    mask_idf = df["DEPT"].isin(params.CONFIG['idf_depts'])
+    df_prov = df.copy()
+    df_prov.loc[~mask_idf, "PROVINCE_CODE"] = "PROVINCE"
+    # On ne garde que les lignes province
+    return df_prov[df_prov["PROVINCE_CODE"] == "PROVINCE"]
+
+def filter_villes_top15(df):
+    """Filtre pour les 15 plus grandes villes."""
+    # Application de la correction Nice 
+    df = apply_nice_correction(df)
+    return df[df["CITY"].isin(params.CONFIG['top15_cities'])]
+
+def filter_villes_cp(df):
+    """Filtre pour les arrondissements (CP) des grandes villes."""
+    return df[df["CITY"].isin(params.CONFIG['villes_arrondissements'])]
 
 
-# Lancer l'analyse complète
 
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].fillna("Non_specifie")
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].replace("","Non_specifie")
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].str.strip()
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].replace("","Non_specifie")
+def get_structure_reference(df,maille_col):
+    """
+    Permet d'extraire la structure du marché (poids de chaque univers élémentaire sur l'ensemble de la période)
+    à partir de la base de référence (CL+DVF)
+    """
 
-rapport_complet_outliers(outliers, base_ml_full)
+    print(f"---Extraction de la structure de marché ({maille_col}) ---")
 
+    df_work = df.copy()
+    if df_work[maille_col].dtype == "object":
+        df_work[maille_col] = df_work[maille_col].astype(str).str.upper().str.strip()
+
+    dims = [maille_col, "BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE"]
+
+    # on compte le volume total sur toute la période
+
+    structure = (
+        df_work.groupby(dims, dropna = False).size().reset_index(name="volume_reference")
+    )
+
+    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
+    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
+    structure = structure[mask_coherence].drop(columns=["PB"])
+
+    structure["poids_relatif_imposes"] = (
+        structure.groupby(maille_col)["volume_reference"].transform(lambda x : x / x.sum())
+    )
+
+    return structure[[maille_col,"BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE","poids_relatif_imposes"]]
