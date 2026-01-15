@@ -1,61 +1,6 @@
-import sys
-import os
-import time
-from datetime import datetime
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.io as pio
-
-# Configuration des chemins
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-import param_generaux as params
-from fonctions import load_and_preprocess_data, process_maille, save_results, apply_nice_correction
-
-
-
-
-if __name__ == "__main__":
-    start_global = datetime.now()
-    
-    # 1. Chargement des données
-    base_ml = load_and_preprocess_data()
-    
-    # 2. Traitement PROVINCE
-
-    df_province_input = base_ml.copy()
-    mask_province = ~df_province_input["DEPT"].isin(params.CONFIG['idf_depts'])
-    df_province_input.loc[mask_province, "CITY"] = "PROVINCE"
-    # On ne garde que ce qui est "PROVINCE" pour ce traitement
-    df_province_input = df_province_input[df_province_input["CITY"] == "PROVINCE"]
-    
-    res_province = process_maille(df_province_input, "CITY", "PROVINCE")
-    save_results(res_province, "PROVINCE")
-    
-    # 3. Traitement VILLES (TOP 15)
-    df_villes = apply_nice_correction(base_ml.copy())
-    df_villes = df_villes[df_villes["CITY"].isin(params.CONFIG['top15_cities'])]
-    
-    res_villes = process_maille(df_villes, "CITY", "CITY")
-    save_results(res_villes, "CITY") 
-    
-    # 4. Traitement DEPARTEMENTS
-    res_dept = process_maille(base_ml,  "DEPT", "DEPT")
-    save_results(res_dept, "DEPT")
-    
-    # 5. Traitement REGIONS
-    res_region = process_maille(base_ml, "REGION", "REGION")
-    save_results(res_region, "REGION")
-
-    # 6. Traitement NATIONAL
-    df_national = base_ml.copy()
-    df_national["PAYS"] = "FRANCE"
-    res_national = process_maille(df_national, "PAYS", "NATIONAL")
-    save_results(res_national, "NATIONAL")
-
-
-    print(f"\nTraitement global terminé en {datetime.now() - start_global}")
+# Avant filtre
+print(f"Avant filtre cohérence : {len(univers_mensuel)} lignes")
+mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
+univers_mensuel = univers_mensuel[mask_coherence]
+print(f"Après filtre cohérence : {len(univers_mensuel)} lignes")
+print(f"PERTE : {len_avant - len(univers_mensuel)} lignes supprimées")
