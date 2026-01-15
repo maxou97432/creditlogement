@@ -426,55 +426,63 @@ if __name__ == "__main__":
     structure_v1 = get_structure_ref_local(df_v1_for_struct)
     
     # -------------------------------------------------------------------------
-    # B.3 CALCUL DES PRIX GLISSANTS - avec fonctions locales identiques à comparaison.py
+    # B.3 CALCUL DES PRIX GLISSANTS
     # -------------------------------------------------------------------------
+    print("\n--- Calcul des prix glissants (V1 et V2_STRUCT) ---")
     res_v1 = process_dataset_local(raw_v1_apt, "V1", is_v2=False, df_structure=None)
     res_v2_struct = process_dataset_local(raw_v2_apt, "V2_STRUCT", is_v2=True, df_structure=structure_v1)
-    res_v2_struct = res_v2_struct[res_v2_struct["Periode"] == res_v2_struct["Periode"].max()]
-    # Fusion des résultats
-    merge_cl = pd.merge(res_v1, res_v2_struct, on=["Ville", "Periode"], how="outer")
-
     
-    # ✅ DEBUG : Vérifier les données
-    print(f"\n[DEBUG] res_v2_struct shape: {res_v2_struct.shape}")
-    print(f"[DEBUG] res_v2_struct colonnes: {res_v2_struct.columns.tolist()}")
-    if len(res_v2_struct) > 0:
-        print(f"[DEBUG] Periodes min/max: {res_v2_struct['Periode'].min()} / {res_v2_struct['Periode'].max()}")
+    print(f"res_v2_struct calculé : {res_v2_struct.shape[0]} lignes, {res_v2_struct.shape[1]} colonnes")
     
-    # ✅ Préparer une copie pour la carte (dernière période uniquement)
-    res_v2_map = res_v2_struct[res_v2_struct["Periode"] == res_v2_struct["Periode"].max()].copy()
-    
-    print(f"[DEBUG] res_v2_map shape après filtre: {res_v2_map.shape}")
-    
-    # ✅ Si pas de données, on ne peut pas continuer
-    if len(res_v2_map) == 0:
-        print("⚠️ ERREUR: Aucune donnée pour la carte ! Vérifiez les données V2.")
-        # On garde l'ancien système
+    # -------------------------------------------------------------------------
+    # B.4 PRÉPARATION POUR LA CARTE (dernière période uniquement)
+    # -------------------------------------------------------------------------
+    if len(res_v2_struct) == 0:
+        print("⚠️ ERREUR: Aucune donnée calculée ! Fallback sur ancien système CSV.")
         df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
         if df_v2 is None:
             sys.exit("Erreur: Pas de données V2.")
         prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
+        df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
+        df_prix_m2 = df_prix_m2.rename(columns={"Prix_M2_V2": "prix_mm_value", "Periode": "DT_MAJ_PM2"})
     else:
-        # ✅ Adapter la structure pour la carte
-        res_v2_map = res_v2_map.rename(columns={
-            "Periode": "DT_MAJ_PM2",
+        # ✅ Garder seulement la dernière période pour la carte
+        derniere_periode = res_v2_struct["Periode"].max()
+        print(f"Dernière période disponible : {derniere_periode}")
+        
+        res_v2_map = res_v2_struct[res_v2_struct["Periode"] == derniere_periode].copy()
+        print(f"Données pour la carte : {len(res_v2_map)} villes")
+        
+        # ✅ Adapter les noms de colonnes pour la carte
+        df_prix_m2 = res_v2_map.rename(columns={
             "Ville": "VAL_MAILLE_GEO",
+            "Periode": "DT_MAJ_PM2",
             "prix_mm_12m (V2_STRUCT)": "prix_mm_value"
-        })
-        res_v2_map["MAILLE_TYPE"] = "CITY"  # Ajouter la colonne manquante
-        res_v2_map["CD_TYPE_BIEN"] = "APT"  # Type de bien
-        res_v2_map["DIC_NAME"] = "prix_m2_12m"  # Nom du dictionnaire
-
-        # A. Utiliser res_v2_map pour la carte
-        df_v2 = res_v2_map.copy()
-        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
-
-
-    prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
-    df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
-    df_prix_m2 = df_prix_m2.rename(columns = {f"Prix_M2_V2":"prix_mm_value","Periode":"DT_MAJ_PM2"})
+        }).copy()
+        
+        # Ajouter les colonnes attendues
+        df_prix_m2["MAILLE_TYPE"] = "CITY"
+        df_prix_m2["CD_TYPE_BIEN"] = "APT"
+        df_prix_m2["DIC_NAME"] = "prix_m2_12m"
+    
+    # -------------------------------------------------------------------------
+    # B.5 NETTOYAGE DES NOMS DE VILLES
+    # -------------------------------------------------------------------------
     df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({"HAVRE":"LE HAVRE", "SAINT ETIENNE": " ST ETIENNE", "ST-ETIENNE": "ST ETIENNE"})
+    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+        "HAVRE": "LE HAVRE",
+        "SAINT ETIENNE": "ST ETIENNE",
+        "ST-ETIENNE": "ST ETIENNE",
+        "SAINT-ETIENNE": "ST ETIENNE"
+    })
+    
+    print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
+    
+    # -------------------------------------------------------------------------
+    # B.6 FUSION POUR ANALYSE LPI (toutes périodes)
+    # -------------------------------------------------------------------------
+    merge_cl = pd.merge(res_v1, res_v2_struct, on=["Ville", "Periode"], how="outer")
+    
     # C. Chargement GPS
     df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
     df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper().str.strip()
