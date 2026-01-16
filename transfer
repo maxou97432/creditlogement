@@ -1,12 +1,207 @@
-univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    print(f"Avant filtre cohérence : {len(univers_mensuel)} lignes")
-    mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
-    
-    # Diagnostic
-    nb_incoherent = (~mask_coherence).sum()
-    print(f"Lignes incohérentes : {nb_incoherent}")
-    if nb_incoherent > 0 and nb_incoherent < 20:
-        print("Exemples:", univers_mensuel[~mask_coherence][["TYPE_BIEN", "NB_PIECES_RANGE"]].head())
-    
-    univers_mensuel = univers_mensuel[mask_coherence].drop(columns=["PB"])
-    print(f"Après filtre : {len(univers_mensuel)} lignes\n")
+
+""" Ce fichier a pour but de créer et traiter la deuxième version de la base de données
+    On reprend la bdd df_transac_clean qu'on vient fusionner à la base df_demande_clean;
+    On ne garde ensuite que les données de Crédit Logement, issues de France héxagonale, 
+    et on retire les transactions RAC et TVX
+"""
+import sys
+import os
+import time
+import logging
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.io as pio
+from fonctions import Connector
+from fonctions import load_and_preprocess_data, get_structure_reference, process_maille, save_results, filter_villes_top15
+import param_generaux as params
+
+pio.renderers.default = "browser"  
+# Configuration de l'environnement
+current_dir = os.getcwd()
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\correction base_demande")
+
+
+
+# Configuration des dossiers
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "correction base_demande")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
+
+def add_metric(metrics, step, before, after, note=""):
+    metrics.append({
+        "étape": step,
+        "lignes_avant": int(before),
+        "lignes_après": int(after),
+        "retirées": int(before - after),
+        "note": note
+    })
+
+# --- 0. Init ---
+t0 = time.time()
+metrics = []
+co = Connector()
+
+# --- 1. IMPORTATION & CONCATÉNATION ---
+base_clean = pd.read_parquet(os.path.join(DATA_PATH, "df_transac_clean.parquet"))
+base_clean["DEMANDE"] = 0
+base_clean_date_max = base_clean["DATE"].max()
+demandes = pd.read_parquet(os.path.join(DATA_PATH, "df_demandes_clean.parquet"))
+demandes["DEMANDE"] = 1
+demandes = demandes[demandes["DATE"] <= base_clean_date_max]
+
+df = pd.concat([base_clean, demandes], axis=0, ignore_index=True)
+
+add_metric(metrics, "Concaténation transactions + demandes", len(base_clean) + len(demandes), len(df))
+
+# --- 2. ENRICHISSEMENT BAN (Codes IRIS) ---
+df_ban = co.read_sql(f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
+# Déduplication par clé pour éviter la multiplication des lignes après merge
+df_ban = df_ban.drop_duplicates(subset=["CLE_INTEROP_ADR"], keep="first")
+
+before = len(df)
+cl_data = pd.merge(df, df_ban, how="left", on="CLE_INTEROP_ADR")
+
+no_match_iris = int(cl_data["code_iris"].isna().sum())
+add_metric(metrics, "Jointure BAN", before, len(cl_data), note=f"sans code_iris={no_match_iris}")
+
+# --- 3. RESTRICTIONS DU PÉRIMÈTRE D'ÉTUDE ---
+
+# A. Source = CL
+before = len(cl_data)
+mask_source = cl_data["SOURCE"].eq("CL")
+cl_data = cl_data[mask_source].copy()
+add_metric(metrics, "Filtre SOURCE = CL", before, len(cl_data))
+
+# B. Métropole (01-95 + 2A/2B)
+before = len(cl_data)
+dept = cl_data["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
+metropole_set = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
+mask_metro = dept.isin(metropole_set)
+cl_data = cl_data[mask_metro].copy()
+add_metric(metrics, "Filtre Géographie (métropole)", before, len(cl_data))
+
+# C. Nature d'opération : exclure TVX et RAC
+before = len(cl_data)
+cl_data["CD_NATUR_OP"] = cl_data["CD_NATUR_OP"].fillna("Non renseigné")
+mask_valid_op = ~cl_data["CD_NATUR_OP"].isin(["TVX", "RAC"])
+cl_data = cl_data[mask_valid_op].copy()
+add_metric(metrics, "Filtre Nature d’opération (excl. TVX/RAC)", before, len(cl_data))
+
+# --- 4. FILTRE TEMPOREL ---
+before = len(cl_data)
+cl_data["DATE"] = pd.to_datetime(cl_data["DATE"], errors="coerce")
+DATE_MIN = pd.Timestamp("2014-01-01")
+DATE_MAX = cl_data["DATE"].max()  # ou date précise à choisir
+mask_date = (cl_data["DATE"] >= DATE_MIN) & (cl_data["DATE"] < DATE_MAX)
+base_ml = cl_data[mask_date].copy()
+add_metric(metrics, "Filtre Date (>= 2014-01-01, < DATE_MAX)", before, len(base_ml))
+
+# --- 5. ENRICHISSEMENT BÂTIMENT (BAT - Année construction) ---
+df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
+df_bat = df_bat.drop_duplicates(subset=["CLE_INTEROP_ADR"], keep="first")
+
+before = len(base_ml)
+base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
+no_year = int(base_ml["annee_construction"].isna().sum())
+add_metric(metrics, "Jointure BAT", before, len(base_ml), note=f"sans annee_construction={no_year}")
+
+# --- 6. Synthèse des métriques ---
+resume_operations = pd.DataFrame(metrics)
+print(resume_operations)
+
+# =============================================================================
+# 6. CRÉATION DE VARIABLES (Neuf/Ancien & Typologie)
+# =============================================================================
+print("\n--- 6. Feature Engineering ---")
+
+# A. Correction Année Construction
+mask_vefa = base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement"
+base_ml.loc[mask_vefa, "annee_construction"] = base_ml.loc[mask_vefa, "DATE"].dt.year
+
+# B. Variable BIEN_NEUF
+base_ml["BIEN_NEUF"] = np.where(
+    (base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement") |
+    (base_ml["CD_NATUR_OP"] == "AQN") |
+    (abs(base_ml["YEAR"].astype(float) - base_ml["annee_construction"]) <= 2),
+    "NEUF",
+    "ANCIEN"
+)
+base_ml = base_ml.drop(columns=["NATURE_MUTATION"])
+
+# C. Variable NB_PIECES_RANGE
+base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
+
+bins_apt = [0, 2, 4, np.inf]
+labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"]
+
+bins_mai = [0, 4, np.inf]
+labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
+
+base_ml["NB_PIECES_RANGE"] = np.nan 
+mask_apt = base_ml["TYPE_BIEN"] == "APT"
+mask_mai = base_ml["TYPE_BIEN"] == "MAI"
+
+base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_apt, "NB_PIECES"], bins=bins_apt, labels=labels_apt, include_lowest=True
+).astype(str)
+
+base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_mai, "NB_PIECES"], bins=bins_mai, labels=labels_mai, include_lowest=True
+).astype(str)
+
+# Gestion des NaN convertis en string "nan"
+base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].replace("nan", np.nan)
+base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
+base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
+
+# =============================================================================
+# 7. EXPORT
+# =============================================================================
+colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES_RANGE", 
+                        "CODE_POSTAL", "BIEN_NEUF"]
+
+base_ml = base_ml[colonnes_finales]
+output_path = os.path.join(OUTPUT_DIR, "transac+demandes_filtree.parquet")
+base_ml.to_parquet(output_path, index=False)
+print(f"\n✓ Fichier sauvegardé : {output_path}")
+
+
+# =============================================================================
+# 8. CALCUL DES PRIX V2_STRUCT (avec fonctions.py)
+# =============================================================================
+print("\n" + "="*80)
+print(" CALCUL DES PRIX V2_STRUCT (Poids V1 sur Base Restreinte)")
+print("="*80)
+
+
+
+# Chemins
+path_base_v1 = r"N:\uflumth\indicateur_marche\univers_elementaire\base_complete_filtree.parquet"
+path_base_v2 = output_path  # La base qu'on vient de créer
+
+# 1. Charger V1 et extraire la structure de marché
+df_v1 = load_and_preprocess_data(specific_path=path_base_v1)
+df_v1 = filter_villes_top15(df_v1)
+structure_v1 = get_structure_reference(df_v1, maille_col="CITY")
+
+# 2. Charger V2 et appliquer les poids V1
+df_v2 = load_and_preprocess_data(specific_path=path_base_v2)
+
+# 3. Calculer les prix V2_STRUCT (avec structure V1)
+res_v2_struct = process_maille(
+    df=df_v2,
+    maille_col="CITY",
+    maille_name="CITY_V2_STRUCT",
+    filter_func=filter_villes_top15,
+    df_structure_ref=structure_v1
+)
+
+# 4. Sauvegarder
+save_results(res_v2_struct, "CITY_RESTREINT")
+
+print("\n✓ Prix V2_STRUCT calculé et sauvegardé")
