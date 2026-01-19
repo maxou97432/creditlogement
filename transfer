@@ -1,41 +1,197 @@
-(.venv) PS N:\uflumth\indicateur_marche\univers_elementaire> & n:/uflumth/indicateur_marche/univers_elementaire/.venv/Scripts/python.exe "n:/uflumth/indicateur_marche/univers_elementaire/TI/comparaison V1 vs V2.py"
-Chargement V1 (Base complète)...
-Chargement V2 (Base réduite)...
+    for ville in final_fusion["Ville"].dropna().unique():
+        df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
+        if df_ville.empty: continue
 
---- Extraction de la Structure de Marché (V1) ---
+        # Générer un graphique pour chaque comparaison (3m et 12m)
+        for comp in comparisons:
+            # --- Graphique principal ---
+            fig = go.Figure()
+            
+            # Interpolation
+            cols = [comp["col_v2"], comp["col_lpi"]]
+            df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
 
---- Calcul des prix glissants V2_STRUCT (avec structure V1) ---
+            # Tracer V2
+            if comp["col_v2"] in df_interp.columns and not df_interp[comp["col_v2"]].isna().all():
+                fig.add_trace(go.Scatter(
+                    x=df_interp["DATE"], 
+                    y=df_interp[comp["col_v2"]],
+                    mode="lines+markers",
+                    name=comp["col_v2"],
+                    line=dict(color=comp["color_v2"], width=2)
+                ))
+            
+            # Tracer LPI
+            if comp["col_lpi"] in df_interp.columns and not df_interp[comp["col_lpi"]].isna().all():
+                fig.add_trace(go.Scatter(
+                    x=df_interp["DATE"], 
+                    y=df_interp[comp["col_lpi"]],
+                    mode="lines+markers",
+                    name=comp["col_lpi"],
+                    line=dict(color=comp["color_lpi"], width=2, dash="dot")
+                ))
+            
+            # Mise en forme
+            fig.update_layout(
+                title=f"{comp['title']} - {ville}",
+                xaxis_title="Date",
+                yaxis_title="Prix au m² (€)",
+                height=500,
+                template="plotly_white"
+            )
+            
+            # Sauvegarde
+            filename = f"Comparaison_{comp['name']}_{ville}.html"
+            fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
 
---- Traitement du dataset : V2_STRUCT ---
-n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py:166: FutureWarning:
+            # --- Graphique avec Intervalles de Confiance ---
+            if comp["col_v2"] in df_interp.columns and comp["col_lpi"] in df_interp.columns:
+                if not df_interp[comp["col_v2"]].isna().all() and not df_interp[comp["col_lpi"]].isna().all():
+                    
+                    # Calcul IC à 95%
+                    std = df_interp[comp["col_v2"]].rolling(12, min_periods=3).std()
+                    df_interp["IC_inf"] = df_interp[comp["col_v2"]] - 1.96 * std
+                    df_interp["IC_sup"] = df_interp[comp["col_v2"]] + 1.96 * std
+                    
+                    # Calcul du match (% de fois où LPI est dans l'IC de V2)
+                    match = ((df_interp[comp["col_lpi"]] >= df_interp["IC_inf"]) & 
+                             (df_interp[comp["col_lpi"]] <= df_interp["IC_sup"])).mean()
+                    
+                    # Graphique IC
+                    fig_ic = go.Figure()
+                    
+                    # Zone IC (remplie)
+                    fig_ic.add_trace(go.Scatter(
+                        x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                        y=pd.concat([df_interp["IC_sup"], df_interp["IC_inf"][::-1]]),
+                        fill="toself",
+                        fillcolor=f"rgba{tuple(list(int(comp['color_v2'].lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + [0.2])}",
+                        line=dict(color="rgba(0,0,0,0)"),
+                        name=f"IC 95% {comp['name']}"
+                    ))
+                    
+                    # Ligne V2
+                    fig_ic.add_trace(go.Scatter(
+                        x=df_interp["DATE"], 
+                        y=df_interp[comp["col_v2"]],
+                        mode='lines',
+                        name=comp["col_v2"],
+                        line=dict(color=comp["color_v2"], width=2)
+                    ))
+                    
+                    # Ligne LPI
+                    fig_ic.add_trace(go.Scatter(
+                        x=df_interp["DATE"], 
+                        y=df_interp[comp["col_lpi"]],
+                        mode='lines+markers',
+                        name=comp["col_lpi"],
+                        line=dict(color=comp["color_lpi"], width=2, dash='dot')
+                    ))
+                    
+                    # Annotation avec le pourcentage de match
+                    fig_ic.add_annotation(
+                        xref="paper", yref="paper",
+                        x=0.01, y=0.99,
+                        text=f"Couverture LPI par IC V2 ({comp['name']}): {match:.1%}",
+                        showarrow=False,
+                        bgcolor="white",
+                        bordercolor="black",
+                        borderwidth=1
+                    )
+                    
+                    fig_ic.update_layout(
+                        title=f"Validité Statistique V2 ({comp['name']}) vs LPI - {ville}",
+                        xaxis_title="Date",
+                        yaxis_title="Prix au m² (€)",
+                        height=500,
+                        template="plotly_white"
+                    )
+                    
+                    filename_ic = f"IC_{comp['name']}_{ville}.html"
+                    fig_ic.write_html(os.path.join(params.CONFIG['output_dir'], filename_ic))
 
-DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+    # -------------------------------------------------------------------------
+    # B.6 SYNTHÈSE STATS
+    # -------------------------------------------------------------------------
+    print("\n" + "="*80)
+    print(" RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)")
+    print("="*80)
+    
+    # Fonctions de calcul des métriques
+    def calc_rmse(g, col):
+        """RMSE absolu en €/m²"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                return np.sqrt(((valid[col] - valid[lpi])**2).mean())
+        return np.nan
+    
+    def calc_rmse_relative(g, col):
+        """RMSE relatif en % du prix moyen"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                rmse = np.sqrt(((valid[col] - valid[lpi])**2).mean())
+                mean_price = valid[lpi].mean()
+                if mean_price > 0:
+                    return (rmse / mean_price) * 100  
+        return np.nan
+    
+    def calc_correlation(g, col):
+        """Corrélation avec LPI"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 5:
+                return valid[col].corr(valid[lpi])
+        return np.nan
 
-   -> Application des poids STRUCTURE (V1)
-n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py:435: FutureWarning:
+    # Calcul des statistiques par ville
+    stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
+        # RMSE 3M
+        "RMSE_3M": calc_rmse(x, "Prix V2 (3 mois glissants)"),
+        # RMSE 12M
+        "RMSE_12M": calc_rmse(x, "Prix V2 (12 mois glissants)"),
+        # RMSE Relatif
+        "RMSE_REL_3M": calc_rmse_relative(x, "Prix V2 (3 mois glissants)"),
+        "RMSE_REL_12M": calc_rmse_relative(x, "Prix V2 (12 mois glissants)"),
+        # Corrélation
+        "CORR_3M": calc_correlation(x, "Prix V2 (3 mois glissants)"),
+        "CORR_12M": calc_correlation(x, "Prix V2 (12 mois glissants)"),
+        # Prix moyen LPI
+        "Prix_Moyen_LPI": x["Prix LPI/IAD (12 mois)"].mean()
+    })).reset_index()
+    
+    # Calcul des différences (12M vs 3M)
+    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]  # Positif = 12M meilleur
+    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]  # Positif = 12M meilleur
+    
+    # Affichage des résultats
+    print("\nRMSE ABSOLU (€/m²) :")
+    print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
+    print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
+    print(f"   Δ   : {stats['Delta_RMSE'].mean():+.2f} €/m² {'(12M meilleur)' if stats['Delta_RMSE'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\nRMSE RELATIF (%) :")
+    print(f"   3M  : {stats['RMSE_REL_3M'].mean():.2f} %")
+    print(f"   12M : {stats['RMSE_REL_12M'].mean():.2f} %")
+    
+    print("\nCORRÉLATION avec LPI :")
+    print(f"   3M  : {stats['CORR_3M'].mean():.4f}")
+    print(f"   12M : {stats['CORR_12M'].mean():.4f}")
+    print(f"   Δ   : {stats['Delta_CORR'].mean():+.4f} {'(12M meilleur)' if stats['Delta_CORR'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\n" + "-" * 80)
+    print("\nDétail par ville :")
+    cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_3M", "RMSE_12M", "Delta_RMSE", 
+                    "RMSE_REL_3M", "RMSE_REL_12M", "CORR_3M", "CORR_12M"]
+    print(stats[cols_display].sort_values("Delta_RMSE", ascending=False).to_string(index=False))
+    
+    # Sauvegarde
+    output_path = os.path.join(params.CONFIG['output_dir'], "stats_comparaison_V2_LPI.csv")
+    stats.to_csv(output_path, index=False)
+    print(f"\n✅ Statistiques sauvegardées : {output_path}")
 
-The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
-
-n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py:436: FutureWarning:
-
-The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
-
-res_v2_struct calculé : 2160 lignes, 6 colonnes
-Dernière période disponible : 2025-12-01 00:00:00
-Données pour la carte : 15 villes
-Villes dans df_prix_m2 : ['BORDEAUX', 'LE HAVRE', 'LILLE', 'LYON', 'MARSEILLE', 'MONTPELLIER', 'NANTES', 'NICE', 'PARIS', 'REIMS', 'RENNES', 'ST ETIENNE', 'STRASBOURG', 'TOULON', 'TOULOUSE']
-
---- Génération des Cartes ---
-   -> Carte : APT
-   -> Sauvegardé : n:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\carte_prix_m2_CITY_APT_V2_RESTREINT.png
-
-=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===
-
---- Chargement LPI/IAD ---
-
---- Génération des graphiques ---
-Traceback (most recent call last):
-  File "n:\uflumth\indicateur_marche\univers_elementaire\TI\comparaison V1 vs V2.py", line 770, in <module>
-    df_interp = df_ville.set_index("DATE")[cols_to_plot].resample("MS").interpolate(method="linear").reset_index()
-                                           ^^^^^^^^^^^^
-NameError: name 'cols_to_plot' is not defined
+    print("\n=== ANALYSE TERMINÉE ===")
