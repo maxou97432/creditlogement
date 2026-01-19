@@ -134,7 +134,7 @@ def process_dataset_local(df, label, is_v2=False, df_structure=None):
         if 'Maille_Analyse' in df.columns:
             df["Ville"] = df["Maille_Analyse"]
         else:
-            df = df.df.rename(columns={"ville_":"Ville"})
+            df = df.rename(columns={"ville_":"Ville"})
 
         df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
         df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
@@ -435,8 +435,9 @@ if __name__ == "__main__":
     raw_v2['Maille_Analyse'] = raw_v2.apply(extract_arrondissement, axis = 1)
     raw_v2_apt['Maille_Analyse'] = raw_v2_apt.apply(extract_arrondissement, axis = 1)
 
-    nb_arr_v1 = len(raw_v1[raw_v1['Maille_Analyse'].str.contains("PARIS", na = 'False')]["Maille_Analyse"].unique())
-    nb_arr_v2 = len(raw_v2_apt[raw_v2_apt['Maille_Analyse'].str.contains("PARIS", na = 'False')]["Maille_Analyse"].unique())
+    nb_arr_v1 = len(raw_v1[raw_v1['Maille_Analyse'].str.contains("PARIS", na=False)]["Maille_Analyse"].unique())
+    nb_arr_v2 = len(raw_v2_apt[raw_v2_apt['Maille_Analyse'].str.contains("PARIS", na=False)]["Maille_Analyse"].unique())
+    print(f"\n🔍 Arrondissements trouvés - V1: {nb_arr_v1}, V2: {nb_arr_v2}")
     # -------------------------------------------------------------------------
     # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - avec fonctions locales
     # -------------------------------------------------------------------------
