@@ -427,10 +427,9 @@ if __name__ == "__main__":
     structure_v1 = get_structure_ref_local(df_v1_for_struct)
     
     # -------------------------------------------------------------------------
-    # B.3 CALCUL DES PRIX GLISSANTS
+    # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
     # -------------------------------------------------------------------------
-    print("\n--- Calcul des prix glissants (V1 et V2_STRUCT) ---")
-    res_v1 = process_dataset_local(raw_v1, "V1", is_v2=False, df_structure=None)
+    print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
     res_v2_struct = process_dataset_local(raw_v2_apt, "V2_STRUCT", is_v2=True, df_structure=structure_v1)
     res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
     res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].pct_change(periods = 4)
@@ -482,9 +481,9 @@ if __name__ == "__main__":
     print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
     
     # -------------------------------------------------------------------------
-    # B.6 FUSION POUR ANALYSE LPI (toutes périodes)
+    # B.6 PRÉPARATION POUR ANALYSE LPI (toutes périodes)
     # -------------------------------------------------------------------------
-    merge_cl = pd.merge(res_v1, res_v2_struct, on=["Ville", "Periode"], how="outer")
+    merge_cl = res_v2_struct.copy()  # On garde seulement V2_STRUCT
     
     # C. Chargement GPS
     df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
@@ -727,9 +726,9 @@ if __name__ == "__main__":
     
     # Renommage pour clarté
     final_fusion = final_fusion.rename(columns={
-        "prix_mm_3m (V1)": "Prix moyen glissant 3 mois - Univ Elem (V1)",
-        "prix_mm_3m (V2_STRUCT)": "Prix moyen glissant 3 mois - Univ Elem (V2_STRUCT)",
-        "Prix_LPI": "Prix moyen glissant 12 mois - LPI/IAD"
+        "prix_mm_3m (V2_STRUCT)": "Prix V2 (3 mois glissants)",
+        "prix_mm_12m (V2_STRUCT)": "Prix V2 (12 mois glissants)",
+        "Prix_LPI": "Prix LPI/IAD (12 mois)"
     })
     
     # Filtre date
@@ -740,15 +739,26 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     print("\n--- Génération des graphiques ---")
     
-    cols_to_plot = [
-        "Prix moyen glissant 3 mois - Univ Elem (V1)",
-        "Prix moyen glissant 3 mois - Univ Elem (V2_STRUCT)",
-        "Prix moyen glissant 12 mois - LPI/IAD"
+    # Deux comparaisons séparées : 3m et 12m vs LPI
+    comparisons = [
+        {
+            "name": "3m",
+            "col_v2": "Prix V2 (3 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#28A745",  # Green
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (3 mois) vs LPI"
+        },
+        {
+            "name": "12m",
+            "col_v2": "Prix V2 (12 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#4C72B0",  # Blue
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (12 mois) vs LPI"
+        }
     ]
-    colors = ["#4C72B0", "#28A745", "#DD8452"]  # Blue (V1), Green (V2_STRUCT), Orange (LPI)
-
-    score_v1_total = 0
-    score_v2_struct_total = 0
+    
     nb_villes = len(final_fusion["Ville"].dropna().unique())
 
     for ville in final_fusion["Ville"].dropna().unique():
