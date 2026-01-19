@@ -893,17 +893,17 @@ if __name__ == "__main__":
     print(" RÉSULTATS COMPARATIFS : V1 vs V2_STRUCT")
     print("="*80)
     
-    print("\n📊 RMSE ABSOLU (€/m²) :")
+    print("\nRMSE ABSOLU (€/m²) :")
     print(f"   V1        : {stats['RMSE_V1'].mean():.2f} €/m²")
     print(f"   V2_STRUCT : {stats['RMSE_V2_STRUCT'].mean():.2f} €/m²")
     print(f"   Gain      : {stats['Gain_RMSE'].mean():.2f} €/m² {'Améliorations des résultats' if stats['Gain_RMSE'].mean() > 0 else 'Dégradation des résultats'}")
     
-    print("\n📊 RMSE RELATIF (% du prix moyen) - Comparable entre villes :")
+    print("\nRMSE RELATIF (% du prix moyen) - Comparable entre villes :")
     print(f"   V1        : {stats['RMSE_REL_V1'].mean():.2f} %")
     print(f"   V2_STRUCT : {stats['RMSE_REL_V2_STRUCT'].mean():.2f} %")
     print(f"   Gain      : {stats['Gain_RMSE_REL'].mean():.2f} pts {'Améliorations des résultats' if stats['Gain_RMSE_REL'].mean() > 0 else 'Dégradation des résultats'}")
     
-    print("\n📊 CORRÉLATION avec LPI :")
+    print("\nCORRÉLATION avec LPI :")
     print(f"   V1        : {stats['CORR_V1'].mean():.4f}")
     print(f"   V2_STRUCT : {stats['CORR_V2_STRUCT'].mean():.4f}")
     print(f"   Gain      : {stats['Gain_CORR'].mean():.4f} {'Améliorations des résultats' if stats['Gain_CORR'].mean() > 0 else 'Dégradation des résultats'}")
