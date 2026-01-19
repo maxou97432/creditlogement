@@ -1,3 +1,8 @@
+    # Initialisation des scores de correspondance
+    score_3m_total = 0
+    score_12m_total = 0
+    nb_villes_valides = 0
+
     for ville in final_fusion["Ville"].dropna().unique():
         df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
         if df_ville.empty: continue
@@ -78,15 +83,22 @@
 
         # Calcul des taux de couverture (% LPI dans IC)
         annotations_text = []
+        match_3m = match_12m = np.nan
+        
         if "IC_inf_3m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
             match_3m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_3m"]) & 
                         (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_3m"])).mean()
             annotations_text.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
+            score_3m_total += match_3m if pd.notna(match_3m) else 0
         
         if "IC_inf_12m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
             match_12m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_12m"]) & 
                          (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_12m"])).mean()
             annotations_text.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
+            score_12m_total += match_12m if pd.notna(match_12m) else 0
+        
+        if pd.notna(match_3m) or pd.notna(match_12m):
+            nb_villes_valides += 1
 
         # Annotation
         if annotations_text:
@@ -168,6 +180,11 @@
     stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
     
     # Affichage
+    print("\nCORRESPONDANCE LPI dans IC (Couverture moyenne) :")
+    if nb_villes_valides > 0:
+        print(f"   IC 3M  : {score_3m_total/nb_villes_valides:.1%}")
+        print(f"   IC 12M : {score_12m_total/nb_villes_valides:.1%}")
+    
     print("\nRMSE ABSOLU (€/m²) :")
     print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
     print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
