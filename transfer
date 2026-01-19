@@ -2,113 +2,118 @@
         df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
         if df_ville.empty: continue
 
-        # Générer un graphique pour chaque comparaison (3m et 12m)
-        for comp in comparisons:
-            # --- Graphique principal ---
-            fig = go.Figure()
-            
-            # Interpolation
-            cols = [comp["col_v2"], comp["col_lpi"]]
-            df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
+        # --- Graphique unique avec toutes les courbes ---
+        fig = go.Figure()
+        
+        # Interpolation
+        cols = ["Prix V2 (3 mois glissants)", "Prix V2 (12 mois glissants)", "Prix LPI/IAD (12 mois)"]
+        df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
 
-            # Tracer V2
-            if comp["col_v2"] in df_interp.columns and not df_interp[comp["col_v2"]].isna().all():
-                fig.add_trace(go.Scatter(
-                    x=df_interp["DATE"], 
-                    y=df_interp[comp["col_v2"]],
-                    mode="lines+markers",
-                    name=comp["col_v2"],
-                    line=dict(color=comp["color_v2"], width=2)
-                ))
+        # Calcul IC pour 3M
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            std_3m = df_interp["Prix V2 (3 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_3m"] = df_interp["Prix V2 (3 mois glissants)"] - 1.96 * std_3m
+            df_interp["IC_sup_3m"] = df_interp["Prix V2 (3 mois glissants)"] + 1.96 * std_3m
             
-            # Tracer LPI
-            if comp["col_lpi"] in df_interp.columns and not df_interp[comp["col_lpi"]].isna().all():
-                fig.add_trace(go.Scatter(
-                    x=df_interp["DATE"], 
-                    y=df_interp[comp["col_lpi"]],
-                    mode="lines+markers",
-                    name=comp["col_lpi"],
-                    line=dict(color=comp["color_lpi"], width=2, dash="dot")
-                ))
+            # Zone IC 3M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_3m"], df_interp["IC_inf_3m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(40,167,69,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (3M)",
+                showlegend=True
+            ))
+
+        # Calcul IC pour 12M
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            std_12m = df_interp["Prix V2 (12 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_12m"] = df_interp["Prix V2 (12 mois glissants)"] - 1.96 * std_12m
+            df_interp["IC_sup_12m"] = df_interp["Prix V2 (12 mois glissants)"] + 1.96 * std_12m
             
-            # Mise en forme
-            fig.update_layout(
-                title=f"{comp['title']} - {ville}",
-                xaxis_title="Date",
-                yaxis_title="Prix au m² (€)",
-                height=500,
-                template="plotly_white"
+            # Zone IC 12M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_12m"], df_interp["IC_inf_12m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(76,114,176,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (12M)",
+                showlegend=True
+            ))
+
+        # Courbe Prix V2 (3 mois)
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (3 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (3M)",
+                line=dict(color="#28A745", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe Prix V2 (12 mois)
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (12 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (12M)",
+                line=dict(color="#4C72B0", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe LPI
+        if "Prix LPI/IAD (12 mois)" in df_interp.columns and not df_interp["Prix LPI/IAD (12 mois)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix LPI/IAD (12 mois)"],
+                mode="lines+markers",
+                name="Prix LPI/IAD",
+                line=dict(color="#DD8452", width=2, dash="dot"),
+                marker=dict(size=6, symbol="diamond")
+            ))
+
+        # Calcul des taux de couverture (% LPI dans IC)
+        annotations_text = []
+        if "IC_inf_3m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_3m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_3m"]) & 
+                        (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_3m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
+        
+        if "IC_inf_12m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_12m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_12m"]) & 
+                         (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_12m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
+
+        # Annotation
+        if annotations_text:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=0.01, y=0.99,
+                text="<br>".join(annotations_text),
+                showarrow=False,
+                bgcolor="white",
+                bordercolor="black",
+                borderwidth=1,
+                align="left"
             )
-            
-            # Sauvegarde
-            filename = f"Comparaison_{comp['name']}_{ville}.html"
-            fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
 
-            # --- Graphique avec Intervalles de Confiance ---
-            if comp["col_v2"] in df_interp.columns and comp["col_lpi"] in df_interp.columns:
-                if not df_interp[comp["col_v2"]].isna().all() and not df_interp[comp["col_lpi"]].isna().all():
-                    
-                    # Calcul IC à 95%
-                    std = df_interp[comp["col_v2"]].rolling(12, min_periods=3).std()
-                    df_interp["IC_inf"] = df_interp[comp["col_v2"]] - 1.96 * std
-                    df_interp["IC_sup"] = df_interp[comp["col_v2"]] + 1.96 * std
-                    
-                    # Calcul du match (% de fois où LPI est dans l'IC de V2)
-                    match = ((df_interp[comp["col_lpi"]] >= df_interp["IC_inf"]) & 
-                             (df_interp[comp["col_lpi"]] <= df_interp["IC_sup"])).mean()
-                    
-                    # Graphique IC
-                    fig_ic = go.Figure()
-                    
-                    # Zone IC (remplie)
-                    fig_ic.add_trace(go.Scatter(
-                        x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
-                        y=pd.concat([df_interp["IC_sup"], df_interp["IC_inf"][::-1]]),
-                        fill="toself",
-                        fillcolor=f"rgba{tuple(list(int(comp['color_v2'].lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + [0.2])}",
-                        line=dict(color="rgba(0,0,0,0)"),
-                        name=f"IC 95% {comp['name']}"
-                    ))
-                    
-                    # Ligne V2
-                    fig_ic.add_trace(go.Scatter(
-                        x=df_interp["DATE"], 
-                        y=df_interp[comp["col_v2"]],
-                        mode='lines',
-                        name=comp["col_v2"],
-                        line=dict(color=comp["color_v2"], width=2)
-                    ))
-                    
-                    # Ligne LPI
-                    fig_ic.add_trace(go.Scatter(
-                        x=df_interp["DATE"], 
-                        y=df_interp[comp["col_lpi"]],
-                        mode='lines+markers',
-                        name=comp["col_lpi"],
-                        line=dict(color=comp["color_lpi"], width=2, dash='dot')
-                    ))
-                    
-                    # Annotation avec le pourcentage de match
-                    fig_ic.add_annotation(
-                        xref="paper", yref="paper",
-                        x=0.01, y=0.99,
-                        text=f"Couverture LPI par IC V2 ({comp['name']}): {match:.1%}",
-                        showarrow=False,
-                        bgcolor="white",
-                        bordercolor="black",
-                        borderwidth=1
-                    )
-                    
-                    fig_ic.update_layout(
-                        title=f"Validité Statistique V2 ({comp['name']}) vs LPI - {ville}",
-                        xaxis_title="Date",
-                        yaxis_title="Prix au m² (€)",
-                        height=500,
-                        template="plotly_white"
-                    )
-                    
-                    filename_ic = f"IC_{comp['name']}_{ville}.html"
-                    fig_ic.write_html(os.path.join(params.CONFIG['output_dir'], filename_ic))
+        # Mise en forme
+        fig.update_layout(
+            title=f"Comparaison Prix V2 (3M & 12M) vs LPI - {ville}",
+            xaxis_title="Date",
+            yaxis_title="Prix au m² (€)",
+            height=600,
+            template="plotly_white",
+            hovermode="x unified"
+        )
+        
+        # Sauvegarde
+        filename = f"Comparaison_V2_LPI_{ville}.html"
+        fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
 
     # -------------------------------------------------------------------------
     # B.6 SYNTHÈSE STATS
@@ -150,25 +155,19 @@
 
     # Calcul des statistiques par ville
     stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
-        # RMSE 3M
         "RMSE_3M": calc_rmse(x, "Prix V2 (3 mois glissants)"),
-        # RMSE 12M
         "RMSE_12M": calc_rmse(x, "Prix V2 (12 mois glissants)"),
-        # RMSE Relatif
         "RMSE_REL_3M": calc_rmse_relative(x, "Prix V2 (3 mois glissants)"),
         "RMSE_REL_12M": calc_rmse_relative(x, "Prix V2 (12 mois glissants)"),
-        # Corrélation
         "CORR_3M": calc_correlation(x, "Prix V2 (3 mois glissants)"),
         "CORR_12M": calc_correlation(x, "Prix V2 (12 mois glissants)"),
-        # Prix moyen LPI
         "Prix_Moyen_LPI": x["Prix LPI/IAD (12 mois)"].mean()
     })).reset_index()
     
-    # Calcul des différences (12M vs 3M)
-    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]  # Positif = 12M meilleur
-    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]  # Positif = 12M meilleur
+    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
+    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
     
-    # Affichage des résultats
+    # Affichage
     print("\nRMSE ABSOLU (€/m²) :")
     print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
     print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
