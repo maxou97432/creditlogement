@@ -131,9 +131,11 @@ def process_dataset_local(df, label, is_v2=False, df_structure=None):
         """Calcule les prix glissants """
         print(f"\n--- Traitement du dataset : {label} ---")
         
+        if 'Maille_Analyse' in df.columns:
+            df["Ville"] = df["Maille_Analyse"]
+        else:
+            df = df.df.rename(columns={"ville_":"Ville"})
 
-        
-        df = df.rename(columns={"ville_": "Ville"})
         df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
         df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
         df["Ville"] = df["Ville"].replace({"HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE"})
