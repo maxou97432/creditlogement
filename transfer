@@ -326,20 +326,39 @@ def process_dataset_restreint(df, label, df_structure=None, df_arr = None):
     res_final_arr = pd.concat(res_final, ignore_index=True)
 
     def moy_pond_paris(res, arr):
+        """Agrège les arrondissements de Paris en une seule ville avec moyenne pondérée"""
         mask_arr = (
-        pd.to_numeric(res['Ville'],errors = "coerce").between(75101,75120)
-        & res["Ville"].astype(str).str.len().eq(5)
+            pd.to_numeric(res['Ville'], errors="coerce").between(75101, 75120)
+            & res["Ville"].astype(str).str.len().eq(5)
         )
-        paris_arr = res.merge(
-            arr,
-            on = ["Ville","TYPE_BIEN"],
-            how = "left"
-        )
-        df_arr = paris_arr[mask_arr].copy()
-        df_arr = df_arr.groupby("Periode")["prix_mm_12m (V2_STRUCT)"].mean(weight = "poids_relatif")
-        df_arr = df_arr.groupby("Periode")["prix_mm_3m (V2_STRUCT)"].mean(weight = "poids_relatif")
-        df_arr["Ville"] = "PARIS"
-        return df_arr
+        
+        # Filtrer les arrondissements de Paris
+        paris_arr = res[mask_arr].copy()
+        
+        # Merger avec les poids des arrondissements (sans TYPE_BIEN car res n'a pas cette colonne)
+        paris_arr = paris_arr.merge(arr, on="Ville", how="left")
+        
+        # Calculer les moyennes pondérées par période
+        def weighted_avg_12m(group):
+            if group["poids_relatif"].sum() > 0:
+                return np.average(group["prix_mm_12m (V2_STRUCT)"], weights=group["poids_relatif"])
+            return np.nan
+        
+        def weighted_avg_3m(group):
+            if group["poids_relatif"].sum() > 0:
+                return np.average(group["prix_mm_3m (V2_STRUCT)"], weights=group["poids_relatif"])
+            return np.nan
+        
+        df_12m = paris_arr.groupby("Periode").apply(weighted_avg_12m, include_groups=False).reset_index(name="prix_mm_12m (V2_STRUCT)")
+        df_3m = paris_arr.groupby("Periode").apply(weighted_avg_3m, include_groups=False).reset_index(name="prix_mm_3m (V2_STRUCT)")
+        
+        # Merger les deux résultats
+        df_paris = df_12m.merge(df_3m, on="Periode")
+        df_paris["Ville"] = "PARIS"
+        
+        # Retirer les arrondissements et ajouter Paris global
+        res_sans_arr = res[~mask_arr].copy()
+        return pd.concat([res_sans_arr, df_paris], ignore_index=True)
     
     if df_arr is not None:
         # Aggrégation des arrondissements de Paris
@@ -388,20 +407,20 @@ if __name__ == "__main__":
     raw_v2_apt = raw_v2[raw_v2["TYPE_BIEN"] == "APT"].copy() # Pour la comparaison avec LPI on ne garde que les appartements
     raw_v1 = raw_v1[raw_v1["DEMANDE"] == 0] #Pour calculer la structure de marché globale, on retire les transactions "DEMANDE"
     
-    raw_v1 = raw_v1.apply(lambda row: clean_base(row, top15_local))
-    raw_v2 = raw_v2.apply(lambda row: clean_base(row, top15_local))
+    raw_v1 = clean_base(raw_v1, top15_local)
+    raw_v2 = clean_base(raw_v2, top15_local)
 
     # -------------------------------------------------------------------------
     # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - 
     # -------------------------------------------------------------------------
     df_v1_for_struct = raw_v1.copy()
-    structure_v1, structure_paris = get_structure_ref_local(df_v1_for_struct)
+    structure_v1, structure_paris = get_structure_reference_city(df_v1_for_struct)
     
     # -------------------------------------------------------------------------
     # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
     # -------------------------------------------------------------------------
     print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
-    res_v2_struct, univers_v2_complet = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1)
+    res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_paris)
     res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
     res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=4, fill_method=None)
     res_v2_struct["TAUX_INFL_3M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=1, fill_method=None)
