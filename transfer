@@ -177,16 +177,22 @@ def clean_base(df, top_cities):
     return df
 
 def poids_arr(raw):
-    """Permet de calculer les poids de chaque arrondissements de PAris dans la structure de marché globale"""
+    """Calcule les poids de chaque arrondissement de Paris (APT uniquement)"""
     mask_arr = (
-        pd.to_numeric(raw['Ville'],errors = "coerce").between(75101,75120)
+        pd.to_numeric(raw['Ville'], errors="coerce").between(75101, 75120)
         & raw["Ville"].astype(str).str.len().eq(5)
-        )
+        & (raw["TYPE_BIEN"] == "APT")  # Filtre APT uniquement pour cohérence avec V2
+    )
     df_arr = raw[mask_arr].copy()
-    structure = df_arr.groupby(["Ville", "TYPE_BIEN"], dropna = False).size().reset_index(name = "volume_ref")
-    structure["poids_relatif"] = structure["volume_ref"] / structure.groupby("Ville")["volume_ref"].transform("sum")
+    
+    # Volume TOTAL par arrondissement (APT uniquement)
+    structure = df_arr.groupby("Ville", dropna=False).size().reset_index(name="volume_ref")
+    
+    # Poids relatif de chaque arrondissement dans Paris (APT)
+    total_paris = structure["volume_ref"].sum()
+    structure["poids_relatif"] = structure["volume_ref"] / total_paris if total_paris > 0 else 0
 
-    return structure[["Ville","TYPE_BIEN","poids_relatif"]]
+    return structure[["Ville", "poids_relatif"]]
 
 def get_structure_reference_city(df):
     """Extrait les poids de référence par Ville (Base V1) (par univers élémentaire), et les poids des arrondissements de Paris"""
@@ -349,7 +355,7 @@ def process_dataset_restreint(df, label, df_structure=None, df_arr = None):
         # Filtrer les arrondissements de Paris
         paris_arr = res[mask_arr].copy()
         
-        # Merger avec les poids des arrondissements (sans TYPE_BIEN car res n'a pas cette colonne)
+        # Merger avec les poids des arrondissements
         paris_arr = paris_arr.merge(arr, on="Ville", how="left")
         
         # Calculer les moyennes pondérées par période
