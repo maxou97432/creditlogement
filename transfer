@@ -1,401 +1,77 @@
-================================================================================
-============================== RAPPORT COMPLET ==================================
-========================= ANALYSE DES OUTLIERS ==================================
-================================================================================
-
-VUE D'ENSEMBLE
 --------------------------------------------------------------------------------
-  Nombre total de biens traités    : 12,078,904
-  Biens valides conservés           : 11,050,145 (91.48%)
-  Outliers détectés et retirés      : 1,028,759 (8.52%)
+                                DATE       Prix_m2    NB_SURF_HAB  annee_construction
+count                        1243896  6.382110e+05  638211.000000        1.097389e+06
+mean   2019-06-06 05:16:54.451369216  3.691353e+03      99.063989        1.959183e+03
+min              2014-01-02 00:00:00  4.032258e+01       1.000000        1.200000e+03
+25%              2016-06-20 00:00:00  1.857143e+03      63.000000        1.930000e+03
+50%              2018-07-05 00:00:00  2.764228e+03      94.000000        1.977000e+03
+75%              2022-05-15 00:00:00  4.153846e+03     120.000000        2.006000e+03
+max              2026-02-15 00:00:00  2.000000e+06     999.000000        2.022000e+03
+std                              NaN  1.082344e+04      55.451551        6.240338e+01
 
-================================================================================
-ANALYSE PAR CRITÈRE D'ÉLIMINATION
-================================================================================
+Médianes et quartiles :
 
-Nombre total d'outliers : 1,028,759
+Prix_m2:
+  Médiane     : 2,764
+  Q1 (25%)    : 1,857
+  Q3 (75%)    : 4,154
+  Écart-type  : 10,823
 
-Répartition par critère (un outlier peut avoir plusieurs critères) :
+NB_SURF_HAB:
+  Médiane     : 94
+  Q1 (25%)    : 63
+  Q3 (75%)    : 120
+  Écart-type  : 55
+
+RÉPARTITION PAR ANNÉE DE CONSTRUCTION
 --------------------------------------------------------------------------------
-  Non_specifie                        : 871,274 (84.69%)
-  Prix_m2_inf_mediane_div_4           : 231,141 (22.47%)
-  Prix_m2_sup_mediane_mult_4          : 37,401 ( 3.64%)
-  Prix_m2_inf_200                     : 35,364 ( 3.44%)
-  Prix_m2_sup_20000                   : 15,390 ( 1.50%)
-  ratio_val_mt_op                     :     35 ( 0.00%)
+annee_construction
+1200.0      33
+1203.0       1
+1205.0       1
+1208.0       2
+1210.0       1
+          ...
+2018.0    9777
+2019.0    8745
+2020.0    6789
+2021.0    5642
+2022.0      24
+Name: count, Length: 540, dtype: int64
 
-Outliers avec critères multiples : 1,028,759 (100.00%)
-
-
-================================================================================
-RÉPARTITION GÉOGRAPHIQUE PAR CRITÈRE D'ÉLIMINATION
-================================================================================
-
-Critère : Non_specifie
+RÉPARTITION PAR NOMBRE DE PIÈCES
 --------------------------------------------------------------------------------
-
-Top 5 départements (871,274 outliers) :
-  Nord                                : 51,761 ( 5.94%)
-  Hauts-de-Seine                      : 33,394 ( 3.83%)
-  Gironde                             : 32,176 ( 3.69%)
-  Bouches-du-Rhône                    : 30,984 ( 3.56%)
-  Haute-Garonne                       : 29,046 ( 3.33%)
-
-Top 5 villes :
-  PARIS                               : 26,175 ( 3.00%)
-  MARSEILLE                           : 11,866 ( 1.36%)
-  TOULOUSE                            : 10,718 ( 1.23%)
-  LYON                                : 7,192 ( 0.83%)
-  NANTES                              : 6,382 ( 0.73%)
-
-Critère : Prix_m2_inf_200
---------------------------------------------------------------------------------
-
-Top 5 départements (35,364 outliers) :
-  Nord                                :    45 ( 0.13%)
-  Puy-de-Dôme                         :    30 ( 0.08%)
-  Dordogne                            :    26 ( 0.07%)
-  Jura                                :    24 ( 0.07%)
-  Haute-Garonne                       :    24 ( 0.07%)
-
-Top 5 villes :
-  PARIS                               :   463 ( 1.31%)
-  SAINT ETIENNE                       :   135 ( 0.38%)
-  SAINT PAUL                          :   117 ( 0.33%)
-  THIERS                              :   101 ( 0.29%)
-  SAINTE ROSE                         :    85 ( 0.24%)
-
-Critère : Prix_m2_inf_mediane_div_4
+NB_PIECES_RANGE
+APT : 3-4 pièces          141150
+APT: 1-2 pièces           109965
+APT: 5 pièces et plus      25016
+MAI: 4 pièces et moins    175222
+MAI: 5 pièces et plus     226683
+nan                       565860
+Name: count, dtype: int64
+RÉPARTITION GÉOGRAPHIQUE
 --------------------------------------------------------------------------------
 
-Top 5 départements (127,223 outliers) :
-  Paris                               :   733 ( 0.58%)
-  Hauts-de-Seine                      :   461 ( 0.36%)
-  Gironde                             :   396 ( 0.31%)
-  Bouches-du-Rhône                    :   380 ( 0.30%)
-  Nord                                :   333 ( 0.26%)
+Top 10 départements avec le plus de transactions :
+  Nord                           : 56894 ( 4.57%)
+  Hauts-de-Seine                 : 52720 ( 4.24%)
+  Paris                          : 47027 ( 3.78%)
+  Gironde                        : 46162 ( 3.71%)
+  Bouches-du-Rhône               : 45794 ( 3.68%)
+  Yvelines                       : 44559 ( 3.58%)
+  Seine-et-Marne                 : 40573 ( 3.26%)
+  Haute-Garonne                  : 39081 ( 3.14%)
+  Rhône                          : 38646 ( 3.11%)
+  Essonne                        : 36782 ( 2.96%)
 
-Top 5 villes :
-  PARIS                               : 4,791 ( 3.77%)
-  MARSEILLE                           : 2,224 ( 1.75%)
-  NIMES                               :   790 ( 0.62%)
-  MONTPELLIER                         :   657 ( 0.52%)
-  LYON                                :   656 ( 0.52%)
-
-Critère : Prix_m2_sup_20000
---------------------------------------------------------------------------------
-
-Top 5 départements (15,390 outliers) :
-  Paris                               :   791 ( 5.14%)
-  Hauts-de-Seine                      :   241 ( 1.57%)
-  Yvelines                            :   112 ( 0.73%)
-  Bouches-du-Rhône                    :   107 ( 0.70%)
-  Gironde                             :    95 ( 0.62%)
-
-Top 5 villes :
-  PARIS                               : 5,216 (33.89%)
-  SAINT TROPEZ                        :   460 ( 2.99%)
-  CANNES                              :   457 ( 2.97%)
-  LEGE CAP FERRET                     :   288 ( 1.87%)
-  RAMATUELLE                          :   192 ( 1.25%)
-
-Critère : Prix_m2_sup_mediane_mult_4
---------------------------------------------------------------------------------
-
-Top 5 départements (21,312 outliers) :
-  Bouches-du-Rhône                    :   181 ( 0.85%)
-  Nord                                :   158 ( 0.74%)
-  Gironde                             :   150 ( 0.70%)
-  Hauts-de-Seine                      :   136 ( 0.64%)
-  Yvelines                            :   126 ( 0.59%)
-
-Top 5 villes :
-  CANNES                              :   538 ( 2.52%)
-  PARIS                               :   444 ( 2.08%)
-  MARSEILLE                           :   381 ( 1.79%)
-  TOULOUSE                            :   179 ( 0.84%)
-  ANTIBES                             :   174 ( 0.82%)
-
-Critère : ratio_val_mt_op
---------------------------------------------------------------------------------
-
-Top 5 départements (35 outliers) :
-  Indre-et-Loire                      :     2 ( 5.71%)
-  Eure-et-Loir                        :     2 ( 5.71%)
-  Lot-et-Garonne                      :     2 ( 5.71%)
-  Loire-Atlantique                    :     2 ( 5.71%)
-  Var                                 :     2 ( 5.71%)
-
-Top 5 villes :
-  CHARTRES                            :     2 ( 5.71%)
-  AGEN                                :     2 ( 5.71%)
-  MARSEILLE                           :     1 ( 2.86%)
-  TOULOUSE                            :     1 ( 2.86%)
-  VIRE NORMANDIE                      :     1 ( 2.86%)
-
-
-================================================================================
-ÉVOLUTION TEMPORELLE PAR CRITÈRE D'ÉLIMINATION
-================================================================================
-
-Critère : Non_specifie
---------------------------------------------------------------------------------
-
-Évolution par année (871,274 outliers au total) :
-  1998 :     8 ( 0.00%)
-  1999 :    50 ( 0.01%)
-  2000 :   166 ( 0.02%)
-  2001 : 1,034 ( 0.12%)
-  2002 :   775 ( 0.09%)
-  2014 : 34,436 ( 3.95%) █
-  2015 : 163,040 (18.71%) █████████
-  2016 : 110,968 (12.74%) ██████
-  2017 : 132,204 (15.17%) ███████
-  2018 : 60,978 ( 7.00%) ███
-  2019 : 72,783 ( 8.35%) ████
-  2020 : 79,010 ( 9.07%) ████
-  2021 : 79,652 ( 9.14%) ████
-  2022 : 59,870 ( 6.87%) ███
-  2023 : 22,574 ( 2.59%) █
-  2024 : 16,483 ( 1.89%)
-  2025 : 37,241 ( 4.27%) ██
-  2026 :     2 ( 0.00%)
-
-Critère : Prix_m2_inf_200
---------------------------------------------------------------------------------
-
-Évolution par année (35,364 outliers au total) :
-  2014 : 2,757 ( 7.80%) ███
-  2015 : 2,986 ( 8.44%) ████
-  2016 : 3,103 ( 8.77%) ████
-  2017 : 3,219 ( 9.10%) ████
-  2018 : 3,161 ( 8.94%) ████
-  2019 : 3,551 (10.04%) █████
-  2020 : 3,437 ( 9.72%) ████
-  2021 : 3,825 (10.82%) █████
-  2022 : 3,144 ( 8.89%) ████
-  2023 : 2,676 ( 7.57%) ███
-  2024 : 2,532 ( 7.16%) ███
-  2025 :   973 ( 2.75%) █
-
-Critère : Prix_m2_inf_mediane_div_4
---------------------------------------------------------------------------------
-
-Évolution par année (127,223 outliers au total) :
-  1999 :     2 ( 0.00%)
-  2000 :     3 ( 0.00%)
-  2001 :     3 ( 0.00%)
-  2002 :     6 ( 0.00%)
-  2014 : 9,125 ( 7.17%) ███
-  2015 : 9,860 ( 7.75%) ███
-  2016 : 10,177 ( 8.00%) ███
-  2017 : 10,935 ( 8.60%) ████
-  2018 : 10,564 ( 8.30%) ████
-  2019 : 11,681 ( 9.18%) ████
-  2020 : 11,189 ( 8.79%) ████
-  2021 : 14,010 (11.01%) █████
-  2022 : 13,687 (10.76%) █████
-  2023 : 11,456 ( 9.00%) ████
-  2024 : 10,211 ( 8.03%) ████
-  2025 : 4,314 ( 3.39%) █
-
-Critère : Prix_m2_sup_20000
---------------------------------------------------------------------------------
-
-Évolution par année (15,390 outliers au total) :
-  1997 :     1 ( 0.01%)
-  2001 :     1 ( 0.01%)
-  2002 :     3 ( 0.02%)
-  2014 :   551 ( 3.58%) █
-  2015 :   668 ( 4.34%) ██
-  2016 :   712 ( 4.63%) ██
-  2017 :   943 ( 6.13%) ███
-  2018 :   995 ( 6.47%) ███
-  2019 : 1,261 ( 8.19%) ████
-  2020 : 1,285 ( 8.35%) ████
-  2021 : 1,694 (11.01%) █████
-  2022 : 2,437 (15.83%) ███████
-  2023 : 2,061 (13.39%) ██████
-  2024 : 1,816 (11.80%) █████
-  2025 :   962 ( 6.25%) ███
-
-Critère : Prix_m2_sup_mediane_mult_4
---------------------------------------------------------------------------------
-
-Évolution par année (21,312 outliers au total) :
-  1997 :     1 ( 0.00%)
-  2001 :     1 ( 0.00%)
-  2002 :     5 ( 0.02%)
-  2014 : 1,255 ( 5.89%) ██
-  2015 : 1,468 ( 6.89%) ███
-  2016 : 1,608 ( 7.55%) ███
-  2017 : 1,764 ( 8.28%) ████
-  2018 : 1,653 ( 7.76%) ███
-  2019 : 1,885 ( 8.84%) ████
-  2020 : 1,737 ( 8.15%) ████
-  2021 : 2,159 (10.13%) █████
-  2022 : 2,527 (11.86%) █████
-  2023 : 2,179 (10.22%) █████
-  2024 : 2,035 ( 9.55%) ████
-  2025 : 1,035 ( 4.86%) ██
-
-Critère : ratio_val_mt_op
---------------------------------------------------------------------------------
-
-Évolution par année (35 outliers au total) :
-  2002 :     1 ( 2.86%) █
-  2016 :     3 ( 8.57%) ████
-  2017 :     1 ( 2.86%) █
-  2018 :     2 ( 5.71%) ██
-  2019 :     2 ( 5.71%) ██
-  2020 :     1 ( 2.86%) █
-  2021 :     4 (11.43%) █████
-  2022 :    11 (31.43%) ███████████████
-  2023 :     4 (11.43%) █████
-  2024 :     2 ( 5.71%) ██
-  2025 :     4 (11.43%) █████
-
-
-================================================================================
-RÉPARTITION TYPOLOGIQUE PAR CRITÈRE D'ÉLIMINATION
-================================================================================
-
-Critère : Non_specifie (871,274 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  MAI             : 553,885 (63.57%)
-  APT             : 317,389 (36.43%)
-
-Critère : Prix_m2_inf_200 (35,364 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  MAI             : 28,665 (81.06%)
-  APT             : 6,699 (18.94%)
-
-Critère : Prix_m2_inf_mediane_div_4 (127,223 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  MAI             : 93,367 (73.39%)
-  APT             : 33,856 (26.61%)
-
-Critère : Prix_m2_sup_20000 (15,390 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  APT             : 8,392 (54.53%)
-  MAI             : 6,998 (45.47%)
-
-Critère : Prix_m2_sup_mediane_mult_4 (21,312 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  MAI             : 13,541 (63.54%)
-  APT             : 7,771 (36.46%)
-
-Critère : ratio_val_mt_op (35 outliers)
---------------------------------------------------------------------------------
-
-Par type de bien :
-  APT             :    23 (65.71%)
-  MAI             :    12 (34.29%)
-
-
-================================================================================
-RÉPARTITION PAR SOURCE DE DONNÉES ET CRITÈRE
-================================================================================
-
-Critère : Non_specifie (871,274 outliers)
---------------------------------------------------------------------------------
-  CL                   : 870,790 (99.94%)
-  DVF                  :   484 ( 0.06%)
-
-Critère : Prix_m2_inf_200 (35,364 outliers)
---------------------------------------------------------------------------------
-  DVF                  : 34,260 (96.88%)
-  CL                   : 1,104 ( 3.12%)
-
-Critère : Prix_m2_inf_mediane_div_4 (127,223 outliers)
---------------------------------------------------------------------------------
-  DVF                  : 116,623 (91.67%)
-  CL                   : 10,600 ( 8.33%)
-
-Critère : Prix_m2_sup_20000 (15,390 outliers)
---------------------------------------------------------------------------------
-  DVF                  : 12,048 (78.28%)
-  CL                   : 3,342 (21.72%)
-
-Critère : Prix_m2_sup_mediane_mult_4 (21,312 outliers)
---------------------------------------------------------------------------------
-  DVF                  : 16,268 (76.33%)
-  CL                   : 5,044 (23.67%)
-
-Critère : ratio_val_mt_op (35 outliers)
---------------------------------------------------------------------------------
-  CL                   :    35 (100.00%)
-
-
-================================================================================
-EXEMPLES CONCRETS PAR CRITÈRE D'ÉLIMINATION
-================================================================================
-
-Exemples pour : Non_specifie
---------------------------------------------------------------------------------
-              ville_ TYPE_BIEN  Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR OUTLIER_REASON
-          CARPENTRAS       MAI      NaN          NaN        NaN  2015   Non_specifie
-          STRASBOURG       APT      NaN          NaN        3.0  2016   Non_specifie
-SAINT SULPICE LANDES       MAI      NaN          NaN        NaN  2016   Non_specifie
-              MANSAC       MAI      NaN          NaN        NaN  2020   Non_specifie
-           MARSEILLE       APT      NaN          NaN        NaN  2021   Non_specifie
-
-
-Exemples pour : Prix_m2_inf_200
---------------------------------------------------------------------------------
-      ville_ TYPE_BIEN    Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
-    AUBUSSON       MAI  86.708333        120.0        3.0  2021 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-SAINT MESMIN       MAI 116.279070        129.0        3.0  2019 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-  VILLEPINTE       MAI  44.117647        340.0       16.0  2023 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-     DUISANS       MAI 155.175000        200.0        7.0  2018 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-     ISSOIRE       APT 163.057325        785.0        1.0  2018 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-
-
-Exemples pour : Prix_m2_inf_mediane_div_4
---------------------------------------------------------------------------------
-          ville_ TYPE_BIEN    Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
- AYAT SUR SIOULE       MAI 166.666667        120.0        2.0  2024 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-NEUVILLE SUR AIN       MAI 468.750000         96.0        3.0  2024                                           Prix_m2_inf_mediane_div_4
-        SERQUEUX       MAI  98.543689        103.0        3.0  2014 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-          ORTHEZ       APT 246.212121        264.0        5.0  2015                 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4
-         GIVONNE       MAI 163.636364        110.0        3.0  2021 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
-
-
-Exemples pour : Prix_m2_sup_20000
---------------------------------------------------------------------------------
-       ville_ TYPE_BIEN      Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                          OUTLIER_REASON
-SAINT ANDRONY       MAI 22750.000000        100.0        3.0  2018 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
-        PARIS       APT 21928.571429         70.0        5.0  2025                                                       Prix_m2_sup_20000
-        PARIS       APT 22989.285714         28.0        1.0  2021                                                       Prix_m2_sup_20000
-   SAINT MALO       MAI 24000.000000        250.0        7.0  2023 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
-        PARIS       APT 21073.170732        205.0        6.0  2022                                                       Prix_m2_sup_20000
-
-
-Exemples pour : Prix_m2_sup_mediane_mult_4
---------------------------------------------------------------------------------
-                  ville_ TYPE_BIEN       Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                          OUTLIER_REASON
-                 MAZAMET       APT   4507.350000         20.0        1.0  2018                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
-               BEURVILLE       MAI   1356.453488         86.0        1.0  2023                                              Prix_m2_sup_mediane_mult_4
-        ROSIERES SALINES       MAI 289246.000000          1.0        1.0  2022 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
-                 DHUIZON       MAI   6285.211268        142.0        6.0  2024                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
-VILLAINES SOUS MALICORNE       MAI  12666.666667         30.0        3.0  2017                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
-
-
-Exemples pour : ratio_val_mt_op
---------------------------------------------------------------------------------
-               ville_ TYPE_BIEN     Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
-CHERBOURG EN COTENTIN       APT  517.543884         57.0        2.0  2025                           Prix_m2_inf_mediane_div_4|ratio_val_mt_op
-                 AGEN       APT  331.166667         54.0        2.0  2022 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|ratio_val_mt_op
-           CHAUMONTEL       APT  662.500000         80.0        3.0  2016                           Prix_m2_inf_mediane_div_4|ratio_val_mt_op
-           DRAGUIGNAN       MAI 2879.120879         91.0        4.0  2016                                                     ratio_val_mt_op
-          ARMENTIERES       APT         NaN          NaN        NaN  2020                                                     ratio_val_mt_op
+Top 10 villes avec le plus de transactions :
+  PARIS                          : 47022 ( 3.78%)
+  MARSEILLE                      : 17930 ( 1.44%)
+  TOULOUSE                       : 14678 ( 1.18%)
+  LYON                           : 11644 ( 0.94%)
+  BORDEAUX                       :  8421 ( 0.68%)
+  NICE                           :  7722 ( 0.62%)
+  NANTES                         :  7522 ( 0.60%)
+  MONTPELLIER                    :  5909 ( 0.48%)
+  LILLE                          :  5838 ( 0.47%)
+  BOULOGNE BILLANCOURT           :  4175 ( 0.34%)
