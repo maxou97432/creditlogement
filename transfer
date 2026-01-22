@@ -1,1187 +1,401 @@
-
-"""Ce fichier a pour but d'instancier le modèle de filtration d'anomalies de la base de données df_cleaned_data, ainsi que l'ensemble
-des fonctions utilisées pour le calcul des prix du m2 par méthode des univers élémentaires """
-
-
-
-import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-import numpy as np
-import pickle
-import os
-import pandas as pd
-import sys
-import param_generaux as params
-from sqlalchemy import create_engine
-import urllib
-
-
-
-N_YEARS = 3  # pour le modele ML
-VAR_NUM = ["Prix_m2"]  # pour le modele TI
-# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
-N_MIN = 30  # pour les deux modeles
-
-# Méthode de détection d'anomalies (la même pour les deux modèles)
-# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
-# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
-# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
-OUTLIER_MODE = "mult"
-# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
-COEFF_ECART = 4
-PRIX_M2_MIN = 200
-PRIX_M2_MAX = 20000
-
-
-class DateOffset:
-    def __init__(
-        self,
-        years=0,
-        months=0,
-        weeks=0,
-        days=0,
-        hours=0,
-        minutes=0,
-        seconds=0,
-        milliseconds=0,
-        microseconds=0,
-        year=None,
-        month=None,
-        day=None,
-        weekday=None,
-        hour=None,
-        minute=None,
-        second=None,
-        microsecond=None,
-    ):
-        self.relative = relativedelta(
-            years=years,
-            months=months,
-            weeks=weeks,
-            days=days,
-            hours=hours,
-            minutes=minutes,
-            seconds=seconds,
-            microseconds=microseconds + milliseconds * 1000
-        )
-        self.absolute = {
-            "year": year,
-            "month": month,
-            "day": day,
-            "weekday": weekday,
-            "hour": hour,
-            "minute": minute,
-            "second": second,
-            "microsecond": microsecond
-        }
-
-    def apply(self, date: datetime) -> datetime:
-        date = date + self.relative
-        date_dict = {k: v for k, v in self.absolute.items() if v is not None}
-        return date.replace(**date_dict)
-
-    def __rsub__(self, other):
-        # Permet d'utiliser : date - DateOffset(...)
-        return other - self.relative
-
-class ImportRecentData:
-    """Classe pour importer les données récentes.
-
-    Arguments
-    ---------
-    n_years: int
-        Nombre d'années les plus récentes à importer (n_years dernière(s))
-    """
-
-    def __init__(self, n_years, input_):
-        self.n_years = n_years
-        self.input_ = input_
-
-    def import_data_recent(self):
-        """Importe les données des n_years dernières années
-
-        Returns
-        -------
-        df: pandas.DataFrame
-            Dataframe des données sur les n_years dernières années.
-        """
-
-        df = self.input_.copy()
-        nb = int(self.n_years)
-        max_year = df["DATE"].dt.year.max()
-        prof_max =  pd.Timestamp(year= max_year- nb, month= 1, day= 1)
-        df = df[df["DATE"] >= prof_max].copy()
-        df.reset_index(drop=True, inplace=True)
-
-        return df
-
-class CalcMetaNum:
-
-    def __init__(self, n_years, geo_bien, var_num):
-        self.n_years = n_years
-        self.geo_bien = geo_bien
-        self.var_num = var_num
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        """Calculs des statistiques descriptives par typologie de bien
-
-        Arguments
-        ---------
-        X: pandas.DataFrame
-            Dataframe (dvf)
-        y: None, optionnel
-
-        Returns
-        -------
-        meta_num_all: pandas.DataFrame
-                      Dataframe contenant les statistiques descriptives par typologie de bien.
-        X: pandas.DataFrame
-           Dataframe enrichi de la colonne year_geo_bien.
-        """
-
-        if self.n_years == -1:
-            X["year_geo_bien"] = X["YEAR"] + X[self.geo_bien]
-
-        else:
-            n_months = self.n_years * 12
-            prof_max = X["DATE"].max() - DateOffset(months=n_months)
-
-            if self.n_years == 1:
-                X["year_geo_bien"] = X[self.geo_bien]
-            elif self.n_years == 2:
-                X["year_geo_bien"] = (
-                    (X["DATE"] >= prof_max + DateOffset(months=12))
-                    .astype("int8")
-                    .astype(str)
-                    + "_"
-                    + X[self.geo_bien]
-                )
-            else:
-                X["days"] =  X["DATE"] -  X["DATE"].min()
-                X["year"] = X.days // np.timedelta64(1, "Y")
-                X.loc[X.year < 0, "year"] = 0
-                X.loc[X.year >= self.n_years, "year"] = self.n_years - 1
-                X["year"] = X["year"].astype(int).astype(str)
-                X["year_geo_bien"] = X["year"] + "_" + X[self.geo_bien]
-                X.drop(columns=["days", "year"], inplace=True)
-
-        meta_num_all = X.groupby("year_geo_bien")[self.var_num].describe(
-            percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]
-        )
-
-        return meta_num_all, X
-    
-
-class EffectifsParMailleGeo:
-
-    def __init__(self, maille_geo):
-        self.maille_geo = maille_geo
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        """Calcul des effectifs par maille géographique
-
-        Arguments
-        ---------
-        X: pandas.DataFrame
-            Dataframe (dvf)
-        y: None, optionnel
-
-        Returns
-        -------
-        dict_geo: dict
-                  Dictionnaire contenant les effectifs calculés par maille géographique.
-        """
-
-        chunksize = 1000
-        X = X.replace(to_replace=[np.inf, -np.inf], value=[np.nan, np.nan], regex=False)
-        tap = (
-            X.loc[pd.notnull(X["Prix_m2"]), [self.maille_geo]]
-            .apply(lambda x: x.value_counts())
-            .stack()
-            .reset_index()
-        )
-
-        tap.columns = ["mod", "var", "N"]
-        tap.drop(columns="var", inplace=True)
-        dict_geo = tap.set_index("mod")["N"].to_dict()
-
-        if self.maille_geo == "ville_":
-            tap.rename(columns={"mod": "LL_VILLE", "N": "EFFECTIF_VILLE"}, inplace=True)
-
-
-        elif self.maille_geo == "code_iris":
-            tap.rename(columns={"mod": "CD_IRIS", "N": "EFFECTIF_IRIS"}, inplace=True)
-
-        return dict_geo
-
-class DefMailleGeoIRIS:
-
-    def __init__(self, n_min, dict_geo_city, dict_geo_iris, geo_bien, maille_geo_loc):
-        self.n_min = n_min
-        self.dict_geo_city = dict_geo_city
-        self.dict_geo_iris = dict_geo_iris
-        self.geo_bien = geo_bien
-        self.maille_geo_loc = maille_geo_loc
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        """Définition pour chaque opération de la maille géographique qui sera appliquée (iris, arrondissement, ville, ou département)
-           en fonction des effectifs calculés par type de maille géographique
-           MAILLE LA PLUS FINE : IRIS
-
-        Arguments
-        ---------
-        X: pandas.DataFrame
-            Dataframe (dvf)
-        y: None, optionnel
-
-        Returns
-        -------
-        X: pandas.DataFrame
-            Dataframe
-        """
-
-        extract_iris = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR", "code_iris"]].apply(
-            lambda x: self.loc_min_count_iris(
-                x, self.dict_geo_city, self.dict_geo_iris, self.n_min
-            ),
-            axis=1,
-        )
-        X[[self.geo_bien, self.maille_geo_loc]] = pd.DataFrame(extract_iris.tolist())
-
-        return X
-
-    def loc_min_count_iris(self, x, dict_geo_ville, dict_geo_iris, n_min):
-        """Choix de la maille géographique avec granularité la plus fine à l'iris"""
-        iris_n = dict_geo_iris.get(x[4])
-        city_n = dict_geo_ville.get(x[1])
-
-        if iris_n is None:
-            iris_n = np.nan
-        if city_n is None:
-            city_n = np.nan
-        if x[0] is None:
-            x[0] = "NAN"
-
-        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
-        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
-
-        if (not math.isnan(iris_n)) & (iris_n >= n_min):
-            return x[4], "IRIS"
-        elif (str(x[0])[:3] in ["750", "690"]) or (str(x[0]) in marseille_cp_prefix):
-            return x[0], "ARR"
-        elif (
-            (
-                str(x[0])[:3] not in ["750", "690"]
-                and (str(x[0]) not in marseille_cp_prefix)
-            )
-            & (not math.isnan(city_n))
-            & (city_n >= n_min)
-        ):
-            return x[1], "CITY"
-        else:
-            return x[2], "DEPT"
-          
-class DefMailleGeoCITY:
-
-    def __init__(self, n_min, dict_geo_city, geo_bien, by_year):
-        self.n_min = n_min
-        self.dict_geo_city = dict_geo_city
-        self.geo_bien = geo_bien
-        self.by_year = by_year
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        """Définition pour chaque opération de la maille géographique qui sera appliquée (arrondissement, ville, ou département)
-           en fonction des effectifs calculés par type de maille géographique
-           MAILLE LA PLUS FINE : ARRONDISSEMENT
-
-        Arguments
-        ---------
-        X: pandas.DataFrame
-            Dataframe (dvf)
-        y: None, optionnel
-
-        Returns
-        -------
-        X: pandas.DataFrame
-            Dataframe enrichi de la colonne maille_geo_loc_city.
-        """
-
-        extract_city = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR"]].apply(
-            lambda x: self.loc_min_count_city(x, self.dict_geo_city), axis=1
-        )
-        X[[self.geo_bien, "maille_geo_loc_city"]] = pd.DataFrame(extract_city.tolist())
-
-        del X["maille_geo_loc_city"]
-
-        return X
-
-    def loc_min_count_city(self, x, dict_geo):
-        """Choix de la maille géographique avec granularité la plus fine à la ville."""
-
-        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
-        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
-
-        if x[0] is not None:
-            # On conserve les CP pour Paris et Lyon
-            if (str(x[0])[:3] not in ["750", "690"]) and (
-                str(x[0]) not in marseille_cp_prefix
-            ):
-                if self.by_year == 0:
-                    city_n = dict_geo.get(x[1])
-                elif self.by_year == 1:
-                    city_n = dict_geo.get(x[3] + x[1])
-                if city_n is not None:
-                    return x[1], "CITY"
-            else:
-                return x[0], "ARR"
-        return x[2], "DEPT"
-class DetectAno:
-
-    def __init__(self, meta_num_all, var_num):
-        self.meta_num_all = meta_num_all
-        self.var_num = var_num
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        """Détection et suppression des anomalies
-
-        Arguments
-        ---------
-        X: pandas.DataFrame
-            Dataframe (dvf)
-        y: None, optionnel
-
-        Returns
-        -------
-        dic_geo_meta: dict
-                      Dictionnaire contenant les informations nécessaires à la détection d'anomalies.
-        X: pandas.DataFrame
-           Dataframe
-        """
-
-        start_time = datetime.now()
-        X['OUTLIER_REASON'] =  ""
-        dic_geo_meta = {}
-        for i in self.meta_num_all.index:
-            meta_num = self.meta_num_all.loc[i, :].unstack(level=[0]).transpose()
-            meta_num.columns = [
-                "N",
-                "Mean",
-                "Std",
-                "Min",
-                "D1",
-                "Q1",
-                "Median",
-                "Q3",
-                "D9",
-                "Max",
-            ]
-            meta_num["IQR"] = meta_num["Q3"] - meta_num["Q1"]
-            if OUTLIER_MODE == "iqr":
-                meta_num["Lower_Limit"] = (
-                    meta_num["Median"] - COEFF_ECART * meta_num["IQR"]
-                )
-                meta_num["Upper_Limit"] = (
-                    meta_num["Median"] + COEFF_ECART * meta_num["IQR"]
-                )
-            elif OUTLIER_MODE == "std":
-                meta_num["Lower_Limit"] = (
-                    meta_num["Mean"] - COEFF_ECART * meta_num["Std"]
-                )
-                meta_num["Upper_Limit"] = (
-                    meta_num["Mean"] + COEFF_ECART * meta_num["Std"]
-                )
-            else:
-                # Critère 1.
-                meta_num["Lower_Limit"] = meta_num["Median"] / COEFF_ECART
-
-                # Critère 2.
-                meta_num["Upper_Limit"] = meta_num["Median"] * COEFF_ECART
-            dic_geo_meta[i] = meta_num
-
-        
-        for var in self.var_num:
-            logging.info("\t Topage des anomalies pour la variable " + var)
-    
-            # Créer les masques pour distinguer inf et sup
-            mask_inf = X[["year_geo_bien", var]].apply(
-                lambda x: (
-                    x["year_geo_bien"] == x["year_geo_bien"]
-                    and x[var] < dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
-                ),
-                axis=1,
-            )
-    
-            mask_sup = X[["year_geo_bien", var]].apply(
-                lambda x: (
-                    x["year_geo_bien"] == x["year_geo_bien"]
-                    and x[var] > dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
-                ),
-                axis=1,
-            )
-    
-            # Tracker séparément inf et sup
-            X.loc[mask_inf, "OUTLIER_REASON"] = X.loc[mask_inf, "OUTLIER_REASON"].apply(
-                lambda x: (x + f"|{var}_inf_mediane_div_{COEFF_ECART}") if x else f"{var}_inf_mediane_div_{COEFF_ECART}"
-            )
-    
-            X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(
-                lambda x: (x + f"|{var}_sup_mediane_mult_{COEFF_ECART}") if x else f"{var}_sup_mediane_mult_{COEFF_ECART}"
-            )
-
-            #X["Ano_" + var] = (mask_inf | mask_sup).astype(int)
-        
-        # =============================================================================
-        # Critères supplémentaires basés sur la médiane par groupe
-        # =============================================================================
-        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
-            logging.info("\t Application des critères de filtrage basés sur la médiane")
-            
-            # Calculer les médianes par groupe (YEAR, ville_, TYPE_BIEN)
-            medianes = X.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
-            medianes.rename(columns={'Prix_m2': 'mediane_prix_m2'}, inplace=True)
-            
-            # Merge pour avoir la médiane de chaque groupe sur chaque ligne
-            X = X.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
-            
-            # Critère 1: Prix < médiane / 4
-            mask_inf_med_div4 = (X['Prix_m2'] < X['mediane_prix_m2'] / 4) & X['Prix_m2'].notna()
-            X.loc[mask_inf_med_div4, 'OUTLIER_REASON'] = X.loc[mask_inf_med_div4, 'OUTLIER_REASON'].apply(
-                lambda x: (x + "|Prix_m2_inf_mediane_div_4") if x else "Prix_m2_inf_mediane_div_4"
-            )
-            
-            # Critère 2: Prix > médiane * 4
-            mask_sup_med_mult4 = (X['Prix_m2'] > X['mediane_prix_m2'] * 4) & X['Prix_m2'].notna()
-            X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'] = X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'].apply(
-                lambda x: (x + "|Prix_m2_sup_mediane_mult_4") if x else "Prix_m2_sup_mediane_mult_4"
-            )
-            
-            # Critère 3: Prix < 200€
-            mask_inf_200 = (X['Prix_m2'] < PRIX_M2_MIN) & X['Prix_m2'].notna()
-            X.loc[mask_inf_200, 'OUTLIER_REASON'] = X.loc[mask_inf_200, 'OUTLIER_REASON'].apply(
-                lambda x: (x + "|Prix_m2_inf_200") if x else "Prix_m2_inf_200"
-            )
-            
-            # Critère 4: Prix > 20,000€
-            mask_sup_20000 = (X['Prix_m2'] > PRIX_M2_MAX) & X['Prix_m2'].notna()
-            X.loc[mask_sup_20000, 'OUTLIER_REASON'] = X.loc[mask_sup_20000, 'OUTLIER_REASON'].apply(
-                lambda x: (x + "|Prix_m2_sup_20000") if x else "Prix_m2_sup_20000"
-            )
-            
-            # Marquer les anomalies détectées par ces critères
-            mask_median_criteria = mask_inf_med_div4 | mask_sup_med_mult4 | mask_inf_200 | mask_sup_20000
-            # Ensure 'Ano_Prix_m2' column exists before trying to update it
-            if "Ano_Prix_m2" not in X.columns:
-                X["Ano_Prix_m2"] = 0
-            X.loc[mask_median_criteria, "Ano_Prix_m2"] = 1  # anomalie
-            
-            logging.info(f"\t \t \t - Prix < médiane/4 : {mask_inf_med_div4.sum()}")
-            logging.info(f"\t \t \t - Prix > médiane*4 : {mask_sup_med_mult4.sum()}")
-            logging.info(f"\t \t \t - Prix < {PRIX_M2_MIN}€ : {mask_inf_200.sum()}")
-            logging.info(f"\t \t \t - Prix > {PRIX_M2_MAX}€ : {mask_sup_20000.sum()}")
-            
-            # Supprimer la colonne temporaire médiane
-            X.drop(columns=['mediane_prix_m2'], inplace=True, errors='ignore')
-
-        nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
-        nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
-        nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
-
-        # Attention, on supprime les surfaces habitables alors que le pb peut provenir de la valeur foncière sous ou sur-estimée
-        if "Prix_m2" in self.var_num:
-            X.loc[(X["Ano_Prix_m2"] == 1), "NB_SURF_HAB"] = np.nan
-            X.loc[(X["Ano_Prix_m2"] == 1), "Prix_m2"] = np.nan
-        if "Prix_piece" in self.var_num:
-            X.loc[X["Ano_Prix_piece"] == 1, "NB_PIECES"] = np.nan
-        if "nb_m2_by_piece" in self.var_num:
-            X.loc[X["Ano_nb_m2_by_piece"] == 1, "NB_PIECES"] = np.nan
-            X.drop(columns=["Ano_nb_m2_by_piece"], inplace=True)
-
-        post_nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
-        post_nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
-        post_nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
-
-        nb_suppr_surf_hab = nb_nn_surf_hab - post_nb_nn_surf_hab
-        nb_suppr_prix_m2 = nb_nn_prix_m2 - post_nb_nn_prix_m2
-        nb_suppr_nb_pieces = nb_nn_nb_pieces - post_nb_nn_nb_pieces
-
-        logging.info(
-            f"\t \t {nb_suppr_surf_hab} anomalies supprimées sur le champ NB_SURF_HAB soit {round((nb_suppr_surf_hab/nb_nn_surf_hab)*100,2)}% : {datetime.now()-start_time}"
-        )
-        logging.info(
-            f"\t \t {nb_suppr_prix_m2} anomalies supprimées sur le champ Prix_m2 soit {round((nb_suppr_prix_m2/nb_nn_prix_m2)*100,2)}% : {datetime.now()-start_time}"
-        )
-        logging.info(
-            f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
-        )
-
-        # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
-        X["ratio_val_mt_op"] = np.nan
-        X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
-            X["MT_OPE"] / X["VALEUR_FONCIERE"]
-        )
-        
-        # Tracker les anomalies ratio_val_mt_op
-        mask_ratio_ano = X["ratio_val_mt_op"] > 2
-        X.loc[mask_ratio_ano, "OUTLIER_REASON"] = X.loc[mask_ratio_ano, "OUTLIER_REASON"].apply(
-            lambda x: (x + "|ratio_val_mt_op") if x else "ratio_val_mt_op"
-        )
-        
-        X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
-        X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
-
-        X.drop(columns=["ratio_val_mt_op"], inplace=True)
-        X.reset_index(drop=True, inplace=True)
-
-        return dic_geo_meta, X
-    
-
-def detect_ano_ml(input_df, n_years=None):
-
-    logging.info("ML detection of anomalies starting")
-
-    # =============================================================================
-    # Import des données sur les N_YEARS dernières années
-    # =============================================================================
-
-    start_time = datetime.now()
-
-    importrecentdata = ImportRecentData(n_years=n_years, input_=input_df)
-    data_recent = importrecentdata.import_data_recent()
-    logging.info(
-        f"Base d'analyse filtrée sur les {params.N_YEARS} dernières années : {datetime.now()-start_time}\n"
-    )
-  
-    data_original = input_df.copy()  
-    
-
-    data_recent["DATE"] = data_recent["DATE"].apply(lambda x: x.replace(day=1))
-    
-  
-    ids_avant_detection = set(data_recent["ID"])  # IDs qui entrent dans la détection
-    
-    # Import des données sur les N_YEARS dernières années
-    start_time = datetime.now()
-    logging.info(
-        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
-    )
-
-    # =============================================================================
-    # Calculs des effectifs par ville et par Iris
-    # =============================================================================
-    step_time = datetime.now()
-    logging.info("workforce calculation")
-    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
-    logging.info(
-        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
-    )
-    step_time = datetime.now()
-    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
-    logging.info(
-        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
-    )
-
-
-    dict_geo_city = effectifsparVille.transform(data_recent)
-
-
-
-    defmaillegeocity = DefMailleGeoCITY(
-        n_min=params.N_MIN,
-        dict_geo_city=dict_geo_city,
-        geo_bien="geo_bien_city",
-        by_year=0,
-    )
-    data_recent = defmaillegeocity.transform(data_recent)
-
-    logging.info("workforce calculation OK")
-
-    # =============================================================================
-    # Calculs des statistiques descriptives par typologie de bien
-    # =============================================================================
-
-    logging.info("statistics calculation")
-    step_time = datetime.now()
-    calcmetanumCity = CalcMetaNum(
-        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
-    )
-    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
-    logging.info(
-        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
-    )
-
-    # =============================================================================
-    # Détection et suppression des anomalies
-    # =============================================================================
-    logging.info("Detection and elimination of anomalies")
-    
-
-    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
-    result = detectano.transform(data_recent)
-    
-    if isinstance(result, tuple):
-        _, data_recent = result
-    else:
-        data_recent = result
-    
-    outlier_reasons = data_recent[['ID','OUTLIER_REASON']].copy()
-
-    nb_avant = len(data_recent)
-    data_recent = data_recent.dropna(subset=["Prix_m2"])
-    nb_apres = len(data_recent)
-    print(f"Nombre de lignes supprimées :{nb_avant - nb_apres}")
-
-    data_recent.drop(columns=["year_geo_bien","OUTLIER_REASON"], inplace=True, errors="ignore")
-    logging.info("Detection and elimination of anomalies OK")
-    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
-    
-    
-    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
-                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
-                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
-                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR","DEMANDE"]
-    
-    # Vérifier que toutes les colonnes existent
-    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
-    data_recent = data_recent[colonnes_disponibles]
-    
-    
-    ids_valides = set(data_recent["ID"])
-    
-    # Outliers = IDs entrés dans la détection MAIS rejetés
-    ids_outliers = ids_avant_detection - ids_valides
-    
-    # Récupérer les outliers depuis les données ORIGINALES
-    data_mauvais = data_original[
-        (data_original["ID"].isin(ids_outliers))
-    ].copy()
-    data_mauvais = data_mauvais.merge(outlier_reasons, on = 'ID', how = 'left')
-    # Ne garder que les colonnes disponibles
-    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
-    colonnes_communes.append("OUTLIER_REASON")
-    data_mauvais = data_mauvais[colonnes_communes]
-    
-
-    return data_recent, data_mauvais
-
-   
-   
-
-#df = pd.read_parquet("Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
-#base_ml = detect_ano_ml(input_df=df, date_min = None, date_max = None, type_bien = None)
-#base_ml.to_csv(r"N:\uflumth\indicateur_marche\prix_m2\my_cl_estim\prez\base_ml_output.csv", index =  False, encoding = "utf-8")
-
-
-class Connector(object):
-    """Classe permettant de lire et écrire des données."""
-
-    def __init__(self):
-        self.engine_read = connect_sql(
-            server=params.SERVEUR,
-            database=params.DATABASE,
-            id=params.PROD_ID,
-            pwd=params.PROD_PWD,
-            usage="read",
-            conn_params_optional=params.CONN_PARAMS_OPTIONAL
-        )
-        self.engine_write = connect_sql(
-            server=params.SERVEUR,
-            database=params.DATABASE,
-            id=params.PROD_ID,
-            pwd=params.PROD_PWD,
-            usage="write",
-            conn_params_optional=params.CONN_PARAMS_OPTIONAL
-        )
-
-    def read_excel(self, input_path, skiprows=None):
-        try:
-            data = pd.read_excel(input_path, skiprows=skiprows)
-        except FileNotFoundError:
-            sys.exit()
-        return data
-
-    def read_csv(self, input_path, sep=","):
-        try:
-            data = pd.read_csv(input_path, sep=sep, low_memory=False)
-        except FileNotFoundError:
-            sys.exit()
-        return data
-
-    def read_pkl(self, input_path):
-        input_path = (
-            f"{input_path}{params.EXT_PKL}"
-            if os.path.isfile(f"{input_path}{params.EXT_PKL}")
-            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PKL}"
-        )
-        try:
-            data = pd.read_pickle(input_path)
-        except:
-            try:
-                with open(input_path, "rb") as file:
-                    data = pickle.load(file)
-            except FileNotFoundError:
-                sys.exit()
-        return data
-
-    def write_pkl(self, data, output_path):
-        output_path = f"{_add_suffixe(output_path)}{params.EXT_PKL}"
-        try:
-            data.to_pickle(output_path)
-        except:
-            try:
-                with open(output_path, "wb") as file:
-                    pickle.dump(data, file)
-            except:  # if the directory doesn't exist
-                sys.exit()
-
-    def read_parquet(self, input_path):
-        input_path = (
-            f"{input_path}{params.EXT_PARQUET}"
-            if os.path.isfile(f"{input_path}{params.EXT_PARQUET}")
-            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PARQUET}"
-        )
-        try:
-            data = pd.read_parquet(input_path)
-        except:
-            sys.exit()
-        return data
-
-    def write_parquet(self, data, output_path):
-        output_path = f"{_add_suffixe(output_path)}{params.EXT_PARQUET}"
-        try:
-            data.to_parquet(output_path)
-        except:
-            sys.exit()
-
-    def read_sql(self, query):
-        data = pd.read_sql_query(query, self.engine_read)
-
-        return data
-
-    def write_sql(self, data, table, chunksize=None):
-        # chunksize < 2100 / nb_colonnes
-        chunksize = chunksize or round(2000 / len(data.columns))
-        data.reset_index(inplace=True, drop=True)
-
-        data.to_sql(
-            name=table,
-            con=self.engine_write,
-            schema=params.SCHEMA,
-            if_exists="append",
-            index=False,
-            chunksize=chunksize,
-        )
-
-    def delete_sql(self, table):
-        with self.engine_read.begin() as conn:
-            conn.execute(f"TRUNCATE TABLE {table}")
-
-
-def connect_sql(
-    server=params.SERVEUR,
-    database=params.DATABASE,
-    id=params.PROD_ID,
-    pwd=params.PROD_PWD,
-    usage="read",
-    conn_params_optional=None
-):
-    conn_params = "DRIVER={SQL Server};" f"SERVER={server};DATABASE={database};"
-    conn_params_optional = conn_params_optional or {}
-    for key, val in conn_params_optional.items():
-        conn_params += f"{key}={val};"
-    if pwd is not None:
-        conn_params += f"UID={id};PWD={pwd};"
-    conn_params = urllib.parse.quote_plus(conn_params)
-    create_engine_kwargs = {"fast_executemany": True}
-    if usage != "write":
-        create_engine_kwargs["isolation_level"] = "AUTOCOMMIT"
-    engine = create_engine(
-        "mssql+pyodbc:///?odbc_connect={}".format(conn_params), **create_engine_kwargs
-    )
-    return engine
-
-
-def _add_suffixe(path):
-    if params.TEST_MODE and params.N_ROWS is not None:
-        path = f"{path}{params.SUFF_TEST_MODE}"
-    return path
-
-
-
-
-
-
-
-#############################################################################################
-#############################################################################################
-                                #Fonctions Univ-Elem#
-
-os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
-
-def load_and_preprocess_data(specific_path = None):
-    """Charge et prétraite les données initiales."""
-    print("Chargement des données...")
-    if specific_path is not None:
-        fichier = specific_path
-    else:
-        fichier = params.CONFIG['input_file']
-
-    try:
-        df = pd.read_parquet(fichier)
-    except FileNotFoundError:
-        print(f"Le fichier {fichier} est introuvable")
-    
-    
-    # Renommage et nettoyage initial
-    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
-    df = df.dropna(subset=["CITY"])
-    
-    # Conversion des dates
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
-    
-    # Ajout colonne REGION
-    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
-    df['REGION'] = df['DEPT'].map(params.CONFIG['dep_to_region'])
-    
-    return df
-
-def apply_nice_correction(df):
-    """Applique la correction spécifique pour Nice."""
-    if "IRIS" in df.columns:
-        mask_nice = df["IRIS"].str[:5].isin(params.CONFIG['codes_insee_nice'])
-        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
-        df.loc[mask_nice, "CITY"] = "NICE"
-    return df
-
-def complete_months(g, col):
-    """Complète les mois manquants."""
-    g = g.sort_values("Periode").set_index("Periode")
-    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
-    g = g.reindex(idx)
-    
-    # Forward fill et Backward fill pour les colonnes catégorielles
-    for i in [col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
-        g[i] = g[i].ffill().bfill()
-    
-    g["nb_transac"] = g["nb_transac"].fillna(0)
-    # g["prix_moyen"] reste NaN là où il n'y a pas de données
-    
-    return g.reset_index().rename(columns={"index": "Periode"})
-
-def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice, typokeys):
-    """Calcule la moyenne mobile pondérée."""
-    result = []
-    g = g.sort_values("Periode")
-    periodes = g["Periode"].unique()
-    
-    for i, periode in enumerate(periodes):
-        # Optimisation: ne traiter que les mois trimestriels (3, 6, 9, 12)
-        if pd.Timestamp(periode).month % 3 != 0:
-            continue
-            
-        start_idx = max(0, i - window + 1)
-        periodes_fenetre = periodes[start_idx:i+1]
-        
-        # Filtre sur la fenêtre temporelle
-        df_fenetre = g[g["Periode"].isin(periodes_fenetre)]
-        
-        # Filtre sur les données actives (prix existant et indicateur valide)
-        mask_actif = (df_fenetre[col_prix].notna()) & (df_fenetre[col_indicatrice] == 1)
-        df_actif = df_fenetre[mask_actif]
-        
-        if len(df_actif) == 0:
-            result.append({
-                "Periode": periode,
-                "prix_mm": np.nan,
-                "nb_observations": 0,
-                "nb_univers": 0
-            })
-            continue
-        
-        total_poids = df_actif["poids_relatif"].sum()
-        
-        if total_poids > 0:
-            # Calcul de la moyenne pondérée
-            prix_mm = np.average(df_actif[col_prix], weights=df_actif["poids_relatif"])
-        else:
-            prix_mm = np.nan
-        nb_transac_mois_courant = df_actif[df_actif["Periode"] == periode]["nb_transac"] .sum()   
-        nb_transac_12_m =  df_actif["nb_transac"].sum()
-        result.append({
-            "Periode": periode,
-            "prix_mm": prix_mm,
-            "nb_observations": nb_transac_mois_courant,
-            "nb_observations_12m":nb_transac_12_m,
-            "nb_univers": df_actif.groupby(typokeys).ngroups
-        })
-    
-    return pd.DataFrame(result)
-
-def process_maille(df, maille_col, maille_name, filter_func=None, df_structure_ref = None):
-    """Fonction générique pour traiter une maille géographique."""
-    print(f"\n--- Traitement de la maille : {maille_name} ---")
-    start_time = datetime.now()
-    
-    # Filtrage spécifique si nécessaire
-    df_work = df.copy()
-    if filter_func:
-        df_work = filter_func(df_work)
-        
-    if df_work.empty:
-        print(f"Aucune donnée pour la maille {maille_name} après filtrage.")
-        return None
-
-    # Nettoyage de la colonne maille
-    if df_work[maille_col].dtype == 'object':
-        df_work[maille_col] = df_work[maille_col].astype(str).str.strip().str.upper()
-
-    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
-    
-    # 1. Agrégation mensuelle
-    univers_mensuel = (
-        df_work.groupby(dims, dropna=False)
-        .agg(
-            nb_transac=("ID", "size"),
-            prix_median=("Prix_m2", "median"),
-            prix_moyen=("Prix_m2", "mean"),
-        )
-        .reset_index()
-    )
-    
-    # Nettoyage post-agrégation
-    univers_mensuel["nb_transac"] = univers_mensuel["nb_transac"].fillna(0).astype(int)
-    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
-    
-    # Filtre cohérence Pièces/Type 
-    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    print(f"Avant filtre cohérence : {len(univers_mensuel)} lignes")
-    mask_coherence = univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]
-    
-    # Diagnostic
-    nb_incoherent = (~mask_coherence).sum()
-    print(f"Lignes incohérentes : {nb_incoherent}")
-    if nb_incoherent > 0 and nb_incoherent < 20:
-        print("Exemples:", univers_mensuel[~mask_coherence][["TYPE_BIEN", "NB_PIECES_RANGE"]].head())
-    
-    univers_mensuel = univers_mensuel[mask_coherence].drop(columns=["PB"])
-    print(f"Après filtre : {len(univers_mensuel)} lignes\n")
-
-    # 2. Complétion des mois
-    print("Complétion des mois manquants...")
-    univers_complet = (
-        univers_mensuel
-        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
-        .apply(lambda g: complete_months(g, maille_col))
-    )
-    
-    # 3. Calcul des poids structurels
-    
-    
-
-    if df_structure_ref is not None:
-        print("--- Application de la structure de marché globale ---")
-        univers_complet = univers_complet.merge(
-            df_structure_ref, on = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how = "left"
-        )
-        univers_complet = univers_complet.rename(columns={"poids_relatif_imposes" : "poids_relatif"})
-        univers_complet = univers_complet.dropna(subset=['poids_relatif'])
-    
-    else:
-        poids_global = (
-        univers_mensuel
-        .groupby([maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
-        .sum()
-        .rename(columns={"nb_transac": "poids_total"})
-        )
-        poids_global["poids_relatif"] = (
-            poids_global.groupby(maille_col)["poids_total"].transform(lambda x: x / x.sum())
-            )
-    
-        univers_complet = univers_complet.merge(
-            poids_global,
-            on=[maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
-            how="left"
-        )
-
-    # 4. Calcul des indicatrices
-    typokeys = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
-    
-    univers_complet["I_3m"] = (
-        univers_complet.groupby(typokeys)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=3, min_periods=3).sum() > 0).astype(int))
-    )
-    univers_complet["I_12m"] = (
-        univers_complet.groupby(typokeys)["nb_transac"]
-        .transform(lambda s: (s.rolling(window=12, min_periods=12).sum() > 0).astype(int))
-    )
-    
-    # 5. Calcul des moyennes mobiles pondérées
-    print("Calcul des moyennes mobiles...")
-    resultats_mm = []
-    
-
-    groupes_calcul = univers_complet.groupby([maille_col, 'TYPE_BIEN'])
-    
-    for (maille_val, type_bien), df_groupe in groupes_calcul:
-        # MM 3 mois
-        mm_3m = calcule_moyenne_mobile_ponderee(
-            df_groupe, 
-            window=3, 
-            col_prix='prix_moyen', 
-            col_indicatrice='I_3m', 
-            typokeys=typokeys
-        )
-        mm_3m["DIC_NAME"] = "prix_m2_3m"
-        mm_3m = mm_3m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
-        
-        # MM 12 mois
-        mm_12m = calcule_moyenne_mobile_ponderee(
-            df_groupe, 
-            window=12, 
-            col_prix='prix_moyen', 
-            col_indicatrice='I_12m', 
-            typokeys=typokeys
-        )
-        mm_12m["DIC_NAME"] = "prix_m2_12m"
-        mm_12m = mm_12m.rename(columns={"prix_mm": "prix_mm_value", "nb_observations": "NB_BIENS"})
-        
-        # Consolidation
-        mm_type = pd.concat([mm_3m, mm_12m], ignore_index=True)
-        mm_type["VAL_MAILLE_GEO"] = maille_val
-        mm_type["TYPE_MAILLE"] = maille_col 
-        mm_type["CD_TYPE_BIEN"] = type_bien
-        
-        resultats_mm.append(mm_type)
-    
-    if not resultats_mm:
-        return None
-        
-    final_df = pd.concat(resultats_mm, ignore_index=True)
-    final_df = final_df.drop(columns="NB_BIENS")
-    # Nettoyage final et calcul taux inflation
-    final_df = final_df.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    
-    # Calcul inflation 
-    final_df["TAUX_INFL_12M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=4) 
-    final_df["TAUX_INFL_3M"] = final_df.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=1)
-
-    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
-    return final_df
-
-def save_results(df, suffixe_fichier):
-    """Sauvegarde les résultats dans différents fichiers CSV."""
-    if df is None or df.empty:
-        print(f"Aucune donnée à sauvegarder pour {suffixe_fichier}")
-        return
-
-    # 1. Base complète (filtrée sur date)
-    df_complet = df.copy()
-    df_complet["Periode"] = pd.to_datetime(df_complet["Periode"])
-    df_complet = df_complet[df_complet["Periode"] >= "2015-03-01"]
-    
-    output_path = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_complet_{suffixe_fichier}.csv")
-    df_complet.to_csv(output_path, index=False)
-    print(f"Sauvegardé: {output_path}")
-
-    # 2. Dernière période (MAJ)
-    df_maj = df_complet.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    df_maj = df_maj[df_maj["Periode"] == df_maj["Periode"].max()]
-    df_maj = df_maj.rename(columns={"Periode": "DT_MAJ_PM2"})
-    
-    cols_export = ["DIC_NAME", "CD_TYPE_BIEN", "TYPE_MAILLE", "VAL_MAILLE_GEO", "DT_MAJ_PM2", "nb_observations", "prix_mm_value", "TAUX_INFL_3M", "TAUX_INFL_12M"]
-    # Vérification que les colonnes existent
-    cols_export = [c for c in cols_export if c in df_maj.columns]
-    
-    output_path_maj = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
-    df_maj[cols_export].to_csv(output_path_maj, index=False)
-    print(f"Sauvegardé: {output_path_maj}")
-
-    # 3. Statistiques de volumétrie
-    df_vol = df.copy()
-    df_vol["Periode"] = pd.to_datetime(df_vol["Periode"])
-    df_vol = df_vol[df_vol["Periode"] >= "2017-03-01"]
-    
-    df_min = df_vol.groupby(["VAL_MAILLE_GEO", "DIC_NAME"], as_index=False)["nb_observations"].min()
-    df_pivot = df_min.pivot(index='VAL_MAILLE_GEO', columns='DIC_NAME', values='nb_observations')
-    df_pivot.columns.name = None
-    df_pivot = df_pivot.reset_index()
-    df_pivot.rename(columns={"prix_m2_3m": "NB_BIENS (3m)", "prix_m2_12m": "NB_BIENS (12m)"}, inplace=True)
-    
-    output_path_vol = os.path.join(params.CONFIG['output_dir'], f"stat_volumeterie_{suffixe_fichier}.csv")
-    df_pivot.to_csv(output_path_vol, index=False)
-    print(f"Sauvegardé: {output_path_vol}")
-
-# --- Fonctions de filtrage spécifiques ---
-
-def filter_province(df):
-    """Filtre pour créer la maille PROVINCE."""
-    mask_idf = df["DEPT"].isin(params.CONFIG['idf_depts'])
-    df_prov = df.copy()
-    df_prov.loc[~mask_idf, "PROVINCE_CODE"] = "PROVINCE"
-    # On ne garde que les lignes province
-    return df_prov[df_prov["PROVINCE_CODE"] == "PROVINCE"]
-
-def filter_villes_top15(df):
-    """Filtre pour les 15 plus grandes villes."""
-    # Application de la correction Nice 
-    df = apply_nice_correction(df)
-    return df[df["CITY"].isin(params.CONFIG['top15_cities'])]
-
-def filter_villes_cp(df):
-    """Filtre pour les arrondissements (CP) des grandes villes."""
-    return df[df["CITY"].isin(params.CONFIG['villes_arrondissements'])]
-
-
-
-def get_structure_reference(df,maille_col):
-    """
-    Permet d'extraire la structure du marché (poids de chaque univers élémentaire sur l'ensemble de la période)
-    à partir de la base de référence (CL+DVF)
-    """
-
-    print(f"---Extraction de la structure de marché ({maille_col}) ---")
-
-    df_work = df.copy()
-    if df_work[maille_col].dtype == "object":
-        df_work[maille_col] = df_work[maille_col].astype(str).str.upper().str.strip()
-
-    dims = [maille_col, "BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE"]
-
-    # on compte le volume total sur toute la période
-
-    structure = (
-        df_work.groupby(dims, dropna = False).size().reset_index(name="volume_reference")
-    )
-
-    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
-    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
-    structure = structure[mask_coherence].drop(columns=["PB"])
-
-    structure["poids_relatif_imposes"] = (
-        structure.groupby(maille_col)["volume_reference"].transform(lambda x : x / x.sum())
-    )
-
-    return structure[[maille_col,"BIEN_NEUF","TYPE_BIEN","NB_PIECES_RANGE","poids_relatif_imposes"]]
+================================================================================
+============================== RAPPORT COMPLET ==================================
+========================= ANALYSE DES OUTLIERS ==================================
+================================================================================
+
+VUE D'ENSEMBLE
+--------------------------------------------------------------------------------
+  Nombre total de biens traités    : 12,078,904
+  Biens valides conservés           : 11,050,145 (91.48%)
+  Outliers détectés et retirés      : 1,028,759 (8.52%)
+
+================================================================================
+ANALYSE PAR CRITÈRE D'ÉLIMINATION
+================================================================================
+
+Nombre total d'outliers : 1,028,759
+
+Répartition par critère (un outlier peut avoir plusieurs critères) :
+--------------------------------------------------------------------------------
+  Non_specifie                        : 871,274 (84.69%)
+  Prix_m2_inf_mediane_div_4           : 231,141 (22.47%)
+  Prix_m2_sup_mediane_mult_4          : 37,401 ( 3.64%)
+  Prix_m2_inf_200                     : 35,364 ( 3.44%)
+  Prix_m2_sup_20000                   : 15,390 ( 1.50%)
+  ratio_val_mt_op                     :     35 ( 0.00%)
+
+Outliers avec critères multiples : 1,028,759 (100.00%)
+
+
+================================================================================
+RÉPARTITION GÉOGRAPHIQUE PAR CRITÈRE D'ÉLIMINATION
+================================================================================
+
+Critère : Non_specifie
+--------------------------------------------------------------------------------
+
+Top 5 départements (871,274 outliers) :
+  Nord                                : 51,761 ( 5.94%)
+  Hauts-de-Seine                      : 33,394 ( 3.83%)
+  Gironde                             : 32,176 ( 3.69%)
+  Bouches-du-Rhône                    : 30,984 ( 3.56%)
+  Haute-Garonne                       : 29,046 ( 3.33%)
+
+Top 5 villes :
+  PARIS                               : 26,175 ( 3.00%)
+  MARSEILLE                           : 11,866 ( 1.36%)
+  TOULOUSE                            : 10,718 ( 1.23%)
+  LYON                                : 7,192 ( 0.83%)
+  NANTES                              : 6,382 ( 0.73%)
+
+Critère : Prix_m2_inf_200
+--------------------------------------------------------------------------------
+
+Top 5 départements (35,364 outliers) :
+  Nord                                :    45 ( 0.13%)
+  Puy-de-Dôme                         :    30 ( 0.08%)
+  Dordogne                            :    26 ( 0.07%)
+  Jura                                :    24 ( 0.07%)
+  Haute-Garonne                       :    24 ( 0.07%)
+
+Top 5 villes :
+  PARIS                               :   463 ( 1.31%)
+  SAINT ETIENNE                       :   135 ( 0.38%)
+  SAINT PAUL                          :   117 ( 0.33%)
+  THIERS                              :   101 ( 0.29%)
+  SAINTE ROSE                         :    85 ( 0.24%)
+
+Critère : Prix_m2_inf_mediane_div_4
+--------------------------------------------------------------------------------
+
+Top 5 départements (127,223 outliers) :
+  Paris                               :   733 ( 0.58%)
+  Hauts-de-Seine                      :   461 ( 0.36%)
+  Gironde                             :   396 ( 0.31%)
+  Bouches-du-Rhône                    :   380 ( 0.30%)
+  Nord                                :   333 ( 0.26%)
+
+Top 5 villes :
+  PARIS                               : 4,791 ( 3.77%)
+  MARSEILLE                           : 2,224 ( 1.75%)
+  NIMES                               :   790 ( 0.62%)
+  MONTPELLIER                         :   657 ( 0.52%)
+  LYON                                :   656 ( 0.52%)
+
+Critère : Prix_m2_sup_20000
+--------------------------------------------------------------------------------
+
+Top 5 départements (15,390 outliers) :
+  Paris                               :   791 ( 5.14%)
+  Hauts-de-Seine                      :   241 ( 1.57%)
+  Yvelines                            :   112 ( 0.73%)
+  Bouches-du-Rhône                    :   107 ( 0.70%)
+  Gironde                             :    95 ( 0.62%)
+
+Top 5 villes :
+  PARIS                               : 5,216 (33.89%)
+  SAINT TROPEZ                        :   460 ( 2.99%)
+  CANNES                              :   457 ( 2.97%)
+  LEGE CAP FERRET                     :   288 ( 1.87%)
+  RAMATUELLE                          :   192 ( 1.25%)
+
+Critère : Prix_m2_sup_mediane_mult_4
+--------------------------------------------------------------------------------
+
+Top 5 départements (21,312 outliers) :
+  Bouches-du-Rhône                    :   181 ( 0.85%)
+  Nord                                :   158 ( 0.74%)
+  Gironde                             :   150 ( 0.70%)
+  Hauts-de-Seine                      :   136 ( 0.64%)
+  Yvelines                            :   126 ( 0.59%)
+
+Top 5 villes :
+  CANNES                              :   538 ( 2.52%)
+  PARIS                               :   444 ( 2.08%)
+  MARSEILLE                           :   381 ( 1.79%)
+  TOULOUSE                            :   179 ( 0.84%)
+  ANTIBES                             :   174 ( 0.82%)
+
+Critère : ratio_val_mt_op
+--------------------------------------------------------------------------------
+
+Top 5 départements (35 outliers) :
+  Indre-et-Loire                      :     2 ( 5.71%)
+  Eure-et-Loir                        :     2 ( 5.71%)
+  Lot-et-Garonne                      :     2 ( 5.71%)
+  Loire-Atlantique                    :     2 ( 5.71%)
+  Var                                 :     2 ( 5.71%)
+
+Top 5 villes :
+  CHARTRES                            :     2 ( 5.71%)
+  AGEN                                :     2 ( 5.71%)
+  MARSEILLE                           :     1 ( 2.86%)
+  TOULOUSE                            :     1 ( 2.86%)
+  VIRE NORMANDIE                      :     1 ( 2.86%)
+
+
+================================================================================
+ÉVOLUTION TEMPORELLE PAR CRITÈRE D'ÉLIMINATION
+================================================================================
+
+Critère : Non_specifie
+--------------------------------------------------------------------------------
+
+Évolution par année (871,274 outliers au total) :
+  1998 :     8 ( 0.00%)
+  1999 :    50 ( 0.01%)
+  2000 :   166 ( 0.02%)
+  2001 : 1,034 ( 0.12%)
+  2002 :   775 ( 0.09%)
+  2014 : 34,436 ( 3.95%) █
+  2015 : 163,040 (18.71%) █████████
+  2016 : 110,968 (12.74%) ██████
+  2017 : 132,204 (15.17%) ███████
+  2018 : 60,978 ( 7.00%) ███
+  2019 : 72,783 ( 8.35%) ████
+  2020 : 79,010 ( 9.07%) ████
+  2021 : 79,652 ( 9.14%) ████
+  2022 : 59,870 ( 6.87%) ███
+  2023 : 22,574 ( 2.59%) █
+  2024 : 16,483 ( 1.89%)
+  2025 : 37,241 ( 4.27%) ██
+  2026 :     2 ( 0.00%)
+
+Critère : Prix_m2_inf_200
+--------------------------------------------------------------------------------
+
+Évolution par année (35,364 outliers au total) :
+  2014 : 2,757 ( 7.80%) ███
+  2015 : 2,986 ( 8.44%) ████
+  2016 : 3,103 ( 8.77%) ████
+  2017 : 3,219 ( 9.10%) ████
+  2018 : 3,161 ( 8.94%) ████
+  2019 : 3,551 (10.04%) █████
+  2020 : 3,437 ( 9.72%) ████
+  2021 : 3,825 (10.82%) █████
+  2022 : 3,144 ( 8.89%) ████
+  2023 : 2,676 ( 7.57%) ███
+  2024 : 2,532 ( 7.16%) ███
+  2025 :   973 ( 2.75%) █
+
+Critère : Prix_m2_inf_mediane_div_4
+--------------------------------------------------------------------------------
+
+Évolution par année (127,223 outliers au total) :
+  1999 :     2 ( 0.00%)
+  2000 :     3 ( 0.00%)
+  2001 :     3 ( 0.00%)
+  2002 :     6 ( 0.00%)
+  2014 : 9,125 ( 7.17%) ███
+  2015 : 9,860 ( 7.75%) ███
+  2016 : 10,177 ( 8.00%) ███
+  2017 : 10,935 ( 8.60%) ████
+  2018 : 10,564 ( 8.30%) ████
+  2019 : 11,681 ( 9.18%) ████
+  2020 : 11,189 ( 8.79%) ████
+  2021 : 14,010 (11.01%) █████
+  2022 : 13,687 (10.76%) █████
+  2023 : 11,456 ( 9.00%) ████
+  2024 : 10,211 ( 8.03%) ████
+  2025 : 4,314 ( 3.39%) █
+
+Critère : Prix_m2_sup_20000
+--------------------------------------------------------------------------------
+
+Évolution par année (15,390 outliers au total) :
+  1997 :     1 ( 0.01%)
+  2001 :     1 ( 0.01%)
+  2002 :     3 ( 0.02%)
+  2014 :   551 ( 3.58%) █
+  2015 :   668 ( 4.34%) ██
+  2016 :   712 ( 4.63%) ██
+  2017 :   943 ( 6.13%) ███
+  2018 :   995 ( 6.47%) ███
+  2019 : 1,261 ( 8.19%) ████
+  2020 : 1,285 ( 8.35%) ████
+  2021 : 1,694 (11.01%) █████
+  2022 : 2,437 (15.83%) ███████
+  2023 : 2,061 (13.39%) ██████
+  2024 : 1,816 (11.80%) █████
+  2025 :   962 ( 6.25%) ███
+
+Critère : Prix_m2_sup_mediane_mult_4
+--------------------------------------------------------------------------------
+
+Évolution par année (21,312 outliers au total) :
+  1997 :     1 ( 0.00%)
+  2001 :     1 ( 0.00%)
+  2002 :     5 ( 0.02%)
+  2014 : 1,255 ( 5.89%) ██
+  2015 : 1,468 ( 6.89%) ███
+  2016 : 1,608 ( 7.55%) ███
+  2017 : 1,764 ( 8.28%) ████
+  2018 : 1,653 ( 7.76%) ███
+  2019 : 1,885 ( 8.84%) ████
+  2020 : 1,737 ( 8.15%) ████
+  2021 : 2,159 (10.13%) █████
+  2022 : 2,527 (11.86%) █████
+  2023 : 2,179 (10.22%) █████
+  2024 : 2,035 ( 9.55%) ████
+  2025 : 1,035 ( 4.86%) ██
+
+Critère : ratio_val_mt_op
+--------------------------------------------------------------------------------
+
+Évolution par année (35 outliers au total) :
+  2002 :     1 ( 2.86%) █
+  2016 :     3 ( 8.57%) ████
+  2017 :     1 ( 2.86%) █
+  2018 :     2 ( 5.71%) ██
+  2019 :     2 ( 5.71%) ██
+  2020 :     1 ( 2.86%) █
+  2021 :     4 (11.43%) █████
+  2022 :    11 (31.43%) ███████████████
+  2023 :     4 (11.43%) █████
+  2024 :     2 ( 5.71%) ██
+  2025 :     4 (11.43%) █████
+
+
+================================================================================
+RÉPARTITION TYPOLOGIQUE PAR CRITÈRE D'ÉLIMINATION
+================================================================================
+
+Critère : Non_specifie (871,274 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  MAI             : 553,885 (63.57%)
+  APT             : 317,389 (36.43%)
+
+Critère : Prix_m2_inf_200 (35,364 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  MAI             : 28,665 (81.06%)
+  APT             : 6,699 (18.94%)
+
+Critère : Prix_m2_inf_mediane_div_4 (127,223 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  MAI             : 93,367 (73.39%)
+  APT             : 33,856 (26.61%)
+
+Critère : Prix_m2_sup_20000 (15,390 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  APT             : 8,392 (54.53%)
+  MAI             : 6,998 (45.47%)
+
+Critère : Prix_m2_sup_mediane_mult_4 (21,312 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  MAI             : 13,541 (63.54%)
+  APT             : 7,771 (36.46%)
+
+Critère : ratio_val_mt_op (35 outliers)
+--------------------------------------------------------------------------------
+
+Par type de bien :
+  APT             :    23 (65.71%)
+  MAI             :    12 (34.29%)
+
+
+================================================================================
+RÉPARTITION PAR SOURCE DE DONNÉES ET CRITÈRE
+================================================================================
+
+Critère : Non_specifie (871,274 outliers)
+--------------------------------------------------------------------------------
+  CL                   : 870,790 (99.94%)
+  DVF                  :   484 ( 0.06%)
+
+Critère : Prix_m2_inf_200 (35,364 outliers)
+--------------------------------------------------------------------------------
+  DVF                  : 34,260 (96.88%)
+  CL                   : 1,104 ( 3.12%)
+
+Critère : Prix_m2_inf_mediane_div_4 (127,223 outliers)
+--------------------------------------------------------------------------------
+  DVF                  : 116,623 (91.67%)
+  CL                   : 10,600 ( 8.33%)
+
+Critère : Prix_m2_sup_20000 (15,390 outliers)
+--------------------------------------------------------------------------------
+  DVF                  : 12,048 (78.28%)
+  CL                   : 3,342 (21.72%)
+
+Critère : Prix_m2_sup_mediane_mult_4 (21,312 outliers)
+--------------------------------------------------------------------------------
+  DVF                  : 16,268 (76.33%)
+  CL                   : 5,044 (23.67%)
+
+Critère : ratio_val_mt_op (35 outliers)
+--------------------------------------------------------------------------------
+  CL                   :    35 (100.00%)
+
+
+================================================================================
+EXEMPLES CONCRETS PAR CRITÈRE D'ÉLIMINATION
+================================================================================
+
+Exemples pour : Non_specifie
+--------------------------------------------------------------------------------
+              ville_ TYPE_BIEN  Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR OUTLIER_REASON
+          CARPENTRAS       MAI      NaN          NaN        NaN  2015   Non_specifie
+          STRASBOURG       APT      NaN          NaN        3.0  2016   Non_specifie
+SAINT SULPICE LANDES       MAI      NaN          NaN        NaN  2016   Non_specifie
+              MANSAC       MAI      NaN          NaN        NaN  2020   Non_specifie
+           MARSEILLE       APT      NaN          NaN        NaN  2021   Non_specifie
+
+
+Exemples pour : Prix_m2_inf_200
+--------------------------------------------------------------------------------
+      ville_ TYPE_BIEN    Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
+    AUBUSSON       MAI  86.708333        120.0        3.0  2021 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+SAINT MESMIN       MAI 116.279070        129.0        3.0  2019 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+  VILLEPINTE       MAI  44.117647        340.0       16.0  2023 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+     DUISANS       MAI 155.175000        200.0        7.0  2018 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+     ISSOIRE       APT 163.057325        785.0        1.0  2018 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+
+
+Exemples pour : Prix_m2_inf_mediane_div_4
+--------------------------------------------------------------------------------
+          ville_ TYPE_BIEN    Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
+ AYAT SUR SIOULE       MAI 166.666667        120.0        2.0  2024 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+NEUVILLE SUR AIN       MAI 468.750000         96.0        3.0  2024                                           Prix_m2_inf_mediane_div_4
+        SERQUEUX       MAI  98.543689        103.0        3.0  2014 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+          ORTHEZ       APT 246.212121        264.0        5.0  2015                 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4
+         GIVONNE       MAI 163.636364        110.0        3.0  2021 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|Prix_m2_inf_200
+
+
+Exemples pour : Prix_m2_sup_20000
+--------------------------------------------------------------------------------
+       ville_ TYPE_BIEN      Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                          OUTLIER_REASON
+SAINT ANDRONY       MAI 22750.000000        100.0        3.0  2018 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
+        PARIS       APT 21928.571429         70.0        5.0  2025                                                       Prix_m2_sup_20000
+        PARIS       APT 22989.285714         28.0        1.0  2021                                                       Prix_m2_sup_20000
+   SAINT MALO       MAI 24000.000000        250.0        7.0  2023 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
+        PARIS       APT 21073.170732        205.0        6.0  2022                                                       Prix_m2_sup_20000
+
+
+Exemples pour : Prix_m2_sup_mediane_mult_4
+--------------------------------------------------------------------------------
+                  ville_ TYPE_BIEN       Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                          OUTLIER_REASON
+                 MAZAMET       APT   4507.350000         20.0        1.0  2018                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
+               BEURVILLE       MAI   1356.453488         86.0        1.0  2023                                              Prix_m2_sup_mediane_mult_4
+        ROSIERES SALINES       MAI 289246.000000          1.0        1.0  2022 Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4|Prix_m2_sup_20000
+                 DHUIZON       MAI   6285.211268        142.0        6.0  2024                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
+VILLAINES SOUS MALICORNE       MAI  12666.666667         30.0        3.0  2017                   Prix_m2_sup_mediane_mult_4|Prix_m2_sup_mediane_mult_4
+
+
+Exemples pour : ratio_val_mt_op
+--------------------------------------------------------------------------------
+               ville_ TYPE_BIEN     Prix_m2  NB_SURF_HAB  NB_PIECES  YEAR                                                      OUTLIER_REASON
+CHERBOURG EN COTENTIN       APT  517.543884         57.0        2.0  2025                           Prix_m2_inf_mediane_div_4|ratio_val_mt_op
+                 AGEN       APT  331.166667         54.0        2.0  2022 Prix_m2_inf_mediane_div_4|Prix_m2_inf_mediane_div_4|ratio_val_mt_op
+           CHAUMONTEL       APT  662.500000         80.0        3.0  2016                           Prix_m2_inf_mediane_div_4|ratio_val_mt_op
+           DRAGUIGNAN       MAI 2879.120879         91.0        4.0  2016                                                     ratio_val_mt_op
+          ARMENTIERES       APT         NaN          NaN        NaN  2020                                                     ratio_val_mt_op
