@@ -1,24 +1,1080 @@
---------------------------------------------------------------------------------
-                                DATE       Prix_m2   NB_SURF_HAB
-count                        2291953  2.291953e+06  2.291953e+06
-mean   2020-05-02 02:11:21.522875392  3.817676e+03  8.442522e+01
-min              2014-01-01 00:00:00  2.000000e+02  3.000000e+00
-25%              2017-10-01 00:00:00  2.120690e+03  5.100000e+01
-50%              2020-06-01 00:00:00  3.218889e+03  7.600000e+01
-75%              2022-10-01 00:00:00  4.687500e+03  1.050000e+02
-max              2025-12-01 00:00:00  2.000000e+04  9.990000e+02
-std                              NaN  2.479991e+03  4.736714e+01
+import sys
+import os
 
-Médianes et quartiles :
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(parent_dir)
 
-Prix_m2:
-  Médiane     : 3,219
-  Q1 (25%)    : 2,121
-  Q3 (75%)    : 4,688
-  Écart-type  : 2,480
+import time
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import plotly.express as px
+import plotly.io as pio
+from fonctions import Connector
+import param_generaux as params
+pio.renderers.default = "png"
 
-NB_SURF_HAB:
-  Médiane     : 76
-  Q1 (25%)    : 51
-  Q3 (75%)    : 105
-  Écart-type  : 47
+# Dossier de sortie
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
+
+
+
+
+
+start_time = time.time()
+base_ml = pd.read_parquet(r"Z:\uflumth\gits\univers_elementaire\TI\resultats\base_complete_filtree.parquet")
+end_time = time.time()
+print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+
+base_ml = base_ml.rename(columns={"ville_":"Ville"})
+
+################# STATISTIQUES UNIVARIEES SUR CHAQUE UNIVERS #################
+dep_to_region = {
+    # Picardie
+    '02': 'Picardie', '60': 'Picardie', '80': 'Picardie',
+
+    # Auvergne
+    '03': 'Auvergne', '15': 'Auvergne', '43': 'Auvergne', '63': 'Auvergne',
+
+    # Provence-Alpes-Côte d'Azur
+    '04': "Provence-Alpes-Côte d'Azur", '05': "Provence-Alpes-Côte d'Azur", '06': "Provence-Alpes-Côte d'Azur",
+    '13': "Provence-Alpes-Côte d'Azur", '83': "Provence-Alpes-Côte d'Azur", '84': "Provence-Alpes-Côte d'Azur",
+
+    # Rhône-Alpes
+    '07': 'Rhône-Alpes', '01': 'Rhône-Alpes', '26': 'Rhône-Alpes', '38': 'Rhône-Alpes',
+    '42': 'Rhône-Alpes', '69': 'Rhône-Alpes', '73': 'Rhône-Alpes', '74': 'Rhône-Alpes',
+
+    # Champagne
+    '08': 'Champagne', '10': 'Champagne', '51': 'Champagne', '52': 'Champagne',
+
+    # Midi-Pyrénées
+    '09': 'Midi-Pyrénées', '12': 'Midi-Pyrénées', '31': 'Midi-Pyrénées', '32': 'Midi-Pyrénées',
+    '46': 'Midi-Pyrénées', '65': 'Midi-Pyrénées', '81': 'Midi-Pyrénées', '82': 'Midi-Pyrénées',
+
+    # Languedoc-Roussillon
+    '11': 'Languedoc-Roussillon', '30': 'Languedoc-Roussillon', '34': 'Languedoc-Roussillon',
+    '48': 'Languedoc-Roussillon', '66': 'Languedoc-Roussillon',
+
+    # Basse-Normandie
+    '14': 'Basse-Normandie', '50': 'Basse-Normandie', '61': 'Basse-Normandie',
+
+    # Poitou-Charentes
+    '16': 'Poitou-Charentes', '17': 'Poitou-Charentes', '86': 'Poitou-Charentes', '79': 'Poitou-Charentes',
+
+    # Centre
+    '18': 'Centre', '28': 'Centre', '36': 'Centre', '37': 'Centre',
+    '41': 'Centre', '45': 'Centre',
+
+    # Limousin
+    '19': 'Limousin', '23': 'Limousin', '87': 'Limousin',
+
+    # Corse
+    '20': 'Corse', '2A': 'Corse', '2B': 'Corse',
+
+    # Bourgogne
+    '21': 'Bourgogne', '58': 'Bourgogne', '71': 'Bourgogne', '89': 'Bourgogne',
+
+    # Bretagne
+    '22': 'Bretagne', '29': 'Bretagne', '35': 'Bretagne', '56': 'Bretagne',
+
+    # Aquitaine
+    '24': 'Aquitaine', '40': 'Aquitaine', '47': 'Aquitaine', '33': 'Aquitaine', '64': 'Aquitaine',
+
+    # Franche-Comté
+    '25': 'Franche-Comté', '39': 'Franche-Comté', '70': 'Franche-Comté', '90': 'Franche-Comté',
+
+    # Haute-Normandie
+    '27': 'Haute-Normandie', '76': 'Haute-Normandie',
+
+    # Pays de la Loire
+    '44': 'Pays de la Loire', '49': 'Pays de la Loire', '53': 'Pays de la Loire',
+    '72': 'Pays de la Loire', '85': 'Pays de la Loire',
+
+    # Lorraine
+    '54': 'Lorraine', '55': 'Lorraine', '57': 'Lorraine', '88': 'Lorraine',
+
+    # Nord
+    '59': 'Nord', '62': 'Nord',
+
+    # Alsace
+    '67': 'Alsace', '68': 'Alsace',
+
+    # Île-de-France
+    '75': 'Île-de-France', '77': 'Île-de-France', '78': 'Île-de-France',
+    '91': 'Île-de-France', '92': 'Île-de-France', '93': 'Île-de-France',
+    '94': 'Île-de-France', '95': 'Île-de-France',
+
+    # DOM
+    '97': 'DOM',
+
+    # Monaco, TOM
+    '98': 'Monaco, TOM', '99': 'Monaco, TOM',
+
+    # Non renseigné
+    '': 'Non Renseigné'
+}
+
+
+base_ml['DEPT_Corse_2A_2B'] = base_ml['DEPT_Corse_2A_2B'].astype(str).str.zfill(2)
+
+base_ml['REGION'] = base_ml['DEPT_Corse_2A_2B'].map(dep_to_region)
+
+analyse = base_ml[["DATE","Prix_m2","NB_SURF_HAB","NB_PIECES_RANGE","annee_construction"]]
+# Statistiques globales sur colonnes numériques
+("STATISTIQUES NUMÉRIQUES")
+print("-" * 80)
+print(analyse.describe())
+
+# Médiane et quartiles
+print("\nMédianes et quartiles :")
+for col in ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]:
+    if col in analyse.columns:
+        print(f"\n{col}:")
+        print(f"  Médiane     : {analyse[col].median():,.0f}")
+        print(f"  Q1 (25%)    : {analyse[col].quantile(0.25):,.0f}")
+        print(f"  Q3 (75%)    : {analyse[col].quantile(0.75):,.0f}")
+        print(f"  Écart-type  : {analyse[col].std():,.0f}")
+        
+#Statistiques de prix par région
+prix_my_reg = (
+    base_ml.groupby('REGION')["Prix_m2"].mean()
+    .reset_index(name="Prix moyen €/m²")
+)
+
+prix_med_reg = (
+    base_ml.groupby('REGION')["Prix_m2"].median()
+    .reset_index(name="Prix médian €/m²")
+)
+
+nb_trans_reg = (
+    base_ml.groupby('REGION')["ID"].count()
+    .reset_index(name="Nombre de transactions")
+)
+
+
+fig1 = px.bar(
+    prix_my_reg.sort_values(by="Prix moyen €/m²", ascending=False),
+    x="REGION",
+    y="Prix moyen €/m²",
+    title="Prix moyen par région (€ / m²)",
+    text="Prix moyen €/m²",
+    color="Prix moyen €/m²",
+    color_continuous_scale="Viridis"
+)
+fig1.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig1.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Prix moyen (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig2 = px.bar(
+    prix_med_reg.sort_values(by="Prix médian €/m²", ascending=False),
+    x="REGION",
+    y="Prix médian €/m²",
+    title="Prix médian par région (€ / m²)",
+    text="Prix médian €/m²",
+    color="Prix médian €/m²",
+    color_continuous_scale="Blues"
+)
+fig2.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig2.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Prix médian (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+fig3 = px.bar(
+    nb_trans_reg.sort_values(by="Nombre de transactions", ascending=False),
+    x="REGION",
+    y="Nombre de transactions",
+    title="Nombre total de transactions par région (sur 10 ans)",
+    text="Nombre de transactions",
+    color="Nombre de transactions",
+    color_continuous_scale="Sunset"
+)
+fig3.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig3.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Nombre de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+
+fig1.write_html(os.path.join(output_dir, "evolution_prix_moyen_m2_region.html"))
+fig2.write_html(os.path.join(output_dir, "evolution_prix_median_m2_region.html"))
+fig3.write_html(os.path.join(output_dir, "evolution_nb_transac_region.html"))
+
+# Statistiques de prix par départements
+prix_moy_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["Prix_m2"].mean()
+    .reset_index(name="Prix moyen €/m²")
+)
+
+prix_med_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["Prix_m2"].median()
+    .reset_index(name="Prix médian €/m²")
+)
+
+nb_trans_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["ID"].count()
+    .reset_index(name="Nombre de transactions")
+    .sort_values(by="Nombre de transactions", ascending=False)
+)
+
+
+top10_depts = nb_trans_dept.head(10)["DEPT_Corse_2A_2B"]
+prix_moy_dept = prix_moy_dept[prix_moy_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+prix_med_dept = prix_med_dept[prix_med_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+nb_trans_dept = nb_trans_dept[nb_trans_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+
+
+fig4 = px.bar(
+    prix_moy_dept.sort_values(by="Prix moyen €/m²", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Prix moyen €/m²",
+    title="Prix moyen par département (€ / m²) — Top 10 départements",
+    text="Prix moyen €/m²",
+    color="Prix moyen €/m²",
+    color_continuous_scale="Viridis"
+)
+fig4.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig4.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Prix moyen (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig5 = px.bar(
+    prix_med_dept.sort_values(by="Prix médian €/m²", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Prix médian €/m²",
+    title="Prix médian par département (€ / m²) — Top 10 départements",
+    text="Prix médian €/m²",
+    color="Prix médian €/m²",
+    color_continuous_scale="Blues"
+)
+fig5.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig5.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Prix médian (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+fig6 = px.bar(
+    nb_trans_dept.sort_values(by="Nombre de transactions", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Nombre de transactions",
+    title="Nombre de transactions par département (sur 10 ans) — Top 10",
+    text="Nombre de transactions",
+    color="Nombre de transactions",
+    color_continuous_scale="Sunset"
+)
+fig6.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig6.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Nombre de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig1.write_html(os.path.join(output_dir, "evolution_prix_moyen_m2_dep.html"))
+fig2.write_html(os.path.join(output_dir, "evolution_prix_median_m2_dep.html"))
+fig3.write_html(os.path.join(output_dir, "evolution_nb_transac_dep.html"))
+
+#Statistiques sur le'ancienneté des biens
+
+
+
+counts = base_ml["BIEN_NEUF"].value_counts()
+percentages = (counts / len(base_ml)) * 100
+
+result_df = pd.DataFrame({
+    "Type de bien": counts.index,
+    "Nombre": counts.values,
+    "Pourcentage (%)": percentages.round(2)
+})
+
+print("Répartition de l'ancienneté des biens sur l'ensemble de la base")
+print("--" * 22)
+print(result_df)
+
+
+df_grouped = (
+    base_ml.groupby(["YEAR", "BIEN_NEUF"])["ID"]
+    .count()
+    .reset_index(name="Nombre_transactions")
+)
+
+total_per_year = df_grouped.groupby("YEAR")["Nombre_transactions"].sum()
+pivot_df = df_grouped.pivot(index="YEAR", columns="BIEN_NEUF", values="Nombre_transactions")
+pourcentage_df = pivot_df.div(total_per_year, axis=0) * 100
+
+
+pourcentage_df = pourcentage_df.reset_index().melt(
+    id_vars="YEAR",
+    var_name="Type de bien",
+    value_name="Pourcentage"
+)
+
+
+fig4 = px.bar(
+    pourcentage_df,
+    x="YEAR",
+    y="Pourcentage",
+    color="Type de bien",
+    barmode="group",
+    text="Pourcentage",
+    color_discrete_map={"Neuf": "#1f77b4", "Ancien": "#ff7f0e"},
+    title="Évolution annuelle du pourcentage de transactions par ancienneté de bien"
+)
+
+fig4.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+fig4.update_layout(
+    xaxis_title="Année",
+    yaxis_title="Pourcentage de transactions",
+    title_x=0.5,
+    plot_bgcolor="white",
+    legend_title="Type de bien"
+)
+
+fig4.write_html(os.path.join(output_dir, "anciennete.html"))
+
+# Statistiques sur les types de bien
+
+r = (base_ml[base_ml['TYPE_BIEN'] == 'APT']
+     .groupby('YEAR')['ID'].count()
+     .reset_index(name='Nombre_transactions'))
+l = (base_ml[base_ml['TYPE_BIEN'] == 'MAI']
+     .groupby('YEAR')['ID'].count()
+     .reset_index(name='Nombre_transactions'))
+
+fig_r = px.bar(
+    r.sort_values('YEAR'),
+    x='YEAR', y='Nombre_transactions',
+    title="Transactions d'appartements par année",
+    text='Nombre_transactions',
+    color_discrete_sequence=['#1f77b4']
+)
+fig_r.update_traces(textposition='outside')
+fig_r.update_layout(xaxis_title="Année", yaxis_title="Nombre de transactions",
+                    title_x=0.5, plot_bgcolor="white")
+
+
+fig_l = px.bar(
+    l.sort_values('YEAR'),
+    x='YEAR', y='Nombre_transactions',
+    title="Transactions de maisons par année",
+    text='Nombre_transactions',
+    color_discrete_sequence=['#ff7f0e']
+)
+fig_l.update_traces(textposition='outside')
+fig_l.update_layout(xaxis_title="Année", yaxis_title="Nombre de transactions",
+                    title_x=0.5, plot_bgcolor="white")
+
+
+
+df_grouped = (base_ml.groupby(['YEAR', 'TYPE_BIEN'])['ID']
+                     .count()
+                     .reset_index(name='Nombre_transactions'))
+
+
+total_per_year = df_grouped.groupby('YEAR')['Nombre_transactions'].transform('sum')
+df_grouped['Pourcentage'] = df_grouped['Nombre_transactions'] / total_per_year * 100
+
+
+fig_pct = px.bar(
+    df_grouped.sort_values('YEAR'),
+    x='YEAR', y='Pourcentage', color='TYPE_BIEN',
+    barmode='group', text='Pourcentage',
+    color_discrete_map={'APT': '#1f77b4', 'MAI': '#ff7f0e'},
+    title="Évolution annuelle de la répartition du type de bien"
+)
+fig_pct.update_traces(texttemplate="%{text:.1f}%", textposition='outside')
+fig_pct.update_layout(
+    xaxis_title="Année", yaxis_title="Pourcentage de transactions",
+    title_x=0.5, plot_bgcolor="white", legend_title="Type de bien"
+)
+
+fig_pct.write_html(os.path.join(output_dir, "type_bien.html"))
+
+# Statistiques sur la répartition du nombre de pièces
+
+base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
+
+
+bins_apt   = [0, 2, 4, np.inf]
+labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
+
+bins_mai   = [0, 4, np.inf]
+labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
+
+
+base_ml["NB_PIECES_RANGE"] = np.nan
+
+mask_apt = base_ml["TYPE_BIEN"].eq("APT")
+mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+
+base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_apt, "NB_PIECES"],
+    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
+)
+
+base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_mai, "NB_PIECES"],
+    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
+)
+
+base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
+
+base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
+base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
+
+distribution = (
+    base_ml.groupby(['TYPE_BIEN', 'NB_PIECES_RANGE'])['ID']
+           .count()
+           .reset_index(name='Nombre')
+)
+tot = distribution.groupby("TYPE_BIEN")["Nombre"].transform("sum")
+distribution['Pourcentage'] = (distribution['Nombre'] / tot) * 100
+
+
+
+
+fig_group = px.bar(
+    distribution.sort_values(['NB_PIECES_RANGE','TYPE_BIEN']),
+    x='NB_PIECES_RANGE', y='Pourcentage',
+    color='TYPE_BIEN',
+    barmode='group',
+    text=distribution['Pourcentage'].round(1).astype(str) + '%',
+    title="Distribution du nombre de pièces par type de bien (en %)"
+)
+fig_group.update_traces(textposition='outside')
+fig_group.update_layout(
+    xaxis_title="Classe de pièces",
+    yaxis_title="Pourcentage de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white",
+    legend_title="Type de bien",
+    uniformtext_minsize=8, uniformtext_mode='hide'
+)
+
+fig_group.write_html(os.path.join(output_dir, "nb_piece_par_type.html"))
+
+distribution_global = (
+    base_ml.groupby(['TYPE_BIEN', 'NB_PIECES_RANGE'])['ID']
+           .count()
+           .reset_index(name='Nombre')
+)
+
+total_global = distribution_global['Nombre'].sum()
+distribution_global['Pourcentage_total'] = (
+    distribution_global['Nombre'] / total_global * 100
+)
+
+
+distribution_global = distribution_global.sort_values(['NB_PIECES_RANGE', 'TYPE_BIEN'])
+
+
+figt = px.bar(
+    distribution_global,
+    x='NB_PIECES_RANGE',
+    y='Pourcentage_total',
+    color='TYPE_BIEN',
+    text=distribution_global['Pourcentage_total'].round(1).astype(str) + '%',
+    title="Répartition des catégories de nombre de pièces (tous biens confondus)",
+    color_discrete_map={'APT': '#1f77b4', 'MAI': '#ff7f0e'},
+    barmode='group'
+)
+
+figt.update_traces(textposition='outside')
+figt.update_layout(
+    xaxis_title="Catégorie (nombre de pièces)",
+    yaxis_title="Part dans le total (%)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white",
+    legend_title="Type de bien"
+)
+
+figt.write_html(os.path.join(output_dir, "nb_piece_tout_confondu.html"))
+
+
+################# CONSTRUCTION DES UNIVERS ELEMENTAIRES #################
+
+# REGIONS
+dims = ["REGION", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"] #on regroupe selon le croisement de ces univers
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          median_price = ("Prix_m2", "median"),
+          mean_price = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["REGION"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+univers_complet_reg = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+univers_complet_reg["nb_transac"] = univers_complet_reg["nb_transac"].fillna(0).astype(int)
+
+univers_complet_reg["PB"] = (
+    univers_complet_reg["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_reg["TYPE_BIEN"] = univers_complet_reg["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_reg["TYPE_BIEN"] != univers_complet_reg["PB"]
+
+univers_complet_reg = univers_complet_reg.loc[~mask].copy()
+univers_complet_reg = univers_complet_reg.drop(columns=["PB"])
+if (univers_complet_reg["nb_transac"]).all() == 0:
+    univers_complet_reg.groupby("REGION")["nb_transac"].transform(sum)
+
+univers_complet_reg["Repartition (%)"] = (univers_complet_reg["nb_transac"] / univers_complet_reg.groupby("REGION")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_reg.csv")
+univers_complet_reg.to_csv(csv_path, index=False)
+
+
+# DEPARTEMENTS
+
+dims = ["DEPT_Corse_2A_2B", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["DEPT_Corse_2A_2B"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+univers_complet_dep = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+univers_complet_dep["nb_transac"] = univers_complet_dep["nb_transac"].fillna(0).astype(int)
+univers_complet_dep["PB"] = (
+    univers_complet_dep["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_dep["TYPE_BIEN"] = univers_complet_dep["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_dep["TYPE_BIEN"] != univers_complet_dep["PB"]
+
+univers_complet_dep = univers_complet_dep.loc[~mask].copy()
+univers_complet_dep = univers_complet_dep.drop(columns=["PB"])
+univers_complet_dep["Repartition (%)"] = (univers_complet_dep["nb_transac"] / univers_complet_dep.groupby("DEPT_Corse_2A_2B")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_dep.csv")
+univers_complet_dep.to_csv(csv_path, index=False)
+
+# VILLES
+
+
+dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+          surface_moyenne = ("NB_SURF_HAB", "mean")
+
+      )
+      .reset_index()
+)
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["Ville"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+
+univers_complet_ville = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+
+univers_complet_ville["nb_transac"] = univers_complet_ville["nb_transac"].fillna(0).astype(int)
+
+univers_complet_ville["PB"] = (
+    univers_complet_ville["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_ville["TYPE_BIEN"] = univers_complet_ville["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_ville["TYPE_BIEN"] != univers_complet_ville["PB"]
+
+univers_complet_ville = univers_complet_ville.loc[~mask].copy()
+univers_complet_ville = univers_complet_ville.drop(columns=["PB"])
+univers_complet_ville["Repartition (%)"] = (univers_complet_ville["nb_transac"] / univers_complet_ville.groupby("Ville")["nb_transac"].transform(sum)) * 100
+
+
+csv_path = os.path.join(output_dir, "univers_complet_ville.csv")
+univers_complet_ville.to_csv(csv_path, index=False)
+
+#CODE POSTAL
+
+
+dims = ["CODE_POSTAL", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["CODE_POSTAL"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+
+univers_complet_cp = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+
+univers_complet_cp["nb_transac"] = univers_complet_cp["nb_transac"].fillna(0).astype(int)
+univers_complet_cp["PB"] = (
+    univers_complet_cp["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_cp["TYPE_BIEN"] = univers_complet_cp["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_cp["TYPE_BIEN"] != univers_complet_cp["PB"]
+
+univers_complet_cp = univers_complet_cp.loc[~mask].copy()
+univers_complet_cp = univers_complet_cp.drop(columns=["PB"])
+univers_complet_cp["Repartition (%)"] = (univers_complet_cp["nb_transac"] / univers_complet_cp.groupby("CODE_POSTAL")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_cp.csv")
+univers_complet_cp.to_csv(csv_path, index=False)
+
+################## Construction des prix glissants aggrégés par ville ##################
+
+
+
+top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", "NICE",
+         "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", "SAINT-ETIENNE", "LE HAVRE"]
+
+
+base_ml2 = base_ml.copy()
+base_ml2 = base_ml2.rename(columns={"ville_": "Ville"})
+base_ml2["Ville"] = base_ml2["Ville"].astype(str).str.strip().str.upper()
+base_ml2 = base_ml2[base_ml2["Ville"].isin(top15)]
+
+
+base_ml2["DATE"] = pd.to_datetime(base_ml2["DATE"])
+base_ml2["Periode"] = base_ml2["DATE"].dt.to_period("M").dt.to_timestamp()
+
+# =============================================================================
+# AGRÉGATION MENSUELLE PAR UNIVERS
+# =============================================================================
+
+keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+
+univers_mensuel = (
+    base_ml2
+    .groupby(keys, dropna=False)
+    .agg(
+        nb_transac=("ID", "size"),
+        prix_moyen=("Prix_m2", "mean"),
+        prix_median=("Prix_m2", "median"),
+        surface_moyenne=("NB_SURF_HAB", "mean")
+    )
+    .reset_index()
+)
+
+print(f"✓ Aggrégation des sous univers par mois")
+
+univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
+univers_mensuel = univers_mensuel.loc[~mask].drop(columns="PB")
+
+
+def complete_months(g):  #complète les mois manquants dans un sous univers en attribuant des valeurs nulles pour nb_transac et na pour prix_m2_moyen
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[col] = g[col].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    g["prix_moyen"] = g["prix_moyen"]  # Garde NaN
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+univers_complet = (
+    univers_mensuel
+    .groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+    .apply(complete_months)
+)
+
+
+
+# =============================================================================
+# CALCUL DES POIDS STRUCTURELS SUR 2015-2025
+# =============================================================================
+
+poids_global = (
+    univers_mensuel
+    .groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+    .sum()
+    .rename(columns={"nb_transac": "poids_total"})
+)
+
+poids_global["poids_relatif"] = (
+    poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
+)
+
+univers_complet = univers_complet.merge(
+    poids_global,
+    on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+    how="left"
+)
+
+print(f"✓ Poids structurels calculés")
+
+# =============================================================================
+# CALCUL DES INDICATRICES I_3m ET I_12m PAR TYPOLOGIE
+# =============================================================================
+#création d'une variable indicatrice représentant la présence ou non de transaction sur 3 et 12 mois
+
+typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+
+univers_complet["I_3m"] = (
+    univers_complet
+    .groupby(typokeys, group_keys=False)["nb_transac"]
+    .transform(lambda s: (s.rolling(window=3, min_periods=1).sum() > 0).astype(int))
+)
+
+univers_complet["I_12m"] = (
+    univers_complet
+    .groupby(typokeys, group_keys=False)["nb_transac"]
+    .transform(lambda s: (s.rolling(window=12, min_periods=6).sum() > 0).astype(int))
+)
+
+print("✓ Indicatrices I_3m et I_12m calculées")
+
+
+
+# =============================================================================
+# MOYENNES MOBILES PONDÉRÉES AVEC INDICATRICES
+# =============================================================================
+
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice):
+    """
+    Calcule une moyenne mobile pondérée sur 3 et 12 mois.
+    
+    Pour chaque mois t :
+    - Regarde les 3/12 derniers mois
+    - Pour chaque typologie : prend les prix où indicatrice = 1
+    - Fait une moyenne pondérée de tous ces prix
+
+    """
+    result = []
+    
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        # Fenêtre : 'window' derniers mois incluant le mois actuel
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
+        
+        # Données de la fenêtre
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
+        
+        # Filtrer : seulement les lignes avec prix ET indicatrice = 1
+        df_actif = df_fenetre[
+            (df_fenetre[col_prix].notna()) & 
+            (df_fenetre[col_indicatrice] == 1)
+        ].copy()
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_typologies": 0
+            })
+            continue
+        
+        # Pondération : poids_relatif pour chaque observation
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            poids_norm = df_actif["poids_relatif"] / total_poids
+            prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
+        else:
+            prix_mm = np.nan
+        
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": len(df_actif),
+            "nb_typologies": df_actif.groupby(typokeys).ngroups
+        })
+    
+    return pd.DataFrame(result)
+
+
+# Calcul par ville
+print("Calcul des moyennes mobiles par ville")
+
+resultats_mm = []
+
+for ville in univers_complet["Ville"].unique():
+    df_ville = univers_complet[univers_complet["Ville"] == ville].copy()
+    
+    # Moyenne mobile 3 mois
+    mm_3m = calcule_moyenne_mobile_ponderee(
+        df_ville, 
+        window=3, 
+        col_prix='prix_moyen',
+        col_indicatrice='I_3m'
+    )
+    mm_3m = mm_3m.rename(columns={
+        "prix_mm": "prix_mm_3m",
+        "nb_observations": "nb_obs_3m",
+        "nb_typologies": "nb_typo_3m"
+    })
+    
+    # Moyenne mobile 12 mois
+    mm_12m = calcule_moyenne_mobile_ponderee(
+        df_ville, 
+        window=12, 
+        col_prix='prix_moyen',
+        col_indicatrice='I_12m'
+    )
+    mm_12m = mm_12m.rename(columns={
+        "prix_mm": "prix_mm_12m",
+        "nb_observations": "nb_obs_12m",
+        "nb_typologies": "nb_typo_12m"
+    })
+    
+    # Fusion
+    mm_ville = mm_3m.merge(mm_12m, on="Periode", how="outer")
+    mm_ville["Ville"] = ville
+    
+    resultats_mm.append(mm_ville)
+
+
+model_agg = pd.concat(resultats_mm, ignore_index=True)
+model_agg = model_agg.sort_values(["Ville", "Periode"])
+
+
+
+
+
+    
+def resume_ville(g):
+    g = g.dropna(subset=["prix_moyen"]).sort_values("nb_transac", ascending=True)
+    
+    if len(g) == 0:
+        return pd.DataFrame()
+    
+    idx_min = g.index[0]
+    idx_max = g.index[-1]
+    idx_med = g.index[len(g)//2]
+    idx_q1 = g.index[int(len(g) * 0.25)]
+    idx_q3 = g.index[int(len(g) * 0.75)]
+
+    
+    return pd.DataFrame([
+        {
+            "Ville": g.loc[idx_min, "Ville"],
+            "Univers": "Moins de transactions",
+            "BIEN_NEUF": g.loc[idx_min, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_min, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_min, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_min, "nb_transac"],
+            "prix_median": g.loc[idx_min, "prix_median"],
+            "prix_moyen": g.loc[idx_min, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_q1, "Ville"],
+            "Univers": "Premier quartile",
+            "BIEN_NEUF": g.loc[idx_q1, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_q1, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_q1, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_q1, "nb_transac"],
+            "prix_median": g.loc[idx_q1, "prix_median"],
+            "prix_moyen": g.loc[idx_q1, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_med, "Ville"],
+            "Univers": "Médian (transactions)",
+            "BIEN_NEUF": g.loc[idx_med, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_med, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_med, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_med, "nb_transac"],
+            "prix_median": g.loc[idx_med, "prix_median"],
+            "prix_moyen": g.loc[idx_med, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_q3, "Ville"],
+            "Univers": "Troisième quartile",
+            "BIEN_NEUF": g.loc[idx_q3, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_q3, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_q3, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_q3, "nb_transac"],
+            "prix_median": g.loc[idx_q3, "prix_median"],
+            "prix_moyen": g.loc[idx_q3, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_max, "Ville"],
+            "Univers": "Plus de transactions",
+            "BIEN_NEUF": g.loc[idx_max, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_max, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_max, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_max, "nb_transac"],
+            "prix_median": g.loc[idx_max, "prix_median"],
+            "prix_moyen": g.loc[idx_max, "prix_moyen"]
+        }
+    ])
+
+resume_global = (
+    univers_complet_ville
+      .groupby("Ville", group_keys=False)
+      .apply(resume_ville)
+      .reset_index(drop=True)
+)
+
+
+
+fig = px.bar(
+    resume_global,
+    x="Ville",
+    y="nb_transac",
+    color="Univers",
+    text=resume_global["prix_moyen"].round(0).astype(str) + " €",
+    barmode="group",
+    title="Univers les plus petits, médians et plus grands (en %)",
+    hover_data={
+        "prix_median": True,
+        "prix_moyen": True,
+        "BIEN_NEUF": True,
+        "TYPE_BIEN": True,
+        "NB_PIECES_RANGE": True,
+        "nb_transac": True
+    },
+    color_discrete_map={
+        "Moins de transactions": "#2ca02c",
+        "Premier quartile": "#9467bd",
+        "Médian (transactions)": "#1f77b4",
+        "Troisième quartile": "#8c564b",
+        "Plus de transactions": "#d62728"
+    }
+)
+
+
+fig.update_traces(
+    texttemplate="%{text}",
+    textposition="outside"
+)
+
+fig.update_layout(
+    title_x=0.5,
+    yaxis_title="Nombre de transactions (log)",
+    yaxis_type = "log",
+    xaxis_title="Ville",
+    plot_bgcolor="white",
+    xaxis_tickangle=45,
+    legend_title="Type d'univers",
+    uniformtext_minsize=8,
+    uniformtext_mode='hide',
+    height=650
+)
+
+
+
+#enregistrement des données
+df_sorted = resume_global.sort_values(["Ville", "Univers"])
+
+csv_path = os.path.join(output_dir, "repartition_univ_elem_par_ville.csv")
+df_sorted.to_csv(csv_path, index=False)
+
+
+
+
+
