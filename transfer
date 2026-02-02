@@ -1,291 +1,65 @@
-import pandas as pd
-import numpy as np
-import sys
-import os
+{
+	"name": "KeyError",
+	"message": "\"['Periode'] not found in axis\"",
+	"stack": "---------------------------------------------------------------------------
+KeyError                                  Traceback (most recent call last)
+Cell In[45], line 263
+    258     print(f\"✅ Après déduplication : {len(insee_final)} observations uniques\")
+    260 # --- 6. Fusion (Merge) ---
+    261 merge = pd.merge(
+    262     df_final, 
+--> 263     insee_final.drop(columns=['Periode']), # On enlève la date Timestamp INSEE pour éviter doublon
+    264     how=\"inner\",
+    265     left_on=[\"VAL_MAILLE_GEO\", \"CD_TYPE_BIEN\", \"Periode_Key\"],
+    266     right_on=[\"VAL_MAILLE_GEO\", \"CD_TYPE_BIEN\", \"Periode_Key\"]
+    267 )
+    269 # --- 7. Nettoyage Final et Conversion Date ---
+    270 
+    271 # Renommer la clé de fusion pour la clarté 
+    272 merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
 
-# --- 1. Chargement des données CL ---
-try:
-    base_path = r"Z:\uflumth\gits\univers_elementaire\TI\resultats"
-    
-    prix_m2_univ_elem_complet_CITY = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_CITY.csv"))
-    prix_m2_univ_elem_complet_DEPT = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_DEPT.csv"))
-    prix_m2_univ_elem_complet_REGION = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_REGION.csv"))
-    prix_m2_univ_elem_complet_PROVINCE = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_PROVINCE.csv"))
-    
-    dfs_to_concat = [
-        prix_m2_univ_elem_complet_CITY,
-        prix_m2_univ_elem_complet_DEPT,
-        prix_m2_univ_elem_complet_REGION,
-        prix_m2_univ_elem_complet_PROVINCE
-    ]
-    
-    df_final = pd.concat(dfs_to_concat, ignore_index=True)
+File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\frame.py:5603, in DataFrame.drop(self, labels, axis, index, columns, level, inplace, errors)
+   5455 def drop(
+   5456     self,
+   5457     labels: IndexLabel | None = None,
+   (...)   5464     errors: IgnoreRaise = \"raise\",
+   5465 ) -> DataFrame | None:
+   5466     \"\"\"
+   5467     Drop specified labels from rows or columns.
+   5468 
+   (...)   5601             weight  1.0     0.8
+   5602     \"\"\"
+-> 5603     return super().drop(
+   5604         labels=labels,
+   5605         axis=axis,
+   5606         index=index,
+   5607         columns=columns,
+   5608         level=level,
+   5609         inplace=inplace,
+   5610         errors=errors,
+   5611     )
 
-except FileNotFoundError as e:
-    print(f"Erreur de lecture de fichier CL : {e}")
-    sys.exit(1)
+File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\generic.py:4810, in NDFrame.drop(self, labels, axis, index, columns, level, inplace, errors)
+   4808 for axis, labels in axes.items():
+   4809     if labels is not None:
+-> 4810         obj = obj._drop_axis(labels, axis, level=level, errors=errors)
+   4812 if inplace:
+   4813     self._update_inplace(obj)
 
-# Nettoyage df_final
-df_final = df_final[df_final['DIC_NAME'] != "prix_m2_3m"]
-df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
+File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\generic.py:4852, in NDFrame._drop_axis(self, labels, axis, level, errors, only_slice)
+   4850         new_axis = axis.drop(labels, level=level, errors=errors)
+   4851     else:
+-> 4852         new_axis = axis.drop(labels, errors=errors)
+   4853     indexer = axis.get_indexer(new_axis)
+   4855 # Case for non-unique axis
+   4856 else:
 
-# --- 2. Calcul de l'indice CL (Base 2020) ---
-df_final["Periode"] = pd.to_datetime(df_final["Periode"])
-mask_2020 = df_final["Periode"].dt.year == 2020
+File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\indexes\\base.py:7136, in Index.drop(self, labels, errors)
+   7134 if mask.any():
+   7135     if errors != \"ignore\":
+-> 7136         raise KeyError(f\"{labels[mask].tolist()} not found in axis\")
+   7137     indexer = indexer[~mask]
+   7138 return self.delete(indexer)
 
-if not df_final.loc[mask_2020].empty:
-    # Pivot par type de bien et zone géographique
-    pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
-    
-    # Application du pivot (Mapping multi-index)
-    df_final["Indice de prix (CL)"] = (
-        (df_final["prix_mm_value"] / 
-         df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
-        ) * 100 
-    ).round(2)
-else:
-    print("Attention: Aucune donnée CL trouvée pour 2020")
-    df_final["Indice de prix (CL)"] = np.nan
-
-# ========================================================================
-# --- 3. Chargement et Préparation des données INSEE (VERSION CENTRALISÉE) ---
-# ========================================================================
-
-insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
-source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
-
-try:
-    df_insee_raw = pd.read_csv(source_file, sep=';')
-    print(f"📁 Fichier INSEE chargé : {len(df_insee_raw)} lignes")
-    
-except FileNotFoundError:
-    print(f"❌ ERREUR: Fichier {source_file} introuvable.")
-    sys.exit(1)
-
-# Filtrage des lignes de métadonnées (lignes "Codes")
-df_insee_raw = df_insee_raw[df_insee_raw['Libellé'] != 'Codes'].copy()
-
-# Ne garder que les SÉRIES BRUTES (pas CVS)
-df_insee_raw = df_insee_raw[
-    ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
-].copy()
-
-# 🔧 CORRECTION CRITIQUE: Exclure TOUTES les subdivisions
-# Les subdivisions sont marquées par " : " dans le libellé
-# Ex: "Île-de-France : Seine-et-Marne", "Province : agglomérations"
-df_insee_raw = df_insee_raw[
-    ~df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False)
-].copy()
-
-print(f"🔍 Après filtrage (métadonnées + CVS + subdivisions) : {len(df_insee_raw)} séries de base")
-
-# Fonction de parsing des métadonnées depuis la colonne "Libellé"
-def parse_libelle(libelle_text):
-    """Extrait le périmètre géographique et le type de bien depuis le Libellé."""
-    
-    if not isinstance(libelle_text, str) or pd.isna(libelle_text):
-        return None, None
-    
-    # Dictionnaire de normalisation géographique
-    geo_mapping = {
-        "Agglomération de Marseille": "MARSEILLE",
-        "Marseille": "MARSEILLE",
-        "Agglomération de Lyon": "LYON",
-        "Lyon": "LYON",
-        "Agglomération de Lille": "LILLE",
-        "Lille": "LILLE",
-        "Paris": "75",
-        "Seine-et-Marne": "77",
-        "Yvelines": "78",
-        "Essonne": "91",
-        "Hauts-de-Seine": "92",
-        "Seine-Saint-Denis": "93",
-        "Val-de-Marne": "94",
-        "Val-d'Oise": "95",
-        "France métropolitaine": "France",
-        "Province": "PROVINCE",
-        "Île-de-France": "ÎLE-DE-FRANCE",
-        "Rhône-Alpes": "RHÔNE-ALPES",
-        "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
-        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS",
-        "Auvergne": "AUVERGNE",
-    }
-    
-    type_mapping = {
-        "Appartements": "APT",
-        "Maisons": "MAI",
-        "Ensemble": "ENSEMBLE"
-    }
-    
-    parts = [p.strip() for p in libelle_text.split(' - ')]
-    
-    geo = None
-    type_bien = None
-    
-    for part in parts:
-        for key, value in geo_mapping.items():
-            if key.lower() in part.lower():
-                geo = value
-                break
-        if geo:
-            break
-    
-    for part in parts:
-        for key, value in type_mapping.items():
-            if key in part:
-                type_bien = value
-                break
-        if type_bien:
-            break
-    
-    return geo, type_bien
-
-# Application du parsing
-df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].apply(
-    lambda x: pd.Series(parse_libelle(x))
-)
-
-# Filtrage des lignes avec parsing réussi
-df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
-
-# 🔧 FILTRE POSITIF: Ne garder que les périmètres de la liste d'origine
-# Correspond exactement à: perimetre_insee = ['92', '93', '94', '95', '91','75', '78', '77', ...]
-perimetre_whitelist = [
-    '75', '77', '78', '91', '92', '93', '94', '95',  # Départements IDF
-    'MARSEILLE', 'LYON', 'LILLE',  # Agglomérations
-    'NORD-PAS-DE-CALAIS', 'PROVENCE-ALPES-CÔTE D\'AZUR', 'RHÔNE-ALPES',  # Régions
-    'PROVINCE', 'AUVERGNE', 'ÎLE-DE-FRANCE'
-]
-
-df_insee_clean = df_insee_clean[
-    df_insee_clean['VAL_MAILLE_GEO'].isin(perimetre_whitelist)
-].copy()
-
-print(f"🎯 Après filtre sur périmètres pertinents : {len(df_insee_clean)} séries")
-print(f"   Périmètres retenus : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
-
-# Identification des colonnes trimestrielles (format "YYYY-TX")
-quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
-
-if not quarter_cols:
-    print("❌ ERREUR: Aucune colonne trimestrielle détectée.")
-    sys.exit(1)
-
-# PIVOT: Transformation WIDE (colonnes) → LONG (lignes)
-df_insee_long = df_insee_clean.melt(
-    id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'],
-    value_vars=quarter_cols,
-    var_name='Periode_Str',
-    value_name='Indice de prix (INSEE)'
-)
-
-# Gestion des valeurs spéciales comme "(s)" = secret statistique
-df_insee_long['Indice de prix (INSEE)'] = df_insee_long['Indice de prix (INSEE)'].astype(str).replace(
-    [r'\(s\)', r'\(p\)', r'\(r\)', 'nan', ''], 
-    np.nan, 
-    regex=True
-)
-
-# Conversion numérique (gérer virgules européennes)
-df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
-    df_insee_long['Indice de prix (INSEE)'].str.replace(',', '.').str.strip(),
-    errors='coerce'
-)
-
-# Filtrage des NaN
-df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
-
-# Parsing temporel: "1992-T1" → Date
-df_insee_long['Year'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('-')[0]))
-df_insee_long['Quarter'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('T')[1]))
-df_insee_long["Date code"] = df_insee_long['Year'].astype(str) + 'Q' + df_insee_long["Quarter"].astype(str)
-df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
-
-insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
-
-print(f"✅ Données INSEE pivotées : {len(insee_final)} observations")
-print(f"   📍 Périmètres uniques : {insee_final['VAL_MAILLE_GEO'].nunique()}")
-print(f"   🏠 Types de biens : {insee_final['CD_TYPE_BIEN'].unique()}")
-print(f"   📅 Période : {insee_final['Periode'].min()} → {insee_final['Periode'].max()}")
-
-# --- 4. Calcul de l'indice INSEE (Base 2020) ---
-insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
-mask_2020_insee = insee_final["Periode"].dt.year == 2020
-
-if not insee_final.loc[mask_2020_insee].empty:
-    pivot_2020_insee = insee_final.loc[mask_2020_insee].groupby(
-        ["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]
-    )["Indice de prix (INSEE)"].mean()
-    
-    insee_final["Indice de prix (INSEE) - Base 2020"] = (
-        (insee_final["Indice de prix (INSEE)"] / 
-         insee_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_insee)
-        ) * 100 
-    ).round(2)
-    
-    print("✅ Indice INSEE rebasé sur 2020")
-else:
-    print("⚠️  Attention: Données INSEE 2020 manquantes.")
-    insee_final["Indice de prix (INSEE) - Base 2020"] = np.nan
-
-# --- 5. Nettoyage et Création des Clés de Fusion ---
-for df in (df_final, insee_final):
-    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
-
-# Création de la clé string ROBUSTE "YYYYQx" (Ex: "2025Q2")
-df_final['Periode_Key'] = df_final["Periode"].dt.to_period('Q').astype(str)
-insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
-
-# 🔍 DIAGNOSTIC: Vérification des doublons dans INSEE avant la fusion
-duplicates_check = insee_final.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']).size()
-doublons = duplicates_check[duplicates_check > 1]
-
-if not doublons.empty:
-    print(f"\n⚠️  ATTENTION: {len(doublons)} doublons détectés dans les données INSEE !")
-    print("📋 Exemples de doublons:")
-    print(doublons.head(10))
-    
-    # DÉDUPLICATION: Moyenne des valeurs en cas de doublon
-    print("\n🔧 Déduplication en cours (moyenne des valeurs)...")
-    insee_final = insee_final.groupby(
-        ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key'], 
-        as_index=False
-    ).agg({
-        'Indice de prix (INSEE)': 'mean',
-        'Indice de prix (INSEE) - Base 2020': 'mean'
-    })
-    print(f"✅ Après déduplication : {len(insee_final)} observations uniques")
-
-# --- 6. Fusion (Merge) ---
-merge = pd.merge(
-    df_final, 
-    insee_final.drop(columns=['Periode']), # On enlève la date Timestamp INSEE pour éviter doublon
-    how="inner",
-    left_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
-    right_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
-)
-
-# --- 7. Nettoyage Final et Conversion Date ---
-
-# Renommer la clé de fusion pour la clarté 
-merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
-merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
-
-# Reconstruction de l'index temporel propre
-merge["Periode"] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how="end")
-temp_period = pd.PeriodIndex(merge['Periode_Trimestre_Str'],freq='Q').to_timestamp(how='end')
-merge["Periode"] = temp_period.normalize().map(lambda x: x.replace(day=1))
-
-merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str', 'Periode_Merge'], errors='ignore')
-merge = merge.loc[:, ~merge.columns.duplicated()]
-
-# Tri final
-merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
-
-print(f"\n🎯 Fusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
-merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
-
-# Affichage des premières lignes
-print("\n📊 Aperçu des données fusionnées:")
-print(merge.head())
+KeyError: \"['Periode'] not found in axis\""
+}
