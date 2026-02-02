@@ -1,42 +1,210 @@
-================================================================================
- RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)
-================================================================================
+import pandas as pd
+import numpy as np
+import sys
+import os
 
-CORRESPONDANCE LPI dans IC (Couverture moyenne) :
-   IC 3M  : 54.5%
-   IC 12M : 34.0%
+# --- 1. Chargement des données CL ---
+try:
+    base_path = r"Z:\uflumth\gits\univers_elementaire\TI\resultats"
+    
+    prix_m2_univ_elem_complet_CITY = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_CITY.csv"))
+    prix_m2_univ_elem_complet_DEPT = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_DEPT.csv"))
+    prix_m2_univ_elem_complet_REGION = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_REGION.csv"))
+    prix_m2_univ_elem_complet_PROVINCE = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_PROVINCE.csv"))
+    
+    dfs_to_concat = [
+        prix_m2_univ_elem_complet_CITY,
+        prix_m2_univ_elem_complet_DEPT,
+        prix_m2_univ_elem_complet_REGION,
+        prix_m2_univ_elem_complet_PROVINCE
+    ]
+    
+    df_final = pd.concat(dfs_to_concat, ignore_index=True)
 
-RMSE ABSOLU (€/m²) :
-   3M  : 191.28 €/m²
-   12M : 192.57 €/m²
-   Δ   : -1.29 €/m² (3M meilleur)
+except FileNotFoundError as e:
+    print(f"Erreur de lecture de fichier CL : {e}")
+    sys.exit(1)
 
-RMSE RELATIF (%) :
-   3M  : 5.77 %
-   12M : 5.65 %
+# Nettoyage df_final
+df_final = df_final[df_final['DIC_NAME'] != "prix_m2_3m"]
+df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
 
-CORRÉLATION avec LPI :
-   3M  : 0.9380
-   12M : 0.9493
-   Δ   : +0.0113 (12M meilleur)
+# --- 2. Calcul de l'indice CL (Base 2020) ---
+df_final["Periode"] = pd.to_datetime(df_final["Periode"])
+mask_2020 = df_final["Periode"].dt.year == 2020
 
---------------------------------------------------------------------------------
+if not df_final.loc[mask_2020].empty:
+    pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
+    
+    df_final["Indice de prix (CL)"] = (
+        (df_final["prix_mm_value"] / 
+         df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
+        ) * 100 
+    ).round(2)
+else:
+    print("Attention: Aucune donnée CL trouvée pour 2020")
+    df_final["Indice de prix (CL)"] = np.nan
 
-Détail par ville :
-        Ville  Prix_Moyen_LPI    RMSE_3M   RMSE_12M  Delta_RMSE  RMSE_REL_3M  RMSE_REL_12M  CORR_3M  CORR_12M
-        LILLE     3405.891892 141.892473  77.781497   64.110977     4.166089      2.283734 0.964112  0.988573
-  MONTPELLIER     3188.054054 227.453037 187.188368   40.264669     7.134541      5.871556 0.953651  0.945521
-     TOULOUSE     3379.072072 144.828539 109.494096   35.334443     4.286045      3.240360 0.971026  0.974495
-       TOULON     2628.828829 135.024697 102.785711   32.238986     5.136306      3.909943 0.873372  0.904409
-   STRASBOURG     3620.873874 129.161348 110.577792   18.583555     3.567132      3.053898 0.953995  0.969799
-     LE HAVRE     2179.504505 123.821145 106.118702   17.702443     5.681160      4.868937 0.911719  0.939692
-        REIMS     2609.828829 142.234399 125.227335   17.007064     5.449951      4.798297 0.905175  0.912662
-     GRENOBLE     2714.486486 109.777862 101.799145    7.978718     4.044148      3.750217 0.857660  0.906567
-    MARSEILLE     3168.252252 178.997637 175.745151    3.252486     5.649728      5.547069 0.923369  0.922248
-SAINT-ETIENNE     1449.684685 264.611102 270.311207   -5.700106    18.253011     18.646207 0.909812  0.942697
-       RENNES     3517.873874 193.015110 216.199567  -23.184457     5.486698      6.145745 0.966161  0.966023
-        PARIS    10071.018018 440.025952 463.524004  -23.498052     4.369230      4.602554 0.945141  0.966687
-         NICE     4491.612613 213.176452 242.797157  -29.620705     4.746101      5.405568 0.951662  0.963451
-       NANTES     3642.216216 168.591587 206.621876  -38.030288     4.628819      5.672971 0.975008  0.970648
-     BORDEAUX     4440.846847 187.932514 249.967752  -62.035238     4.231907      5.628831 0.971165  0.959989
-         LYON     4770.792793 259.939099 334.937623  -74.998524     5.448551      7.020586 0.974653  0.955805
+# --- 3. Chargement et Préparation des données INSEE (VERSION CENTRALISÉE) ---
+
+# Lecture unique du fichier source centralisé
+insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
+source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
+
+try:
+    df_insee_raw = pd.read_csv(source_file, sep=';')
+    print(f"Fichier INSEE chargé : {len(df_insee_raw)} lignes")
+    
+except FileNotFoundError:
+    print(f"ERREUR: Fichier {source_file} introuvable.")
+    sys.exit(1)
+
+# Fonction de parsing des métadonnées depuis la colonne "Libellé"
+def parse_libelle(libelle_text):
+    """Extrait le périmètre géographique et le type de bien depuis le Libellé."""
+    
+    if not isinstance(libelle_text, str) or pd.isna(libelle_text):
+        return None, None
+    
+    # Dictionnaire de normalisation géographique
+    geo_mapping = {
+        "Agglomération de Marseille": "MARSEILLE",
+        "Marseille": "MARSEILLE",
+        "Agglomération de Lyon": "LYON",
+        "Lyon": "LYON",
+        "Agglomération de Lille": "LILLE",
+        "Lille": "LILLE",
+        "Paris": "75",
+        "Seine-et-Marne": "77",
+        "Yvelines": "78",
+        "Essonne": "91",
+        "Hauts-de-Seine": "92",
+        "Seine-Saint-Denis": "93",
+        "Val-de-Marne": "94",
+        "Val-d'Oise": "95",
+        "France métropolitaine": "France",
+        "Province": "PROVINCE",
+        "Île-de-France": "ÎLE-DE-FRANCE",
+        "Rhône-Alpes": "RHÔNE-ALPES",
+        "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
+        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS",
+        "Auvergne": "AUVERGNE",
+    }
+    
+    type_mapping = {
+        "Appartements": "APT",
+        "Maisons": "MAI",
+        "Ensemble": "ENSEMBLE"
+    }
+    
+    parts = [p.strip() for p in libelle_text.split(' - ')]
+    
+    geo = None
+    type_bien = None
+    
+    for part in parts:
+        for key, value in geo_mapping.items():
+            if key.lower() in part.lower():
+                geo = value
+                break
+        if geo:
+            break
+    
+    for part in parts:
+        for key, value in type_mapping.items():
+            if key in part:
+                type_bien = value
+                break
+        if type_bien:
+            break
+    
+    return geo, type_bien
+
+# Application du parsing
+df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].apply(
+    lambda x: pd.Series(parse_libelle(x))
+)
+
+df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
+
+# Identification des colonnes trimestrielles
+quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
+
+# Pivot WIDE → LONG
+df_insee_long = df_insee_clean.melt(
+    id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'],
+    value_vars=quarter_cols,
+    var_name='Periode_Str',
+    value_name='Indice de prix (INSEE)'
+)
+
+# Conversion numérique
+df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
+    df_insee_long['Indice de prix (INSEE)'].str.replace(',', '.').str.strip(),
+    errors='coerce'
+)
+
+df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
+
+# Parsing temporel
+df_insee_long['Year'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('-')[0]))
+df_insee_long['Quarter'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('T')[1]))
+df_insee_long["Date code"] = df_insee_long['Year'].astype(str) + 'Q' + df_insee_long["Quarter"].astype(str)
+df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
+
+insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
+
+print(f"✅ Données INSEE pivotées : {len(insee_final)} observations")
+
+# --- 4. Calcul de l'indice INSEE (Base 2020) ---
+insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
+mask_2020_insee = insee_final["Periode"].dt.year == 2020
+
+if not insee_final.loc[mask_2020_insee].empty:
+    pivot_2020_insee = insee_final.loc[mask_2020_insee].groupby(
+        ["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]
+    )["Indice de prix (INSEE)"].mean()
+    
+    insee_final["Indice de prix (INSEE) - Base 2020"] = (
+        (insee_final["Indice de prix (INSEE)"] / 
+         insee_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_insee)
+        ) * 100 
+    ).round(2)
+    
+    print("✅ Indice INSEE rebasé sur 2020")
+else:
+    insee_final["Indice de prix (INSEE) - Base 2020"] = np.nan
+
+# --- 5. Nettoyage et Création des Clés de Fusion ---
+for df in (df_final, insee_final):
+    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+df_final['Periode_Key'] = df_final["Periode"].dt.to_period('Q').astype(str)
+insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
+
+# --- 6. Fusion (Merge) ---
+merge = pd.merge(
+    df_final, 
+    insee_final.drop(columns=['Periode']),
+    how="inner",
+    left_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
+    right_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
+)
+
+# --- 7. Nettoyage Final et Conversion Date ---
+merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
+merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
+
+merge["Periode"] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how="end")
+temp_period = pd.PeriodIndex(merge['Periode_Trimestre_Str'],freq='Q').to_timestamp(how='end')
+merge["Periode"] = temp_period.normalize().map(lambda x: x.replace(day=1))
+
+merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str', 'Periode_Merge'], errors='ignore')
+merge = merge.loc[:, ~merge.columns.duplicated()]
+merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
+
+print(f"\nFusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
+merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
+
+merge.head()
