@@ -78,6 +78,8 @@ filtres_exclusion = [
     'agglomérations de moins',
     'agglomérations de plus',
     'France (hors Mayotte)',  # Doublon avec France métropolitaine
+    'Île-de-France :',  # Exclut "Île-de-France : Seine-et-Marne", etc.
+    'Province :',  # Exclut "Province : agglomérations de...", etc.
 ]
 
 for filtre in filtres_exclusion:
@@ -244,6 +246,26 @@ for df in (df_final, insee_final):
 # Création de la clé string ROBUSTE "YYYYQx" (Ex: "2025Q2")
 df_final['Periode_Key'] = df_final["Periode"].dt.to_period('Q').astype(str)
 insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
+
+# 🔍 DIAGNOSTIC: Vérification des doublons dans INSEE avant la fusion
+duplicates_check = insee_final.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']).size()
+doublons = duplicates_check[duplicates_check > 1]
+
+if not doublons.empty:
+    print(f"\n⚠️  ATTENTION: {len(doublons)} doublons détectés dans les données INSEE !")
+    print("📋 Exemples de doublons:")
+    print(doublons.head(10))
+    
+    # DÉDUPLICATION: Moyenne des valeurs en cas de doublon
+    print("\n🔧 Déduplication en cours (moyenne des valeurs)...")
+    insee_final = insee_final.groupby(
+        ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key'], 
+        as_index=False
+    ).agg({
+        'Indice de prix (INSEE)': 'mean',
+        'Indice de prix (INSEE) - Base 2020': 'mean'
+    })
+    print(f"✅ Après déduplication : {len(insee_final)} observations uniques")
 
 # --- 6. Fusion (Merge) ---
 merge = pd.merge(
