@@ -34,8 +34,10 @@ df_final["Periode"] = pd.to_datetime(df_final["Periode"])
 mask_2020 = df_final["Periode"].dt.year == 2020
 
 if not df_final.loc[mask_2020].empty:
+    # Pivot par type de bien et zone géographique
     pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
     
+    # Application du pivot (Mapping multi-index)
     df_final["Indice de prix (CL)"] = (
         (df_final["prix_mm_value"] / 
          df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
@@ -45,19 +47,30 @@ else:
     print("Attention: Aucune donnée CL trouvée pour 2020")
     df_final["Indice de prix (CL)"] = np.nan
 
+# ========================================================================
 # --- 3. Chargement et Préparation des données INSEE (VERSION CENTRALISÉE) ---
+# ========================================================================
 
-# Lecture unique du fichier source centralisé
 insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
 source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
 
 try:
     df_insee_raw = pd.read_csv(source_file, sep=';')
-    print(f"Fichier INSEE chargé : {len(df_insee_raw)} lignes")
+    print(f"📁 Fichier INSEE chargé : {len(df_insee_raw)} lignes")
     
 except FileNotFoundError:
-    print(f"ERREUR: Fichier {source_file} introuvable.")
+    print(f"❌ ERREUR: Fichier {source_file} introuvable.")
     sys.exit(1)
+
+# Filtrage des lignes de métadonnées (lignes "Codes")
+df_insee_raw = df_insee_raw[df_insee_raw['Libellé'] != 'Codes'].copy()
+
+# Ne garder que les SÉRIES BRUTES (pas CVS)
+df_insee_raw = df_insee_raw[
+    ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
+].copy()
+
+print(f"🔍 Après filtrage métadonnées : {len(df_insee_raw)} séries brutes uniques")
 
 # Fonction de parsing des métadonnées depuis la colonne "Libellé"
 def parse_libelle(libelle_text):
@@ -125,12 +138,17 @@ df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].appl
     lambda x: pd.Series(parse_libelle(x))
 )
 
+# Filtrage des lignes avec parsing réussi
 df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
 
-# Identification des colonnes trimestrielles
+# Identification des colonnes trimestrielles (format "YYYY-TX")
 quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
 
-# Pivot WIDE → LONG
+if not quarter_cols:
+    print("❌ ERREUR: Aucune colonne trimestrielle détectée.")
+    sys.exit(1)
+
+# PIVOT: Transformation WIDE (colonnes) → LONG (lignes)
 df_insee_long = df_insee_clean.melt(
     id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'],
     value_vars=quarter_cols,
@@ -138,15 +156,23 @@ df_insee_long = df_insee_clean.melt(
     value_name='Indice de prix (INSEE)'
 )
 
-# Conversion numérique
+# Gestion des valeurs spéciales comme "(s)" = secret statistique
+df_insee_long['Indice de prix (INSEE)'] = df_insee_long['Indice de prix (INSEE)'].astype(str).replace(
+    [r'\(s\)', r'\(p\)', r'\(r\)', 'nan', ''], 
+    np.nan, 
+    regex=True
+)
+
+# Conversion numérique (gérer virgules européennes)
 df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
     df_insee_long['Indice de prix (INSEE)'].str.replace(',', '.').str.strip(),
     errors='coerce'
 )
 
+# Filtrage des NaN
 df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
 
-# Parsing temporel
+# Parsing temporel: "1992-T1" → Date
 df_insee_long['Year'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('-')[0]))
 df_insee_long['Quarter'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('T')[1]))
 df_insee_long["Date code"] = df_insee_long['Year'].astype(str) + 'Q' + df_insee_long["Quarter"].astype(str)
@@ -155,6 +181,9 @@ df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").
 insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
 
 print(f"✅ Données INSEE pivotées : {len(insee_final)} observations")
+print(f"   📍 Périmètres uniques : {insee_final['VAL_MAILLE_GEO'].nunique()}")
+print(f"   🏠 Types de biens : {insee_final['CD_TYPE_BIEN'].unique()}")
+print(f"   📅 Période : {insee_final['Periode'].min()} → {insee_final['Periode'].max()}")
 
 # --- 4. Calcul de l'indice INSEE (Base 2020) ---
 insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
@@ -173,6 +202,7 @@ if not insee_final.loc[mask_2020_insee].empty:
     
     print("✅ Indice INSEE rebasé sur 2020")
 else:
+    print("⚠️  Attention: Données INSEE 2020 manquantes.")
     insee_final["Indice de prix (INSEE) - Base 2020"] = np.nan
 
 # --- 5. Nettoyage et Création des Clés de Fusion ---
@@ -180,31 +210,39 @@ for df in (df_final, insee_final):
     df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
     df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
 
+# Création de la clé string ROBUSTE "YYYYQx" (Ex: "2025Q2")
 df_final['Periode_Key'] = df_final["Periode"].dt.to_period('Q').astype(str)
 insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
 
 # --- 6. Fusion (Merge) ---
 merge = pd.merge(
     df_final, 
-    insee_final.drop(columns=['Periode']),
+    insee_final.drop(columns=['Periode']), # On enlève la date Timestamp INSEE pour éviter doublon
     how="inner",
     left_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
     right_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
 )
 
 # --- 7. Nettoyage Final et Conversion Date ---
+
+# Renommer la clé de fusion pour la clarté 
 merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
 merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
 
+# Reconstruction de l'index temporel propre
 merge["Periode"] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how="end")
 temp_period = pd.PeriodIndex(merge['Periode_Trimestre_Str'],freq='Q').to_timestamp(how='end')
 merge["Periode"] = temp_period.normalize().map(lambda x: x.replace(day=1))
 
 merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str', 'Periode_Merge'], errors='ignore')
 merge = merge.loc[:, ~merge.columns.duplicated()]
+
+# Tri final
 merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
 
-print(f"\nFusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
+print(f"\n🎯 Fusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
 merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
 
-merge.head()
+# Affichage des premières lignes
+print("\n📊 Aperçu des données fusionnées:")
+print(merge.head())
