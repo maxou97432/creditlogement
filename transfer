@@ -70,7 +70,22 @@ df_insee_raw = df_insee_raw[
     ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
 ].copy()
 
-print(f"🔍 Après filtrage métadonnées : {len(df_insee_raw)} séries brutes uniques")
+# 🔧 CORRECTION CRITIQUE: Exclure les sous-agrégations (banlieues, villes centres, etc.)
+# pour éviter les doublons et avoir des courbes lisses
+filtres_exclusion = [
+    'Banlieues',
+    'Villes centres', 
+    'agglomérations de moins',
+    'agglomérations de plus',
+    'France (hors Mayotte)',  # Doublon avec France métropolitaine
+]
+
+for filtre in filtres_exclusion:
+    df_insee_raw = df_insee_raw[
+        ~df_insee_raw['Libellé'].str.contains(filtre, na=False, case=False)
+    ].copy()
+
+print(f"🔍 Après filtrage métadonnées et sous-agrégations : {len(df_insee_raw)} séries uniques")
 
 # Fonction de parsing des métadonnées depuis la colonne "Libellé"
 def parse_libelle(libelle_text):
@@ -140,6 +155,22 @@ df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].appl
 
 # Filtrage des lignes avec parsing réussi
 df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
+
+# 🔧 FILTRE POSITIF: Ne garder que les périmètres de la liste d'origine
+# Correspond exactement à: perimetre_insee = ['92', '93', '94', '95', '91','75', '78', '77', ...]
+perimetre_whitelist = [
+    '75', '77', '78', '91', '92', '93', '94', '95',  # Départements IDF
+    'MARSEILLE', 'LYON', 'LILLE',  # Agglomérations
+    'NORD-PAS-DE-CALAIS', 'PROVENCE-ALPES-CÔTE D\'AZUR', 'RHÔNE-ALPES',  # Régions
+    'PROVINCE', 'AUVERGNE', 'ÎLE-DE-FRANCE'
+]
+
+df_insee_clean = df_insee_clean[
+    df_insee_clean['VAL_MAILLE_GEO'].isin(perimetre_whitelist)
+].copy()
+
+print(f"🎯 Après filtre sur périmètres pertinents : {len(df_insee_clean)} séries")
+print(f"   Périmètres retenus : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
 
 # Identification des colonnes trimestrielles (format "YYYY-TX")
 quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
