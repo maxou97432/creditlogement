@@ -70,24 +70,14 @@ df_insee_raw = df_insee_raw[
     ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
 ].copy()
 
-# 🔧 CORRECTION CRITIQUE: Exclure les sous-agrégations (banlieues, villes centres, etc.)
-# pour éviter les doublons et avoir des courbes lisses
-filtres_exclusion = [
-    'Banlieues',
-    'Villes centres', 
-    'agglomérations de moins',
-    'agglomérations de plus',
-    'France (hors Mayotte)',  # Doublon avec France métropolitaine
-    'Île-de-France :',  # Exclut "Île-de-France : Seine-et-Marne", etc.
-    'Province :',  # Exclut "Province : agglomérations de...", etc.
-]
+# 🔧 CORRECTION CRITIQUE: Exclure TOUTES les subdivisions
+# Les subdivisions sont marquées par " : " dans le libellé
+# Ex: "Île-de-France : Seine-et-Marne", "Province : agglomérations"
+df_insee_raw = df_insee_raw[
+    ~df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False)
+].copy()
 
-for filtre in filtres_exclusion:
-    df_insee_raw = df_insee_raw[
-        ~df_insee_raw['Libellé'].str.contains(filtre, na=False, case=False)
-    ].copy()
-
-print(f"🔍 Après filtrage métadonnées et sous-agrégations : {len(df_insee_raw)} séries uniques")
+print(f"🔍 Après filtrage (métadonnées + CVS + subdivisions) : {len(df_insee_raw)} séries de base")
 
 # Fonction de parsing des métadonnées depuis la colonne "Libellé"
 def parse_libelle(libelle_text):
