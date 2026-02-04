@@ -1,33 +1,27 @@
-1. Analyse du Biais (Test t de Student)
-
-Résultats :
-
-Appartements (APT) : La quasi-totalité des zones présentent un écart moyen significatif (p<0.05).
-
-Rhône-Alpes & Province : écart moyen +2,96 et +2,01, très significatifs (p<0.0001), indiquant une surévaluation globale.
-
-Seine-Saint-Denis (93) : écart moyen fort de +2,73, significatif.
-
-Paris (75) : écart moyen -1,89, significatif (tendance inverse de sous-évaluation).
-
-Maisons (MAI) : Résultats très contrastés selon la densité de la zone.
-
-Province & Nord : écarts positifs significatifs (ex. Nord-Pas-de-Calais : +2,85).
-
-Petite Couronne (92, 93) : écarts négatifs forts, ex. Hauts-de-Seine (-3,30) et Seine-Saint-Denis (-2,17).
-
-Zones non significatives : Lille, Yvelines (78), Essonne (91), suggérant une convergence des indices sur ces marchés.
-
-2. Analyse de la Dynamique (Test ADF)
-
-Résultats :
-
-Stationnarité (ADF) : La majorité des séries (20 sur 26) sont non-stationnaires (False).
-
-Cela indique que l'écart entre votre indice et celui de l'INSEE n'est pas constant et a tendance à diverger selon les cycles.
-
-Exceptions (True) :
-
-Paris (75-APT) et certaines zones pavillonnaires (91, 94, 95-MAI) présentent des écarts stables dans le temps.
-
-Conclusion : Les écarts observés sont statistiquement significatifs dans la majorité des cas (69% de True au test t). Cela confirme l'existence d'un biais structurel spécifique à la typologie du bien : une tendance à la surévaluation sur les appartements (hors Paris) et à la sous-évaluation sur les maisons en zones denses par rapport à l'INSEE.
+VAL_MAILLE_GEO	CD_TYPE_BIEN	Ecart_Moyen	Ecart_type	Ecart_min	Ecart_max	RMSE	Corrélation
+0	75	APT	-1.894070	1.474111	-4.340	0.75	2.389554	0.989303
+1	77	APT	1.539535	2.772726	-2.670	10.40	3.143149	0.925462
+2	77	MAI	0.148372	2.085268	-3.330	5.09	2.066212	0.977446
+3	78	APT	0.818372	1.682866	-2.090	6.18	1.853621	0.971431
+4	78	MAI	-0.181163	1.498387	-3.780	2.46	1.491901	0.982607
+5	91	APT	0.186512	1.411490	-2.860	2.57	1.407394	0.980933
+6	91	MAI	-0.118605	1.446680	-6.200	2.83	1.434670	0.980824
+7	92	APT	0.587442	1.078085	-1.190	3.30	1.216686	0.991732
+8	92	MAI	-3.302093	2.702960	-11.750	3.02	4.247341	0.955527
+9	93	APT	2.733953	2.625488	-1.200	12.40	3.769268	0.962336
+10	93	MAI	-2.174419	2.713811	-8.310	3.09	3.452766	0.972394
+11	94	APT	1.064186	1.651611	-1.000	7.25	1.948557	0.980859
+12	94	MAI	-0.998605	2.420541	-8.470	3.34	2.592291	0.980490
+13	95	APT	1.289535	2.603367	-2.680	7.67	2.877986	0.948217
+14	95	MAI	-0.801860	1.855753	-4.680	2.63	2.001677	0.982724
+15	LILLE	MAI	-0.351628	3.823511	-7.080	8.25	3.795115	0.968179
+16	LYON	APT	2.075581	1.612826	-1.080	7.37	2.617012	0.992412
+17	MARSEILLE	APT	0.440732	2.811020	-2.740	13.09	2.811290	0.984027
+18	NORD-PAS-DE-CALAIS	APT	0.750930	2.785487	-4.120	6.02	2.853488	0.987604
+19	NORD-PAS-DE-CALAIS	MAI	2.854186	3.616316	-0.710	22.19	4.573837	0.941347
+20	PROVENCE-ALPES-CÔTE D'AZUR	APT	0.834419	1.150326	-0.950	5.86	1.410223	0.995203
+21	PROVENCE-ALPES-CÔTE D'AZUR	MAI	-0.231395	1.567753	-4.810	4.62	1.566600	0.992257
+22	PROVINCE	APT	2.005814	2.249399	-1.240	9.31	2.994230	0.983583
+23	PROVINCE	MAI	1.837442	2.790934	-0.980	17.04	3.314266	0.973939
+24	RHÔNE-ALPES	APT	2.964070	3.227956	-1.785	15.91	4.354663	0.962242
+25	RHÔNE-ALPES	MAI	1.574302	1.639715	-0.780	7.28	2.259329	0.993152
