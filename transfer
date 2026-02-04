@@ -1,26 +1,95 @@
-                            OLS Regression Results                            
-==============================================================================
-Dep. Variable:            Delta_INSEE   R-squared:                       0.783
-Model:                            OLS   Adj. R-squared:                  0.783
-Method:                 Least Squares   F-statistic:                     2010.
-Date:                Wed, 04 Feb 2026   Prob (F-statistic):               0.00
-Time:                        11:02:28   Log-Likelihood:                -2165.8
-No. Observations:                1115   AIC:                             4338.
-Df Residuals:                    1112   BIC:                             4353.
-Df Model:                           2                                         
-Covariance Type:            nonrobust                                         
-==============================================================================
-                 coef    std err          t      P>|t|      [0.025      0.975]
-------------------------------------------------------------------------------
-const         -0.0916      0.052     -1.773      0.077      -0.193       0.010
-Delta_CL       0.7129      0.012     61.850      0.000       0.690       0.735
-Ecart_Lag1     0.1796      0.020      9.110      0.000       0.141       0.218
-==============================================================================
-Omnibus:                      476.654   Durbin-Watson:                   2.170
-Prob(Omnibus):                  0.000   Jarque-Bera (JB):             6731.575
-Skew:                          -1.579   Prob(JB):                         0.00
-Kurtosis:                      14.615   Cond. No.                         4.96
-==============================================================================
+Analyse de l'impact de la Volumétrie sur l'Écart...
 
-Notes:
-[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+--- Segments où le Volume explique l'Écart (Significatif) ---
+                          Zone Type  Corrélation (Pearson)  \
+0                           75  APT                  -0.41   
+1                           77  APT                  -0.58   
+2                           77  MAI                  -0.51   
+3                           78  APT                  -0.54   
+5                           91  APT                  -0.38   
+7                           92  APT                  -0.66   
+9                           93  APT                  -0.71   
+11                          94  APT                  -0.63   
+13                          95  APT                  -0.58   
+16                        LYON  APT                  -0.54   
+17                   MARSEILLE  APT                  -0.60   
+19          NORD-PAS-DE-CALAIS  MAI                  -0.67   
+20  PROVENCE-ALPES-CÔTE D'AZUR  APT                  -0.50   
+22                    PROVINCE  APT                  -0.63   
+23                    PROVINCE  MAI                  -0.71   
+24                 RHÔNE-ALPES  APT                  -0.64   
+25                 RHÔNE-ALPES  MAI                  -0.56   
+
+    Impact Volume (Beta)  P-value Significatif à 5%    R2   
+0                -0.0000   0.0049               OUI  0.177  
+1                -0.0008   0.0001               OUI  0.306  
+2                -0.0000   0.0008               OUI  0.244  
+3                -0.0000   0.0008               OUI  0.244  
+5                -0.0000   0.0203               OUI  0.125  
+7                -0.0000   0.0000               OUI  0.399  
+9                -0.0001   0.0000               OUI  0.458  
+11               -0.0000   0.0001               OUI  0.303  
+13               -0.0000   0.0002               OUI  0.286  
+16               -0.0000   0.0016               OUI  0.219  
+17               -0.0001   0.0005               OUI  0.272  
+19               -0.0000   0.0002               OUI  0.286  
+20               -0.0000   0.0011               OUI  0.231  
+22               -0.0000   0.0000               OUI  0.337  
+23               -0.0000   0.0000               OUI  0.362  
+24               -0.0000   0.0001               OUI  0.321  
+25               -0.0000   0.0005               OUI  0.259  
+                          Zone Type  Corrélation (Pearson)  \
+0                           75  APT                  -0.41   
+1                           77  APT                  -0.58   
+2                           77  MAI                  -0.51   
+3                           78  APT                  -0.54   
+4                           78  MAI                  -0.21   
+5                           91  APT                  -0.38   
+6                           91  MAI                  -0.03   
+7                           92  APT                  -0.66   
+8                           92  MAI                   0.01   
+9                           93  APT                  -0.71   
+10                          93  MAI                  -0.08   
+11                          94  APT                  -0.63   
+12                          94  MAI                  -0.01   
+13                          95  APT                  -0.58   
+14                          95  MAI                  -0.06   
+15                       LILLE  MAI                  -0.03   
+16                        LYON  APT                  -0.54   
+17                   MARSEILLE  APT                  -0.60   
+18          NORD-PAS-DE-CALAIS  APT                   0.01   
+19          NORD-PAS-DE-CALAIS  MAI                  -0.67   
+20  PROVENCE-ALPES-CÔTE D'AZUR  APT                  -0.50   
+21  PROVENCE-ALPES-CÔTE D'AZUR  MAI                  -0.12   
+22                    PROVINCE  APT                  -0.63   
+23                    PROVINCE  MAI                  -0.71   
+24                 RHÔNE-ALPES  APT                  -0.64   
+25                 RHÔNE-ALPES  MAI                  -0.56   
+
+    Impact Volume (Beta)  P-value Significatif à 5%    R2   
+0                -0.0000   0.0049               OUI  0.177  
+1                -0.0008   0.0001               OUI  0.306  
+2                -0.0000   0.0008               OUI  0.244  
+3                -0.0000   0.0008               OUI  0.244  
+4                -0.0013   0.1869               NON  0.042  
+5                -0.0000   0.0203               OUI  0.125  
+6                -0.0000   0.6273               NON  0.006  
+7                -0.0000   0.0000               OUI  0.399  
+8                 0.0002   0.9687               NON  0.000  
+9                -0.0001   0.0000               OUI  0.458  
+10               -0.0001   0.5060               NON  0.011  
+11               -0.0000   0.0001               OUI  0.303  
+12               -0.0000   0.7534               NON  0.002  
+13               -0.0000   0.0002               OUI  0.286  
+14               -0.0000   0.6442               NON  0.005  
+15               -0.0001   0.8580               NON  0.001  
+16               -0.0000   0.0016               OUI  0.219  
+17               -0.0001   0.0005               OUI  0.272  
+18                0.0000   0.9479               NON  0.000  
+19               -0.0000   0.0002               OUI  0.286  
+20               -0.0000   0.0011               OUI  0.231  
+21               -0.0000   0.2988               NON  0.026  
+22               -0.0000   0.0000               OUI  0.337  
+23               -0.0000   0.0000               OUI  0.362  
+24               -0.0000   0.0001               OUI  0.321  
+25               -0.0000   0.0005               OUI  0.259  
