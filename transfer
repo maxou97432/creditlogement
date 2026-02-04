@@ -1,98 +1,33 @@
---Résultats du Test t--
-                                         Ecart moyen observé  T_stat  p_value  \
-VAL_MAILLE_GEO             CD_TYPE_BIEN                                         
-75                         APT                         -1.89  -8.426   0.0000   
-77                         APT                          1.54   3.641   0.0007   
-                           MAI                          0.15   0.467   0.6432   
-78                         APT                          0.82   3.189   0.0027   
-                           MAI                         -0.18  -0.793   0.4323   
-91                         APT                          0.19   0.866   0.3911   
-                           MAI                         -0.12  -0.538   0.5937   
-92                         APT                          0.59   3.573   0.0009   
-                           MAI                         -3.30  -8.011   0.0000   
-93                         APT                          2.73   6.828   0.0000   
-                           MAI                         -2.17  -5.254   0.0000   
-94                         APT                          1.06   4.225   0.0001   
-                           MAI                         -1.00  -2.705   0.0098   
-95                         APT                          1.29   3.248   0.0023   
-                           MAI                         -0.80  -2.833   0.0070   
-LILLE                      MAI                         -0.35  -0.603   0.5497   
-LYON                       APT                          2.08   8.439   0.0000   
-MARSEILLE                  APT                          0.44   1.004   0.3214   
-NORD-PAS-DE-CALAIS         APT                          0.75   1.768   0.0844   
-                           MAI                          2.85   5.175   0.0000   
-PROVENCE-ALPES-CÔTE D'AZUR APT                          0.83   4.757   0.0000   
-                           MAI                         -0.23  -0.968   0.3387   
-PROVINCE                   APT                          2.01   5.847   0.0000   
-                           MAI                          1.84   4.317   0.0001   
-RHÔNE-ALPES                APT                          2.96   6.021   0.0000   
-                           MAI                          1.57   6.296   0.0000   
+1. Analyse du Biais (Test t de Student)
 
-                                         Significatif (p_value < 0.05)  
-VAL_MAILLE_GEO             CD_TYPE_BIEN                                 
-75                         APT                                    True  
-77                         APT                                    True  
-                           MAI                                   False  
-78                         APT                                    True  
-                           MAI                                   False  
-91                         APT                                   False  
-                           MAI                                   False  
-92                         APT                                    True  
-                           MAI                                    True  
-93                         APT                                    True  
-                           MAI                                    True  
-94                         APT                                    True  
-                           MAI                                    True  
-95                         APT                                    True  
-                           MAI                                    True  
-LILLE                      MAI                                   False  
-LYON                       APT                                    True  
-MARSEILLE                  APT                                   False  
-NORD-PAS-DE-CALAIS         APT                                   False  
-                           MAI                                    True  
-PROVENCE-ALPES-CÔTE D'AZUR APT                                    True  
-                           MAI                                   False  
-PROVINCE                   APT                                    True  
-                           MAI                                    True  
-RHÔNE-ALPES                APT                                    True  
-                           MAI                                    True  
---Résultats du Test ADF--
-                VAL_MAILLE_GEO CD_TYPE_BIEN  Stationnaire (ADF)
-0                           75          APT                True
-1                           77          APT               False
-2                           77          MAI               False
-3                           78          APT               False
-4                           78          MAI               False
-5                           91          APT               False
-6                           91          MAI                True
-7                           92          APT               False
-8                           92          MAI               False
-9                           93          APT               False
-10                          93          MAI               False
-11                          94          APT               False
-12                          94          MAI                True
-13                          95          APT               False
-14                          95          MAI                True
-15                       LILLE          MAI               False
-16                        LYON          APT               False
-17                   MARSEILLE          APT               False
-18          NORD-PAS-DE-CALAIS          APT               False
-19          NORD-PAS-DE-CALAIS          MAI               False
-20  PROVENCE-ALPES-CÔTE D'AZUR          APT               False
-21  PROVENCE-ALPES-CÔTE D'AZUR          MAI               False
-22                    PROVINCE          APT               False
-23                    PROVINCE          MAI               False
-24                 RHÔNE-ALPES          APT               False
-25                 RHÔNE-ALPES          MAI               False
+Résultats :
 
-* **Résultats :**
-  * **Appartements (APT) :** La majorité des zones présentent un écart moyen significatif ($p < 0.05$).
-    * *Île-de-France :* écart moyen **+3,65**, très significatif ($p < 0.0001$).
-    * *Rhône-Alpes :* écart moyen **+2,96**, significatif ($p < 0.0001$).
-  * **Maisons (MAI) :** Résultats plus contrastés.
-    * Certaines zones sont significatives (ex. Rhône-Alpes : +2,17).
-    * D'autres non (ex. Lille, Marseille, Île-de-France), suggérant des indices très proches.
-  * **Cas particuliers :**
-    * *92-MAI :* écart moyen **-2,13**, significatif (tendance inverse).
+Appartements (APT) : La quasi-totalité des zones présentent un écart moyen significatif (p<0.05).
 
-> **Conclusion :** Les écarts sont faibles en valeur absolue mais **statistiquement significatifs dans la majorité des cas** (83.3% de True). Cela confirme l'existence d'un biais structurel  qui n'est pas dû au hasard.
+Rhône-Alpes & Province : écart moyen +2,96 et +2,01, très significatifs (p<0.0001), indiquant une surévaluation globale.
+
+Seine-Saint-Denis (93) : écart moyen fort de +2,73, significatif.
+
+Paris (75) : écart moyen -1,89, significatif (tendance inverse de sous-évaluation).
+
+Maisons (MAI) : Résultats très contrastés selon la densité de la zone.
+
+Province & Nord : écarts positifs significatifs (ex. Nord-Pas-de-Calais : +2,85).
+
+Petite Couronne (92, 93) : écarts négatifs forts, ex. Hauts-de-Seine (-3,30) et Seine-Saint-Denis (-2,17).
+
+Zones non significatives : Lille, Yvelines (78), Essonne (91), suggérant une convergence des indices sur ces marchés.
+
+2. Analyse de la Dynamique (Test ADF)
+
+Résultats :
+
+Stationnarité (ADF) : La majorité des séries (20 sur 26) sont non-stationnaires (False).
+
+Cela indique que l'écart entre votre indice et celui de l'INSEE n'est pas constant et a tendance à diverger selon les cycles.
+
+Exceptions (True) :
+
+Paris (75-APT) et certaines zones pavillonnaires (91, 94, 95-MAI) présentent des écarts stables dans le temps.
+
+Conclusion : Les écarts observés sont statistiquement significatifs dans la majorité des cas (69% de True au test t). Cela confirme l'existence d'un biais structurel spécifique à la typologie du bien : une tendance à la surévaluation sur les appartements (hors Paris) et à la sous-évaluation sur les maisons en zones denses par rapport à l'INSEE.
