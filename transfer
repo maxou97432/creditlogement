@@ -70,12 +70,32 @@ df_insee_raw = df_insee_raw[
     ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
 ].copy()
 
-#  CORRECTION CRITIQUE: Exclure TOUTES les subdivisions
-# Les subdivisions sont marquées par " : " dans le libellé
-# Ex: "Île-de-France : Seine-et-Marne", "Province : agglomérations"
-df_insee_raw = df_insee_raw[
-    ~df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False)
-].copy()
+# 🔧 CORRECTION CRITIQUE: Filtrage intelligent des subdivisions
+# On veut GARDER: "Île-de-France : Maisons", "Île-de-France : Appartements"
+# On veut EXCLURE: "Île-de-France : Seine-et-Marne - Ensemble", "Île-de-France : Grande couronne - Maisons"
+
+# Liste des séries régionales à GARDER (format "Région : Type")
+series_regionales_a_garder = [
+    "Île-de-France : Maisons",
+    "Île-de-France : Appartements", 
+    "Île-de-France : Ensemble",
+]
+
+# Créer un masque pour identifier les lignes à garder
+mask_garder = df_insee_raw['Libellé'].apply(
+    lambda x: any(serie in str(x) for serie in series_regionales_a_garder) if isinstance(x, str) else False
+)
+
+# Créer un masque pour identifier les subdivisions à exclure (contiennent " : " mais pas dans la liste à garder)
+mask_subdivision = (
+    df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False) & 
+    ~mask_garder
+)
+
+# Appliquer le filtre : exclure les subdivisions
+df_insee_raw = df_insee_raw[~mask_subdivision].copy()
+
+print(f"🔍 Après filtrage (métadonnées + CVS + subdivisions) : {len(df_insee_raw)} séries de base")
 
 
 
@@ -85,6 +105,15 @@ def parse_libelle(libelle_text):
     
     if not isinstance(libelle_text, str) or pd.isna(libelle_text):
         return None, None
+    
+    # 🔧 CAS SPÉCIAL: Séries régionales au format "Région : Type de bien"
+    # Ex: "Indice... - Île-de-France : Maisons - Base..."
+    if "Île-de-France : Maisons" in libelle_text:
+        return "ÎLE-DE-FRANCE", "MAI"
+    elif "Île-de-France : Appartements" in libelle_text:
+        return "ÎLE-DE-FRANCE", "APT"
+    elif "Île-de-France : Ensemble" in libelle_text:
+        return "ÎLE-DE-FRANCE", "ENSEMBLE"
     
     # Dictionnaire de normalisation géographique
     geo_mapping = {
