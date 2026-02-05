@@ -1,92 +1,26 @@
---Résultats du Test t--
-                                         Ecart moyen observé  T_stat  p_value  \
-VAL_MAILLE_GEO             CD_TYPE_BIEN                                         
-77                         APT                          1.54   3.641   0.0007   
-                           MAI                          0.15   0.467   0.6432   
-78                         APT                          0.82   3.189   0.0027   
-                           MAI                         -0.18  -0.793   0.4323   
-91                         APT                          0.19   0.866   0.3911   
-                           MAI                         -0.12  -0.538   0.5937   
-92                         APT                          0.59   3.573   0.0009   
-                           MAI                         -3.30  -8.011   0.0000   
-93                         APT                          2.73   6.828   0.0000   
-                           MAI                         -2.17  -5.254   0.0000   
-94                         APT                          1.06   4.225   0.0001   
-                           MAI                         -1.00  -2.705   0.0098   
-95                         APT                          1.29   3.248   0.0023   
-                           MAI                         -0.80  -2.833   0.0070   
-LILLE                      MAI                         -0.35  -0.603   0.5497   
-LYON                       APT                          2.08   8.439   0.0000   
-MARSEILLE                  APT                          0.44   1.004   0.3214   
-NORD-PAS-DE-CALAIS         APT                          0.75   1.768   0.0844   
-                           MAI                          2.85   5.175   0.0000   
-PARIS                      APT                          0.74   5.961   0.0000   
-PROVENCE-ALPES-CÔTE D'AZUR APT                          0.83   4.757   0.0000   
-                           MAI                         -0.23  -0.968   0.3387   
-PROVINCE                   APT                          2.01   5.847   0.0000   
-                           MAI                          1.84   4.317   0.0001   
-RHÔNE-ALPES                APT                          2.96   6.021   0.0000   
-                           MAI                          1.57   6.296   0.0000   
-ÎLE-DE-FRANCE              APT                          1.87   6.870   0.0000   
-                           MAI                         -0.22  -1.153   0.2554   
+                             OLS Regression Results                            
+===============================================================================
+Dep. Variable:             Delta_INSEE   R-squared:                       0.806
+Model:                             OLS   Adj. R-squared:                  0.806
+Method:                  Least Squares   F-statistic:                     2495.
+Date:              jeu., 05 févr. 2026   Prob (F-statistic):               0.00
+Time:                         10:19:52   Log-Likelihood:                -2307.1
+No. Observations:                 1201   AIC:                             4620.
+Df Residuals:                     1198   BIC:                             4635.
+Df Model:                            2                                         
+Covariance Type:             nonrobust                                         
+==============================================================================
+                 coef    std err          t      P>|t|      [0.025      0.975]
+------------------------------------------------------------------------------
+const         -0.1112      0.049     -2.253      0.024      -0.208      -0.014
+Delta_CL       0.7256      0.011     68.176      0.000       0.705       0.746
+Ecart_Lag1     0.1772      0.019      9.092      0.000       0.139       0.215
+==============================================================================
+Omnibus:                      489.428   Durbin-Watson:                   2.166
+Prob(Omnibus):                  0.000   Jarque-Bera (JB):             6531.094
+Skew:                          -1.507   Prob(JB):                         0.00
+Kurtosis:                      14.020   Cond. No.                         5.20
+==============================================================================
 
-                                         Significatif (p_value < 0.05)  
-VAL_MAILLE_GEO             CD_TYPE_BIEN                                 
-77                         APT                                    True  
-                           MAI                                   False  
-78                         APT                                    True  
-                           MAI                                   False  
-91                         APT                                   False  
-                           MAI                                   False  
-92                         APT                                    True  
-                           MAI                                    True  
-93                         APT                                    True  
-                           MAI                                    True  
-94                         APT                                    True  
-                           MAI                                    True  
-95                         APT                                    True  
-                           MAI                                    True  
-LILLE                      MAI                                   False  
-LYON                       APT                                    True  
-MARSEILLE                  APT                                   False  
-NORD-PAS-DE-CALAIS         APT                                   False  
-                           MAI                                    True  
-PARIS                      APT                                    True  
-PROVENCE-ALPES-CÔTE D'AZUR APT                                    True  
-                           MAI                                   False  
-PROVINCE                   APT                                    True  
-                           MAI                                    True  
-RHÔNE-ALPES                APT                                    True  
-                           MAI                                    True  
-ÎLE-DE-FRANCE              APT                                    True  
-                           MAI                                   False  
---Résultats du Test ADF--
-                VAL_MAILLE_GEO CD_TYPE_BIEN  Stationnaire (ADF)
-0                           77          APT               False
-1                           77          MAI               False
-2                           78          APT               False
-3                           78          MAI               False
-4                           91          APT               False
-5                           91          MAI                True
-6                           92          APT               False
-7                           92          MAI               False
-8                           93          APT               False
-9                           93          MAI               False
-10                          94          APT               False
-11                          94          MAI                True
-12                          95          APT               False
-13                          95          MAI                True
-14                       LILLE          MAI               False
-15                        LYON          APT               False
-16                   MARSEILLE          APT               False
-17          NORD-PAS-DE-CALAIS          APT               False
-18          NORD-PAS-DE-CALAIS          MAI               False
-19                       PARIS          APT               False
-20  PROVENCE-ALPES-CÔTE D'AZUR          APT               False
-21  PROVENCE-ALPES-CÔTE D'AZUR          MAI               False
-22                    PROVINCE          APT               False
-23                    PROVINCE          MAI               False
-24                 RHÔNE-ALPES          APT               False
-25                 RHÔNE-ALPES          MAI               False
-26               ÎLE-DE-FRANCE          APT               False
-27               ÎLE-DE-FRANCE          MAI                True
+Notes:
+[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
