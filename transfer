@@ -1,321 +1,42 @@
-import pandas as pd
-import numpy as np
-import sys
-import os
 
-# --- 1. Chargement des données CL ---
-try:
-    base_path = r"Z:\uflumth\gits\univers_elementaire\TI\resultats"
-    
-    prix_m2_univ_elem_complet_CITY = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_CITY.csv"))
-    prix_m2_univ_elem_complet_DEPT = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_DEPT.csv"))
-    prix_m2_univ_elem_complet_REGION = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_REGION.csv"))
-    prix_m2_univ_elem_complet_PROVINCE = pd.read_csv(os.path.join(base_path, "prix_m2_univ_elem_complet_PROVINCE.csv"))
-    
-    dfs_to_concat = [
-        prix_m2_univ_elem_complet_CITY,
-        prix_m2_univ_elem_complet_DEPT,
-        prix_m2_univ_elem_complet_REGION,
-        prix_m2_univ_elem_complet_PROVINCE
-    ]
-    
-    df_final = pd.concat(dfs_to_concat, ignore_index=True)
+--- Résultat de la Comparaison Statistique ---
+==========================================================================================
+       Ecart_Moyen  Ecart_type  Ecart_min  Ecart_max       RMSE  Corrélation
+count    28.000000   28.000000  28.000000  28.000000  28.000000    28.000000
+mean      0.640624    2.131467  -3.269821   7.178571   2.535038     0.975943
+std       1.445161    0.785366   2.806854   5.014943   1.026464     0.017104
+min      -3.302093    0.815269 -11.750000   2.320000   1.094773     0.925462
+25%      -0.191047    1.550412  -4.260000   3.225000   1.547925     0.970618
+50%       0.746047    1.970511  -2.490000   6.100000   2.582504     0.980841
+75%       1.640087    2.728539  -1.162500   8.515000   3.185928     0.988234
+max       2.964070    3.823511  -0.660000  22.190000   4.573837     0.995744
 
-except FileNotFoundError as e:
-    print(f"Erreur de lecture de fichier CL : {e}")
-    sys.exit(1)
-
-# Nettoyage df_final
-df_final = df_final[df_final['DIC_NAME'] != "prix_m2_12m"]
-df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
-
-# --- 2. Calcul de l'indice CL (Base 2020) ---
-df_final["Periode"] = pd.to_datetime(df_final["Periode"])
-mask_2020 = df_final["Periode"].dt.year == 2020
-
-if not df_final.loc[mask_2020].empty:
-    # Pivot par type de bien et zone géographique
-    pivot_2020_CL = df_final.loc[mask_2020].groupby(["CD_TYPE_BIEN","VAL_MAILLE_GEO"])["prix_mm_value"].mean()
-    
-    # Application du pivot (Mapping multi-index)
-    df_final["Indice de prix (CL)"] = (
-        (df_final["prix_mm_value"] / 
-         df_final.set_index(["CD_TYPE_BIEN","VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
-        ) * 100 
-    ).round(2)
-else:
-    print("Attention: Aucune donnée CL trouvée pour 2020")
-    df_final["Indice de prix (CL)"] = np.nan
-
-# ========================================================================
-# --- 3. Chargement et Préparation des données INSEE (VERSION CENTRALISÉE) ---
-# ========================================================================
-
-insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
-source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
-
-try:
-    df_insee_raw = pd.read_csv(source_file, sep=';')
-    print(f" Fichier INSEE chargé : {len(df_insee_raw)} lignes")
-    
-except FileNotFoundError:
-    print(f" ERREUR: Fichier {source_file} introuvable.")
-    sys.exit(1)
-
-# Filtrage des lignes de métadonnées (lignes "Codes")
-df_insee_raw = df_insee_raw[df_insee_raw['Libellé'] != 'Codes'].copy()
-
-# Ne garder que les SÉRIES BRUTES (pas CVS)
-df_insee_raw = df_insee_raw[
-    ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
-].copy()
-
-# 🔧 CORRECTION CRITIQUE: Filtrage intelligent des subdivisions
-# On veut GARDER: "Île-de-France : Maisons", "Île-de-France : Appartements"
-# On veut EXCLURE: "Île-de-France : Seine-et-Marne - Ensemble", "Île-de-France : Grande couronne - Maisons"
-
-# Liste des séries régionales à GARDER (format "Région : Type")
-series_regionales_a_garder = [
-    "Île-de-France : Maisons",
-    "Île-de-France : Appartements", 
-    "Île-de-France : Ensemble",
-]
-
-# Créer un masque pour identifier les lignes à garder
-mask_garder = df_insee_raw['Libellé'].apply(
-    lambda x: any(serie in str(x) for serie in series_regionales_a_garder) if isinstance(x, str) else False
-)
-
-# Créer un masque pour identifier les subdivisions à exclure (contiennent " : " mais pas dans la liste à garder)
-mask_subdivision = (
-    df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False) & 
-    ~mask_garder
-)
-
-# Appliquer le filtre : exclure les subdivisions
-df_insee_raw = df_insee_raw[~mask_subdivision].copy()
-
-print(f"🔍 Après filtrage (métadonnées + CVS + subdivisions) : {len(df_insee_raw)} séries de base")
-
-
-
-# Fonction de parsing des métadonnées depuis la colonne "Libellé"
-def parse_libelle(libelle_text):
-    """Extrait le périmètre géographique et le type de bien depuis le Libellé."""
-    
-    if not isinstance(libelle_text, str) or pd.isna(libelle_text):
-        return None, None
-    
-    # 🔧 CAS SPÉCIAL: Séries régionales au format "Région : Type de bien"
-    # Ex: "Indice... - Île-de-France : Maisons - Base..."
-    if "Île-de-France : Maisons" in libelle_text:
-        return "ÎLE-DE-FRANCE", "MAI"
-    elif "Île-de-France : Appartements" in libelle_text:
-        return "ÎLE-DE-FRANCE", "APT"
-    elif "Île-de-France : Ensemble" in libelle_text:
-        return "ÎLE-DE-FRANCE", "ENSEMBLE"
-    
-    # Dictionnaire de normalisation géographique
-    geo_mapping = {
-        "Agglomération de Marseille": "MARSEILLE",
-        "Agglomération de Lyon": "LYON",
-        "Agglomération de Lille": "LILLE",
-        "Seine-et-Marne": "77",
-        "Yvelines": "78",
-        "Essonne": "91",
-        "Hauts-de-Seine": "92",
-        "Seine-Saint-Denis": "93",
-        "Val-de-Marne": "94",
-        "Val-d'Oise": "95",
-        "France métropolitaine": "France",
-        "Province": "PROVINCE",
-        "Île-de-France": "ÎLE-DE-FRANCE",
-        "Ile-de-France": "ÎLE-DE-FRANCE",
-        "Rhône-Alpes": "RHÔNE-ALPES",
-        "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
-        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS",
-        "Auvergne": "AUVERGNE",
-        "Marseille":"MARSEILLE",
-        "Paris": "PARIS",
-        "Lille": "LILLE"
-    }
-    
-    type_mapping = {
-        "Appartements": "APT",
-        "Maisons": "MAI",
-        "Ensemble": "ENSEMBLE"
-    }
-    
-    parts = [p.strip() for p in libelle_text.split(' - ')]
-    
-    geo = None
-    type_bien = None
-    
-    for part in parts:
-        for key, value in geo_mapping.items():
-            if key.lower() in part.lower():
-                geo = value
-                break
-        if geo:
-            break
-    
-    for part in parts:
-        for key, value in type_mapping.items():
-            if key in part:
-                type_bien = value
-                break
-        if type_bien:
-            break
-    
-    return geo, type_bien
-
-# Application du parsing
-df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].apply(
-    lambda x: pd.Series(parse_libelle(x))
-)
-
-# Filtrage des lignes avec parsing réussi
-df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
-
-#  FILTRE POSITIF: Ne garder que les périmètres de la liste d'origine
-# Correspond exactement à: perimetre_insee = ['92', '93', '94', '95', '91','75', '78', '77', ...]
-perimetre_whitelist = [
-    '77', '78', '91', '92', '93', '94', '95',  # Départements IDF
-    'MARSEILLE', 'LYON', 'LILLE','PARIS',  # Agglomérations
-    'NORD-PAS-DE-CALAIS', 'PROVENCE-ALPES-CÔTE D\'AZUR', 'RHÔNE-ALPES',  # Régions
-    'PROVINCE', 'AUVERGNE', 'ÎLE-DE-FRANCE'
-]
-
-df_insee_clean = df_insee_clean[
-    df_insee_clean['VAL_MAILLE_GEO'].isin(perimetre_whitelist)
-].copy()
-
-print(f" Après filtre sur périmètres pertinents : {len(df_insee_clean)} séries")
-print(f"   Périmètres retenus : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
-
-# Identification des colonnes trimestrielles (format "YYYY-TX")
-quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
-
-if not quarter_cols:
-    print(" ERREUR: Aucune colonne trimestrielle détectée.")
-    sys.exit(1)
-
-# PIVOT: Transformation WIDE (colonnes) → LONG (lignes)
-df_insee_long = df_insee_clean.melt(
-    id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'],
-    value_vars=quarter_cols,
-    var_name='Periode_Str',
-    value_name='Indice de prix (INSEE)'
-)
-
-# Gestion des valeurs spéciales comme "(s)" = secret statistique
-df_insee_long['Indice de prix (INSEE)'] = df_insee_long['Indice de prix (INSEE)'].astype(str).replace(
-    [r'\(s\)', r'\(p\)', r'\(r\)', 'nan', ''], 
-    np.nan, 
-    regex=True
-)
-
-# Conversion numérique (gérer virgules européennes)
-df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
-    df_insee_long['Indice de prix (INSEE)'].str.replace(',', '.').str.strip(),
-    errors='coerce'
-)
-
-# Filtrage des NaN
-df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
-
-# Parsing temporel: "1992-T1" → Date
-df_insee_long['Year'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('-')[0]))
-df_insee_long['Quarter'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('T')[1]))
-df_insee_long["Date code"] = df_insee_long['Year'].astype(str) + 'Q' + df_insee_long["Quarter"].astype(str)
-df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
-
-insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
-
-print(f" Données INSEE pivotées : {len(insee_final)} observations")
-print(f"    Périmètres uniques : {insee_final['VAL_MAILLE_GEO'].nunique()}")
-print(f"    Types de biens : {insee_final['CD_TYPE_BIEN'].unique()}")
-print(f"    Période : {insee_final['Periode'].min()} → {insee_final['Periode'].max()}")
-
-# --- 4. Calcul de l'indice INSEE (Base 2020) ---
-insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
-mask_2020_insee = insee_final["Periode"].dt.year == 2020
-
-if not insee_final.loc[mask_2020_insee].empty:
-    pivot_2020_insee = insee_final.loc[mask_2020_insee].groupby(
-        ["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]
-    )["Indice de prix (INSEE)"].mean()
-    
-    insee_final["Indice de prix (INSEE) - Base 2020"] = (
-        (insee_final["Indice de prix (INSEE)"] / 
-         insee_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_insee)
-        ) * 100 
-    ).round(2)
-    
-    print(" Indice INSEE rebasé sur 2020")
-else:
-    print("  Attention: Données INSEE 2020 manquantes.")
-    insee_final["Indice de prix (INSEE) - Base 2020"] = np.nan
-
-# --- 5. Nettoyage et Création des Clés de Fusion ---
-for df in (df_final, insee_final):
-    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
-
-# Création de la clé string ROBUSTE "YYYYQx" (Ex: "2025Q2")
-df_final['Periode_Key'] = df_final["Periode"].dt.to_period('Q').astype(str)
-insee_final['Periode_Key'] = insee_final["Periode"].dt.to_period('Q').astype(str)
-
-# 🔍 DIAGNOSTIC: Vérification des doublons dans INSEE avant la fusion
-duplicates_check = insee_final.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']).size()
-doublons = duplicates_check[duplicates_check > 1]
-
-if not doublons.empty:
-    print(f"\n  ATTENTION: {len(doublons)} doublons détectés dans les données INSEE !")
-    print(" Exemples de doublons:")
-    print(doublons.head(10))
-    
-    # DÉDUPLICATION: Moyenne des valeurs en cas de doublon
-    print("\n Déduplication en cours (moyenne des valeurs)...")
-    insee_final = insee_final.groupby(
-        ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key'], 
-        as_index=False
-    ).agg({
-        'Periode': 'first',  # Garder la première valeur de Periode (elles sont identiques pour un même trimestre)
-        'Indice de prix (INSEE)': 'mean',
-        'Indice de prix (INSEE) - Base 2020': 'mean'
-    })
-    print(f" Après déduplication : {len(insee_final)} observations uniques")
-
-# --- 6. Fusion (Merge) ---
-merge = pd.merge(
-    df_final, 
-    insee_final.drop(columns=['Periode'], errors='ignore'), # On enlève la date Timestamp INSEE pour éviter doublon
-    how="inner",
-    left_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
-    right_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
-)
-
-# --- 7. Nettoyage Final et Conversion Date ---
-
-# Renommer la clé de fusion pour la clarté 
-merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
-merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
-
-# Reconstruction de l'index temporel propre
-merge["Periode"] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how="end")
-temp_period = pd.PeriodIndex(merge['Periode_Trimestre_Str'],freq='Q').to_timestamp(how='end')
-merge["Periode"] = temp_period.normalize().map(lambda x: x.replace(day=1))
-
-merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str', 'Periode_Merge'], errors='ignore')
-merge = merge.loc[:, ~merge.columns.duplicated()]
-
-# Tri final
-merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
-
-print(f"\n Fusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
-merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
-
-# Affichage des premières lignes
-print("\n Aperçu des données fusionnées:")
-merge.head()
+VAL_MAILLE_GEO	CD_TYPE_BIEN	Ecart_Moyen	Ecart_type	Ecart_min	Ecart_max	RMSE	Corrélation
+0	77	APT	1.539535	2.772726	-2.670	10.40	3.143149	0.925462
+1	77	MAI	0.148372	2.085268	-3.330	5.09	2.066212	0.977446
+2	78	APT	0.818372	1.682866	-2.090	6.18	1.853621	0.971431
+3	78	MAI	-0.181163	1.498387	-3.780	2.46	1.491901	0.982607
+4	91	APT	0.186512	1.411490	-2.860	2.57	1.407394	0.980933
+5	91	MAI	-0.118605	1.446680	-6.200	2.83	1.434670	0.980824
+6	92	APT	0.587442	1.078085	-1.190	3.30	1.216686	0.991732
+7	92	MAI	-3.302093	2.702960	-11.750	3.02	4.247341	0.955527
+8	93	APT	2.733953	2.625488	-1.200	12.40	3.769268	0.962336
+9	93	MAI	-2.174419	2.713811	-8.310	3.09	3.452766	0.972394
+10	94	APT	1.064186	1.651611	-1.000	7.25	1.948557	0.980859
+11	94	MAI	-0.998605	2.420541	-8.470	3.34	2.592291	0.980490
+12	95	APT	1.289535	2.603367	-2.680	7.67	2.877986	0.948217
+13	95	MAI	-0.801860	1.855753	-4.680	2.63	2.001677	0.982724
+14	LILLE	MAI	-0.351628	3.823511	-7.080	8.25	3.795115	0.968179
+15	LYON	APT	2.075581	1.612826	-1.080	7.37	2.617012	0.992412
+16	MARSEILLE	APT	0.440732	2.811020	-2.740	13.09	2.811290	0.984027
+17	NORD-PAS-DE-CALAIS	APT	0.750930	2.785487	-4.120	6.02	2.853488	0.987604
+18	NORD-PAS-DE-CALAIS	MAI	2.854186	3.616316	-0.710	22.19	4.573837	0.941347
+19	PARIS	APT	0.741163	0.815269	-0.660	3.27	1.094773	0.995744
+20	PROVENCE-ALPES-CÔTE D'AZUR	APT	0.834419	1.150326	-0.950	5.86	1.410223	0.995203
+21	PROVENCE-ALPES-CÔTE D'AZUR	MAI	-0.231395	1.567753	-4.810	4.62	1.566600	0.992257
+22	PROVINCE	APT	2.005814	2.249399	-1.240	9.31	2.994230	0.983583
+23	PROVINCE	MAI	1.837442	2.790934	-0.980	17.04	3.314266	0.973939
+24	RHÔNE-ALPES	APT	2.964070	3.227956	-1.785	15.91	4.354663	0.962242
+25	RHÔNE-ALPES	MAI	1.574302	1.639715	-0.780	7.28	2.259329	0.993152
+26	ÎLE-DE-FRANCE	APT	1.871395	1.786327	-2.100	6.24	2.572718	0.973618
+27	ÎLE-DE-FRANCE	MAI	-0.220698	1.255203	-2.310	2.32	1.260001	0.990126
