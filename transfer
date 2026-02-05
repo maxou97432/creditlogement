@@ -1,26 +1,103 @@
-                             OLS Regression Results                            
-===============================================================================
-Dep. Variable:             Delta_INSEE   R-squared:                       0.806
-Model:                             OLS   Adj. R-squared:                  0.806
-Method:                  Least Squares   F-statistic:                     2495.
-Date:              jeu., 05 févr. 2026   Prob (F-statistic):               0.00
-Time:                         10:19:52   Log-Likelihood:                -2307.1
-No. Observations:                 1201   AIC:                             4620.
-Df Residuals:                     1198   BIC:                             4635.
-Df Model:                            2                                         
-Covariance Type:             nonrobust                                         
-==============================================================================
-                 coef    std err          t      P>|t|      [0.025      0.975]
-------------------------------------------------------------------------------
-const         -0.1112      0.049     -2.253      0.024      -0.208      -0.014
-Delta_CL       0.7256      0.011     68.176      0.000       0.705       0.746
-Ecart_Lag1     0.1772      0.019      9.092      0.000       0.139       0.215
-==============================================================================
-Omnibus:                      489.428   Durbin-Watson:                   2.166
-Prob(Omnibus):                  0.000   Jarque-Bera (JB):             6531.094
-Skew:                          -1.507   Prob(JB):                         0.00
-Kurtosis:                      14.020   Cond. No.                         5.20
-==============================================================================
+Analyse de l'impact de la Volumétrie sur l'Écart...
 
-Notes:
-[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+--- Segments où le Volume explique l'Écart (Significatif) ---
+                          Zone Type  Corrélation (Pearson)  \
+0                           77  APT                  -0.58   
+1                           77  MAI                  -0.51   
+2                           78  APT                  -0.54   
+4                           91  APT                  -0.38   
+6                           92  APT                  -0.66   
+8                           93  APT                  -0.71   
+10                          94  APT                  -0.63   
+12                          95  APT                  -0.58   
+15                        LYON  APT                  -0.54   
+16                   MARSEILLE  APT                  -0.60   
+18          NORD-PAS-DE-CALAIS  MAI                  -0.67   
+19                       PARIS  APT                  -0.43   
+20  PROVENCE-ALPES-CÔTE D'AZUR  APT                  -0.50   
+22                    PROVINCE  APT                  -0.63   
+23                    PROVINCE  MAI                  -0.71   
+24                 RHÔNE-ALPES  APT                  -0.64   
+25                 RHÔNE-ALPES  MAI                  -0.56   
+26               ÎLE-DE-FRANCE  APT                  -0.50   
+27               ÎLE-DE-FRANCE  MAI                  -0.44   
+
+    Impact Volume (Beta)  P-value Significatif à 5%    R2   
+0                -0.0008   0.0001               OUI  0.306  
+1                -0.0000   0.0008               OUI  0.244  
+2                -0.0000   0.0008               OUI  0.244  
+4                -0.0000   0.0203               OUI  0.125  
+6                -0.0000   0.0000               OUI  0.399  
+8                -0.0001   0.0000               OUI  0.458  
+10               -0.0000   0.0001               OUI  0.303  
+12               -0.0000   0.0002               OUI  0.286  
+15               -0.0000   0.0016               OUI  0.219  
+16               -0.0001   0.0005               OUI  0.272  
+18               -0.0000   0.0002               OUI  0.286  
+19               -0.0000   0.0070               OUI  0.164  
+20               -0.0000   0.0011               OUI  0.231  
+22               -0.0000   0.0000               OUI  0.337  
+23               -0.0000   0.0000               OUI  0.362  
+24               -0.0000   0.0001               OUI  0.321  
+25               -0.0000   0.0005               OUI  0.259  
+26               -0.0000   0.0006               OUI  0.253  
+27               -0.0000   0.0027               OUI  0.199  
+                          Zone Type  Corrélation (Pearson)  \
+0                           77  APT                  -0.58   
+1                           77  MAI                  -0.51   
+2                           78  APT                  -0.54   
+3                           78  MAI                  -0.21   
+4                           91  APT                  -0.38   
+5                           91  MAI                  -0.03   
+6                           92  APT                  -0.66   
+7                           92  MAI                   0.01   
+8                           93  APT                  -0.71   
+9                           93  MAI                  -0.08   
+10                          94  APT                  -0.63   
+11                          94  MAI                  -0.01   
+12                          95  APT                  -0.58   
+13                          95  MAI                  -0.06   
+14                       LILLE  MAI                  -0.03   
+15                        LYON  APT                  -0.54   
+16                   MARSEILLE  APT                  -0.60   
+17          NORD-PAS-DE-CALAIS  APT                   0.01   
+18          NORD-PAS-DE-CALAIS  MAI                  -0.67   
+19                       PARIS  APT                  -0.43   
+20  PROVENCE-ALPES-CÔTE D'AZUR  APT                  -0.50   
+21  PROVENCE-ALPES-CÔTE D'AZUR  MAI                  -0.12   
+22                    PROVINCE  APT                  -0.63   
+23                    PROVINCE  MAI                  -0.71   
+24                 RHÔNE-ALPES  APT                  -0.64   
+25                 RHÔNE-ALPES  MAI                  -0.56   
+26               ÎLE-DE-FRANCE  APT                  -0.50   
+27               ÎLE-DE-FRANCE  MAI                  -0.44   
+
+    Impact Volume (Beta)  P-value Significatif à 5%    R2   
+0                -0.0008   0.0001               OUI  0.306  
+1                -0.0000   0.0008               OUI  0.244  
+2                -0.0000   0.0008               OUI  0.244  
+3                -0.0013   0.1869               NON  0.042  
+4                -0.0000   0.0203               OUI  0.125  
+5                -0.0000   0.6273               NON  0.006  
+6                -0.0000   0.0000               OUI  0.399  
+7                 0.0002   0.9687               NON  0.000  
+8                -0.0001   0.0000               OUI  0.458  
+9                -0.0001   0.5060               NON  0.011  
+10               -0.0000   0.0001               OUI  0.303  
+11               -0.0000   0.7534               NON  0.002  
+12               -0.0000   0.0002               OUI  0.286  
+13               -0.0000   0.6442               NON  0.005  
+14               -0.0001   0.8580               NON  0.001  
+15               -0.0000   0.0016               OUI  0.219  
+16               -0.0001   0.0005               OUI  0.272  
+17                0.0000   0.9479               NON  0.000  
+18               -0.0000   0.0002               OUI  0.286  
+19               -0.0000   0.0070               OUI  0.164  
+20               -0.0000   0.0011               OUI  0.231  
+21               -0.0000   0.2988               NON  0.026  
+22               -0.0000   0.0000               OUI  0.337  
+23               -0.0000   0.0000               OUI  0.362  
+24               -0.0000   0.0001               OUI  0.321  
+25               -0.0000   0.0005               OUI  0.259  
+26               -0.0000   0.0006               OUI  0.253  
+27               -0.0000   0.0027               OUI  0.199  
