@@ -1,67 +1,173 @@
+"""
+    Ce fichier a pour but de calculer le prix de chaque périmètre selon la méthodologie des univers élémentaires.
+    Il utilise la base_complete_filtree_complete.parquet, et un ensemble de fonctions dans fonctions.py.
 
-================================================================================
-AJUSTEMENTS À APPLIQUER
-Formule : Indice INSEE Prévu = Indice CL du trimestre - Ajustement
-================================================================================
-                          Zone Type  Ajustement T+1  Ajustement T+2  \
-0                           77  APT           10.09           10.71   
-1                           77  MAI            3.82            3.95   
-2                           78  APT            6.11            6.77   
-3                           78  MAI            0.92            0.96   
-4                           91  APT            1.88            1.95   
-5                           91  MAI           -1.92           -1.94   
-6                           92  APT            2.79            2.86   
-7                           92  MAI           -9.69           -9.80   
-8                           93  APT           10.72           11.61   
-9                           93  MAI           -2.82           -2.80   
-10                          94  APT            6.14            6.27   
-11                          94  MAI           -2.97           -3.52   
-12                          95  APT            7.09            7.27   
-13                          95  MAI            0.34            0.35   
-14                       LILLE  MAI            2.86            2.96   
-15                        LYON  APT            5.83            6.16   
-16                   MARSEILLE  APT           11.96           13.67   
-17          NORD-PAS-DE-CALAIS  APT           -1.46           -1.55   
-18          NORD-PAS-DE-CALAIS  MAI           29.64           35.59   
-19                       PARIS  APT            2.45            2.49   
-20  PROVENCE-ALPES-CÔTE D'AZUR  APT            3.94            4.35   
-21  PROVENCE-ALPES-CÔTE D'AZUR  MAI           -0.28           -0.28   
-22                    PROVINCE  APT           10.72           12.12   
-23                    PROVINCE  MAI           25.34           33.75   
-24                 RHÔNE-ALPES  APT           14.10           16.31   
-25                 RHÔNE-ALPES  MAI            5.47            5.83   
-26               ÎLE-DE-FRANCE  APT            5.00            5.20   
-27               ÎLE-DE-FRANCE  MAI            0.90            0.93   
+    Les résultats sont des prix trimestriels par périmètre dans le fichier resultat
+    
+    REFACTORÉ : Utilise maintenant process_dataset_restreint au lieu de process_maille
+"""
+import sys
+import os
+from datetime import datetime
+import pandas as pd
+import numpy as np
 
-    Marge Erreur  
-0           2.32  
-1           2.02  
-2           2.11  
-3           2.61  
-4           2.12  
-5           2.93  
-6           1.34  
-7           4.17  
-8           2.26  
-9           4.10  
-10          2.36  
-11          3.94  
-12          2.48  
-13          2.65  
-14          6.15  
-15          2.00  
-16          3.25  
-17          3.32  
-18          4.59  
-19          0.89  
-20          1.71  
-21          3.03  
-22          1.94  
-23          2.68  
-24          3.68  
-25          2.16  
-26          2.63  
-27          1.82  
+# Configuration des chemins
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-================================================================================
-COEFFICIENT DU BACKTEST
+import param_generaux as params
+from fonctions import (
+    load_and_preprocess_data, 
+    apply_nice_correction, 
+    save_results,
+    process_dataset_restreint,
+    get_structure_reference_city,
+    clean_base
+)
+
+
+def process_maille_wrapper(df, maille_col, maille_name, df_structure=None):
+    """
+    Wrapper pour utiliser process_dataset_restreint avec n'importe quelle maille géographique.
+    
+    Convertit la colonne maille_col en "Ville" pour compatibilité avec process_dataset_restreint,
+    puis reconvertit le résultat au format attendu.
+    """
+    print(f"\n--- Traitement de la maille : {maille_name} ---")
+    start_time = datetime.now()
+    
+    # Préparation : renommer la colonne maille en "Ville"
+    df_work = df.copy()
+    
+    # Si la colonne n'est pas déjà "Ville", on la renomme temporairement
+    if maille_col != "Ville":
+        if "Ville" in df_work.columns:
+            df_work = df_work.drop(columns=["Ville"])
+        df_work = df_work.rename(columns={maille_col: "Ville"})
+    
+    # Nettoyage standard
+    df_work["Ville"] = df_work["Ville"].astype(str).str.strip().str.upper()
+    df_work = df_work.dropna(subset=["Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
+    
+    # Si on a une structure de référence, on doit aussi renommer sa colonne
+    structure_adapted = None
+    if df_structure is not None:
+        structure_adapted = df_structure.copy()
+        if maille_col in structure_adapted.columns and maille_col != "Ville":
+            structure_adapted = structure_adapted.rename(columns={maille_col: "Ville"})
+    
+    # Appel de la fonction unifiée
+    result = process_dataset_restreint(
+        df_work, 
+        label=maille_name,
+        df_structure=structure_adapted,
+        df_arr=None  # Pas de gestion d'arrondissements pour les mailles génériques
+    )
+    
+    if result is None or result.empty:
+        print(f"Aucune donnée pour la maille {maille_name}")
+        return None
+    
+    # Conversion du format de sortie
+    # process_dataset_restreint retourne : Ville, Periode, prix_mm_3m (label), prix_mm_12m (label)
+    # On veut : VAL_MAILLE_GEO, TYPE_MAILLE, CD_TYPE_BIEN, Periode, DIC_NAME, prix_mm_value
+    
+    final_rows = []
+    
+    for _, row in result.iterrows():
+        ville = row["Ville"]
+        periode = row["Periode"]
+        
+        # Ligne pour 3 mois
+        col_3m = f"prix_mm_3m ({maille_name})"
+        if col_3m in result.columns and pd.notna(row[col_3m]):
+            final_rows.append({
+                "VAL_MAILLE_GEO": ville,
+                "TYPE_MAILLE": maille_col,
+                "CD_TYPE_BIEN": "APT",  # process_dataset_restreint agrège tous les types
+                "Periode": periode,
+                "DIC_NAME": "prix_m2_3m",
+                "prix_mm_value": row[col_3m],
+                "nb_observations": 0,  # Non disponible dans ce format
+                "nb_univers": 0
+            })
+        
+        # Ligne pour 12 mois
+        col_12m = f"prix_mm_12m ({maille_name})"
+        if col_12m in result.columns and pd.notna(row[col_12m]):
+            final_rows.append({
+                "VAL_MAILLE_GEO": ville,
+                "TYPE_MAILLE": maille_col,
+                "CD_TYPE_BIEN": "APT",
+                "Periode": periode,
+                "DIC_NAME": "prix_m2_12m",
+                "prix_mm_value": row[col_12m],
+                "nb_observations": 0,
+                "nb_univers": 0
+            })
+    
+    if not final_rows:
+        print(f"Aucune donnée après conversion pour {maille_name}")
+        return None
+    
+    final_result = pd.DataFrame(final_rows)
+    
+    # Calcul des taux d'inflation
+    final_result = final_result.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    final_result["TAUX_INFL_12M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=4)
+    final_result["TAUX_INFL_3M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=1)
+    
+    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
+    print(f"  → {len(final_result)} lignes générées")
+    return final_result
+
+
+
+if __name__ == "__main__":
+    start_global = datetime.now()
+    
+    # 1. Chargement des données
+    base_ml = load_and_preprocess_data()
+    
+    # Renommer CITY en Ville pour compatibilité
+    if "CITY" in base_ml.columns:
+        base_ml = base_ml.rename(columns={"CITY": "Ville"})
+    
+    # 2. Traitement PROVINCE
+    df_province_input = base_ml.copy()
+    mask_province = ~df_province_input["DEPT"].isin(params.CONFIG['idf_depts'])
+    df_province_input.loc[mask_province, "Ville"] = "PROVINCE"
+    df_province_input = df_province_input[df_province_input["Ville"] == "PROVINCE"]
+    
+    res_province = process_maille_wrapper(df_province_input, "Ville", "PROVINCE")
+    save_results(res_province, "PROVINCE")
+    
+    # 3. Traitement VILLES (TOP 15)
+    df_villes = apply_nice_correction(base_ml.copy())
+    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG['top15_cities'])]
+    
+    # Extraction de la structure de référence pour les villes
+    print("\n--- Extraction de la structure de marché de référence ---")
+    structure_villes, structure_arr = get_structure_reference_city(base_ml)
+    
+    res_villes = process_maille_wrapper(df_villes, "Ville", "CITY", df_structure=structure_villes)
+    save_results(res_villes, "CITY")
+    
+    # 4. Traitement DEPARTEMENTS
+    res_dept = process_maille_wrapper(base_ml, "DEPT", "DEPT")
+    save_results(res_dept, "DEPT")
+    
+    # 5. Traitement REGIONS
+    res_region = process_maille_wrapper(base_ml, "REGION", "REGION")
+    save_results(res_region, "REGION")
+    
+    # 6. Traitement NATIONAL
+    df_national = base_ml.copy()
+    df_national["PAYS"] = "FRANCE"
+    res_national = process_maille_wrapper(df_national, "PAYS", "NATIONAL")
+    save_results(res_national, "NATIONAL")
+    
+    print(f"\nTraitement global terminé en {datetime.now() - start_global}")
