@@ -1,4 +1,4 @@
-PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe z:/uflumth/gits/univers_elementaire/TI/comparaison_restriction_VS_lpi.py
+ PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe z:/uflumth/gits/univers_elementaire/TI/comparaison_restriction_VS_lpi.py
 Chargement V1 (Base complète)...
 Chargement V2 (Base réduite)...
 
@@ -14,7 +14,7 @@ Traceback (most recent call last):
   File "z:\uflumth\gits\univers_elementaire\TI\comparaison_restriction_VS_lpi.py", line 127, in <module>
     res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_paris)
                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "z:\uflumth\gits\univers_elementaire\TI\fonctions.py", line 1297, in process_dataset_restreint
+  File "z:\uflumth\gits\univers_elementaire\TI\fonctions.py", line 1295, in process_dataset_restreint
     res_final_complet = moy_pond_cities(res_final_arr, df_arr, label)
                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 TypeError: process_dataset_restreint.<locals>.moy_pond_cities() takes 2 positional arguments but 3 were given
