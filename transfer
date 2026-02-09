@@ -120,7 +120,20 @@ if __name__ == "__main__":
     # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
     # -------------------------------------------------------------------------
     print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
+    
+    # DEBUG: Vérifier les données avant traitement
+    print(f"\nDEBUG - Villes uniques dans raw_v2_apt: {sorted(raw_v2_apt['Ville'].unique())[:20]}")
+    print(f"DEBUG - Nombre de lignes Paris: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('751', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Marseille: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('132', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Lyon: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('693', na=False)])}")
+    print(f"DEBUG - Structure arrondissement shape: {structure_arrondissement.shape}")
+    print(f"DEBUG - Villes dans structure_arrondissement: {structure_arrondissement['Ville'].unique()}")
+    
     res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_arrondissement)
+    
+    # DEBUG: Vérifier les résultats après traitement
+    print(f"\nDEBUG - Villes dans res_v2_struct: {sorted(res_v2_struct['Ville'].unique())}")
+    
     res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
     res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=4, fill_method=None)
     res_v2_struct["TAUX_INFL_3M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=1, fill_method=None)
