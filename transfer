@@ -1,89 +1,1338 @@
-VS_lpi.py
-Chargement V1 (Base complète)...
-Chargement V2 (Base réduite)...
-DEBUG - Structure V1 après filtre: ['13201' '13202' '13203' '13204' '13205' '13206' '13207' '13208' '13209'
- '13210' '13211' '13212' '13213' '13214' '13215' '13216' '69381' '69382'
- '69383' '69384']
 
---- Calcul des prix glissants V2_STRUCT (avec structure V1) ---
+"""Ce fichier a pour but d'instancier le modèle de filtration d'anomalies de la base de données df_cleaned_data, ainsi que l'ensemble
+des fonctions utilisées pour le calcul des prix du m2 par méthode des univers élémentaires """
 
-DEBUG - Villes uniques dans raw_v2_apt: ['13075', '13106', '13201', '13202', '13203', '13204', '13205', '13206', '13207', '13208', '13209', '13210', '13211', '13212', '13213', '13214', '13215', '13216', '69040', '69191']
-DEBUG - Nombre de lignes Paris: 144259
-DEBUG - Nombre de lignes Marseille: 35159
-DEBUG - Nombre de lignes Lyon: 29035
-DEBUG - Structure arrondissement shape: (45, 3)
-DEBUG - Villes dans structure_arrondissement: ['75101' '75102' '75103' '75104' '75105' '75106' '75107' '75108' '75109'
- '75110' '75111' '75112' '75113' '75114' '75115' '75116' '75117' '75118'
- '75119' '75120' '13201' '13202' '13203' '13204' '13205' '13206' '13207'
- '13208' '13209' '13210' '13211' '13212' '13213' '13214' '13215' '13216'
- '69381' '69382' '69383' '69384' '69385' '69386' '69387' '69388' '69389']
 
---- Traitement du dataset : V2_STRUCT ---
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1175: FutureWarning:
 
-DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+from datetime import datetime
+import logging
+import math
+from datetime import timedelta, datetime
+from dateutil.relativedelta import relativedelta
+import numpy as np
+import pickle
+import os
+import pandas as pd
+import sys
+import param_generaux as params
+from sqlalchemy import create_engine
+import urllib
 
-   -> Application des poids (Structure V1)
 
-DEBUG - Villes dans res_v2_struct: ['BORDEAUX', 'GRENOBLE', 'LE HAVRE', 'LILLE', 'LYON', 'MARSEILLE', 'MONTPELLIER', 'NANTES', 'NICE', 'PARIS', 'REIMS', 'RENNES', 'SAINT-ETIENNE', 'STRASBOURG', 'TOULON', 'TOULOUSE']
-res_v2_struct calculé : 2304 lignes, 6 colonnes
-Dernière période disponible : 2025-12-01 00:00:00
-Données pour la carte : 16 villes
-Villes dans df_prix_m2 : ['BORDEAUX', 'GRENOBLE', 'LE HAVRE', 'LILLE', 'LYON', 'MARSEILLE', 'MONTPELLIER', 'NANTES', 'NICE', 'PARIS', 'REIMS', 'RENNES', 'ST ETIENNE', 'STRASBOURG', 'TOULON', 'TOULOUSE']
 
---- Génération des Cartes ---
-   -> Carte : APT
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI\resultats\carte_prix_m2_CITY_APT_V2_RESTREINT.png
+N_YEARS = 3  # pour le modele ML
+VAR_NUM = ["Prix_m2"]  # pour le modele TI
+# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
+N_MIN = 30  # pour les deux modeles
 
-=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===
+# Méthode de détection d'anomalies (la même pour les deux modèles)
+# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
+# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
+# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
+OUTLIER_MODE = "mult"
+# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
+COEFF_ECART = 4
+PRIX_M2_MIN = 200
+PRIX_M2_MAX = 20000
 
---- Chargement LPI/IAD ---
 
---- Génération des graphiques ---
+class DateOffset:
+    def __init__(
+        self,
+        years=0,
+        months=0,
+        weeks=0,
+        days=0,
+        hours=0,
+        minutes=0,
+        seconds=0,
+        milliseconds=0,
+        microseconds=0,
+        year=None,
+        month=None,
+        day=None,
+        weekday=None,
+        hour=None,
+        minute=None,
+        second=None,
+        microsecond=None,
+    ):
+        self.relative = relativedelta(
+            years=years,
+            months=months,
+            weeks=weeks,
+            days=days,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            microseconds=microseconds + milliseconds * 1000
+        )
+        self.absolute = {
+            "year": year,
+            "month": month,
+            "day": day,
+            "weekday": weekday,
+            "hour": hour,
+            "minute": minute,
+            "second": second,
+            "microsecond": microsecond
+        }
 
-================================================================================
- RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)
-================================================================================
+    def apply(self, date: datetime) -> datetime:
+        date = date + self.relative
+        date_dict = {k: v for k, v in self.absolute.items() if v is not None}
+        return date.replace(**date_dict)
 
-CORRESPONDANCE LPI dans IC (Couverture moyenne) :
-   IC 3M  : 50.2%
-   IC 12M : 32.9%
+    def __rsub__(self, other):
+        # Permet d'utiliser : date - DateOffset(...)
+        return other - self.relative
 
-RMSE ABSOLU (€/m²) :
-   3M  : 203.93 €/m²
-   12M : 199.26 €/m²
-   Δ   : +4.67 €/m² (12M meilleur)
+class ImportRecentData:
+    """Classe pour importer les données récentes.
 
-RMSE RELATIF (%) :
-   3M  : 6.05 %
-   12M : 5.83 %
+    Arguments
+    ---------
+    n_years: int
+        Nombre d'années les plus récentes à importer (n_years dernière(s))
+    """
 
-CORRÉLATION avec LPI :
-   3M  : 0.9382
-   12M : 0.9494
-   Δ   : +0.0113 (12M meilleur)
+    def __init__(self, n_years, input_):
+        self.n_years = n_years
+        self.input_ = input_
 
---------------------------------------------------------------------------------
+    def import_data_recent(self):
+        """Importe les données des n_years dernières années
 
-Détail par ville :
-        Ville  Prix_Moyen_LPI    RMSE_3M   RMSE_12M  Delta_RMSE  RMSE_REL_3M  RMSE_REL_12M  CORR_3M  CORR_12M
-        LILLE     3405.891892 141.892473  77.781497   64.110977     4.166089      2.283734 0.964112  0.988573
-  MONTPELLIER     3188.054054 227.453037 187.188368   40.264669     7.134541      5.871556 0.953651  0.945521
-     TOULOUSE     3379.072072 144.828539 109.494096   35.334443     4.286045      3.240360 0.971026  0.974495
-       TOULON     2628.828829 135.024697 102.785711   32.238986     5.136306      3.909943 0.873372  0.904409
-   STRASBOURG     3620.873874 129.161348 110.577792   18.583555     3.567132      3.053898 0.953995  0.969799
-     LE HAVRE     2179.504505 123.821145 106.118702   17.702443     5.681160      4.868937 0.911719  0.939692
-        REIMS     2609.828829 142.234399 125.227335   17.007064     5.449951      4.798297 0.905175  0.912662
-     GRENOBLE     2714.486486 109.777862 101.799145    7.978718     4.044148      3.750217 0.857660  0.906567
-        PARIS    10071.018018 463.524004 463.524004    0.000000     4.602554      4.602554 0.966687  0.966687
-    MARSEILLE     3168.252252 227.306087 227.306087    0.000000     7.174495      7.174495 0.920855  0.920855
-         LYON     4770.792793 390.526339 390.526339    0.000000     8.185774      8.185774 0.959102  0.959102
-SAINT-ETIENNE     1449.684685 264.611102 270.311207   -5.700106    18.253011     18.646207 0.909812  0.942697
-       RENNES     3517.873874 193.015110 216.199567  -23.184457     5.486698      6.145745 0.966161  0.966023
-         NICE     4491.612613 213.176452 242.797157  -29.620705     4.746101      5.405568 0.951662  0.963451
-       NANTES     3642.216216 168.591587 206.621876  -38.030288     4.628819      5.672971 0.975008  0.970648
-     BORDEAUX     4440.846847 187.932514 249.967752  -62.035238     4.231907      5.628831 0.971165  0.959989
+        Returns
+        -------
+        df: pandas.DataFrame
+            Dataframe des données sur les n_years dernières années.
+        """
 
- Statistiques sauvegardées : z:\uflumth\gits\univers_elementaire\TI\resultats\stats_comparaison_V2_LPI.csv
+        df = self.input_.copy()
+        nb = int(self.n_years)
+        max_year = df["DATE"].dt.year.max()
+        prof_max =  pd.Timestamp(year= max_year- nb, month= 1, day= 1)
+        df = df[df["DATE"] >= prof_max].copy()
+        df.reset_index(drop=True, inplace=True)
 
-=== ANALYSE TERMINÉE ===
+        return df
+
+class CalcMetaNum:
+
+    def __init__(self, n_years, geo_bien, var_num):
+        self.n_years = n_years
+        self.geo_bien = geo_bien
+        self.var_num = var_num
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Calculs des statistiques descriptives par typologie de bien
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        meta_num_all: pandas.DataFrame
+                      Dataframe contenant les statistiques descriptives par typologie de bien.
+        X: pandas.DataFrame
+           Dataframe enrichi de la colonne year_geo_bien.
+        """
+
+        if self.n_years == -1:
+            X["year_geo_bien"] = X["YEAR"] + X[self.geo_bien]
+
+        else:
+            n_months = self.n_years * 12
+            prof_max = X["DATE"].max() - DateOffset(months=n_months)
+
+            if self.n_years == 1:
+                X["year_geo_bien"] = X[self.geo_bien]
+            elif self.n_years == 2:
+                X["year_geo_bien"] = (
+                    (X["DATE"] >= prof_max + DateOffset(months=12))
+                    .astype("int8")
+                    .astype(str)
+                    + "_"
+                    + X[self.geo_bien]
+                )
+            else:
+                X["days"] =  X["DATE"] -  X["DATE"].min()
+                X["year"] = X.days // np.timedelta64(1, "Y")
+                X.loc[X.year < 0, "year"] = 0
+                X.loc[X.year >= self.n_years, "year"] = self.n_years - 1
+                X["year"] = X["year"].astype(int).astype(str)
+                X["year_geo_bien"] = X["year"] + "_" + X[self.geo_bien]
+                X.drop(columns=["days", "year"], inplace=True)
+
+        meta_num_all = X.groupby("year_geo_bien")[self.var_num].describe(
+            percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]
+        )
+
+        return meta_num_all, X
+    
+
+class EffectifsParMailleGeo:
+
+    def __init__(self, maille_geo):
+        self.maille_geo = maille_geo
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Calcul des effectifs par maille géographique
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        dict_geo: dict
+                  Dictionnaire contenant les effectifs calculés par maille géographique.
+        """
+
+        chunksize = 1000
+        X = X.replace(to_replace=[np.inf, -np.inf], value=[np.nan, np.nan], regex=False)
+        tap = (
+            X.loc[pd.notnull(X["Prix_m2"]), [self.maille_geo]]
+            .apply(lambda x: x.value_counts())
+            .stack()
+            .reset_index()
+        )
+
+        tap.columns = ["mod", "var", "N"]
+        tap.drop(columns="var", inplace=True)
+        dict_geo = tap.set_index("mod")["N"].to_dict()
+
+        if self.maille_geo == "ville_":
+            tap.rename(columns={"mod": "LL_VILLE", "N": "EFFECTIF_VILLE"}, inplace=True)
+
+
+        elif self.maille_geo == "code_iris":
+            tap.rename(columns={"mod": "CD_IRIS", "N": "EFFECTIF_IRIS"}, inplace=True)
+
+        return dict_geo
+
+class DefMailleGeoIRIS:
+
+    def __init__(self, n_min, dict_geo_city, dict_geo_iris, geo_bien, maille_geo_loc):
+        self.n_min = n_min
+        self.dict_geo_city = dict_geo_city
+        self.dict_geo_iris = dict_geo_iris
+        self.geo_bien = geo_bien
+        self.maille_geo_loc = maille_geo_loc
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Définition pour chaque opération de la maille géographique qui sera appliquée (iris, arrondissement, ville, ou département)
+           en fonction des effectifs calculés par type de maille géographique
+           MAILLE LA PLUS FINE : IRIS
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        X: pandas.DataFrame
+            Dataframe
+        """
+
+        extract_iris = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR", "code_iris"]].apply(
+            lambda x: self.loc_min_count_iris(
+                x, self.dict_geo_city, self.dict_geo_iris, self.n_min
+            ),
+            axis=1,
+        )
+        X[[self.geo_bien, self.maille_geo_loc]] = pd.DataFrame(extract_iris.tolist())
+
+        return X
+
+    def loc_min_count_iris(self, x, dict_geo_ville, dict_geo_iris, n_min):
+        """Choix de la maille géographique avec granularité la plus fine à l'iris"""
+        iris_n = dict_geo_iris.get(x[4])
+        city_n = dict_geo_ville.get(x[1])
+
+        if iris_n is None:
+            iris_n = np.nan
+        if city_n is None:
+            city_n = np.nan
+        if x[0] is None:
+            x[0] = "NAN"
+
+        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
+        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
+
+        if (not math.isnan(iris_n)) & (iris_n >= n_min):
+            return x[4], "IRIS"
+        elif (str(x[0])[:3] in ["750", "690"]) or (str(x[0]) in marseille_cp_prefix):
+            return x[0], "ARR"
+        elif (
+            (
+                str(x[0])[:3] not in ["750", "690"]
+                and (str(x[0]) not in marseille_cp_prefix)
+            )
+            & (not math.isnan(city_n))
+            & (city_n >= n_min)
+        ):
+            return x[1], "CITY"
+        else:
+            return x[2], "DEPT"
+          
+class DefMailleGeoCITY:
+
+    def __init__(self, n_min, dict_geo_city, geo_bien, by_year):
+        self.n_min = n_min
+        self.dict_geo_city = dict_geo_city
+        self.geo_bien = geo_bien
+        self.by_year = by_year
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Définition pour chaque opération de la maille géographique qui sera appliquée (arrondissement, ville, ou département)
+           en fonction des effectifs calculés par type de maille géographique
+           MAILLE LA PLUS FINE : ARRONDISSEMENT
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        X: pandas.DataFrame
+            Dataframe enrichi de la colonne maille_geo_loc_city.
+        """
+
+        extract_city = X[["CODE_POSTAL", "ville_", "DEPT", "YEAR"]].apply(
+            lambda x: self.loc_min_count_city(x, self.dict_geo_city), axis=1
+        )
+        X[[self.geo_bien, "maille_geo_loc_city"]] = pd.DataFrame(extract_city.tolist())
+
+        del X["maille_geo_loc_city"]
+
+        return X
+
+    def loc_min_count_city(self, x, dict_geo):
+        """Choix de la maille géographique avec granularité la plus fine à la ville."""
+
+        # Pour éviter de découper en ARR: AIX EN PROVENCE QUI COMMENCE EGALEMENT PAR 130 !!!
+        marseille_cp_prefix = ["130" + str(i).zfill(2) for i in range(1, 17)]
+
+        if x[0] is not None:
+            # On conserve les CP pour Paris et Lyon
+            if (str(x[0])[:3] not in ["750", "690"]) and (
+                str(x[0]) not in marseille_cp_prefix
+            ):
+                if self.by_year == 0:
+                    city_n = dict_geo.get(x[1])
+                elif self.by_year == 1:
+                    city_n = dict_geo.get(x[3] + x[1])
+                if city_n is not None:
+                    return x[1], "CITY"
+            else:
+                return x[0], "ARR"
+        return x[2], "DEPT"
+class DetectAno:
+
+    def __init__(self, meta_num_all, var_num):
+        self.meta_num_all = meta_num_all
+        self.var_num = var_num
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        """Détection et suppression des anomalies
+
+        Arguments
+        ---------
+        X: pandas.DataFrame
+            Dataframe (dvf)
+        y: None, optionnel
+
+        Returns
+        -------
+        dic_geo_meta: dict
+                      Dictionnaire contenant les informations nécessaires à la détection d'anomalies.
+        X: pandas.DataFrame
+           Dataframe
+        """
+
+        start_time = datetime.now()
+        X['OUTLIER_REASON'] =  ""
+        dic_geo_meta = {}
+        for i in self.meta_num_all.index:
+            meta_num = self.meta_num_all.loc[i, :].unstack(level=[0]).transpose()
+            meta_num.columns = [
+                "N",
+                "Mean",
+                "Std",
+                "Min",
+                "D1",
+                "Q1",
+                "Median",
+                "Q3",
+                "D9",
+                "Max",
+            ]
+            meta_num["IQR"] = meta_num["Q3"] - meta_num["Q1"]
+            if OUTLIER_MODE == "iqr":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Median"] - COEFF_ECART * meta_num["IQR"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Median"] + COEFF_ECART * meta_num["IQR"]
+                )
+            elif OUTLIER_MODE == "std":
+                meta_num["Lower_Limit"] = (
+                    meta_num["Mean"] - COEFF_ECART * meta_num["Std"]
+                )
+                meta_num["Upper_Limit"] = (
+                    meta_num["Mean"] + COEFF_ECART * meta_num["Std"]
+                )
+            else:
+                # Critère 1.
+                meta_num["Lower_Limit"] = meta_num["Median"] / COEFF_ECART
+
+                # Critère 2.
+                meta_num["Upper_Limit"] = meta_num["Median"] * COEFF_ECART
+            dic_geo_meta[i] = meta_num
+
+        
+        for var in self.var_num:
+            logging.info("\t Topage des anomalies pour la variable " + var)
+    
+            # Créer les masques pour distinguer inf et sup
+            mask_inf = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    x["year_geo_bien"] == x["year_geo_bien"]
+                    and x[var] < dic_geo_meta[x["year_geo_bien"]].loc[var, "Lower_Limit"]
+                ),
+                axis=1,
+            )
+    
+            mask_sup = X[["year_geo_bien", var]].apply(
+                lambda x: (
+                    x["year_geo_bien"] == x["year_geo_bien"]
+                    and x[var] > dic_geo_meta[x["year_geo_bien"]].loc[var, "Upper_Limit"]
+                ),
+                axis=1,
+            )
+    
+            # Tracker séparément inf et sup
+            X.loc[mask_inf, "OUTLIER_REASON"] = X.loc[mask_inf, "OUTLIER_REASON"].apply(
+                lambda x: (x + f"|{var}_inf_mediane_div_{COEFF_ECART}") if x else f"{var}_inf_mediane_div_{COEFF_ECART}"
+            )
+    
+            X.loc[mask_sup, "OUTLIER_REASON"] = X.loc[mask_sup, "OUTLIER_REASON"].apply(
+                lambda x: (x + f"|{var}_sup_mediane_mult_{COEFF_ECART}") if x else f"{var}_sup_mediane_mult_{COEFF_ECART}"
+            )
+
+            #X["Ano_" + var] = (mask_inf | mask_sup).astype(int)
+        
+        # =============================================================================
+        # Critères supplémentaires basés sur la médiane par groupe
+        # =============================================================================
+        if "Prix_m2" in X.columns and "YEAR" in X.columns and "ville_" in X.columns and "TYPE_BIEN" in X.columns:
+            logging.info("\t Application des critères de filtrage basés sur la médiane")
+            
+            # Calculer les médianes par groupe (YEAR, ville_, TYPE_BIEN)
+            medianes = X.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
+            medianes.rename(columns={'Prix_m2': 'mediane_prix_m2'}, inplace=True)
+            
+            # Merge pour avoir la médiane de chaque groupe sur chaque ligne
+            X = X.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
+            
+            # Critère 1: Prix < médiane / 4
+            mask_inf_med_div4 = (X['Prix_m2'] < X['mediane_prix_m2'] / 4) & X['Prix_m2'].notna()
+            X.loc[mask_inf_med_div4, 'OUTLIER_REASON'] = X.loc[mask_inf_med_div4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_mediane_div_4") if x else "Prix_m2_inf_mediane_div_4"
+            )
+            
+            # Critère 2: Prix > médiane * 4
+            mask_sup_med_mult4 = (X['Prix_m2'] > X['mediane_prix_m2'] * 4) & X['Prix_m2'].notna()
+            X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'] = X.loc[mask_sup_med_mult4, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_mediane_mult_4") if x else "Prix_m2_sup_mediane_mult_4"
+            )
+            
+            # Critère 3: Prix < 200€
+            mask_inf_200 = (X['Prix_m2'] < PRIX_M2_MIN) & X['Prix_m2'].notna()
+            X.loc[mask_inf_200, 'OUTLIER_REASON'] = X.loc[mask_inf_200, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_inf_200") if x else "Prix_m2_inf_200"
+            )
+            
+            # Critère 4: Prix > 20,000€
+            mask_sup_20000 = (X['Prix_m2'] > PRIX_M2_MAX) & X['Prix_m2'].notna()
+            X.loc[mask_sup_20000, 'OUTLIER_REASON'] = X.loc[mask_sup_20000, 'OUTLIER_REASON'].apply(
+                lambda x: (x + "|Prix_m2_sup_20000") if x else "Prix_m2_sup_20000"
+            )
+            
+            # Marquer les anomalies détectées par ces critères
+            mask_median_criteria = mask_inf_med_div4 | mask_sup_med_mult4 | mask_inf_200 | mask_sup_20000
+            # Ensure 'Ano_Prix_m2' column exists before trying to update it
+            if "Ano_Prix_m2" not in X.columns:
+                X["Ano_Prix_m2"] = 0
+            X.loc[mask_median_criteria, "Ano_Prix_m2"] = 1  # anomalie
+            
+            logging.info(f"\t \t \t - Prix < médiane/4 : {mask_inf_med_div4.sum()}")
+            logging.info(f"\t \t \t - Prix > médiane*4 : {mask_sup_med_mult4.sum()}")
+            logging.info(f"\t \t \t - Prix < {PRIX_M2_MIN}€ : {mask_inf_200.sum()}")
+            logging.info(f"\t \t \t - Prix > {PRIX_M2_MAX}€ : {mask_sup_20000.sum()}")
+            
+            # Supprimer la colonne temporaire médiane
+            X.drop(columns=['mediane_prix_m2'], inplace=True, errors='ignore')
+
+        nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        # Attention, on supprime les surfaces habitables alors que le pb peut provenir de la valeur foncière sous ou sur-estimée
+        if "Prix_m2" in self.var_num:
+            X.loc[(X["Ano_Prix_m2"] == 1), "NB_SURF_HAB"] = np.nan
+            X.loc[(X["Ano_Prix_m2"] == 1), "Prix_m2"] = np.nan
+        if "Prix_piece" in self.var_num:
+            X.loc[X["Ano_Prix_piece"] == 1, "NB_PIECES"] = np.nan
+        if "nb_m2_by_piece" in self.var_num:
+            X.loc[X["Ano_nb_m2_by_piece"] == 1, "NB_PIECES"] = np.nan
+            X.drop(columns=["Ano_nb_m2_by_piece"], inplace=True)
+
+        post_nb_nn_surf_hab = X["NB_SURF_HAB"].notnull().sum()
+        post_nb_nn_prix_m2 = X["Prix_m2"].notnull().sum()
+        post_nb_nn_nb_pieces = X["NB_PIECES"].notnull().sum()
+
+        nb_suppr_surf_hab = nb_nn_surf_hab - post_nb_nn_surf_hab
+        nb_suppr_prix_m2 = nb_nn_prix_m2 - post_nb_nn_prix_m2
+        nb_suppr_nb_pieces = nb_nn_nb_pieces - post_nb_nn_nb_pieces
+
+        logging.info(
+            f"\t \t {nb_suppr_surf_hab} anomalies supprimées sur le champ NB_SURF_HAB soit {round((nb_suppr_surf_hab/nb_nn_surf_hab)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_prix_m2} anomalies supprimées sur le champ Prix_m2 soit {round((nb_suppr_prix_m2/nb_nn_prix_m2)*100,2)}% : {datetime.now()-start_time}"
+        )
+        logging.info(
+            f"\t \t {nb_suppr_nb_pieces} anomalies supprimées sur le champ NB_PIECES soit {round((nb_suppr_nb_pieces/nb_nn_nb_pieces)*100,2)}% : {datetime.now()-start_time} \n"
+        )
+
+        # Recherche des anomalies sur les valeurs foncières par rapport au montant du prêt
+        X["ratio_val_mt_op"] = np.nan
+        X.loc[X["CD_NATUR_OP"].isin(["AQA", "AQN"]), "ratio_val_mt_op"] = (
+            X["MT_OPE"] / X["VALEUR_FONCIERE"]
+        )
+        
+        # Tracker les anomalies ratio_val_mt_op
+        mask_ratio_ano = X["ratio_val_mt_op"] > 2
+        X.loc[mask_ratio_ano, "OUTLIER_REASON"] = X.loc[mask_ratio_ano, "OUTLIER_REASON"].apply(
+            lambda x: (x + "|ratio_val_mt_op") if x else "ratio_val_mt_op"
+        )
+        
+        X.loc[X["ratio_val_mt_op"] > 2, "VALEUR_FONCIERE"] = np.nan
+        X.loc[X["ratio_val_mt_op"] > 2, "Prix_m2"] = np.nan
+
+        X.drop(columns=["ratio_val_mt_op"], inplace=True)
+        X.reset_index(drop=True, inplace=True)
+
+        return dic_geo_meta, X
+    
+
+def detect_ano_ml(input_df, n_years=None):
+
+    logging.info("ML detection of anomalies starting")
+
+    # =============================================================================
+    # Import des données sur les N_YEARS dernières années
+    # =============================================================================
+
+    start_time = datetime.now()
+
+    importrecentdata = ImportRecentData(n_years=n_years, input_=input_df)
+    data_recent = importrecentdata.import_data_recent()
+    logging.info(
+        f"Base d'analyse filtrée sur les {params.N_YEARS} dernières années : {datetime.now()-start_time}\n"
+    )
+  
+    data_original = input_df.copy()  
+    
+
+    data_recent["DATE"] = data_recent["DATE"].apply(lambda x: x.replace(day=1))
+    
+  
+    ids_avant_detection = set(data_recent["ID"])  # IDs qui entrent dans la détection
+    
+    # Import des données sur les N_YEARS dernières années
+    start_time = datetime.now()
+    logging.info(
+        f"Base d'analyse filtrée sur les {n_years} dernières années : {datetime.now()-start_time}\n"
+    )
+
+    # =============================================================================
+    # Calculs des effectifs par ville et par Iris
+    # =============================================================================
+    step_time = datetime.now()
+    logging.info("workforce calculation")
+    effectifsparIris = EffectifsParMailleGeo(maille_geo="code_iris")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_code_iris des effectifs par code_iris : {datetime.now()-step_time}\n"
+    )
+    step_time = datetime.now()
+    effectifsparVille = EffectifsParMailleGeo(maille_geo="ville_")
+    logging.info(
+        f"\t Calcul et enregistrement dans le dictionnaire dict_geo_ville_ des effectifs par ville_ : {datetime.now()-step_time}\n"
+    )
+
+
+    dict_geo_city = effectifsparVille.transform(data_recent)
+
+
+
+    defmaillegeocity = DefMailleGeoCITY(
+        n_min=params.N_MIN,
+        dict_geo_city=dict_geo_city,
+        geo_bien="geo_bien_city",
+        by_year=0,
+    )
+    data_recent = defmaillegeocity.transform(data_recent)
+
+    logging.info("workforce calculation OK")
+
+    # =============================================================================
+    # Calculs des statistiques descriptives par typologie de bien
+    # =============================================================================
+
+    logging.info("statistics calculation")
+    step_time = datetime.now()
+    calcmetanumCity = CalcMetaNum(
+        n_years=1, geo_bien="geo_bien_city", var_num=params.VAR_NUM
+    )
+    meta_num_all_city, data_recent = calcmetanumCity.transform(data_recent)
+    logging.info(
+        f"\t Calcul des statistiques descriptives par geo_bien_city et typologie de bien : {datetime.now()-step_time}\n"
+    )
+
+    # =============================================================================
+    # Détection et suppression des anomalies
+    # =============================================================================
+    logging.info("Detection and elimination of anomalies")
+    
+
+    detectano = DetectAno(meta_num_all=meta_num_all_city, var_num=VAR_NUM)
+    result = detectano.transform(data_recent)
+    
+    if isinstance(result, tuple):
+        _, data_recent = result
+    else:
+        data_recent = result
+    
+    outlier_reasons = data_recent[['ID','OUTLIER_REASON']].copy()
+
+    mask_nan_prix = data_recent["Prix_m2"].isna()
+    mask_no_reason = (data_recent["OUTLIER_REASON"].isna()) | (data_recent["OUTLIER_REASON"] == "")
+    mask_nan_non_marquee = mask_nan_prix & mask_no_reason
+
+    data_recent.loc[mask_nan_non_marquee, "OUTLIER_REASON"] = "missing_prix_m2"
+    outlier_reasons = data_recent[['ID','OUTLIER_REASON']].copy()
+    nb_avant = len(data_recent)
+    data_recent = data_recent.dropna(subset=["Prix_m2"])
+    nb_apres = len(data_recent)
+    print(f"Nombre de lignes supprimées :{nb_avant - nb_apres}")
+
+    data_recent.drop(columns=["year_geo_bien","OUTLIER_REASON"], inplace=True, errors="ignore")
+    logging.info("Detection and elimination of anomalies OK")
+    logging.info(f"ML detection of anomalies completed: {datetime.now()-start_time}.\n")
+    
+    
+    colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT_Corse_2A_2B", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", 
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES", 
+                        "CODE_POSTAL", "NATURE_MUTATION", "CLE_INTEROP_ADR","DEMANDE"]
+    
+    # Vérifier que toutes les colonnes existent
+    colonnes_disponibles = [col for col in colonnes_finales if col in data_recent.columns]
+    data_recent = data_recent[colonnes_disponibles]
+    
+    
+    ids_valides = set(data_recent["ID"])
+    
+    # Outliers = IDs entrés dans la détection MAIS rejetés
+    ids_outliers = ids_avant_detection - ids_valides
+    
+    # Récupérer les outliers depuis les données ORIGINALES
+    data_mauvais = data_original[
+        (data_original["ID"].isin(ids_outliers))
+    ].copy()
+    data_mauvais = data_mauvais.merge(outlier_reasons, on = 'ID', how = 'left')
+    # Ne garder que les colonnes disponibles
+    colonnes_communes = [col for col in colonnes_disponibles if col in data_mauvais.columns]
+    colonnes_communes.append("OUTLIER_REASON")
+    data_mauvais = data_mauvais[colonnes_communes]
+    
+
+    return data_recent, data_mauvais
+
+   
+   
+
+#df = pd.read_parquet("Z:\data\cl_estim\cleaned_data\df_transac_clean.parquet")
+#base_ml = detect_ano_ml(input_df=df, date_min = None, date_max = None, type_bien = None)
+#base_ml.to_csv(r"N:\uflumth\indicateur_marche\prix_m2\my_cl_estim\prez\base_ml_output.csv", index =  False, encoding = "utf-8")
+
+
+class Connector(object):
+    """Classe permettant de lire et écrire des données."""
+
+    def __init__(self):
+        self.engine_read = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="read",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+        self.engine_write = connect_sql(
+            server=params.SERVEUR,
+            database=params.DATABASE,
+            id=params.PROD_ID,
+            pwd=params.PROD_PWD,
+            usage="write",
+            conn_params_optional=params.CONN_PARAMS_OPTIONAL
+        )
+
+    def read_excel(self, input_path, skiprows=None):
+        try:
+            data = pd.read_excel(input_path, skiprows=skiprows)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_csv(self, input_path, sep=","):
+        try:
+            data = pd.read_csv(input_path, sep=sep, low_memory=False)
+        except FileNotFoundError:
+            sys.exit()
+        return data
+
+    def read_pkl(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PKL}"
+            if os.path.isfile(f"{input_path}{params.EXT_PKL}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PKL}"
+        )
+        try:
+            data = pd.read_pickle(input_path)
+        except:
+            try:
+                with open(input_path, "rb") as file:
+                    data = pickle.load(file)
+            except FileNotFoundError:
+                sys.exit()
+        return data
+
+    def write_pkl(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PKL}"
+        try:
+            data.to_pickle(output_path)
+        except:
+            try:
+                with open(output_path, "wb") as file:
+                    pickle.dump(data, file)
+            except:  # if the directory doesn't exist
+                sys.exit()
+
+    def read_parquet(self, input_path):
+        input_path = (
+            f"{input_path}{params.EXT_PARQUET}"
+            if os.path.isfile(f"{input_path}{params.EXT_PARQUET}")
+            else f"{input_path}{params.SUFF_TEST_MODE}{params.EXT_PARQUET}"
+        )
+        try:
+            data = pd.read_parquet(input_path)
+        except:
+            sys.exit()
+        return data
+
+    def write_parquet(self, data, output_path):
+        output_path = f"{_add_suffixe(output_path)}{params.EXT_PARQUET}"
+        try:
+            data.to_parquet(output_path)
+        except:
+            sys.exit()
+
+    def read_sql(self, query):
+        data = pd.read_sql_query(query, self.engine_read)
+
+        return data
+
+    def write_sql(self, data, table, chunksize=None):
+        # chunksize < 2100 / nb_colonnes
+        chunksize = chunksize or round(2000 / len(data.columns))
+        data.reset_index(inplace=True, drop=True)
+
+        data.to_sql(
+            name=table,
+            con=self.engine_write,
+            schema=params.SCHEMA,
+            if_exists="append",
+            index=False,
+            chunksize=chunksize,
+        )
+
+    def delete_sql(self, table):
+        with self.engine_read.begin() as conn:
+            conn.execute(f"TRUNCATE TABLE {table}")
+
+
+def connect_sql(
+    server=params.SERVEUR,
+    database=params.DATABASE,
+    id=params.PROD_ID,
+    pwd=params.PROD_PWD,
+    usage="read",
+    conn_params_optional=None
+):
+    conn_params = "DRIVER={SQL Server};" f"SERVER={server};DATABASE={database};"
+    conn_params_optional = conn_params_optional or {}
+    for key, val in conn_params_optional.items():
+        conn_params += f"{key}={val};"
+    if pwd is not None:
+        conn_params += f"UID={id};PWD={pwd};"
+    conn_params = urllib.parse.quote_plus(conn_params)
+    create_engine_kwargs = {"fast_executemany": True}
+    if usage != "write":
+        create_engine_kwargs["isolation_level"] = "AUTOCOMMIT"
+    engine = create_engine(
+        "mssql+pyodbc:///?odbc_connect={}".format(conn_params), **create_engine_kwargs
+    )
+    return engine
+
+
+def _add_suffixe(path):
+    if params.TEST_MODE and params.N_ROWS is not None:
+        path = f"{path}{params.SUFF_TEST_MODE}"
+    return path
+
+
+
+
+
+
+
+#############################################################################################
+#############################################################################################
+                                #Fonctions Univ-Elem#
+
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
+
+def load_and_preprocess_data(specific_path = None):
+    """Charge et prétraite les données initiales."""
+    print("Chargement des données...")
+    if specific_path is not None:
+        fichier = specific_path
+    else:
+        fichier = params.CONFIG['input_file']
+
+    try:
+        df = pd.read_parquet(fichier)
+    except FileNotFoundError:
+        print(f"Le fichier {fichier} est introuvable")
+    
+    
+    # Renommage et nettoyage initial
+    df = df.rename(columns={"DEPT_Corse_2A_2B": "DEPT", "ville_": "CITY", "code_iris": "IRIS", "CODE_POSTAL": "CP"})
+    df = df.dropna(subset=["CITY"])
+    
+    # Conversion des dates
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    # Ajout colonne REGION
+    df['DEPT'] = df['DEPT'].astype(str).str.zfill(2)
+    df['REGION'] = df['DEPT'].map(params.CONFIG['dep_to_region'])
+    
+    return df
+
+def apply_nice_correction(df):
+    """Applique la correction spécifique pour Nice."""
+    if "IRIS" in df.columns:
+        mask_nice = df["IRIS"].str[:5].isin(params.CONFIG['codes_insee_nice'])
+        print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+        df.loc[mask_nice, "CITY"] = "NICE"
+    return df
+
+# SUPPRIMÉ : complete_months() - Version obsolète, remplacée par la version interne dans process_dataset_restreint
+
+# SUPPRIMÉ : calcule_moyenne_mobile_ponderee() - Version obsolète, remplacée par calc_mm() dans process_dataset_restreint
+
+# SUPPRIMÉ : process_maille() - Version obsolète, remplacée par process_dataset_restreint()
+# Utilisez process_maille_wrapper() dans calc_prix_m2_univ_elem.py pour la compatibilité
+
+def save_results(df, suffixe_fichier):
+    """Sauvegarde les résultats dans différents fichiers CSV."""
+    if df is None or df.empty:
+        print(f"Aucune donnée à sauvegarder pour {suffixe_fichier}")
+        return
+
+    # 1. Base complète (filtrée sur date)
+    df_complet = df.copy()
+    df_complet["Periode"] = pd.to_datetime(df_complet["Periode"])
+    df_complet = df_complet[df_complet["Periode"] >= "2015-03-01"]
+    
+    output_path = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_complet_{suffixe_fichier}.csv")
+    df_complet.to_csv(output_path, index=False)
+    print(f"Sauvegardé: {output_path}")
+
+    # 2. Dernière période (MAJ)
+    df_maj = df_complet.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
+    df_maj = df_maj[df_maj["Periode"] == df_maj["Periode"].max()]
+    df_maj = df_maj.rename(columns={"Periode": "DT_MAJ_PM2"})
+    
+    cols_export = ["DIC_NAME", "CD_TYPE_BIEN", "TYPE_MAILLE", "VAL_MAILLE_GEO", "DT_MAJ_PM2", "nb_observations", "prix_mm_value", "TAUX_INFL_3M", "TAUX_INFL_12M"]
+    # Vérification que les colonnes existent
+    cols_export = [c for c in cols_export if c in df_maj.columns]
+    
+    output_path_maj = os.path.join(params.CONFIG['output_dir'], f"prix_m2_univ_elem_MAJ_{suffixe_fichier}.csv")
+    df_maj[cols_export].to_csv(output_path_maj, index=False)
+    print(f"Sauvegardé: {output_path_maj}")
+
+    # 3. Statistiques de volumétrie
+    df_vol = df.copy()
+    df_vol["Periode"] = pd.to_datetime(df_vol["Periode"])
+    date_max = df_vol["Periode"].max()
+    periodes_triees = sorted(df_vol["Periode"].unique(), reverse=True)
+    if len(periodes_triees) > 4:
+        seuil_exclusion = periodes_triees[3]
+        df_vol = df_vol[df_vol["Periode"] < seuil_exclusion]
+    df_vol = df_vol[(df_vol["Periode"] >= "2017-03-01") & (df_vol["Periode"] < date_max)]
+    
+    df_min = df_vol.groupby(["VAL_MAILLE_GEO", "DIC_NAME","CD_TYPE_BIEN"], as_index=False)["nb_observations"].min()
+    df_pivot = df_min.pivot(index=['VAL_MAILLE_GEO',"CD_TYPE_BIEN"], columns='DIC_NAME', values='nb_observations')
+    df_pivot.columns.name = None
+    df_pivot = df_pivot.reset_index()
+    df_pivot.rename(columns={"prix_m2_3m": "NB_BIENS"}, inplace=True)
+    df_pivot = df_pivot[["VAL_MAILLE_GEO","CD_TYPE_BIEN","NB_BIENS"]]
+
+    output_path_vol = os.path.join(params.CONFIG['output_dir'], f"stat_volumeterie_{suffixe_fichier}.csv")
+    df_pivot.to_csv(output_path_vol, index=False)
+    print(f"Sauvegardé: {output_path_vol}")
+
+# --- Fonctions de filtrage spécifiques ---
+
+def filter_province(df):
+    """Filtre pour créer la maille PROVINCE."""
+    mask_idf = df["DEPT"].isin(params.CONFIG['idf_depts'])
+    df_prov = df.copy()
+    df_prov.loc[~mask_idf, "PROVINCE_CODE"] = "PROVINCE"
+    # On ne garde que les lignes province
+    return df_prov[df_prov["PROVINCE_CODE"] == "PROVINCE"]
+
+def filter_villes_top15(df):
+    """Filtre pour les 15 plus grandes villes."""
+    # Application de la correction Nice 
+    df = apply_nice_correction(df)
+    return df[df["CITY"].isin(params.CONFIG['top15_cities'])]
+
+def filter_villes_cp(df):
+    """Filtre pour les arrondissements (CP) des grandes villes."""
+    return df[df["CITY"].isin(params.CONFIG['villes_arrondissements'])]
+
+
+
+# SUPPRIMÉ : get_structure_reference() - Version obsolète, remplacée par get_structure_reference_city()
+
+
+
+
+# =============================================================================
+# 1. FONCTIONS UTILISEES
+# =============================================================================
+def load_cl_results(base_path, version_label):
+    print(f"--- Chargement {version_label} depuis {base_path} ---")
+    dfs = []
+    suffixes = ["CITY", "DEPT", "REGION", "PROVINCE", "NATIONAL"]
+    
+    for suffix in suffixes:
+
+        if version_label == "V1":
+            possible_names = [f"prix_m2_univ_elem_MAJ_{suffix}.csv"]
+        else:
+            # Pour V2, on veut la version modifiée 
+            possible_names = [
+                f"prix_m2_univ_elem_MAJ_{suffix}_RESTREINT.csv"
+            ]
+        
+        found = False
+        for fname in possible_names:
+            fpath = os.path.join(base_path, fname)
+            if os.path.exists(fpath):
+                print(f"   -> Trouvé : {fname}")
+                try:
+                    df = pd.read_csv(fpath)
+
+                    if "VAL_MAILLE_GEO" not in df.columns:
+                        cols_pot = [c for c in df.columns if c in ["Ville", "DEPT", "REGION", "PROVINCE_CODE"]]
+                        if cols_pot:
+                            df = df.rename(columns={cols_pot[0]: "VAL_MAILLE_GEO"})
+                    
+                    df['MAILLE_TYPE'] = suffix
+                    dfs.append(df)
+                    found = True
+                    break 
+                except Exception as e:
+                    print(f"   /!\\ Erreur lecture {fname}: {e}")
+        
+        if not found and version_label == "V2": 
+            # On accepte que le National manque, mais on le signale
+            print(f"   [INFO] Fichier manquant pour maille : {suffix}")
+
+    if not dfs: return None
+    full_df = pd.concat(dfs, ignore_index=True)
+    
+
+    if "DT_MAJ_PM2" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["DT_MAJ_PM2"], errors='coerce')
+    elif "Periode" in full_df.columns:
+        full_df["Periode"] = pd.to_datetime(full_df["Periode"], errors='coerce')
+        
+    col_prix = "prix_mm_value"
+    if col_prix in full_df.columns:
+        full_df = full_df.rename(columns={col_prix: f"Prix_M2_{version_label}"})
+        
+    return full_df
+
+def get_structure_ref_local(df):
+        """Extrait la structure du marché (poids) """
+        print("\n--- Extraction de la Structure de Marché (V1) ---")
+        dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+        structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
+        structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.strip().str.upper()
+        structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+        structure = structure[structure["TYPE_BIEN"] == structure["PB"]].drop(columns=["PB"])
+        structure["poids_structure"] = structure.groupby("Ville")["volume_ref"].transform(lambda x: x / x.sum())
+        return structure[["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "poids_structure"]]
+
+
+
+def extract_arrondissement(row):
+    """Remplace PARIS, LYON, MARSEILLE par son arrondissement (code IRIS), sinon retourne Ville
+    """
+    
+    # Chercher la ville dans plusieurs colonnes possibles
+    ville = row.get('Ville')
+
+
+    if pd.isna(ville):
+        return ville
+
+    ville_upper = str(ville).upper().strip()
+    villes_arr = {"PARIS","MARSEILLE","LYON"}
+
+    if ville_upper not in villes_arr :
+        return ville
+        
+    #Chercher le code IRIS
+    for col in ('code_iris', 'IRIS'):
+        if col in row.index:
+            val = row.get(col)
+            if pd.notna(val):
+                code = str(val)
+                if len(code) >= 5:
+                    return code[:5]  # Retourne le code IRIS 
+    
+    # Si pas de code IRIS trouvé pour Paris, retourner "PARIS" 
+    return ville
+
+def clean_base(df, top_cities):
+    """Nettoyage standard pour V1 et V2"""
+    # Renommage
+    if "ville_" in df.columns: df = df.rename(columns={"ville_": "Ville"})
+    if "CITY" in df.columns: df = df.rename(columns={"CITY": "Ville"})
+    
+    # Dates
+    df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+    
+    # Ville
+    df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
+    df["Ville"] = df["Ville"].replace({
+        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE", "ST ETIENNE": "SAINT-ETIENNE"
+    })
+    
+    # Filtre Top 15
+    df = df[df["Ville"].isin(top_cities)]
+    
+    # Nettoyage Types
+    df = df.dropna(subset=["DATE", "Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
+    df["Periode"] = df["DATE"].dt.to_period("M").dt.to_timestamp()
+    
+    df["Ville"] = df.apply(lambda row: extract_arrondissement(row), axis=1)
+    return df
+
+def poids_arr(raw):
+    """Calcule les poids de chaque arrondissement de Paris, Marseille et Lyon (APT uniquement)"""
+    plages = {
+        "PARIS" : (75101, 75120),
+        "MARSEILLE" : (13201, 13216),
+        "LYON" : (69381, 69389)
+    }
+
+    results = []
+
+    for city, (low, high) in plages.items():
+
+        mask_arr = (
+            pd.to_numeric(raw['Ville'], errors="coerce").between(low, high)
+            & raw["Ville"].astype(str).str.len().eq(5)
+            & (raw["TYPE_BIEN"] == "APT")  
+        )
+        df_arr = raw[mask_arr].copy()
+        if df_arr.empty:
+            continue
+    
+        # Volume TOTAL par arrondissement (APT uniquement)
+        structure = df_arr.groupby("Ville", dropna=False).size().reset_index(name="volume_ref")
+    
+        # Poids relatif de chaque arrondissement dans Paris (APT)
+        total = structure["volume_ref"].sum()
+        structure["poids_relatif"] = structure["volume_ref"] / total if total > 0 else 0
+        structure["Ville_source"] = city
+        results.append(structure[["Ville", "Ville_source", "poids_relatif"]])
+
+    if results:
+        return pd.concat(results, ignore_index = True)
+    return pd.DataFrame(columns=["Ville", "Ville_source", "poids_relatif"])
+
+def get_structure_reference_city(df):
+    """Extrait les poids de référence par Ville (Base complete).
+    
+    Returns:
+        tuple: (structure_univers_elementaires, structure_arrondissements)
+            - structure_univers_elementaires: Poids par univers élémentaire pour toutes les villes
+            - structure_arrondissements: Poids des arrondissements de Paris, Marseille et Lyon
+    """
+    df_arr = poids_arr(df)
+
+    # Agrégation par Univers Élémentaire
+    dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    
+    structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
+    
+    # Nettoyage cohérence Type/Pièces
+    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    structure = structure[structure["TYPE_BIEN"] == structure["PB"]].drop(columns=["PB"])
+    
+    # Calcul Poids Relatif dans la Ville
+    structure["poids_ref"] = structure.groupby("Ville")["volume_ref"].transform(lambda x: x / x.sum())
+    df_structure_univ_elem = structure[["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "poids_ref"]]
+    return df_structure_univ_elem, df_arr
+
+# ===================================================================================
+# Permet de récupérer les poids de chaque arrondissements de Paris dans la structure de marché globale
+# ===================================================================================
+
+
+    
+def process_dataset_restreint(df, label, df_structure=None, df_arr = None):
+    """
+    Calcule les prix moyens podérées par Ville.
+    Si df_structure est fourni : Utilise les poids externes
+    Sinon : Utilise les poids internes (Méthode Standard).
+    """
+    print(f"\n--- Traitement du dataset : {label} ---")
+    
+    # 1. Agrégation Mensuelle (Prix unitaires)
+    keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    univers_mensuel = (
+        df.groupby(keys, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_moyen=("Prix_m2", "mean")
+        )
+        .reset_index()
+    )
+    
+    # Nettoyage cohérence
+    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    univers_mensuel = univers_mensuel[univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]].drop(columns=["PB"])
+
+    # 2. Complétion des mois manquants
+    def complete_months(g):
+        g = g.sort_values("Periode").set_index("Periode")
+        idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+        g = g.reindex(idx)
+        for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+            g[col] = g[col].ffill().bfill()
+        g["nb_transac"] = g["nb_transac"].fillna(0)
+        return g.reset_index().rename(columns={"index": "Periode"})
+
+    univers_complet = (
+        univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+        .apply(complete_months)
+    )
+
+    # 3. Application des Poids 
+    
+    if df_structure is not None:
+        print("   -> Application des poids (Structure V1)")
+        univers_complet = univers_complet.merge(
+            df_structure, 
+            on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], 
+            how="left"
+        )
+
+        univers_complet = univers_complet.rename(columns={"poids_ref": "poids_relatif"})
+        # On ne garde que ce qui existe dans la structure de référence
+        univers_complet = univers_complet.dropna(subset=["poids_relatif"])
+    else:
+        print("   -> Calcul des poids STANDARDS (Structure Interne)")
+        poids_global = (
+            univers_mensuel.groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+            .sum().rename(columns={"nb_transac": "poids_total"})
+        )
+        poids_global["poids_relatif"] = poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
+        univers_complet = univers_complet.merge(poids_global, on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], how="left")
+
+    # 4. Indicatrices (Pour filtrer les segments sans prix)
+    typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+    
+    univers_complet["I_3m"] = univers_complet.groupby(typokeys)["nb_transac"].transform(lambda s: (s.rolling(3, min_periods=3).sum() > 0).astype(int))
+    univers_complet["I_12m"] = univers_complet.groupby(typokeys)["nb_transac"].transform(lambda s: (s.rolling(12, min_periods=12).sum() > 0).astype(int))
+
+    # 5. Calcul Moyenne Mobile Pondérée 
+    def calc_mm(g, window, col_indic):
+        result = []
+        g = g.sort_values("Periode")
+        periodes = g["Periode"].unique()
+        
+        for i, periode in enumerate(periodes):
+            start = max(0, i - window + 1)
+
+            df_fenetre = g[g["Periode"].isin(periodes[start:i+1])]
+            
+            # On ne garde que les segments qui ont un prix ET assez de volume (Indicatrice)
+            actifs = df_fenetre[(df_fenetre["prix_moyen"].notna()) & (df_fenetre[col_indic] == 1)]
+            
+            if len(actifs) == 0:
+                result.append({"Periode": periode, "prix_mm": np.nan})
+                continue
+            
+            # Renormalisation des poids sur les segments actifs
+            poids_sum = actifs["poids_relatif"].sum()
+            if poids_sum > 0:
+                prix = np.average(actifs["prix_moyen"], weights=actifs["poids_relatif"])
+            else:
+                prix = np.nan
+            
+            result.append({"Periode": periode, "prix_mm": prix})
+        return pd.DataFrame(result)
+
+    # 6. Exécution par Ville (Agrégation tous types confondus pour coller à LPI)
+    res_final = []
+    for ville, df_ville in univers_complet.groupby("Ville"):
+
+        
+        mm_12m = calc_mm(df_ville, 12, "I_12m")
+        mm_12m = mm_12m.rename(columns={"prix_mm": f"prix_mm_12m ({label})"})
+        
+
+        mm_3m = calc_mm(df_ville, 3, "I_3m")
+        mm_3m = mm_3m.rename(columns={"prix_mm": f"prix_mm_3m ({label})"})
+        
+        merged = pd.merge(mm_12m, mm_3m, on="Periode", how="outer")
+        merged["Ville"] = ville
+        res_final.append(merged)
+
+    res_final_arr = pd.concat(res_final, ignore_index=True)
+
+    def moy_pond_cities(res, arr):
+        """Agrège les arrondissements de Paris, Marseille et Lyon en une seule ville avec moyenne pondérée.
+           Si df_arr n'a pas de "Ville_source", on déduit la ville avec Ville
+        """
+        col3 = f"prix_mm_3m ({label})"
+        col12 = f"prix_mm_12m ({label})"
+
+        arr_use = arr.copy()
+
+        # on veut s'assurer qu'on sait quelle ville appartient chaque code IRIS (Ville_source)
+        # La colonne Ville_source devrait déjà exister dans arr
+        
+        print(f"\n  DEBUG moy_pond_cities - Début agrégation")
+        print(f"  DEBUG - res shape avant merge: {res.shape}")
+        print(f"  DEBUG - arr shape: {arr.shape}")
+        print(f"  DEBUG - Villes dans res: {res['Ville'].unique()[:10]}")
+        
+        res_arr = res.merge(arr_use, on='Ville', how="inner")
+        print(f"  DEBUG - res_arr shape après merge: {res_arr.shape}")
+        print(f"  DEBUG - Villes_source dans res_arr: {res_arr['Ville_source'].unique() if 'Ville_source' in res_arr.columns else 'COLONNE MANQUANTE'}")
+        
+        if res_arr.empty:
+            print(f"  DEBUG - res_arr est vide, retour sans agrégation")
+            return res
+        
+        def _wavg(group, col):
+            m = group[col]
+            w = group["poids_relatif"]
+            mask = m.notna() & w.notna() & (w > 0)
+            if not mask.any():
+                return np.nan
+            return np.average(m[mask], weights=w[mask])
+        
+        print(f"  DEBUG - Calcul agg_3 avec colonne: {col3}")
+        agg_3 = (
+            res_arr.groupby(["Ville_source", "Periode"]).apply(lambda x: _wavg(x, col3), include_groups=False).reset_index(name=col3)
+        )
+        print(f"  DEBUG - agg_3 shape: {agg_3.shape}, villes: {agg_3['Ville_source'].unique()}")
+        
+        print(f"  DEBUG - Calcul agg_12 avec colonne: {col12}")
+        agg_12 = (
+            res_arr.groupby(["Ville_source", "Periode"]).apply(lambda x: _wavg(x, col12), include_groups=False).reset_index(name=col12)
+        )
+        print(f"  DEBUG - agg_12 shape: {agg_12.shape}, villes: {agg_12['Ville_source'].unique()}")
+        
+        agg_city = agg_12.merge(agg_3, on=["Ville_source", "Periode"], how="outer")
+        print(f"  DEBUG - agg_city après merge shape: {agg_city.shape}")
+        print(f"  DEBUG - Exemple agg_city:\n{agg_city.head()}")
+        
+        agg_city = agg_city.rename(columns={"Ville_source": "Ville"})
+        villes_cibles = agg_city["Ville"].unique().tolist()
+        print(f"  DEBUG - Villes agrégées: {villes_cibles}")
+        
+        to_drop_codes = arr_use[arr_use["Ville_source"].isin(villes_cibles)]["Ville"].astype(str).tolist()
+        print(f"  DEBUG - Codes à supprimer: {to_drop_codes[:10]}")
+        
+        res_sans_arr = res[~res["Ville"].astype(str).isin(to_drop_codes)].copy()
+        print(f"  DEBUG - res_sans_arr shape: {res_sans_arr.shape}")
+
+        # Ajouter les villes agrégées
+        result = pd.concat([res_sans_arr, agg_city], ignore_index=True)
+        print(f"  DEBUG - Résultat final shape: {result.shape}, villes: {sorted(result['Ville'].unique())}")
+        return result
+
+    if df_arr is not None:
+        # Agrégation des arrondissements (Paris, Marseille, Lyon, etc.)
+        res_final_complet = moy_pond_cities(res_final_arr, df_arr)
+        return res_final_complet
+
+    return res_final_arr
