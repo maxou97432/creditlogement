@@ -1,48 +1,14 @@
-def get_stats(self) -> Dict:
-        """Retourne des statistiques sur la hiérarchie."""
-        return {
-            'iris_count': len(self.iris_to_city),
-            'city_count': len(self.city_to_dept),
-            'dept_count': len(set(self.city_to_dept.values())),
-            'region_count': len(set(self.dept_to_region.values()))
-        }
+print(f"\n✅ Corrections appliquées à {corrections_count}/{total_groups} zones/types")
+    print(f"   → Corrections directes: {corrections_direct}")
+    print(f"   → Corrections via parent: {corrections_parent}")
     
-    def __repr__(self):
-        stats = self.get_stats()
-        return (f"GeoHierarchy("
-                f"IRIS={stats['iris_count']}, "
-                f"Cities={stats['city_count']}, "
-                f"Depts={stats['dept_count']}, "
-                f"Regions={stats['region_count']})")
-
-
-if __name__ == "__main__":
-    # Test
-    print("🧪 Test GeoHierarchy\n")
+    # Statistiques de couverture
+    total_obs = len(df_merged)
+    corrected_obs = df_merged['correction_applied'].sum()
+    coverage = corrected_obs / total_obs * 100 if total_obs > 0 else 0
+    print(f"   → Couverture: {corrected_obs}/{total_obs} observations ({coverage:.1f}%)")
     
-    # Données de test avec codes IRIS réels (9 chiffres)
-    test_data = pd.DataFrame({
-        'code_iris': ['751010101', '751020202', '130550201', '693810305'],
-        'Ville': ['PARIS', 'PARIS', 'MARSEILLE', 'LYON'],
-        'VAL_MAILLE_GEO': ['75101', '75102', '13201', '69381']
-    })
+    # Utiliser l'indice corrigé comme prix corrigé (pour le calcul des taux)
+    df_merged['prix_corrected'] = df_merged['Indice de prix (CL) - Corrigé']
     
-    # Construction
-    hierarchy = GeoHierarchy()
-    hierarchy.build_from_data(test_data)
-    
-    print(f"\n{hierarchy}")
-    
-    # Tests
-    print("\n📍 Tests de hiérarchie:")
-    
-    # Test avec codes commune (5 digits extraits)
-    test_cases = ['75101', 'PARIS', '75', 'ÎLE-DE-FRANCE']
-    for code in test_cases:
-        level = hierarchy.get_level(code)
-        parent = hierarchy.get_parent(code)
-        full_hierarchy = hierarchy.get_hierarchy(code)
-        
-        print(f"\n{code} ({level}):")
-        print(f"  Parent: {parent}")
-        print(f"  Hiérarchie: {' → '.join(full_hierarchy)}")
+    return df_merged
