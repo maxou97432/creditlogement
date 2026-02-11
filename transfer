@@ -1,86 +1,19 @@
-def print_estimation(self, result: Dict):
-        """
-        Affiche le résultat d'une estimation de manière formatée.
+# Île-de-France
+        idf_depts = ['75', '77', '78', '91', '92', '93', '94', '95']
+        for dept in idf_depts:
+            self.dept_to_region[dept] = 'ÎLE-DE-FRANCE'
         
-        Args:
-            result: Dict retourné par estimate()
-        """
-        print("\n" + "="*80)
-        print("ESTIMATION DE VALEUR FONCIÈRE")
-        print("="*80)
-        
-        if not result['success']:
-            print(f"❌ Échec: {result['message']}")
-            return
-        
-        print(f"\n📅 Période:")
-        print(f"   Date d'achat      : {result['annee_achat']}")
-        print(f"   Année de référence: {result['annee_reference']}")
-        print(f"   Écart             : {result['periode']} ans")
-        
-        print(f"\n💰 Valeurs:")
-        print(f"   Valeur initiale : {result['valeur_initiale']:,.2f} €")
-        print(f"   Valeur estimée  : {result['valeur_estimee']:,.2f} €")
-        print(f"   Variation       : {result['valeur_estimee'] - result['valeur_initiale']:+,.2f} €")
-        
-        print(f"\n📊 Taux d'inflation:")
-        print(f"   Taux appliqué   : {result['taux_pourcent']:+.2f}%")
-        print(f"   Niveau géo      : {result['niveau_geo']} ({result['maille']})")
-        print(f"   Effectif        : {result['effectif']} transactions")
-        
-        print(f"\n✅ {result['message']}")
-
-
-if __name__ == "__main__":
-    # Test avec table fictive
-    print("🧪 Test PropertyValueEstimator\n")
-    
-    # Créer une table de taux fictive
-    rates_data = [
-        {'VAL_MAILLE_GEO': '75101', 'CD_TYPE_BIEN': 'APT', 'annee': 2025, 'periode': 0, 'taux_inflation': 0.00, 'effectif': 150, 'niveau_geo': 'IRIS'},
-        {'VAL_MAILLE_GEO': '75101', 'CD_TYPE_BIEN': 'APT', 'annee': 2024, 'periode': 1, 'taux_inflation': 0.023, 'effectif': 145, 'niveau_geo': 'IRIS'},
-        {'VAL_MAILLE_GEO': '75101', 'CD_TYPE_BIEN': 'APT', 'annee': 2023, 'periode': 2, 'taux_inflation': 0.048, 'effectif': 132, 'niveau_geo': 'IRIS'},
-        {'VAL_MAILLE_GEO': '75101', 'CD_TYPE_BIEN': 'APT', 'annee': 2022, 'periode': 3, 'taux_inflation': 0.072, 'effectif': 128, 'niveau_geo': 'IRIS'},
-        {'VAL_MAILLE_GEO': 'PARIS', 'CD_TYPE_BIEN': 'APT', 'annee': 2022, 'periode': 3, 'taux_inflation': 0.065, 'effectif': 450, 'niveau_geo': 'CITY'},
-        {'VAL_MAILLE_GEO': '75', 'CD_TYPE_BIEN': 'APT', 'annee': 2022, 'periode': 3, 'taux_inflation': 0.060, 'effectif': 800, 'niveau_geo': 'DEPT'},
-    ]
-    
-    df_rates = pd.DataFrame(rates_data)
-    df_rates.to_csv('/tmp/test_rates.csv', index=False)
-    
-    # Test estimation
-    estimator = PropertyValueEstimator('/tmp/test_rates.csv')
-    
-    # Cas 1: Avec IRIS
-    print("\n1️⃣  Test avec code IRIS:")
-    result = estimator.estimate(
-        valeur_initiale=300000,
-        date_achat='2022-03-15',
-        type_bien='APT',
-        code_iris='75101',
-        ville='PARIS',
-        dept='75'
-    )
-    estimator.print_estimation(result)
-    
-    # Cas 2: Sans IRIS (fallback ville)
-    print("\n2️⃣  Test sans IRIS (fallback ville):")
-    result = estimator.estimate(
-        valeur_initiale=300000,
-        date_achat='2022-03-15',
-        type_bien='APT',
-        ville='PARIS',
-        dept='75'
-    )
-    estimator.print_estimation(result)
-    
-    # Cas 3: Batch
-    print("\n3️⃣  Test batch:")
-    biens = pd.DataFrame([
-        {'valeur_initiale': 300000, 'date_achat': '2022-03-15', 'type_bien': 'APT', 'code_iris': '75101', 'ville': 'PARIS', 'dept': '75'},
-        {'valeur_initiale': 250000, 'date_achat': '2023-06-20', 'type_bien': 'APT', 'ville': 'PARIS', 'dept': '75'},
-    ])
-    
-    results = estimator.estimate_batch(biens)
-    print("\n📊 Résultats batch:")
-    print(results[['valeur_initiale', 'valeur_estimee', 'taux_pourcent', 'niveau_geo']].to_string(index=False))
+        # Autres régions principales
+        regions = {
+            'PROVENCE-ALPES-CÔTE D\'AZUR': ['04', '05', '06', '13', '83', '84'],
+            'AUVERGNE-RHÔNE-ALPES': ['01', '03', '07', '15', '26', '38', '42', '43', '63', '69', '73', '74'],
+            'NOUVELLE-AQUITAINE': ['16', '17', '19', '23', '24', '33', '40', '47', '64', '79', '86', '87'],
+            'OCCITANIE': ['09', '11', '12', '30', '31', '32', '34', '46', '48', '65', '66', '81', '82'],
+            'HAUTS-DE-FRANCE': ['02', '59', '60', '62', '80'],
+            'GRAND EST': ['08', '10', '51', '52', '54', '55', '57', '67', '68', '88'],
+            'BRETAGNE': ['22', '29', '35', '56'],
+            'PAYS DE LA LOIRE': ['44', '49', '53', '72', '85'],
+            'NORMANDIE': ['14', '27', '50', '61', '76'],
+            'BOURGOGNE-FRANCHE-COMTÉ': ['21', '25', '39', '58', '70', '71', '89', '90'],
+            'CENTRE-VAL DE LOIRE': ['18', '28', '36', '37', '41', '45'],
+        }
