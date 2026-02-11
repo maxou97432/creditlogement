@@ -1,19 +1,48 @@
-# Île-de-France
-        idf_depts = ['75', '77', '78', '91', '92', '93', '94', '95']
-        for dept in idf_depts:
-            self.dept_to_region[dept] = 'ÎLE-DE-FRANCE'
-        
-        # Autres régions principales
-        regions = {
-            'PROVENCE-ALPES-CÔTE D\'AZUR': ['04', '05', '06', '13', '83', '84'],
-            'AUVERGNE-RHÔNE-ALPES': ['01', '03', '07', '15', '26', '38', '42', '43', '63', '69', '73', '74'],
-            'NOUVELLE-AQUITAINE': ['16', '17', '19', '23', '24', '33', '40', '47', '64', '79', '86', '87'],
-            'OCCITANIE': ['09', '11', '12', '30', '31', '32', '34', '46', '48', '65', '66', '81', '82'],
-            'HAUTS-DE-FRANCE': ['02', '59', '60', '62', '80'],
-            'GRAND EST': ['08', '10', '51', '52', '54', '55', '57', '67', '68', '88'],
-            'BRETAGNE': ['22', '29', '35', '56'],
-            'PAYS DE LA LOIRE': ['44', '49', '53', '72', '85'],
-            'NORMANDIE': ['14', '27', '50', '61', '76'],
-            'BOURGOGNE-FRANCHE-COMTÉ': ['21', '25', '39', '58', '70', '71', '89', '90'],
-            'CENTRE-VAL DE LOIRE': ['18', '28', '36', '37', '41', '45'],
+def get_stats(self) -> Dict:
+        """Retourne des statistiques sur la hiérarchie."""
+        return {
+            'iris_count': len(self.iris_to_city),
+            'city_count': len(self.city_to_dept),
+            'dept_count': len(set(self.city_to_dept.values())),
+            'region_count': len(set(self.dept_to_region.values()))
         }
+    
+    def __repr__(self):
+        stats = self.get_stats()
+        return (f"GeoHierarchy("
+                f"IRIS={stats['iris_count']}, "
+                f"Cities={stats['city_count']}, "
+                f"Depts={stats['dept_count']}, "
+                f"Regions={stats['region_count']})")
+
+
+if __name__ == "__main__":
+    # Test
+    print("🧪 Test GeoHierarchy\n")
+    
+    # Données de test avec codes IRIS réels (9 chiffres)
+    test_data = pd.DataFrame({
+        'code_iris': ['751010101', '751020202', '130550201', '693810305'],
+        'Ville': ['PARIS', 'PARIS', 'MARSEILLE', 'LYON'],
+        'VAL_MAILLE_GEO': ['75101', '75102', '13201', '69381']
+    })
+    
+    # Construction
+    hierarchy = GeoHierarchy()
+    hierarchy.build_from_data(test_data)
+    
+    print(f"\n{hierarchy}")
+    
+    # Tests
+    print("\n📍 Tests de hiérarchie:")
+    
+    # Test avec codes commune (5 digits extraits)
+    test_cases = ['75101', 'PARIS', '75', 'ÎLE-DE-FRANCE']
+    for code in test_cases:
+        level = hierarchy.get_level(code)
+        parent = hierarchy.get_parent(code)
+        full_hierarchy = hierarchy.get_hierarchy(code)
+        
+        print(f"\n{code} ({level}):")
+        print(f"  Parent: {parent}")
+        print(f"  Hiérarchie: {' → '.join(full_hierarchy)}")
