@@ -1,36 +1,130 @@
-inflation:
-    method: 'compound'  # 'simple', 'compound', 'exponential'
-    lookback_periods: 4  # Nombre de trimestres pour calcul taux
-    smoothing_alpha: 0.3  # Pour lissage exponentiel
-    
-training:
-  retrain_frequency: 'quarterly'
-  validation_split: 0.2
-  min_train_size: 8
-  
-  # Critères de sauvegarde
-  save_criteria:
-    min_correlation: 0.85
-    max_rmse: 10.0
-    improvement_threshold: 0.02  # 2% amélioration minimum
-
-inference:
-  confidence_level: 0.95
-  output_format: 'csv'
-  batch_size: 100
-  
-monitoring:
-  metrics:
-    - 'rmse'
-    - 'correlation'
-    - 'mean_absolute_error'
-    - 'bias'
-  
-  drift_threshold: 0.15  # 15% changement = alerte
-  alert_email: null  # À configurer si besoin
-
-paths:
-  models: "artifacts/models"
-  predictions: "artifacts/predictions"
-  metrics: "artifacts/metrics"
-  logs: "logs"
+et	Date	Price	Size	Value	Total P&L	Price P&L	Funding P&L	Fee	Role	Type	Tx Hash	Trade Id
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+1.403 PAXG	$7,149.22	
++$83.99
++$87.73	-$3.73	$0	Maker	Trade	0x2b27…c2cb	177080665910…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.127 PAXG	$647.15	
++$7.60
++$7.94	-$0.34	$0	Maker	Trade	0x3871…86ee	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.075 PAXG	$382.18	
++$4.49
++$4.69	-$0.20	$0	Maker	Trade	0x43fe…ba32	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.268 PAXG	$1,365.64	
++$16.04
++$16.76	-$0.71	$0	Maker	Trade	0x43fe…ba32	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.244 PAXG	$1,243.34	
++$14.61
++$15.26	-$0.65	$0	Maker	Trade	0x43fe…ba32	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.094 PAXG	$478.99	
++$5.63
++$5.88	-$0.25	$0	Maker	Trade	0x43fe…ba32	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.382 PAXG	$1,946.55	
++$22.87
++$23.89	-$1.02	$0	Maker	Trade	0x2b27…c2cb	177080665907…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+1.871 PAXG	$9,533.99	
++$112.01
++$116.99	-$4.98	$0	Maker	Trade	0x3871…86ee	177080665905…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.242 PAXG	$1,233.15	
++$14.49
++$15.13	-$0.64	$0	Maker	Trade	0x3871…86ee	177080665901…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.053 PAXG	$270.07	
++$3.17
++$3.31	-$0.14	$0	Maker	Trade	0x3871…86ee	177080665901…
+PAXG-USD
+PERP
+11:44:19
+11 Feb 26	
+$5,095.58
+0.038 PAXG	$193.64	
++$2.27
++$2.38	-$0.10	$0	Maker	Trade	0x4fab…78ef	177080665899…
+PAXG-USD
+PERP
+11:44:18
+11 Feb 26	
+$5,095.58
+0.196 PAXG	$998.75	
++$11.73
++$12.26	-$0.52	$0	Maker	Trade	0x4fab…78ef	177080665896…
+PAXG-USD
+PERP
+11:44:18
+11 Feb 26	
+$5,095.58
+0.141 PAXG	$718.49	
++$8.44
++$8.82	-$0.38	$0	Maker	Trade	0x4fab…78ef	177080665896…
+PAXG-USD
+PERP
+11:44:18
+11 Feb 26	
+$5,095.58
+0.124 PAXG	$631.86	
++$7.42
++$7.75	-$0.33	$0	Maker	Trade	0x4fab…78ef	177080665883…
+PAXG-USD
+PERP
+11:44:18
+11 Feb 26	
+$5,095.58
+0.117 PAXG	$596.19	
++$7.00
++$7.32	-$0.31	$0	Maker	Trade	0x2575…1103	177080665875…
+PAXG-USD
+PERP
+11:44:11
+11 Feb 26	
+$5,095.85
+RPI
+1.185 PAXG	$6,030.14	
++$71.24
++$74.40	-$3.15	$0	Taker	Trade	-
