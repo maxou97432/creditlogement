@@ -1,14 +1,42 @@
-print(f"\n✅ Corrections appliquées à {corrections_count}/{total_groups} zones/types")
-    print(f"   → Corrections directes: {corrections_direct}")
-    print(f"   → Corrections via parent: {corrections_parent}")
+if __name__ == "__main__":
+    # Test avec données fictives
+    print("🧪 Test InflationRateCalculator\n")
     
-    # Statistiques de couverture
-    total_obs = len(df_merged)
-    corrected_obs = df_merged['correction_applied'].sum()
-    coverage = corrected_obs / total_obs * 100 if total_obs > 0 else 0
-    print(f"   → Couverture: {corrected_obs}/{total_obs} observations ({coverage:.1f}%)")
+    # Données de test
+    dates = pd.date_range('2020-01-01', periods=24, freq='Q')
     
-    # Utiliser l'indice corrigé comme prix corrigé (pour le calcul des taux)
-    df_merged['prix_corrected'] = df_merged['Indice de prix (CL) - Corrigé']
+    data = []
+    for date in dates:
+        # IRIS
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': '75101',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5000 + np.random.normal(0, 100) + (date.year - 2020) * 100
+        })
+        # Ville
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': 'PARIS',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5200 + np.random.normal(0, 100) + (date.year - 2020) * 120
+        })
+        # Dept
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': '75',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5100 + np.random.normal(0, 100) + (date.year - 2020) * 110
+        })
     
-    return df_merged
+    df = pd.DataFrame(data)
+    
+    # Calcul
+    calculator = InflationRateCalculator()
+    df_rates = calculator.calculate_all_rates(df)
+    
+    print("\n📊 Aperçu des taux:")
+    print(df_rates.head(10))
+    
+    # Sauvegarde
+    calculator.save_rates_table(df_rates, '/tmp/test_taux_inflation.csv')
