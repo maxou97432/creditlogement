@@ -1,8 +1,164 @@
-# DEBUG: Vérifier si les colonnes de stats existent
-    print(f"\n  DEBUG fonctions.py - Colonnes dans res_final_arr:")
-    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
-        if col in res_final_arr.columns:
-            print(f"    ✓ {col}: min={res_final_arr[col].min()}, max={res_final_arr[col].max()}")
-        else:
-            print(f"    ✗ {col}: MANQUANTE")
-    print(f"  Colonnes disponibles: {sorted(res_final_arr.columns.tolist())}\n")
+(.venv) PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe z:/uflumth/gits/univers_elementaire/TI/calc_prix_m2_univ_elem.py
+Chargement des données...
+
+================================================================================
+EXTRACTION ET SAUVEGARDE DES STRUCTURES DE MARCHÉ
+================================================================================
+
+   Extraction structure PROVINCE...
+      -> structure_poids_PROVINCE.csv
+         24 univers, 1 PROVINCE
+
+--- Traitement de la maille : PROVINCE ---
+
+--- Traitement du dataset : PROVINCE ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Calcul des poids STANDARDS (Structure Interne)
+
+  DEBUG fonctions.py - Colonnes dans res_final_arr:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+  Colonnes disponibles: ['Periode', 'VF_mm_12m (PROVINCE)', 'VF_mm_3m (PROVINCE)', 'Ville', 'prix_mm_12m (PROVINCE)', 'prix_mm_3m (PROVINCE)', 'surface_mm_12m (PROVINCE)', 'surface_mm_3m (PROVINCE)']
+
+
+  DEBUG - Colonnes de statistiques:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+Traitement PROVINCE terminé en 0:00:08.221979
+  → 831 lignes générées
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_PROVINCE.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_MAJ_PROVINCE.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\stat_volumeterie_PROVINCE.csv
+Nombre de transactions reclassées comme NICE: 141052
+
+   Extraction structure CITY (avec arrondissements)...
+      -> structure_poids_CITY.csv
+         294311 univers, 32647 villes
+      -> structure_poids_arrondissements.csv
+         0 arrondissements
+         Villes:
+
+--- Traitement de la maille : CITY ---
+
+--- Traitement du dataset : CITY ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Application des poids (Structure V1)
+
+  DEBUG fonctions.py - Colonnes dans res_final_arr:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+  Colonnes disponibles: ['Periode', 'VF_mm_12m (CITY)', 'VF_mm_3m (CITY)', 'Ville', 'prix_mm_12m (CITY)', 'prix_mm_3m (CITY)', 'surface_mm_12m (CITY)', 'surface_mm_3m (CITY)']
+
+
+  DEBUG - Colonnes de statistiques:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+Traitement CITY terminé en 0:00:14.345963
+  → 13296 lignes générées
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_CITY.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_MAJ_CITY.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\stat_volumeterie_CITY.csv
+
+   Extraction structure DEPT...
+      -> structure_poids_DEPT.csv
+         2462 univers, 105 DEPT
+
+--- Traitement de la maille : DEPT ---
+
+--- Traitement du dataset : DEPT ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Calcul des poids STANDARDS (Structure Interne)
+
+  DEBUG fonctions.py - Colonnes dans res_final_arr:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+  Colonnes disponibles: ['Periode', 'VF_mm_12m (DEPT)', 'VF_mm_3m (DEPT)', 'Ville', 'prix_mm_12m (DEPT)', 'prix_mm_3m (DEPT)', 'surface_mm_12m (DEPT)', 'surface_mm_3m (DEPT)']
+
+
+  DEBUG - Colonnes de statistiques:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+Traitement DEPT terminé en 0:01:37.420037
+  → 84798 lignes générées
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_DEPT.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_MAJ_DEPT.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\stat_volumeterie_DEPT.csv
+
+   Extraction structure REGION...
+      -> structure_poids_REGION.csv
+         552 univers, 22 REGION
+
+--- Traitement de la maille : REGION ---
+
+--- Traitement du dataset : REGION ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Calcul des poids STANDARDS (Structure Interne)
+
+  DEBUG fonctions.py - Colonnes dans res_final_arr:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+  Colonnes disponibles: ['Periode', 'VF_mm_12m (REGION)', 'VF_mm_3m (REGION)', 'Ville', 'prix_mm_12m (REGION)', 'prix_mm_3m (REGION)', 'surface_mm_12m (REGION)', 'surface_mm_3m (REGION)']
+
+
+  DEBUG - Colonnes de statistiques:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+Traitement REGION terminé en 0:00:30.370933
+  → 19071 lignes générées
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_REGION.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_MAJ_REGION.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\stat_volumeterie_REGION.csv
+
+   Extraction structure NATIONAL...
+      -> structure_poids_NATIONAL.csv
+         24 univers, 1 NATIONAL
+
+--- Traitement de la maille : NATIONAL ---
+
+--- Traitement du dataset : NATIONAL ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Calcul des poids STANDARDS (Structure Interne)
+
+  DEBUG fonctions.py - Colonnes dans res_final_arr:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+  Colonnes disponibles: ['Periode', 'VF_mm_12m (NATIONAL)', 'VF_mm_3m (NATIONAL)', 'Ville', 'prix_mm_12m (NATIONAL)', 'prix_mm_3m (NATIONAL)', 'surface_mm_12m (NATIONAL)', 'surface_mm_3m (NATIONAL)']
+
+
+  DEBUG - Colonnes de statistiques:
+    ✗ nb_observations_3m: MANQUANTE
+    ✗ nb_observations_12m: MANQUANTE
+    ✗ nb_univers_3m: MANQUANTE
+    ✗ nb_univers_12m: MANQUANTE
+Traitement NATIONAL terminé en 0:00:12.355971
+  → 831 lignes générées
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_NATIONAL.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_MAJ_NATIONAL.csv
+Sauvegardé: z:\uflumth\gits\univers_elementaire\TI\resultats\stat_volumeterie_NATIONAL.csv
+
+================================================================================
+Traitement global terminé en 0:03:41.243929
+================================================================================
