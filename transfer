@@ -1,9 +1,43 @@
-base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years = 12)
+PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe z:/uflumth/gits/univers_elementaire/TI/base_work.py
+Temps d'importation : 32.51 secondes
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:342: FutureWarning:
 
-# DEBUG: Vérifier si VALEUR_FONCIERE existe
-print(f"\nDEBUG - Colonnes dans base_ml_full:")
-print(f"   VALEUR_FONCIERE existe: {'VALEUR_FONCIERE' in base_ml_full.columns}")
-if 'VALEUR_FONCIERE' in base_ml_full.columns:
-    print(f"   Valeurs non-NaN: {base_ml_full['VALEUR_FONCIERE'].notna().sum():,}")
-else:
-    print(f"   Colonnes disponibles: {sorted(base_ml_full.columns.tolist())}")
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:344: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:345: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:348: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:352: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:355: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:354: FutureWarning:
+
+Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+
+Nombre de lignes supprimées :2592
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:660: SettingWithCopyWarning:
+
+
+A value is trying to be set on a copy of a slice from a DataFrame
+
+See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+
+Temps de détections d'anomalies : 8.79 secondes
+
+DEBUG - Colonnes dans base_ml_full:
+   VALEUR_FONCIERE existe: True
+   Valeurs non-NaN: 7,303
