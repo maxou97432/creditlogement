@@ -1,55 +1,10 @@
-(.venv) PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe z:/uflumth/gits/univers_elementaire/TI/base_work.py
-Temps d'importation : 32.89 secondes
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:342: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:344: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:345: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:348: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:352: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:354: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:355: FutureWarning:
-
-Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-
-Nombre de lignes supprimées :1029936
-z:\uflumth\gits\univers_elementaire\TI\fonctions.py:660: SettingWithCopyWarning:
-
-
-A value is trying to be set on a copy of a slice from a DataFrame
-
-See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
-
-Temps de détections d'anomalies : 1091.82 secondes
-
-DEBUG - Colonnes dans base_ml_full:
-   VALEUR_FONCIERE existe: True
-   Valeurs non-NaN: 11,060,759
-Temps de fusion avec BAT_ENRICHIE : 25.06 secondes
-Temps de traitement variable BIEN_NEUF : 1.92 secondes
-Traceback (most recent call last):
-  File "z:\uflumth\gits\univers_elementaire\TI\base_work.py", line 166, in <module>
-    base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-                                               ^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\reshape\tile.py", line 257, in cut
-    fac, bins = _bins_to_cuts(
-                ^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\reshape\tile.py", line 493, in _bins_to_cuts
-    raise ValueError(
-ValueError: Bin labels must be one fewer than the number of bin edges
+# DEBUG: Vérifier les colonnes disponibles
+    print(f"\n  DEBUG - Colonnes dans result: {sorted(result.columns.tolist())}")
+    print(f"\n  DEBUG - Vérification des colonnes attendues:")
+    for col_source, dic_name in variables_mapping:
+        exists = col_source in result.columns
+        if exists:
+            non_null = result[col_source].notna().sum()
+            print(f"    ✓ {col_source}: {non_null} valeurs non-nulles")
+        else:
+            print(f"    ✗ {col_source}: MANQUANTE")
