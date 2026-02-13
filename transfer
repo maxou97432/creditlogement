@@ -4,31 +4,19 @@ Chargement des données...
 --- Traitement de la maille : PROVINCE ---
 
 --- Traitement du dataset : PROVINCE ---
+z:\uflumth\gits\univers_elementaire\TI\fonctions.py:1193: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  .apply(complete_months)
+   -> Calcul des poids STANDARDS (Structure Interne)
 Traceback (most recent call last):
   File "z:\uflumth\gits\univers_elementaire\TI\calc_prix_m2_univ_elem.py", line 171, in <module>
     res_province = process_maille_wrapper(df_province_input, "Ville", "PROVINCE")
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "z:\uflumth\gits\univers_elementaire\TI\calc_prix_m2_univ_elem.py", line 62, in process_maille_wrapper
-    result = process_dataset_restreint(
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "z:\uflumth\gits\univers_elementaire\TI\fonctions.py", line 1167, in process_dataset_restreint
-    .agg(
-     ^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\groupby\generic.py", line 1432, in aggregate
-    result = op.agg()
-             ^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\apply.py", line 190, in agg
-    return self.agg_dict_like()
-           ^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\apply.py", line 423, in agg_dict_like
-    return self.agg_or_apply_dict_like(op_name="agg")
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\apply.py", line 1603, in agg_or_apply_dict_like
-    result_index, result_data = self.compute_dict_like(
-                                ^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\apply.py", line 462, in compute_dict_like
-    func = self.normalize_dictlike_arg(op_name, selected_obj, func)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\apply.py", line 663, in normalize_dictlike_arg
-    raise KeyError(f"Column(s) {list(cols)} do not exist")
-KeyError: "Column(s) ['NB_SURFACE_HAB'] do not exist"
+  File "z:\uflumth\gits\univers_elementaire\TI\calc_prix_m2_univ_elem.py", line 128, in process_maille_wrapper
+    final_result["TAUX_INFL_12M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["value"].pct_change(periods=4)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\groupby\generic.py", line 1951, in __getitem__
+    return super().__getitem__(key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\base.py", line 245, in __getitem__
+    raise KeyError(f"Column not found: {key}")
+KeyError: 'Column not found: value'
