@@ -1,28 +1,7 @@
-for _, row in result.iterrows():
-        ville = row["Ville"]
-        periode = row["Periode"]
-        
-        # Boucle sur toutes les variables
-        for col_source, dic_name in variables_mapping:
-            if col_source in result.columns and pd.notna(row[col_source]):
-                # Déterminer si c'est 3m ou 12m pour extraire les bonnes stats
-                if "_3m" in dic_name:
-                    nb_obs = row.get("nb_observations_3m", 0)
-                    nb_univ = row.get("nb_univers_3m", 0)
-                elif "_12m" in dic_name:
-                    nb_obs = row.get("nb_observations_12m", 0)
-                    nb_univ = row.get("nb_univers_12m", 0)
-                else:
-                    nb_obs = 0
-                    nb_univ = 0
-                
-                final_rows.append({
-                    "VAL_MAILLE_GEO": ville,
-                    "TYPE_MAILLE": maille_col,
-                    "CD_TYPE_BIEN": "APT",  # process_dataset_restreint agrège tous les types
-                    "Periode": periode,
-                    "DIC_NAME": dic_name,
-                    "value": row[col_source],
-                    "nb_observations": int(nb_obs) if pd.notna(nb_obs) else 0,
-                    "nb_univers": int(nb_univ) if pd.notna(nb_univ) else 0
-                })
+# DEBUG: Vérifier si les colonnes de stats existent
+    print(f"\n  DEBUG - Colonnes de statistiques:")
+    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
+        if col in result.columns:
+            print(f"    ✓ {col}: min={result[col].min()}, max={result[col].max()}, mean={result[col].mean():.1f}")
+        else:
+            print(f"    ✗ {col}: MANQUANTE")
