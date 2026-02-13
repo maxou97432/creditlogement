@@ -1,54 +1,8 @@
-
-        # Colonnes à moyenner (prix, surface, valeur)
-        colonnes_moyennes = [col for col in colonnes_a_aggreger if not col.startswith("nb_")]
-        
-        # Colonnes à sommer (nb_observations, nb_univers)
-        colonnes_sommes = [col for col in colonnes_a_aggreger if col.startswith("nb_")]
-        
-        # Agrégation avec moyenne pondérée
-        for col in colonnes_moyennes:
-            if col in res_arr.columns:
-                agg = (
-                    res_arr.groupby(["Ville_source", "Periode"]).apply(lambda x: _wavg(x, col), include_groups=False).reset_index(name=col)
-                )
-                agg_results.append(agg)
-        
-        # Agrégation avec somme pour les statistiques
-        for col in colonnes_sommes:
-            if col in res_arr.columns:
-                agg = (
-                    res_arr.groupby(["Ville_source", "Periode"])[col].sum().reset_index(name=col)
-                )
-                agg_results.append(agg)
-
-        # Fusionner toutes les aggrégations
-        if not agg_results:
-            print("Aucune colonne à agréger trouvéz")
-            return res
-        
-        agg_city = agg_results[0]
-        for agg in agg_results[1:]:
-            agg_city = agg_city.merge(agg, on =["Ville_source","Periode"], how="outer")
-
-        
-        agg_city = agg_city.rename(columns={"Ville_source": "Ville"})
-        villes_cibles = agg_city["Ville"].unique().tolist()
-
-        
-        to_drop_codes = arr_use[arr_use["Ville_source"].isin(villes_cibles)]["Ville"].astype(str).tolist()
-
-        
-        res_sans_arr = res[~res["Ville"].astype(str).isin(to_drop_codes)].copy()
-
-
-        # Ajouter les villes agrégées
-        result = pd.concat([res_sans_arr, agg_city], ignore_index=True)
-
-        return result
-
-    if df_arr is not None:
-        # Agrégation des arrondissements (Paris, Marseille, Lyon, etc.)
-        res_final_complet = moy_pond_cities(res_final_arr, df_arr)
-        return res_final_complet
-
-    return res_final_arr
+# DEBUG: Vérifier si les colonnes de stats existent
+    print(f"\n  DEBUG fonctions.py - Colonnes dans res_final_arr:")
+    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
+        if col in res_final_arr.columns:
+            print(f"    ✓ {col}: min={res_final_arr[col].min()}, max={res_final_arr[col].max()}")
+        else:
+            print(f"    ✗ {col}: MANQUANTE")
+    print(f"  Colonnes disponibles: {sorted(res_final_arr.columns.tolist())}\n")
