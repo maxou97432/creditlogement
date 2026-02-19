@@ -1,276 +1,262 @@
-import argparse
-import sys
-from pathlib import Path
+# MLOps System - Price Index Models & Property Valuation
 
+Système MLOps production-ready pour la modélisation d'indices de prix immobiliers et l'estimation de valeur foncière.
 
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
+## 🎯 Fonctionnalités
 
+### Étape 1 : Correction Holt-Winters
+- Correction dynamique des biais CL vs INSEE
+- Lissage exponentiel avec tendance amortie
+- Sauvegarde/chargement des modèles
 
-from data.data_loader import DataLoader
-from data.data_preprocessor import DataPreprocessor
-from models.holt_winters_model import HoltWintersModel
-from models.inflation_rate_calculator import InflationRateCalculator
-from inference.estimation import PropertyValueEstimator
-import pandas as pd
+### Étape 2 : Calcul des Taux d'Inflation
+- Taux par maille géographique (IRIS, Ville, Département)
+- Gestion des effectifs minimums
+- Table de taux par période
 
-def train_holt_winters(config_path : str = None):
-    """Entraine les modèles Holt-Winters pour la correction du bias
+### Étape 3 : Estimation de Valeur Foncière
+- Estimation basée sur taux d'inflation
+- Fallback géographique (IRIS → Ville → Département)
+- Mode batch pour estimations massives
 
-    Args:
-        config_path (str, optional): _description_. Defaults to None.
-    """
+## 📁 Structure
 
-    print("============================================")
-    print("1. ENTRAINEMENT HOLT-WINTERS")
-    print("============================================")
+```
+indice_prix_mlops/
+├── config/
+│   └── config.yaml              # Configuration centralisée
+├── data/
+│   ├── data_loader.py          # Chargement CL + INSEE
+│   └── data_processor.py       # Preprocessing et fusion
+├── models/
+│   ├── holt_winters_model.py   # Modèle Holt-Winters
+│   └── inflation_rate_calculator.py  # Calcul taux inflation
+├── inference/
+│   ├── apply_corrections.py    # Application corrections HW
+│   └── estimate_property_value.py    # Estimation valeur foncière
+├── artifacts/
+│   ├── models/                 # Modèles HW sauvegardés
+│   ├── corrected_prices/       # Prix corrigés
+│   └── inflation_rates/        # Tables de taux
+└── main.py                     # Point d'entrée CLI
+```
 
-    # 1. Chargement des données
+## 🚀 Workflow Complet
 
-    loader = DataLoader()
-    data_cl = loader.load_data()
-    data_insee = loader.load_data_insee()
+### Étape 1 : Entraînement Holt-Winters
 
-    # 2. Preprocessing
-    processor = DataPreprocessor()
-    df_merged = processor.process_all(data_cl,data_insee)
+Entraîne les modèles de correction de biais pour chaque zone/type de bien.
 
-    # 3. Entrainement par zone / type
-    print("============================================")
-    print("ENTRAINEMENT DES MDOELES")
-    print("============================================")
+```bash
+python main.py --mode train_holt_winters
+```
 
-    models_dir = project_root / "artificats" / "models" / "latest"
-    models_dir.mkdir(parents=True, exist_ok = True)
+**Output** : Modèles sauvegardés dans `artifacts/models/latest/`
 
-    trained_models = []
+### Étape 2a : Application des Corrections
 
-    grouped = df_merged.groupby(["VAL_MAILLE_GEO","CD_TYPE_BIEN"])
+Applique les corrections HW aux prix bruts pour produire des prix corrigés.
 
-    for (zone, type_bien), group in grouped:
-        print(f"{zone}-{type_bien}")
+```bash
+python main.py --mode apply_corrections \
+    --input_dir Z:/uflumth/gits/univers_elementaire/TI/resultats \
+    --models_dir artifacts/models/latest \
+    --output artifacts/corrected_prices/prix_corriges.csv
+```
 
-        # Serie de biais
-        group = group.sort_values("Periode").set_index("Periode")
-        bias_series = group['Dif'].dropna()
+**Output** : Fichier CSV avec prix corrigés
 
-        # Création et entraînement
-        model = HoltWintersModel(zone, type_bien, config_path)
-        success = model.fit(bias_series)
+### Étape 2b : Calcul des Taux d'Inflation
 
-        if success:
-            # Sauvegarde
+Calcule les taux d'inflation par maille géographique à partir des prix corrigés.
 
-            model_path = models_dir / f"{zone}_{type_bien}"
-            model.save(str(model_path))
-            trained_models.append(model)
+```bash
+python main.py --mode calculate_rates \
+    --input artifacts/corrected_prices/prix_corriges.csv \
+    --output artifacts/inflation_rates/taux_inflation.csv
+```
 
-            metrics = model.get_metrics()
-            print(f"RMSE: : {metrics['rmse']:.2f}, MAE: : {metrics['mae']:.2f}")
+**Output** : Table de taux d'inflation par maille et période
 
-        print(f"{len(trained_models)} modèles entrainés")
+### Étape 3a : Estimation Unitaire
 
+Estime la valeur actuelle d'un bien immobilier.
 
-def calculate_inflation_inflation_rates(input_path: str, output_path: str, config_path: str = None):
-    """Calcule les taux d'inflation à partir des taux corrigés
+```bash
+python main.py --mode estimate \
+    --rates artifacts/inflation_rates/taux_inflation.csv \
+    --valeur_initiale 300000 \
+    --date_achat 2022-03-15 \
+    --type_bien APT \
+    --code_iris 75101 \
+    --ville PARIS \
+    --dept 75
+```
 
-    Args:
-        input_path (str): _description_
-        outputh_path (str): _description_
-        config_path (str, optional): _description_. Defaults to None.
-    """
-    print("============================================")
-    print("2. CALCUL DES TAUX D'INFLATIONS")
-    print("============================================")
+**Output** :
+```
+================================================================================
+ESTIMATION DE VALEUR FONCIÈRE
+================================================================================
 
-    df_corrected = pd.read_csv(input_path)
-    df_corrected['Periode'] = pd.to_datetime(df_corrected['Periode'])
+� Période:
+   Date d'achat      : 2022
+   Année de référence: 2025
+   Écart             : 3 ans
 
-    # Calcul des taux
+💰 Valeurs:
+   Valeur initiale : 300,000.00 €
+   Valeur estimée  : 321,600.00 €
+   Variation       : +21,600.00 €
 
-    calculator = InflationRateCalculator(config_path)
-    df_rates = calculator.calculate_all_rates(df_corrected)
-    calculator.save_rates_table(df_rates, output_path)
+📊 Taux d'inflation:
+   Taux appliqué   : +7.20%
+   Niveau géo      : IRIS (75101)
+   Effectif        : 145 transactions
 
+✅ Taux trouvé au niveau IRIS
+```
 
-def estimate_property_value(rates_table: str,
-                            valeur_initiale: float,
-                            date_achat: str,
-                            type_bien: str,
-                            code_iris: str = None,
-                            ville: str = None,
-                            dept: str = None):
-    """Estime la valeur d'un bien immobilier.
+### Étape 3b : Estimation Batch
 
-    Args:
-        rates_table (str): _description_
-        valeur_initiale (float): _description_
-        date_achat (str): _description_
-        type_bien (str): _description_
-        code_iris (str, optional): _description_. Defaults to None.
-        ville (str, optional): _description_. Defaults to None.
-        dept (str, optional): _description_. Defaults to None.
-    """
+Estime la valeur pour un lot de biens depuis un fichier CSV.
 
-    print("============================================")
-    print("3. ESTIMATION DE VALEUR FONCIERE")
-    print("============================================")
-    
-    estimator = PropertyValueEstimator(rates_table)
+**Format du fichier d'entrée** (`biens.csv`) :
+```csv
+valeur_initiale,date_achat,type_bien,code_iris,ville,dept
+300000,2022-03-15,APT,75101,PARIS,75
+250000,2023-06-20,APT,,PARIS,75
+180000,2021-11-10,MAI,,,92
+```
 
-    result = estimator.estimate(valeur_initiale=valeur_initiale,
-                                date_achat = date_achat,
-                                type_bien = type_bien,
-                                code_iris = code_iris,
-                                ville = ville,
-                                dept = dept)
-    
-    estimator.print_estimation(result)
+```bash
+python main.py --mode estimate_batch \
+    --rates artifacts/inflation_rates/taux_inflation.csv \
+    --input biens.csv \
+    --output estimations.csv
+```
 
+**Output** : Fichier CSV avec colonnes d'estimation ajoutées
 
-def estimate_batch(rates_table: str, input_csv: str, output_csv: str):
-    """Estimation du'un lot de biens à partir d'un fichier csv.
+## ⚙️ Configuration
 
-    Args:
-        rates_table (str): _description_
-        input_csv (str): _description_
-        output_csv (str): _description_
-    """
+Modifiez `config/config.yaml` pour :
 
-    print("============================================")
-    print("ESTIMATION DE VALEUR FONCIERE D'UN LOT DE BIENS")
-    print("============================================")
+### Chemins des Données
+```yaml
+data:
+  base_path: "Z:\\uflumth\\gits\\univers_elementaire\\TI\\resultats"
+  insee_path: "Z:\\uflumth\\gits\\univers_elementaire\\TI\\table_rapport (2025)"
+```
 
-    estimator = PropertyValueEstimator(rates_table)
+### Hyperparamètres Holt-Winters
+```yaml
+model:
+  holt_winters:
+    trend: 'add'
+    damped_trend: true
+    min_observations: 8
+    n_forecast: 2
+```
 
-    # Chargement
-    df_biens = pd.read_csv(input_csv)
+### Effectifs Minimums
+```yaml
+# Dans inflation_rate_calculator.py
+min_effectifs = {
+    'IRIS': 10,
+    'CITY': 30,
+    'DEPT': 50
+}
+```
 
-    # Estimation
-    df_results = estimator.estimate_batch(df_biens)
-    df_results.to_csv(output_csv, index = False, encoding = 'utf-8-sig')
-    print("Résultats sauvegardés")
+## 📊 Méthodologie
 
+### Fréquence Temporelle
 
+**Données sources** :
+- CL : Mensuelles
+- INSEE : **Trimestrielles**
 
-def apply_correction(config_path: str = None, models_dir: str = None, output_file : str = None):
-    """Applique les corrections Holt-Winter aux indices de CL"""
+**Traitement** : Fusion au niveau **trimestriel**
+- Les données CL mensuelles sont agrégées par trimestre
+- Cohérence avec la fréquence INSEE
+- Corrections HW appliquées sur données trimestrielles
 
-    from inference.apply_correction import apply_corrections_pipeline
+### Calcul des Taux d'Inflation
 
-    apply_corrections_pipeline(config_path,models_dir,output_file )
+1. **Période de référence** : Année la plus récente dans les données
+2. **Périodes** : Distance en années depuis la référence (0, 1, 2, ...)
+3. **Formule** : `taux = (prix_periode_0 - prix_periode_t) / prix_periode_t`
+4. **Effectif** : `min(effectif_periode_0, effectif_periode_t)`
+5. **Filtrage** : Effectif >= seuil minimum par niveau géographique
 
+### Hiérarchie de Fallback
 
-def main():
-    parser = argparse.ArgumentParser(
-        description = "MLOps Pipeline - Prévision de valeur foncière par méthode de taux d'inflation corrigé par Holt-Winters",
-        formatter_class= argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Exemple d'utilisation:
+Lors de l'estimation, recherche du taux dans l'ordre :
 
-    # 1. Entraîner les modèles Holt-Winters
-    python main.py --mode train_holt_winters
+1. **IRIS** (code à 5 chiffres) : Si effectif >= 10
+2. **Ville** (nom) : Si effectif >= 30
+3. **Département** (code à 2 chiffres) : Si effectif >= 50
 
-    #2.a Appliquer les corrections (charge automatiquement les données)
-    python main.py --mode apply_corrections \\
-    --models_dir artificats/models/latest \\
-    --output artificats/corrected_prices/prix_corriges.csv
+### Propagation des Corrections HW
 
-    #2.b Calculer les taux d'inflation
-    python main.py --mode calculate_rates\\
-    --input artificats/corrected_prices/prix_corriges.csv \\
-    --output artificats/inflation_rates/taux.csv
+Les corrections sont propagées hiérarchiquement :
+- **IRIS** → Cherche modèle IRIS, sinon hérite de la Ville
+- **Ville** → Cherche modèle Ville, sinon hérite du Département
+- **Département** → Cherche modèle Département, sinon hérite de la Région
 
-    #3. Estimer une valeur
-    python main.py --mode estimate\\
-    --rates artificats/inflation_rates/taux.csv \\
-    --valeur_initiale 300000 \\
-    --date_achat initiale 2022-03-15 \\
-    --type_bien APT \\
-    --code_iris 75101 \\
-    --ville PARIS \\
-    --dept 75 \\
-    
-    # Estimation lots de bien
-    python main.py--mode estimate_batch \\
-    --rates artificat/inflation_rates/taux.csv \\
-    --input biens.csv \\
-    --output estimation.csv
-"""
-    )
+**Exemple** : IRIS 75101 sans modèle → Utilise correction de PARIS
 
-    parser.add_argument('--mode', type=str, required=True,
-                       choices=['train_holt_winters', 'apply_corrections', 
-                               'calculate_rates', 'estimate', 'estimate_batch'],
-                       help='Mode d\'exécution')
-    
-    # Arguments communs
-    parser.add_argument('--config', type=str, help='Chemin config.yaml')
-    
-    # Arguments pour apply_corrections
-    parser.add_argument('--input_dir', type=str, help='Répertoire des prix bruts')
-    parser.add_argument('--models_dir', type=str, help='Répertoire des modèles HW')
-    
-    # Arguments pour calculate_rates et estimate
-    parser.add_argument('--input', type=str, help='Fichier d\'entrée')
-    parser.add_argument('--output', type=str, help='Fichier de sortie')
-    parser.add_argument('--rates', type=str, help='Table de taux d\'inflation')
-    
-    # Arguments pour estimate
-    parser.add_argument('--valeur_initiale', type=float, help='Valeur initiale (€)')
-    parser.add_argument('--date_achat', type=str, help='Date d\'achat (YYYY-MM-DD)')
-    parser.add_argument('--type_bien', type=str, help='Type de bien (APT/MAI/ENSEMBLE)')
-    parser.add_argument('--code_iris', type=str, help='Code IRIS')
-    parser.add_argument('--ville', type=str, help='Ville')
-    parser.add_argument('--dept', type=str, help='Département')
-    
-    args = parser.parse_args()
-    
-    try:
-        if args.mode == 'train_holt_winters':
-            train_holt_winters(args.config)
-        
-        elif args.mode == 'apply_corrections':
-            if not args.output:
-                print("--output requis")
-                sys.exit(1)
-            apply_corrections(args.config, args.models_dir, args.output)
-        
-        elif args.mode == 'calculate_rates':
-            if not args.input or not args.output:
-                print("--input et --output requis")
-                sys.exit(1)
-            calculate_inflation_rates(args.input, args.output, args.config)
-        
-        elif args.mode == 'estimate':
-            if not args.rates or not args.valeur_initiale or not args.date_achat or not args.type_bien:
-                print("--rates, --valeur_initiale, --date_achat et --type_bien requis")
-                sys.exit(1)
-            estimate_property_value(
-                args.rates, args.valeur_initiale, args.date_achat, args.type_bien,
-                args.code_iris, args.ville, args.dept
-            )
-        
-        elif args.mode == 'estimate_batch':
-            if not args.rates or not args.input or not args.output:
-                print("--rates, --input et --output requis")
-                sys.exit(1)
-            estimate_batch(args.rates, args.input, args.output)
-    
-    except Exception as e:
-        print(f"\n Erreur: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+### Estimation de Valeur
 
+```
+valeur_estimee = valeur_initiale × (1 + taux_inflation)
+```
 
-if __name__ == "__main__":
-    main()
+## 🔧 Installation
 
-PS Z:\uflumth\gits\univers_elementaire\TI - V2> & "C:/Program Files/Python311/python.exe" "z:/uflumth/gits/univers_elementaire/TI - V2/indice_de_prix/main.py"
-Traceback (most recent call last):
-  File "z:\uflumth\gits\univers_elementaire\TI - V2\indice_de_prix\main.py", line 14, in <module>
-    from inference.estimation import PropertyValueEstimator
-  File "z:\uflumth\gits\univers_elementaire\TI - V2\indice_de_prix\inference\estimation.py", line 39
-    if type_bien:
-IndentationError: unexpected indent
+```bash
+# Cloner le projet
+cd /Users/maximethiong-ly/Downloads/py/indice_prix_mlops
+
+# Installer les dépendances
+pip install -r requirements.txt
+```
+
+## 📝 Dépendances
+
+- pandas >= 1.5.0
+- numpy >= 1.23.0
+- pyyaml >= 6.0
+- statsmodels >= 0.14.0
+- scipy >= 1.10.0
+
+## � Debugging
+
+### Vérifier les modèles entraînés
+```bash
+ls artifacts/models/latest/
+```
+
+### Vérifier les prix corrigés
+```bash
+head artifacts/corrected_prices/prix_corriges.csv
+```
+
+### Vérifier la table de taux
+```bash
+head artifacts/inflation_rates/taux_inflation.csv
+```
+
+## 📈 Prochaines Étapes
+
+- [ ] Monitoring des performances
+- [ ] API REST pour inférence en ligne
+- [ ] Dashboard de visualisation
+- [ ] Tests unitaires complets
+- [ ] CI/CD pipeline
+
+## 📄 Licence
+
+Crédit Logement - Usage interne
+
