@@ -278,15 +278,24 @@ if __name__ == "__main__":
     if "VALEUR_FONCIERE" not in df_apt_ancien.columns or df_apt_ancien["VALEUR_FONCIERE"].isna().all():
         df_apt_ancien["VALEUR_FONCIERE"] = df_apt_ancien["Prix_m2"] * df_apt_ancien["NB_SURF_HAB"]
 
+    # Regrouper Paris/Lyon/Marseille (codes arrondissements → nom de ville)
+    ARRT_TO_CITY = {
+        **{f"{75100+i}": "PARIS"     for i in range(1, 21)},
+        **{f"{13200+i}": "MARSEILLE" for i in range(1, 17)},
+        **{f"{69380+i}": "LYON"      for i in range(1, 10)},
+    }
+    df_apt_ancien["Ville_carte"] = df_apt_ancien["Ville"].astype(str).map(ARRT_TO_CITY).fillna(df_apt_ancien["Ville"])
+
     df_apt_ancien["DATE"] = pd.to_datetime(df_apt_ancien["DATE"], errors="coerce")
     annee_max_c1 = df_apt_ancien["DATE"].dt.year.max()
+    derniere_date_c1 = df_apt_ancien["DATE"].max()
     df_apt_recent = df_apt_ancien[df_apt_ancien["DATE"].dt.year >= annee_max_c1 - 1]
 
-    stats_c1 = df_apt_recent.groupby("Ville").agg(
+    stats_c1 = df_apt_recent.groupby("Ville_carte").agg(
         prix_m2=("Prix_m2", "median"),
         surface=("NB_SURF_HAB", "median"),
         valeur_fonciere=("VALEUR_FONCIERE", "median")
-    ).reset_index()
+    ).reset_index().rename(columns={"Ville_carte": "Ville"})
 
     df_map_c1 = df_geo_gps.merge(stats_c1, left_on="label", right_on="Ville", how="inner")
     df_map_c1 = df_map_c1.dropna(subset=["latitude", "longitude", "prix_m2"])
@@ -316,9 +325,9 @@ if __name__ == "__main__":
             anc_x, anc_y = cx + ax_off, cy + ay_off
             ha_c1 = "right" if ax_off < 0 else "left"
 
-            prix_str = f"{round(row_c1['prix_m2']):,} \u20ac/m\u00b2".replace(",", "\u202f") if pd.notna(row_c1.get("prix_m2")) else "N/A"
-            surf_str = f"{round(row_c1['surface']):,} m\u00b2".replace(",", "\u202f") if pd.notna(row_c1.get("surface")) else "N/A"
-            vf_str   = f"{round(row_c1['valeur_fonciere']):,} \u20ac".replace(",", "\u202f") if pd.notna(row_c1.get("valeur_fonciere")) else "N/A"
+            prix_str = f"{round(row_c1['prix_m2']):,} EUR/m2".replace(",", " ") if pd.notna(row_c1.get("prix_m2")) else "N/A"
+            surf_str = f"{round(row_c1['surface']):,} m2".replace(",", " ")         if pd.notna(row_c1.get("surface")) else "N/A"
+            vf_str   = f"{round(row_c1['valeur_fonciere']):,} EUR".replace(",", " ") if pd.notna(row_c1.get("valeur_fonciere")) else "N/A"
 
             ax_c1.text(anc_x, anc_y,              city_lbl, fontsize=DEFAULT_FONT_SIZE,     ha=ha_c1, va="top", color=CL_BLACK,    weight="normal", zorder=4, path_effects=halo_c1)
             ax_c1.text(anc_x, anc_y - 1.5*LS_C1, prix_str, fontsize=0.85*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color=CL_BLACK,    weight="bold",   zorder=4, path_effects=halo_c1)
@@ -334,7 +343,8 @@ if __name__ == "__main__":
                     "L\u00c9GENDE\nPrix m\u00e9dian au m\u00b2\nSurface m\u00e9diane\nCo\u00fbt m\u00e9dian de l'op\u00e9ration",
                     ha="left", va="bottom", fontsize=16,
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-        fig_c1.text(0.04, 0.02, f"CR\u00c9DIT LOGEMENT \u2013 {annee_max_c1}", ha="left", va="bottom", fontsize=12)
+        _date_c1 = derniere_date_c1.strftime("%B %Y").upper() if pd.notna(derniere_date_c1) else str(annee_max_c1)
+        fig_c1.text(0.04, 0.02, f"CREDIT LOGEMENT - {_date_c1}", ha="left", va="bottom", fontsize=12)
         out_c1 = os.path.join(params.CONFIG["output_dir"], "carte_couts_operations_APT_ANCIEN.png")
         plt.savefig(out_c1, dpi=300, bbox_inches=None, facecolor=fig_c1.get_facecolor())
         plt.close()
