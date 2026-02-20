@@ -266,6 +266,7 @@ if __name__ == "__main__":
         'TOULOUSE':    {'x': -5000, 'y': 3000},
         'TOURS':       {'x': 5000,  'y': -3000},
         'BREST':       {'x': -35000, 'y': 0},
+        'REIMS':       {'x': 40000, 'y': 10000},
     }
 
     # =========================================================================
@@ -325,9 +326,10 @@ if __name__ == "__main__":
             anc_x, anc_y = cx + ax_off, cy + ay_off
             ha_c1 = "right" if ax_off < 0 else "left"
 
-            prix_str = f"{round(row_c1['prix_m2']):,} EUR/m2".replace(",", " ") if pd.notna(row_c1.get("prix_m2")) else "N/A"
-            surf_str = f"{round(row_c1['surface']):,} m2".replace(",", " ")         if pd.notna(row_c1.get("surface")) else "N/A"
-            vf_str   = f"{round(row_c1['valeur_fonciere']):,} EUR".replace(",", " ") if pd.notna(row_c1.get("valeur_fonciere")) else "N/A"
+            prix_str = f"{int(row_c1['prix_m2']):,} EUR/m2".replace(",", " ")    if pd.notna(row_c1.get("prix_m2")) else "N/A"
+            surf_str = f"{int(row_c1['surface']):,} m2".replace(",", " ")          if pd.notna(row_c1.get("surface")) else "N/A"
+            vf_val   = row_c1.get("valeur_fonciere")
+            vf_str   = f"{int(vf_val):,} EUR".replace(",", " ")                   if pd.notna(vf_val) else "N/A"
 
             ax_c1.text(anc_x, anc_y,              city_lbl, fontsize=DEFAULT_FONT_SIZE,     ha=ha_c1, va="top", color=CL_BLACK,    weight="normal", zorder=4, path_effects=halo_c1)
             ax_c1.text(anc_x, anc_y - 1.5*LS_C1, prix_str, fontsize=0.85*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color=CL_BLACK,    weight="bold",   zorder=4, path_effects=halo_c1)
@@ -343,7 +345,9 @@ if __name__ == "__main__":
                     "L\u00c9GENDE\nPrix m\u00e9dian au m\u00b2\nSurface m\u00e9diane\nCo\u00fbt m\u00e9dian de l'op\u00e9ration",
                     ha="left", va="bottom", fontsize=16,
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-        _date_c1 = derniere_date_c1.strftime("%B %Y").upper() if pd.notna(derniere_date_c1) else str(annee_max_c1)
+        _MOIS_FR = {1:"JANVIER",2:"FEVRIER",3:"MARS",4:"AVRIL",5:"MAI",6:"JUIN",
+                    7:"JUILLET",8:"AOUT",9:"SEPTEMBRE",10:"OCTOBRE",11:"NOVEMBRE",12:"DECEMBRE"}
+        _date_c1 = f"{_MOIS_FR[derniere_date_c1.month]} {derniere_date_c1.year}" if pd.notna(derniere_date_c1) else str(annee_max_c1)
         fig_c1.text(0.04, 0.02, f"CREDIT LOGEMENT - {_date_c1}", ha="left", va="bottom", fontsize=12)
         out_c1 = os.path.join(params.CONFIG["output_dir"], "carte_couts_operations_APT_ANCIEN.png")
         plt.savefig(out_c1, dpi=300, bbox_inches=None, facecolor=fig_c1.get_facecolor())
