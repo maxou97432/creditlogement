@@ -1,73 +1,40 @@
-from scipy import stats
-from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings("ignore")
+=================================================================
+VÉRIFICATION DES HYPOTHÈSES SÉRIES TEMPORELLES (par segment)
+=================================================================
+Segments analysés : 28
 
-resultats_hyp = []
+  1. Stationnarité     (ADF p<0.05) : 14% ✅
+  2. Normalité          (Shapiro p≥0.05) : 50% ✅
+  3. Homoscédasticité   (ARCH p≥0.05) : 32% ✅
+  4. Pas autocorrélation(Ljung-Box p≥0.05) : 0% ✅
 
-for (zone, type_bien), group in merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]):
-    serie = group.sort_values("Periode")["Dif"].dropna()
-    n = len(serie)
-    
-    if n < 12:
-        continue  # Série trop courte
+Zone	Type	N	ADF_p	Stationnaire	Shapiro_p	Normale	ARCH_p	Homoscédastique	LB_lag4_p	LB_lag8_p	Pas_autocorr
+0	77	APT	43	0.9990	False	0.0002	False	0.0000	False	0.0000	0.0000	False
+1	77	MAI	43	0.6443	False	0.0015	False	0.0000	False	0.0000	0.0000	False
+2	78	APT	43	0.9944	False	0.0101	False	0.0000	False	0.0000	0.0000	False
+3	78	MAI	43	0.0257	True	0.9839	True	0.8614	True	0.0000	0.0000	False
+4	91	APT	43	0.1235	False	0.6600	True	0.1211	True	0.0000	0.0000	False
+5	91	MAI	43	0.0077	True	0.8882	True	0.3691	True	0.0449	0.0822	False
+6	92	APT	43	0.8043	False	0.1140	True	0.0000	False	0.0000	0.0000	False
+7	92	MAI	43	0.0949	False	0.3381	True	0.2178	True	0.0001	0.0017	False
+8	93	APT	43	0.9379	False	0.0009	False	0.0000	False	0.0000	0.0000	False
+9	93	MAI	43	0.0571	False	0.0178	False	0.0002	False	0.0000	0.0000	False
+10	94	APT	43	0.9885	False	0.0325	False	0.0000	False	0.0000	0.0000	False
+11	94	MAI	43	0.5521	False	0.3993	True	0.3059	True	0.0000	0.0000	False
+12	95	APT	43	0.9980	False	0.0018	False	0.0000	False	0.0000	0.0000	False
+13	95	MAI	43	0.3113	False	0.7576	True	0.2715	True	0.0000	0.0000	False
+14	LILLE	MAI	43	0.0111	True	0.2218	True	0.4667	True	0.0000	0.0000	False
+15	LYON	APT	43	0.7189	False	0.4243	True	0.0000	False	0.0000	0.0000	False
+16	MARSEILLE	APT	41	0.9988	False	0.0000	False	0.0000	False	0.0000	0.0000	False
+17	NORD-PAS-DE-CALAIS	APT	43	0.8593	False	0.1631	True	0.0106	False	0.0000	0.0000	False
+18	NORD-PAS-DE-CALAIS	MAI	43	0.9973	False	0.0000	False	0.0005	False	0.0003	0.0008	False
+19	PARIS	APT	43	0.9547	False	0.0215	False	0.0000	False	0.0000	0.0000	False
+20	PROVENCE-ALPES-CÔTE D'AZUR	APT	43	0.9962	False	0.1907	True	0.0000	False	0.0000	0.0001	False
+21	PROVENCE-ALPES-CÔTE D'AZUR	MAI	43	0.0025	True	0.0154	False	0.1034	True	0.0003	0.0054	False
+22	PROVINCE	APT	43	0.4145	False	0.0648	True	0.0001	False	0.0000	0.0000	False
+23	PROVINCE	MAI	43	0.9939	False	0.0000	False	0.0000	False	0.0088	0.0507	False
+24	RHÔNE-ALPES	APT	43	0.6841	False	0.0008	False	0.0000	False	0.0000	0.0000	False
+25	RHÔNE-ALPES	MAI	43	0.9670	False	0.0090	False	0.0007	False	0.0000	0.0000	False
+26	ÎLE-DE-FRANCE	APT	43	0.1267	False	0.6331	True	0.0006	False	0.0000	0.0000	False
+27	ÎLE-DE-FRANCE	MAI	43	0.5633	False	0.0979	True	0.1670	True	0.0000	0.0000	False
 
-    row = {"Zone": zone, "Type": type_bien, "N": n}
-
-    # ── 1. Stationnarité – ADF ─────────────────────────────────────────
-    from statsmodels.tsa.stattools import adfuller
-    adf_p = adfuller(serie)[1]
-    row["ADF_p"] = round(adf_p, 4)
-    row["Stationnaire"] = adf_p < 0.05
-
-    # ── 2. Normalité – Shapiro-Wilk ────────────────────────────────────
-    sample = serie.values if n <= 5000 else serie.values[-200:]
-    _, p_shapiro = stats.shapiro(sample)
-    row["Shapiro_p"] = round(p_shapiro, 4)
-    row["Normale"] = p_shapiro >= 0.05
-
-    # ── 3. Homoscédasticité – ARCH-LM ──────────────────────────────────
-    try:
-        _, p_arch, _, _ = het_arch(serie.values, nlags=4)
-        row["ARCH_p"] = round(p_arch, 4)
-        row["Homoscédastique"] = p_arch >= 0.05
-    except Exception:
-        row["ARCH_p"] = np.nan
-        row["Homoscédastique"] = np.nan
-
-    # ── 4. Autocorrélation – Ljung-Box (lags 4 et 8) ───────────────────
-    try:
-        lb = acorr_ljungbox(serie, lags=[4, 8], return_df=True)
-        p_lb4 = round(lb["lb_pvalue"].iloc[0], 4)
-        p_lb8 = round(lb["lb_pvalue"].iloc[1], 4)
-        row["LB_lag4_p"] = p_lb4
-        row["LB_lag8_p"] = p_lb8
-        row["Pas_autocorr"] = (p_lb4 >= 0.05) and (p_lb8 >= 0.05)
-    except Exception:
-        row["LB_lag4_p"] = np.nan
-        row["LB_lag8_p"] = np.nan
-        row["Pas_autocorr"] = np.nan
-
-    resultats_hyp.append(row)
-
-df_hyp = pd.DataFrame(resultats_hyp)
-
-# ── Synthèse globale ────────────────────────────────────────────────────
-print("=" * 65)
-print("VÉRIFICATION DES HYPOTHÈSES SÉRIES TEMPORELLES (par segment)")
-print("=" * 65)
-print(f"Segments analysés : {len(df_hyp)}\n")
-
-for col, label in [
-    ("Stationnaire",    "1. Stationnarité     (ADF p<0.05)"),
-    ("Normale",         "2. Normalité          (Shapiro p≥0.05)"),
-    ("Homoscédastique", "3. Homoscédasticité   (ARCH p≥0.05)"),
-    ("Pas_autocorr",    "4. Pas autocorrélation(Ljung-Box p≥0.05)"),
-]:
-    pct = df_hyp[col].mean() * 100
-    print(f"  {label} : {pct:.0f}% ✅")
-
-print()
-df_hyp
