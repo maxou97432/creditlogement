@@ -1,18 +1,21 @@
-# Relancer la décomposition saisonnière par segment (cell 22)
-# en séparant APT et MAI
-from statsmodels.tsa.seasonal import seasonal_decompose
-
-for (zone, type_bien), group in merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]):
-    ts = group.sort_values("Periode").set_index("Periode")["Dif"].dropna()
-    ts.index = pd.PeriodIndex(ts.index, freq="Q")
-    if len(ts) < 12:
-        continue
-    try:
-        res = seasonal_decompose(ts, model="additive", period=4)
-        amp_saison  = res.seasonal.max() - res.seasonal.min()
-        amp_tendance = res.trend.dropna().max() - res.trend.dropna().min()
-        ratio = amp_saison / amp_tendance if amp_tendance > 0 else 0
-        if ratio > 0.2:
-            print(f"[SAISONNALITÉ] {zone} - {type_bien} : ratio={ratio:.2f}")
-    except Exception:
-        pass
+[SAISONNALITÉ] 77 - APT : ratio=0.20
+[SAISONNALITÉ] 78 - APT : ratio=0.29
+[SAISONNALITÉ] 78 - MAI : ratio=0.34
+[SAISONNALITÉ] 91 - APT : ratio=0.28
+[SAISONNALITÉ] 91 - MAI : ratio=0.45
+[SAISONNALITÉ] 92 - APT : ratio=0.36
+[SAISONNALITÉ] 92 - MAI : ratio=0.24
+[SAISONNALITÉ] 93 - MAI : ratio=0.30
+[SAISONNALITÉ] 94 - APT : ratio=0.26
+[SAISONNALITÉ] 94 - MAI : ratio=0.34
+[SAISONNALITÉ] 95 - APT : ratio=0.20
+[SAISONNALITÉ] 95 - MAI : ratio=0.30
+[SAISONNALITÉ] LILLE - MAI : ratio=0.26
+[SAISONNALITÉ] LYON - APT : ratio=0.24
+[SAISONNALITÉ] NORD-PAS-DE-CALAIS - APT : ratio=0.27
+[SAISONNALITÉ] NORD-PAS-DE-CALAIS - MAI : ratio=0.26
+[SAISONNALITÉ] PROVENCE-ALPES-CÔTE D'AZUR - APT : ratio=0.38
+[SAISONNALITÉ] RHÔNE-ALPES - APT : ratio=0.26
+[SAISONNALITÉ] RHÔNE-ALPES - MAI : ratio=0.34
+[SAISONNALITÉ] ÎLE-DE-FRANCE - APT : ratio=0.31
+[SAISONNALITÉ] ÎLE-DE-FRANCE - MAI : ratio=0.34
