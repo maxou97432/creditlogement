@@ -1,139 +1,425 @@
-import pandas as pd
-import numpy as np
-import itertools
-import warnings
-import logging
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-warnings.filterwarnings("ignore")
-logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+============================================================
+SEGMENT : 77 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(0, 1, 1, 4) (AIC=58.2)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-# Dict pour stocker le vainqueur par segment → utilisé dans la cellule backtest
-winners = {}  # {(zone, type_bien): {"modele": str, "seasonal": "add"|None, "sarima_order": (...), "sarima_seasonal": (...)}}
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.533            0.658
+SARIMA                  1.577            0.795
+TES (sans saison)       2.347            0.891
+   ✅ Vainqueur : TES (avec saison)
 
-for segment_name, segment_data in merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]):
-    zone, type_bien = segment_name
-    print(f"\n{'='*60}")
-    print(f"SEGMENT : {zone} - {type_bien}")
-    print(f"{'='*60}")
+============================================================
+SEGMENT : 77 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(0, 1, 1, 4) (AIC=54.4)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    ts_ecart = (
-        segment_data.sort_values("Periode")
-        .set_index("Periode")["Dif"]
-        .dropna()
-    )
-    ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq="Q")
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.130            0.797
+TES (sans saison)       1.165            0.762
+SARIMA                  1.289            0.778
+   ✅ Vainqueur : TES (avec saison)
 
-    if len(ts_ecart) < 16:
-        print("   ⚠️ Série trop courte — segment ignoré.")
-        continue
+============================================================
+SEGMENT : 78 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(0, 1, 1, 4) (AIC=63.5)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    print(f"   {len(ts_ecart)} trimestres ({ts_ecart.index[0]} → {ts_ecart.index[-1]})")
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.500            0.697
+SARIMA                  1.628            0.697
+TES (sans saison)       1.692            1.010
+   ✅ Vainqueur : TES (avec saison)
 
-    # ══════════════════════════════════════════════════════════════════
-    # 1. SARIMAX – Grid Search AIC (calibration sur 75% de la série)
-    # ══════════════════════════════════════════════════════════════════
-    print("   1. Grid Search SARIMA...")
-    train_calib = ts_ecart.iloc[:int(len(ts_ecart) * 0.75)]
+============================================================
+SEGMENT : 78 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=68.5)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    pdq          = list(itertools.product(range(0, 3), [0, 1], range(0, 3)))
-    seasonal_pdq = list(itertools.product(range(0, 2), [0, 1], range(0, 2), [4]))
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.305            0.767
+SARIMA                  1.319            0.785
+TES (sans saison)       1.349            0.689
+   ✅ Vainqueur : TES (avec saison)
 
-    best_aic             = float("inf")
-    best_order           = (1, 1, 0)
-    best_seasonal_order  = (0, 0, 0, 4)
+============================================================
+SEGMENT : 91 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(1, 1, 1, 4) (AIC=60.6)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    for order in pdq:
-        for s_order in seasonal_pdq:
-            try:
-                fit = ARIMA(
-                    train_calib, order=order, seasonal_order=s_order,
-                    enforce_stationarity=False, enforce_invertibility=False
-                ).fit()
-                if fit.aic < best_aic:
-                    best_aic            = fit.aic
-                    best_order          = order
-                    best_seasonal_order = s_order
-            except Exception:
-                continue
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (sans saison)       1.376            0.667
+TES (avec saison)       1.507            0.418
+SARIMA                  1.558            0.510
+   ✅ Vainqueur : TES (sans saison)
 
-    print(f"      → SARIMA{best_order}×{best_seasonal_order} (AIC={best_aic:.1f})")
+============================================================
+SEGMENT : 91 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(0, 1, 1, 4) (AIC=72.8)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    # ══════════════════════════════════════════════════════════════════
-    # 2. CROSS-VALIDATION (5 splits, horizon 4 trimestres)
-    # ══════════════════════════════════════════════════════════════════
-    print("   2. Cross-Validation (5 splits, horizon T+4)...")
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.406            0.724
+SARIMA                  1.464            0.464
+TES (sans saison)       1.565            0.581
+   ✅ Vainqueur : TES (avec saison)
 
-    tscv = TimeSeriesSplit(n_splits=5, test_size=4)
-    results_cv = {
-        "SARIMA":          [],
-        "TES (avec saison)": [],
-        "TES (sans saison)": [],
-    }
+============================================================
+SEGMENT : 92 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(1, 1, 2)×(0, 1, 1, 4) (AIC=49.2)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    for train_idx, test_idx in tscv.split(ts_ecart):
-        cv_train = ts_ecart.iloc[train_idx]
-        cv_test  = ts_ecart.iloc[test_idx]
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.085            0.231
+SARIMA                  1.204            0.226
+TES (sans saison)       1.330            0.502
+   ✅ Vainqueur : TES (avec saison)
 
-        # A. SARIMA
-        try:
-            pred = ARIMA(
-                cv_train, order=best_order, seasonal_order=best_seasonal_order,
-                enforce_stationarity=False, enforce_invertibility=False
-            ).fit().forecast(steps=4)
-            results_cv["SARIMA"].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except Exception:
-            results_cv["SARIMA"].append(np.nan)
+============================================================
+SEGMENT : 92 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 0, 2)×(0, 1, 1, 4) (AIC=91.1)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-        # B. TES avec saisonnalité
-        try:
-            pred = ExponentialSmoothing(
-                cv_train, trend="add", seasonal="add",
-                seasonal_periods=4, damped_trend=True,
-                initialization_method="estimated"
-            ).fit().forecast(steps=4)
-            results_cv["TES (avec saison)"].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except Exception:
-            results_cv["TES (avec saison)"].append(np.nan)
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.924             0.81
+TES (sans saison)       2.989             0.71
+SARIMA                  3.200             1.62
+   ✅ Vainqueur : TES (avec saison)
 
-        # C. TES sans saisonnalité
-        try:
-            pred = ExponentialSmoothing(
-                cv_train, trend="add", seasonal=None,
-                damped_trend=True, initialization_method="estimated"
-            ).fit().forecast(steps=4)
-            results_cv["TES (sans saison)"].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except Exception:
-            results_cv["TES (sans saison)"].append(np.nan)
+============================================================
+SEGMENT : 93 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(0, 1, 1, 4) (AIC=66.5)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    # ══════════════════════════════════════════════════════════════════
-    # 3. RÉSULTATS & VAINQUEUR
-    # ══════════════════════════════════════════════════════════════════
-    summary = (
-        pd.DataFrame(results_cv)
-        .apply(lambda s: pd.to_numeric(s, errors="coerce"))
-        .agg(["mean", "std"])
-        .T
-        .rename(columns={"mean": "RMSE Moyen", "std": "Stabilité (Std)"})
-        .sort_values("RMSE Moyen")
-    )
-    print("\n   🏆 CLASSEMENT :")
-    print(summary.round(3))
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.885            0.735
+SARIMA                  1.926            0.888
+TES (sans saison)       2.162            0.802
+   ✅ Vainqueur : TES (avec saison)
 
-    winner_name = summary.index[0]
-    print(f"   ✅ Vainqueur : {winner_name}")
+============================================================
+SEGMENT : 93 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(1, 1, 1, 4) (AIC=69.9)
+   2. Cross-Validation (5 splits, horizon T+4)...
 
-    # Stocker pour la cellule backtest
-    winners[(zone, type_bien)] = {
-        "modele":          winner_name,
-        "seasonal":        "add" if "avec saison" in winner_name else None,
-        "sarima_order":    best_order,
-        "sarima_seasonal": best_seasonal_order,
-    }
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.051            0.771
+TES (sans saison)       2.337            0.565
+SARIMA                  2.694            0.805
+   ✅ Vainqueur : TES (avec saison)
 
-print(f"\n{'='*60}")
-print(f"Compétition terminée : {len(winners)} segments analysés")
-print(pd.DataFrame(winners).T[["modele", "seasonal"]].value_counts().to_string())
+============================================================
+SEGMENT : 94 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(0, 1, 1, 4) (AIC=57.4)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.271            0.394
+TES (sans saison)       1.368            0.579
+SARIMA                  2.145            1.294
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : 94 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(0, 1, 1, 4) (AIC=71.5)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.791            1.081
+SARIMA                  2.018            1.237
+TES (sans saison)       2.035            0.966
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : 95 - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(0, 1, 1, 4) (AIC=59.8)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.596            0.737
+TES (sans saison)       2.096            1.003
+SARIMA                  2.372            1.261
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : 95 - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(1, 1, 1, 4) (AIC=65.7)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.470            1.050
+SARIMA                  1.635            1.179
+TES (sans saison)       1.660            1.068
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : LILLE - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(1, 1, 1, 4) (AIC=108.3)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (sans saison)       2.958            1.551
+TES (avec saison)       3.070            1.385
+SARIMA                  3.658            1.767
+   ✅ Vainqueur : TES (sans saison)
+
+============================================================
+SEGMENT : LYON - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=72.9)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+SARIMA                  1.665            0.730
+TES (avec saison)       1.750            0.924
+TES (sans saison)       1.904            1.031
+   ✅ Vainqueur : SARIMA
+
+============================================================
+SEGMENT : MARSEILLE - APT
+============================================================
+   41 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=52.1)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.149            1.624
+SARIMA                  2.151            1.399
+TES (sans saison)       2.279            1.825
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : NORD-PAS-DE-CALAIS - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=79.0)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.218            0.722
+TES (sans saison)       1.439            0.817
+SARIMA                  1.459            0.764
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : NORD-PAS-DE-CALAIS - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 1, 2)×(0, 1, 1, 4) (AIC=62.7)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.577            2.262
+TES (sans saison)       2.613            2.499
+SARIMA                  2.805            2.155
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : PARIS - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(1, 0, 2)×(0, 1, 1, 4) (AIC=37.3)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       0.667            0.073
+TES (sans saison)       0.780            0.114
+SARIMA                  0.857            0.299
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : PROVENCE-ALPES-CÔTE D'AZUR - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=46.9)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+SARIMA                  1.122            0.224
+TES (avec saison)       1.148            0.288
+TES (sans saison)       1.421            0.450
+   ✅ Vainqueur : SARIMA
+
+============================================================
+SEGMENT : PROVENCE-ALPES-CÔTE D'AZUR - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 0, 2)×(0, 1, 1, 4) (AIC=66.2)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.426            0.659
+TES (sans saison)       1.495            0.599
+SARIMA                  1.571            0.602
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : PROVINCE - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(2, 0, 2)×(0, 1, 1, 4) (AIC=30.2)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+SARIMA                  1.238            1.328
+TES (avec saison)       1.345            1.149
+TES (sans saison)       1.647            0.827
+   ✅ Vainqueur : SARIMA
+
+============================================================
+SEGMENT : PROVINCE - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(1, 1, 2)×(0, 1, 1, 4) (AIC=46.1)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.118            2.789
+TES (sans saison)       2.180            2.786
+SARIMA                  2.223            2.760
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : RHÔNE-ALPES - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 1)×(0, 1, 1, 4) (AIC=58.4)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       2.103            1.721
+SARIMA                  2.211            1.991
+TES (sans saison)       2.301            1.641
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : RHÔNE-ALPES - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=60.6)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+SARIMA                  1.475            0.634
+TES (avec saison)       1.592            0.791
+TES (sans saison)       1.605            1.222
+   ✅ Vainqueur : SARIMA
+
+============================================================
+SEGMENT : ÎLE-DE-FRANCE - APT
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 2)×(0, 1, 1, 4) (AIC=64.9)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+TES (avec saison)       1.378            0.301
+SARIMA                  1.532            0.504
+TES (sans saison)       1.739            0.907
+   ✅ Vainqueur : TES (avec saison)
+
+============================================================
+SEGMENT : ÎLE-DE-FRANCE - MAI
+============================================================
+   43 trimestres (2015Q1 → 2025Q3)
+   1. Grid Search SARIMA...
+      → SARIMA(0, 1, 1)×(0, 1, 1, 4) (AIC=56.0)
+   2. Cross-Validation (5 splits, horizon T+4)...
+
+   🏆 CLASSEMENT :
+                   RMSE Moyen  Stabilité (Std)
+SARIMA                  0.896            0.778
+TES (avec saison)       0.934            0.802
+TES (sans saison)       1.301            0.761
+   ✅ Vainqueur : SARIMA
+
+============================================================
+Compétition terminée : 28 segments analysés
+modele             seasonal
+TES (avec saison)  add         21
