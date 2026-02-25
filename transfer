@@ -8,116 +8,132 @@ from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-# --- CONFIGURATION ---
 warnings.filterwarnings("ignore")
 logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
-logging.getLogger('prophet').setLevel(logging.WARNING)
 
-# --- BOUCLE SUR CHAQUE SEGMENT ---
-unique_segments = merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"])
+# Dict pour stocker le vainqueur par segment → utilisé dans la cellule backtest
+winners = {}  # {(zone, type_bien): {"modele": str, "seasonal": "add"|None, "sarima_order": (...), "sarima_seasonal": (...)}}
 
-for segment_name, segment_data in unique_segments:
-    print(f"\n========================================================")
-    print(f"ANALYSE DU SEGMENT : {segment_name}")
-    print(f"========================================================")
+for segment_name, segment_data in merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]):
+    zone, type_bien = segment_name
+    print(f"\n{'='*60}")
+    print(f"SEGMENT : {zone} - {type_bien}")
+    print(f"{'='*60}")
 
-    # 1. PRÉPARATION DES DONNÉES
-    df_analyse = segment_data.sort_values("Periode").set_index("Periode")
-    
-    if 'Dif' not in df_analyse.columns:
-        df_analyse['Dif'] = df_analyse['Indice de prix (CL)'] - df_analyse['Indice de prix (INSEE) - Base 2020']
+    ts_ecart = (
+        segment_data.sort_values("Periode")
+        .set_index("Periode")["Dif"]
+        .dropna()
+    )
+    ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq="Q")
 
-    ts_ecart = df_analyse['Dif'].dropna()
-    ts_ecart.index = pd.PeriodIndex(ts_ecart.index, freq='Q')
-
-    print(f"   Série chargée : {len(ts_ecart)} trimestres du {ts_ecart.index[0]} au {ts_ecart.index[-1]}")
-    
-    if len(ts_ecart) < 16: # Besoin de minimum 16 points pour CV 5 splits + horizon 4
-        print("   ⚠️ Série trop courte pour l'analyse complète. Passage au segment suivant.")
+    if len(ts_ecart) < 16:
+        print("   ⚠️ Série trop courte — segment ignoré.")
         continue
 
-    # ==============================================================================
-    # 2. OPTIMISATION SARIMA (Grid Search AIC)
-    # ==============================================================================
-    print("   2. Optimisation SARIMA...")
-    
-    p = q = range(0, 4) 
-    d = [0, 1, 2]
-    P = Q = range(0, 4)
-    D = [0, 1, 2]
-    s = [4]
+    print(f"   {len(ts_ecart)} trimestres ({ts_ecart.index[0]} → {ts_ecart.index[-1]})")
 
-    pdq = list(itertools.product(p, d, q))
-    seasonal_pdq = list(itertools.product(P, D, Q, s))
+    # ══════════════════════════════════════════════════════════════════
+    # 1. SARIMAX – Grid Search AIC (calibration sur 75% de la série)
+    # ══════════════════════════════════════════════════════════════════
+    print("   1. Grid Search SARIMA...")
+    train_calib = ts_ecart.iloc[:int(len(ts_ecart) * 0.75)]
 
-    best_aic = float("inf")
-    best_order = (1, 1, 0)
-    best_seasonal_order = (0, 0, 0, 4)
-    
-    train_calibration = ts_ecart.iloc[:int(len(ts_ecart)*0.75)] # Calibration sur le passé
+    pdq          = list(itertools.product(range(0, 3), [0, 1], range(0, 3)))
+    seasonal_pdq = list(itertools.product(range(0, 2), [0, 1], range(0, 2), [4]))
 
-    for param in pdq:
-        for param_seasonal in seasonal_pdq:
+    best_aic             = float("inf")
+    best_order           = (1, 1, 0)
+    best_seasonal_order  = (0, 0, 0, 4)
+
+    for order in pdq:
+        for s_order in seasonal_pdq:
             try:
-                mod = ARIMA(train_calibration, order=param, seasonal_order=param_seasonal,
-                            enforce_stationarity=False, enforce_invertibility=False)
-                results = mod.fit()
-                if results.aic < best_aic:
-                    best_aic = results.aic
-                    best_order = param
-                    best_seasonal_order = param_seasonal
-            except:
+                fit = ARIMA(
+                    train_calib, order=order, seasonal_order=s_order,
+                    enforce_stationarity=False, enforce_invertibility=False
+                ).fit()
+                if fit.aic < best_aic:
+                    best_aic            = fit.aic
+                    best_order          = order
+                    best_seasonal_order = s_order
+            except Exception:
                 continue
-                
-    print(f"      -> SARIMA Optimal : Order={best_order}, Seasonal={best_seasonal_order}")
 
-    
+    print(f"      → SARIMA{best_order}×{best_seasonal_order} (AIC={best_aic:.1f})")
 
+    # ══════════════════════════════════════════════════════════════════
+    # 2. CROSS-VALIDATION (5 splits, horizon 4 trimestres)
+    # ══════════════════════════════════════════════════════════════════
+    print("   2. Cross-Validation (5 splits, horizon T+4)...")
 
-    # ==============================================================================
-    # 4. LE TOURNOI : CROSS-VALIDATION (Robustesse)
-    # ==============================================================================
-    print("   3. Estimation du meilleur modèle...")
+    tscv = TimeSeriesSplit(n_splits=5, test_size=4)
+    results_cv = {
+        "SARIMA":          [],
+        "TES (avec saison)": [],
+        "TES (sans saison)": [],
+    }
 
-    n_splits = 5
-    test_horizon = 4
-    tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_horizon)   ## Cross Validation de séries temporelles
-
-    results_cv = {'SARIMA Opti': [], 'TES (Holt-Winters)': []}
-
-    for train_index, test_index in tscv.split(ts_ecart):
-        cv_train = ts_ecart.iloc[train_index]
-        cv_test = ts_ecart.iloc[test_index]
+    for train_idx, test_idx in tscv.split(ts_ecart):
+        cv_train = ts_ecart.iloc[train_idx]
+        cv_test  = ts_ecart.iloc[test_idx]
 
         # A. SARIMA
         try:
-            mod = ARIMA(cv_train, order=best_order, seasonal_order=best_seasonal_order, 
-                        enforce_stationarity=False, enforce_invertibility=False).fit()
-            pred = mod.forecast(steps=test_horizon)
-            results_cv['SARIMA Opti'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['SARIMA Opti'].append(np.nan)
+            pred = ARIMA(
+                cv_train, order=best_order, seasonal_order=best_seasonal_order,
+                enforce_stationarity=False, enforce_invertibility=False
+            ).fit().forecast(steps=4)
+            results_cv["SARIMA"].append(np.sqrt(mean_squared_error(cv_test, pred)))
+        except Exception:
+            results_cv["SARIMA"].append(np.nan)
 
-
-        # B. TES (Holt-Winters)
+        # B. TES avec saisonnalité
         try:
-            mod = ExponentialSmoothing(cv_train, trend='add', seasonal='add', seasonal_periods=4, damped_trend=True, initialization_method="estimated").fit()
-            pred = mod.forecast(steps=test_horizon)
-            results_cv['TES (Holt-Winters)'].append(np.sqrt(mean_squared_error(cv_test, pred)))
-        except:
-            results_cv['TES (Holt-Winters)'].append(np.nan)
+            pred = ExponentialSmoothing(
+                cv_train, trend="add", seasonal="add",
+                seasonal_periods=4, damped_trend=True,
+                initialization_method="estimated"
+            ).fit().forecast(steps=4)
+            results_cv["TES (avec saison)"].append(np.sqrt(mean_squared_error(cv_test, pred)))
+        except Exception:
+            results_cv["TES (avec saison)"].append(np.nan)
 
-        
+        # C. TES sans saisonnalité
+        try:
+            pred = ExponentialSmoothing(
+                cv_train, trend="add", seasonal=None,
+                damped_trend=True, initialization_method="estimated"
+            ).fit().forecast(steps=4)
+            results_cv["TES (sans saison)"].append(np.sqrt(mean_squared_error(cv_test, pred)))
+        except Exception:
+            results_cv["TES (sans saison)"].append(np.nan)
 
-    # ==============================================================================
-    # 5. RÉSULTATS FINAUX DU SEGMENT
-    # ==============================================================================
-    df_results = pd.DataFrame(results_cv)
-    summary = pd.DataFrame({
-        'RMSE Moyen': df_results.mean(),
-        'Stabilité (Std)': df_results.std()
-    }).sort_values("RMSE Moyen")
-    
-    print("\n   🏆 CLASSEMENT DU SEGMENT :")
-    print(summary)
-    print(f"   ✅ Vainqueur : {summary.index[0]}")
+    # ══════════════════════════════════════════════════════════════════
+    # 3. RÉSULTATS & VAINQUEUR
+    # ══════════════════════════════════════════════════════════════════
+    summary = (
+        pd.DataFrame(results_cv)
+        .apply(lambda s: pd.to_numeric(s, errors="coerce"))
+        .agg(["mean", "std"])
+        .T
+        .rename(columns={"mean": "RMSE Moyen", "std": "Stabilité (Std)"})
+        .sort_values("RMSE Moyen")
+    )
+    print("\n   🏆 CLASSEMENT :")
+    print(summary.round(3))
+
+    winner_name = summary.index[0]
+    print(f"   ✅ Vainqueur : {winner_name}")
+
+    # Stocker pour la cellule backtest
+    winners[(zone, type_bien)] = {
+        "modele":          winner_name,
+        "seasonal":        "add" if "avec saison" in winner_name else None,
+        "sarima_order":    best_order,
+        "sarima_seasonal": best_seasonal_order,
+    }
+
+print(f"\n{'='*60}")
+print(f"Compétition terminée : {len(winners)} segments analysés")
+print(pd.DataFrame(winners).T[["modele", "seasonal"]].value_counts().to_string())
