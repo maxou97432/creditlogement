@@ -1,36 +1,5 @@
-{
-	"name": "KeyError",
-	"message": "'Column not found: prix_mm_value'",
-	"stack": "---------------------------------------------------------------------------
-KeyError                                  Traceback (most recent call last)
-Cell In[1], line 38
-     34 mask_2020 = df_final[\"Periode\"].dt.year == 2020
-     36 if not df_final.loc[mask_2020].empty:
-     37     # Pivot par type de bien et zone géographique
----> 38     pivot_2020_CL = df_final.loc[mask_2020].groupby([\"CD_TYPE_BIEN\",\"VAL_MAILLE_GEO\"])[\"prix_mm_value\"].mean()
-     40     # Application du pivot (Mapping multi-index)
-     41     df_final[\"Indice de prix (CL)\"] = (
-     42         (df_final[\"prix_mm_value\"] / 
-     43          df_final.set_index([\"CD_TYPE_BIEN\",\"VAL_MAILLE_GEO\"]).index.map(pivot_2020_CL)
-     44         ) * 100 
-     45     ).round(2)
-
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\groupby\\generic.py:1951, in DataFrameGroupBy.__getitem__(self, key)
-   1944 if isinstance(key, tuple) and len(key) > 1:
-   1945     # if len == 1, then it becomes a SeriesGroupBy and this is actually
-   1946     # valid syntax, so don't raise
-   1947     raise ValueError(
-   1948         \"Cannot subset columns with a tuple with more than one element. \"
-   1949         \"Use a list instead.\"
-   1950     )
--> 1951 return super().__getitem__(key)
-
-File n:\\uflumth\\indicateur_marche\\V2\\sklearn-env\\Lib\\site-packages\\pandas\\core\\base.py:245, in SelectionMixin.__getitem__(self, key)
-    243 else:
-    244     if key not in self.obj:
---> 245         raise KeyError(f\"Column not found: {key}\")
-    246     ndim = self.obj[key].ndim
-    247     return self._gotitem(key, ndim=ndim)
-
-KeyError: 'Column not found: prix_mm_value'"
-}
+import pandas as pd, os
+df_test = pd.read_csv(r"Z:\uflumth\gits\univers_elementaire\TI\resultats\prix_m2_univ_elem_complet_CITY.csv")
+print(df_test.columns.tolist())
+print(df_test['DIC_NAME'].unique())
+print(df_test['CD_TYPE_BIEN'].unique())
