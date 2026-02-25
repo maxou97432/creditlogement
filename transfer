@@ -1,129 +1,86 @@
-# =============================================================================
-# CHARGEMENT INSEE + FUSION CL x INSEE → merge
-# NE PAS relancer la cellule précédente après celle-ci
-# =============================================================================
+import pandas as pd
+import numpy as np
+import sys
+import os
 
-insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
-source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
-
+# =============================================================================
+# 1. CHARGEMENT DES DONNÉES CL (nouveaux fichiers prix_m2_univ_elem_complet_*)
+# =============================================================================
 try:
-    df_insee_raw = pd.read_csv(source_file, sep=";")
-    print(f"Fichier INSEE chargé : {len(df_insee_raw)} lignes")
-except FileNotFoundError:
-    print(f"ERREUR: {source_file} introuvable.")
+    base_path = r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats"  # ← chemin nouveau
+
+    dfs_to_concat = []
+    for suffix in ["CITY", "DEPT", "REGION", "PROVINCE"]:
+        fpath = os.path.join(base_path, f"prix_m2_univ_elem_complet_{suffix}.csv")
+        df_ = pd.read_csv(fpath)
+        df_["MAILLE_TYPE"] = suffix
+        dfs_to_concat.append(df_)
+        print(f"Chargé {suffix} : {len(df_)} lignes")
+
+    df_raw = pd.concat(dfs_to_concat, ignore_index=True)
+    dic_names = df_raw["DIC_NAME"].unique().tolist()
+    print(f"Total brut : {len(df_raw)} lignes | DIC_NAME uniques : {dic_names}")
+
+except FileNotFoundError as e:
+    print(f"Erreur lecture fichier CL : {e}")
     sys.exit(1)
 
-# Filtrage métadonnées / CVS / subdivisions
-df_insee_raw = df_insee_raw[df_insee_raw["Libellé"] != "Codes"].copy()
-df_insee_raw = df_insee_raw[~df_insee_raw["Libellé"].str.contains("CVS", na=False, case=False)].copy()
-
-series_a_garder = ["Île-de-France : Maisons", "Île-de-France : Appartements", "Île-de-France : Ensemble"]
-mask_garder = df_insee_raw["Libellé"].apply(lambda x: any(s in str(x) for s in series_a_garder))
-mask_subdiv = df_insee_raw["Libellé"].str.contains(" : ", na=False) & ~mask_garder
-df_insee_raw = df_insee_raw[~mask_subdiv].copy()
-
-def parse_libelle(txt):
-    if not isinstance(txt, str): return None, None
-    if "Île-de-France : Maisons" in txt:       return "ÎLE-DE-FRANCE", "MAI"
-    if "Île-de-France : Appartements" in txt:  return "ÎLE-DE-FRANCE", "APT"
-    if "Île-de-France : Ensemble" in txt:      return "ÎLE-DE-FRANCE", "ENSEMBLE"
-    geo_map = {
-        "Agglomération de Marseille": "MARSEILLE", "Agglomération de Lyon": "LYON",
-        "Agglomération de Lille": "LILLE", "Seine-et-Marne": "77", "Yvelines": "78",
-        "Essonne": "91", "Hauts-de-Seine": "92", "Seine-Saint-Denis": "93",
-        "Val-de-Marne": "94", "Val-d'Oise": "95", "Province": "PROVINCE",
-        "Île-de-France": "ÎLE-DE-FRANCE", "Ile-de-France": "ÎLE-DE-FRANCE",
-        "Rhône-Alpes": "RHÔNE-ALPES", "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
-        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS", "Auvergne": "AUVERGNE",
-        "Marseille": "MARSEILLE", "Paris": "PARIS", "Lille": "LILLE"
-    }
-    type_map = {"Appartements": "APT", "Maisons": "MAI", "Ensemble": "ENSEMBLE"}
-    parts = [p.strip() for p in txt.split(" - ")]
-    geo = next((v for p in parts for k, v in geo_map.items() if k.lower() in p.lower()), None)
-    tb  = next((v for p in parts for k, v in type_map.items() if k in p), None)
-    return geo, tb
-
-df_insee_raw[["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]] = df_insee_raw["Libellé"].apply(
-    lambda x: pd.Series(parse_libelle(x)))
-df_insee_clean = df_insee_raw.dropna(subset=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).copy()
-
-perimetre_whitelist = [
-    "77", "78", "91", "92", "93", "94", "95",
-    "MARSEILLE", "LYON", "LILLE", "PARIS",
-    "NORD-PAS-DE-CALAIS", "PROVENCE-ALPES-CÔTE D'AZUR", "RHÔNE-ALPES",
-    "PROVINCE", "AUVERGNE", "ÎLE-DE-FRANCE"
-]
-df_insee_clean = df_insee_clean[df_insee_clean["VAL_MAILLE_GEO"].isin(perimetre_whitelist)].copy()
-print(f"Périmètres INSEE : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
-print(f"Types INSEE      : {sorted(df_insee_clean['CD_TYPE_BIEN'].unique())}")
-
-# Pivot wide → long (colonnes trimestrielles)
-quarter_cols = [c for c in df_insee_clean.columns if c and "-T" in c and c[0].isdigit()]
-df_insee_long = df_insee_clean.melt(
-    id_vars=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"], value_vars=quarter_cols,
-    var_name="Periode_Str", value_name="Indice de prix (INSEE)"
+# =============================================================================
+# 2. FILTRE : on garde uniquement le prix au m² (glissant 3 mois)
+# =============================================================================
+DIC_NAME_RETENU = "prix_m2_3m"  # ← changer en "prix_m2_12m" si besoin
+df_final = df_raw[df_raw["DIC_NAME"] == DIC_NAME_RETENU].copy()
+df_final = df_final.drop(
+    columns=["TYPE_MAILLE", "MAILLE_TYPE", "DIC_NAME", "TAUX_INFL_12M", "TAUX_INFL_3M", "nb_univers"],
+    errors="ignore"
 )
-df_insee_long["Indice de prix (INSEE)"] = pd.to_numeric(
-    df_insee_long["Indice de prix (INSEE)"].astype(str)
-        .replace([r"\(s\)", r"\(p\)", r"\(r\)", "nan", ""], np.nan, regex=True)
-        .str.replace(",", ".").str.strip(),
-    errors="coerce"
+# ↑ nb_observations est conservé intentionnellement (utilisé dans les cellules suivantes)
+print(f"Après filtre DIC_NAME={DIC_NAME_RETENU} : {len(df_final)} lignes")
+
+# =============================================================================
+# 3. AGRÉGATION MENSUEL → TRIMESTRIEL
+# =============================================================================
+df_final["Periode"] = pd.to_datetime(df_final["Periode"])
+df_final["Trimestre"] = df_final["Periode"].dt.to_period("Q")
+
+agg_dict = {"prix_mm_value": "mean"}
+if "nb_observations" in df_final.columns:
+    agg_dict["nb_observations"] = "sum"  # somme des observations sur le trimestre
+
+df_final = (
+    df_final.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Trimestre"])
+    .agg(agg_dict)
+    .reset_index()
 )
-df_insee_long = df_insee_long.dropna(subset=["Indice de prix (INSEE)"]).copy()
-df_insee_long["Date code"] = (
-    df_insee_long["Periode_Str"].str.split("-T").str[0] + "Q" +
-    df_insee_long["Periode_Str"].str.split("T").str[-1]
-)
-df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
-insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
+# Convertir le trimestre en timestamp (1er jour du trimestre)
+df_final["Periode"] = df_final["Trimestre"].dt.to_timestamp(how="start")
+df_final = df_final.drop(columns=["Trimestre"])
 
-# Rebase INSEE 2020 = 100
-insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
-mask_2020i = insee_final["Periode"].dt.year == 2020
-pivot_2020i = insee_final.loc[mask_2020i].groupby(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"])["Indice de prix (INSEE)"].mean()
-insee_final["Indice de prix (INSEE) - Base 2020"] = (
-    insee_final["Indice de prix (INSEE)"]
-    / insee_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020i)
-    * 100
-).round(2)
-print("Indice INSEE rebasé sur 2020 = 100")
+print(f"Après agrégation trimestrielle : {len(df_final)} lignes")
+print(f"   Zones : {df_final['VAL_MAILLE_GEO'].nunique()} | Types : {df_final['CD_TYPE_BIEN'].unique()}")
+print(f"   Période : {df_final['Periode'].min().date()} → {df_final['Periode'].max().date()}")
 
-# Normalisation + clé de fusion
-for df in (df_final, insee_final):
-    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df["CD_TYPE_BIEN"]   = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+# =============================================================================
+# 4. CALCUL DE L'INDICE CL (Base 2020 = 100)
+# =============================================================================
+mask_2020 = df_final["Periode"].dt.year == 2020
 
-df_final["Periode_Key"]    = df_final["Periode"].dt.to_period("Q").astype(str)
-insee_final["Periode_Key"] = insee_final["Periode"].dt.to_period("Q").astype(str)
+if df_final.loc[mask_2020].empty:
+    print("Attention : aucune donnée CL pour 2020 – rebasing impossible")
+    df_final["Indice de prix (CL)"] = np.nan
+else:
+    pivot_2020_CL = (
+        df_final.loc[mask_2020]
+        .groupby(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"])["prix_mm_value"]
+        .mean()
+    )
+    df_final["Indice de prix (CL)"] = (
+        df_final["prix_mm_value"]
+        / df_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
+        * 100
+    ).round(2)
+    print("Indice CL rebasé sur 2020 = 100")
 
-# Dédoublonnage INSEE
-dupes = insee_final.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]).size()
-if (dupes > 1).any():
-    insee_final = insee_final.groupby(
-        ["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"], as_index=False
-    ).agg({"Periode": "first", "Indice de prix (INSEE)": "mean", "Indice de prix (INSEE) - Base 2020": "mean"})
-
-# Fusion inner
-merge = pd.merge(
-    df_final,
-    insee_final.drop(columns=["Periode"], errors="ignore"),
-    how="inner",
-    on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
-)
-merge = merge.rename(columns={"Periode_Key": "Periode_Trimestre_Str"})
-merge = merge[merge["Periode_Trimestre_Str"].str.match(r"^\d{4}Q\d$", na=False)]
-merge["Periode"] = pd.PeriodIndex(merge["Periode_Trimestre_Str"], freq="Q").to_timestamp(how="start")
-merge = merge.drop(columns=["Periode_Trimestre_Str"], errors="ignore")
-merge = merge.loc[:, ~merge.columns.duplicated()]
-merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
-merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
-
-print(f"\nFusion réussie : {len(merge)} lignes")
-print(f"   Types de bien dans merge : {sorted(merge['CD_TYPE_BIEN'].unique())}")
-print(f"   Zones : {merge['VAL_MAILLE_GEO'].nunique()}")
-
-# Vérification rapide de l'échelle (doit être proche de 100 en 2020)
-check = merge[merge["Periode"].dt.year == 2020].groupby("CD_TYPE_BIEN")[["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"]].mean().round(1)
-print("\nVérification échelle 2020 (doit être ~100) :")
-print(check)
-merge.head()
+df_final = df_final.drop(columns=["prix_mm_value"], errors="ignore")
+print(f"Colonnes de df_final : {df_final.columns.tolist()}")
+print(df_final.head())
