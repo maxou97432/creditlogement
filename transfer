@@ -1,86 +1,73 @@
+from scipy import stats
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 import pandas as pd
 import numpy as np
-import sys
-import os
+import warnings
+warnings.filterwarnings("ignore")
 
-# =============================================================================
-# 1. CHARGEMENT DES DONNÉES CL (nouveaux fichiers prix_m2_univ_elem_complet_*)
-# =============================================================================
-try:
-    base_path = r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats"  # ← chemin nouveau
+resultats_hyp = []
 
-    dfs_to_concat = []
-    for suffix in ["CITY", "DEPT", "REGION", "PROVINCE"]:
-        fpath = os.path.join(base_path, f"prix_m2_univ_elem_complet_{suffix}.csv")
-        df_ = pd.read_csv(fpath)
-        df_["MAILLE_TYPE"] = suffix
-        dfs_to_concat.append(df_)
-        print(f"Chargé {suffix} : {len(df_)} lignes")
+for (zone, type_bien), group in merge.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]):
+    serie = group.sort_values("Periode")["Dif"].dropna()
+    n = len(serie)
+    
+    if n < 12:
+        continue  # Série trop courte
 
-    df_raw = pd.concat(dfs_to_concat, ignore_index=True)
-    dic_names = df_raw["DIC_NAME"].unique().tolist()
-    print(f"Total brut : {len(df_raw)} lignes | DIC_NAME uniques : {dic_names}")
+    row = {"Zone": zone, "Type": type_bien, "N": n}
 
-except FileNotFoundError as e:
-    print(f"Erreur lecture fichier CL : {e}")
-    sys.exit(1)
+    # ── 1. Stationnarité – ADF ─────────────────────────────────────────
+    from statsmodels.tsa.stattools import adfuller
+    adf_p = adfuller(serie)[1]
+    row["ADF_p"] = round(adf_p, 4)
+    row["Stationnaire"] = adf_p < 0.05
 
-# =============================================================================
-# 2. FILTRE : on garde uniquement le prix au m² (glissant 3 mois)
-# =============================================================================
-DIC_NAME_RETENU = "prix_m2_3m"  # ← changer en "prix_m2_12m" si besoin
-df_final = df_raw[df_raw["DIC_NAME"] == DIC_NAME_RETENU].copy()
-df_final = df_final.drop(
-    columns=["TYPE_MAILLE", "MAILLE_TYPE", "DIC_NAME", "TAUX_INFL_12M", "TAUX_INFL_3M", "nb_univers"],
-    errors="ignore"
-)
-# ↑ nb_observations est conservé intentionnellement (utilisé dans les cellules suivantes)
-print(f"Après filtre DIC_NAME={DIC_NAME_RETENU} : {len(df_final)} lignes")
+    # ── 2. Normalité – Shapiro-Wilk ────────────────────────────────────
+    sample = serie.values if n <= 5000 else serie.values[-200:]
+    _, p_shapiro = stats.shapiro(sample)
+    row["Shapiro_p"] = round(p_shapiro, 4)
+    row["Normale"] = p_shapiro >= 0.05
 
-# =============================================================================
-# 3. AGRÉGATION MENSUEL → TRIMESTRIEL
-# =============================================================================
-df_final["Periode"] = pd.to_datetime(df_final["Periode"])
-df_final["Trimestre"] = df_final["Periode"].dt.to_period("Q")
+    # ── 3. Homoscédasticité – ARCH-LM ──────────────────────────────────
+    try:
+        _, p_arch, _, _ = het_arch(serie.values, nlags=4)
+        row["ARCH_p"] = round(p_arch, 4)
+        row["Homoscédastique"] = p_arch >= 0.05
+    except Exception:
+        row["ARCH_p"] = np.nan
+        row["Homoscédastique"] = np.nan
 
-agg_dict = {"prix_mm_value": "mean"}
-if "nb_observations" in df_final.columns:
-    agg_dict["nb_observations"] = "sum"  # somme des observations sur le trimestre
+    # ── 4. Autocorrélation – Ljung-Box (lags 4 et 8) ───────────────────
+    try:
+        lb = acorr_ljungbox(serie, lags=[4, 8], return_df=True)
+        p_lb4 = round(lb["lb_pvalue"].iloc[0], 4)
+        p_lb8 = round(lb["lb_pvalue"].iloc[1], 4)
+        row["LB_lag4_p"] = p_lb4
+        row["LB_lag8_p"] = p_lb8
+        row["Pas_autocorr"] = (p_lb4 >= 0.05) and (p_lb8 >= 0.05)
+    except Exception:
+        row["LB_lag4_p"] = np.nan
+        row["LB_lag8_p"] = np.nan
+        row["Pas_autocorr"] = np.nan
 
-df_final = (
-    df_final.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Trimestre"])
-    .agg(agg_dict)
-    .reset_index()
-)
-# Convertir le trimestre en timestamp (1er jour du trimestre)
-df_final["Periode"] = df_final["Trimestre"].dt.to_timestamp(how="start")
-df_final = df_final.drop(columns=["Trimestre"])
+    resultats_hyp.append(row)
 
-print(f"Après agrégation trimestrielle : {len(df_final)} lignes")
-print(f"   Zones : {df_final['VAL_MAILLE_GEO'].nunique()} | Types : {df_final['CD_TYPE_BIEN'].unique()}")
-print(f"   Période : {df_final['Periode'].min().date()} → {df_final['Periode'].max().date()}")
+df_hyp = pd.DataFrame(resultats_hyp)
 
-# =============================================================================
-# 4. CALCUL DE L'INDICE CL (Base 2020 = 100)
-# =============================================================================
-mask_2020 = df_final["Periode"].dt.year == 2020
+# ── Synthèse globale ────────────────────────────────────────────────────
+print("=" * 65)
+print("VÉRIFICATION DES HYPOTHÈSES SÉRIES TEMPORELLES (par segment)")
+print("=" * 65)
+print(f"Segments analysés : {len(df_hyp)}\n")
 
-if df_final.loc[mask_2020].empty:
-    print("Attention : aucune donnée CL pour 2020 – rebasing impossible")
-    df_final["Indice de prix (CL)"] = np.nan
-else:
-    pivot_2020_CL = (
-        df_final.loc[mask_2020]
-        .groupby(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"])["prix_mm_value"]
-        .mean()
-    )
-    df_final["Indice de prix (CL)"] = (
-        df_final["prix_mm_value"]
-        / df_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
-        * 100
-    ).round(2)
-    print("Indice CL rebasé sur 2020 = 100")
+for col, label in [
+    ("Stationnaire",    "1. Stationnarité     (ADF p<0.05)"),
+    ("Normale",         "2. Normalité          (Shapiro p≥0.05)"),
+    ("Homoscédastique", "3. Homoscédasticité   (ARCH p≥0.05)"),
+    ("Pas_autocorr",    "4. Pas autocorrélation(Ljung-Box p≥0.05)"),
+]:
+    pct = df_hyp[col].mean() * 100
+    print(f"  {label} : {pct:.0f}% ✅")
 
-df_final = df_final.drop(columns=["prix_mm_value"], errors="ignore")
-print(f"Colonnes de df_final : {df_final.columns.tolist()}")
-print(df_final.head())
+print()
+df_hyp
