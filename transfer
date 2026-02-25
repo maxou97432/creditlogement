@@ -1,85 +1,9 @@
-import pandas as pd
-import numpy as np
-import sys
-import os
-
-# =============================================================================
-# 1. CHARGEMENT DES DONNÉES CL (nouveaux fichiers prix_m2_univ_elem_complet_*)
-# =============================================================================
-try:
-    base_path = r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats"  # ← chemin nouveau
-
-    dfs_to_concat = []
-    for suffix in ["CITY", "DEPT", "REGION", "PROVINCE"]:
-        fpath = os.path.join(base_path, f"prix_m2_univ_elem_complet_{suffix}.csv")
-        df_ = pd.read_csv(fpath)
-        df_["MAILLE_TYPE"] = suffix
-        dfs_to_concat.append(df_)
-        print(f"Chargé {suffix} : {len(df_)} lignes")
-
-    df_raw = pd.concat(dfs_to_concat, ignore_index=True)
-    print(f"Total brut : {len(df_raw)} lignes | DIC_NAME uniques : {df_raw["DIC_NAME"].unique().tolist()}")
-
-except FileNotFoundError as e:
-    print(f"Erreur lecture fichier CL : {e}")
-    sys.exit(1)
-
-# =============================================================================
-# 2. FILTRE : on garde uniquement le prix au m² (glissant 3 mois)
-# =============================================================================
-DIC_NAME_RETENU = "prix_m2_3m"  # ← changer en "prix_m2_12m" si besoin
-df_final = df_raw[df_raw["DIC_NAME"] == DIC_NAME_RETENU].copy()
-df_final = df_final.drop(
-    columns=["TYPE_MAILLE", "MAILLE_TYPE", "DIC_NAME", "TAUX_INFL_12M", "TAUX_INFL_3M", "nb_univers"],
-    errors="ignore"
-)
-# ↑ nb_observations est conservé intentionnellement (utilisé dans les cellules suivantes)
-print(f"Après filtre DIC_NAME={DIC_NAME_RETENU} : {len(df_final)} lignes")
-
-# =============================================================================
-# 3. AGRÉGATION MENSUEL → TRIMESTRIEL
-# =============================================================================
-df_final["Periode"] = pd.to_datetime(df_final["Periode"])
-df_final["Trimestre"] = df_final["Periode"].dt.to_period("Q")
-
-agg_dict = {"prix_mm_value": "mean"}
-if "nb_observations" in df_final.columns:
-    agg_dict["nb_observations"] = "sum"  # somme des observations sur le trimestre
-
-df_final = (
-    df_final.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Trimestre"])
-    .agg(agg_dict)
-    .reset_index()
-)
-# Convertir le trimestre en timestamp (1er jour du trimestre)
-df_final["Periode"] = df_final["Trimestre"].dt.to_timestamp(how="start")
-df_final = df_final.drop(columns=["Trimestre"])
-
-print(f"Après agrégation trimestrielle : {len(df_final)} lignes")
-print(f"   Zones : {df_final['VAL_MAILLE_GEO'].nunique()} | Types : {df_final['CD_TYPE_BIEN'].unique()}")
-print(f"   Période : {df_final['Periode'].min().date()} → {df_final['Periode'].max().date()}")
-
-# =============================================================================
-# 4. CALCUL DE L'INDICE CL (Base 2020 = 100)
-# =============================================================================
-mask_2020 = df_final["Periode"].dt.year == 2020
-
-if df_final.loc[mask_2020].empty:
-    print("Attention : aucune donnée CL pour 2020 – rebasing impossible")
-    df_final["Indice de prix (CL)"] = np.nan
-else:
-    pivot_2020_CL = (
-        df_final.loc[mask_2020]
-        .groupby(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"])["prix_mm_value"]
-        .mean()
-    )
-    df_final["Indice de prix (CL)"] = (
-        df_final["prix_mm_value"]
-        / df_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_CL)
-        * 100
-    ).round(2)
-    print("Indice CL rebasé sur 2020 = 100")
-
-df_final = df_final.drop(columns=["prix_mm_value"], errors="ignore")
-print(f"Colonnes de df_final : {df_final.columns.tolist()}")
-print(df_final.head())
+{
+	"name": "SyntaxError",
+	"message": "f-string: unmatched '[' (2161803523.py, line 21)",
+	"stack": "  Cell In[2], line 21
+    print(f\"Total brut : {len(df_raw)} lignes | DIC_NAME uniques : {df_raw[\"DIC_NAME\"].unique().tolist()}\")
+                                                                            ^
+SyntaxError: f-string: unmatched '['
+"
+}
