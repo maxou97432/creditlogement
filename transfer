@@ -1,259 +1,129 @@
-"""
-    Ce fichier a pour but de calculer le prix de chaque périmètre selon la méthodologie des univers élémentaires.
-    Il utilise la base_complete_filtree_complete.parquet, et un ensemble de fonctions dans fonctions.py.
+# =============================================================================
+# CHARGEMENT INSEE + FUSION CL x INSEE → merge
+# NE PAS relancer la cellule précédente après celle-ci
+# =============================================================================
 
-    Les résultats sont des prix trimestriels par périmètre dans le fichier resultat
-    
-    REFACTORÉ : Utilise maintenant process_dataset_restreint au lieu de process_maille
-"""
-import sys
-import os
-from datetime import datetime
-import pandas as pd
-import numpy as np
+insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
+source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
 
-# Configuration des chemins
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+try:
+    df_insee_raw = pd.read_csv(source_file, sep=";")
+    print(f"Fichier INSEE chargé : {len(df_insee_raw)} lignes")
+except FileNotFoundError:
+    print(f"ERREUR: {source_file} introuvable.")
+    sys.exit(1)
 
-import param_generaux as params
-from fonctions import (
-    load_and_preprocess_data, 
-    apply_nice_correction, 
-    save_results,
-    process_dataset_restreint,
-    get_structure_reference_city,
-    clean_base
+# Filtrage métadonnées / CVS / subdivisions
+df_insee_raw = df_insee_raw[df_insee_raw["Libellé"] != "Codes"].copy()
+df_insee_raw = df_insee_raw[~df_insee_raw["Libellé"].str.contains("CVS", na=False, case=False)].copy()
+
+series_a_garder = ["Île-de-France : Maisons", "Île-de-France : Appartements", "Île-de-France : Ensemble"]
+mask_garder = df_insee_raw["Libellé"].apply(lambda x: any(s in str(x) for s in series_a_garder))
+mask_subdiv = df_insee_raw["Libellé"].str.contains(" : ", na=False) & ~mask_garder
+df_insee_raw = df_insee_raw[~mask_subdiv].copy()
+
+def parse_libelle(txt):
+    if not isinstance(txt, str): return None, None
+    if "Île-de-France : Maisons" in txt:       return "ÎLE-DE-FRANCE", "MAI"
+    if "Île-de-France : Appartements" in txt:  return "ÎLE-DE-FRANCE", "APT"
+    if "Île-de-France : Ensemble" in txt:      return "ÎLE-DE-FRANCE", "ENSEMBLE"
+    geo_map = {
+        "Agglomération de Marseille": "MARSEILLE", "Agglomération de Lyon": "LYON",
+        "Agglomération de Lille": "LILLE", "Seine-et-Marne": "77", "Yvelines": "78",
+        "Essonne": "91", "Hauts-de-Seine": "92", "Seine-Saint-Denis": "93",
+        "Val-de-Marne": "94", "Val-d'Oise": "95", "Province": "PROVINCE",
+        "Île-de-France": "ÎLE-DE-FRANCE", "Ile-de-France": "ÎLE-DE-FRANCE",
+        "Rhône-Alpes": "RHÔNE-ALPES", "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
+        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS", "Auvergne": "AUVERGNE",
+        "Marseille": "MARSEILLE", "Paris": "PARIS", "Lille": "LILLE"
+    }
+    type_map = {"Appartements": "APT", "Maisons": "MAI", "Ensemble": "ENSEMBLE"}
+    parts = [p.strip() for p in txt.split(" - ")]
+    geo = next((v for p in parts for k, v in geo_map.items() if k.lower() in p.lower()), None)
+    tb  = next((v for p in parts for k, v in type_map.items() if k in p), None)
+    return geo, tb
+
+df_insee_raw[["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]] = df_insee_raw["Libellé"].apply(
+    lambda x: pd.Series(parse_libelle(x)))
+df_insee_clean = df_insee_raw.dropna(subset=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"]).copy()
+
+perimetre_whitelist = [
+    "77", "78", "91", "92", "93", "94", "95",
+    "MARSEILLE", "LYON", "LILLE", "PARIS",
+    "NORD-PAS-DE-CALAIS", "PROVENCE-ALPES-CÔTE D'AZUR", "RHÔNE-ALPES",
+    "PROVINCE", "AUVERGNE", "ÎLE-DE-FRANCE"
+]
+df_insee_clean = df_insee_clean[df_insee_clean["VAL_MAILLE_GEO"].isin(perimetre_whitelist)].copy()
+print(f"Périmètres INSEE : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
+print(f"Types INSEE      : {sorted(df_insee_clean['CD_TYPE_BIEN'].unique())}")
+
+# Pivot wide → long (colonnes trimestrielles)
+quarter_cols = [c for c in df_insee_clean.columns if c and "-T" in c and c[0].isdigit()]
+df_insee_long = df_insee_clean.melt(
+    id_vars=["VAL_MAILLE_GEO", "CD_TYPE_BIEN"], value_vars=quarter_cols,
+    var_name="Periode_Str", value_name="Indice de prix (INSEE)"
 )
+df_insee_long["Indice de prix (INSEE)"] = pd.to_numeric(
+    df_insee_long["Indice de prix (INSEE)"].astype(str)
+        .replace([r"\(s\)", r"\(p\)", r"\(r\)", "nan", ""], np.nan, regex=True)
+        .str.replace(",", ".").str.strip(),
+    errors="coerce"
+)
+df_insee_long = df_insee_long.dropna(subset=["Indice de prix (INSEE)"]).copy()
+df_insee_long["Date code"] = (
+    df_insee_long["Periode_Str"].str.split("-T").str[0] + "Q" +
+    df_insee_long["Periode_Str"].str.split("T").str[-1]
+)
+df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
+insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
 
+# Rebase INSEE 2020 = 100
+insee_final["Periode"] = pd.to_datetime(insee_final["Periode"])
+mask_2020i = insee_final["Periode"].dt.year == 2020
+pivot_2020i = insee_final.loc[mask_2020i].groupby(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"])["Indice de prix (INSEE)"].mean()
+insee_final["Indice de prix (INSEE) - Base 2020"] = (
+    insee_final["Indice de prix (INSEE)"]
+    / insee_final.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020i)
+    * 100
+).round(2)
+print("Indice INSEE rebasé sur 2020 = 100")
 
-def process_maille_wrapper(df, maille_col, maille_name, df_structure=None, cd_type_bien=None):
-    """
-    Wrapper pour utiliser process_dataset_restreint avec n'importe quelle maille géographique.
-    
-    Convertit la colonne maille_col en "Ville" pour compatibilité avec process_dataset_restreint,
-    puis reconvertit le résultat au format attendu.
-    """
-    print(f"\n--- Traitement de la maille : {maille_name} ---")
-    start_time = datetime.now()
-    
-    # Préparation : renommer la colonne maille en "Ville"
-    df_work = df.copy()
-    
-    # Si la colonne n'est pas déjà "Ville", on la renomme temporairement
-    if maille_col != "Ville":
-        if "Ville" in df_work.columns:
-            df_work = df_work.drop(columns=["Ville"])
-        df_work = df_work.rename(columns={maille_col: "Ville"})
-    
-    # Nettoyage standard
-    df_work["Ville"] = df_work["Ville"].astype(str).str.strip().str.upper()
-    df_work = df_work.dropna(subset=["Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
-    
-    # Filtre par type de bien si spécifié
-    if cd_type_bien is not None:
-        df_work = df_work[df_work["TYPE_BIEN"] == cd_type_bien].copy()
-        if df_work.empty:
-            print(f"Aucune donnée {cd_type_bien} pour la maille {maille_name}")
-            return None
-    
-    # Si on a une structure de référence, on doit aussi renommer sa colonne
-    structure_adapted = None
-    if df_structure is not None:
-        structure_adapted = df_structure.copy()
-        if maille_col in structure_adapted.columns and maille_col != "Ville":
-            structure_adapted = structure_adapted.rename(columns={maille_col: "Ville"})
-        # Filtrer la structure sur le même type de bien
-        if cd_type_bien is not None and "TYPE_BIEN" in structure_adapted.columns:
-            structure_adapted = structure_adapted[structure_adapted["TYPE_BIEN"] == cd_type_bien].copy()
-    
-    # Appel de la fonction unifiée
-    result = process_dataset_restreint(
-        df_work, 
-        label=maille_name,
-        df_structure=structure_adapted,
-        df_arr=None  # Pas de gestion d'arrondissements pour les mailles génériques
-    )
-    
-    if result is None or result.empty:
-        print(f"Aucune donnée pour la maille {maille_name}")
-        return None
-    
-    # Conversion du format de sortie
-    # process_dataset_restreint retourne : Ville, Periode, prix_mm_3m, prix_mm_12m, surface_mm_3m, surface_mm_12m, VF_mm_3m, VF_mm_12m
-    # On veut : VAL_MAILLE_GEO, TYPE_MAILLE, CD_TYPE_BIEN, Periode, DIC_NAME, value
-    
-    # Mapping des colonnes source → DIC_NAME
-    variables_mapping = [
-        (f"prix_mm_3m ({maille_name})", "prix_m2_3m"),
-        (f"prix_mm_12m ({maille_name})", "prix_m2_12m"),
-        (f"surface_mm_3m ({maille_name})", "surface_3m"),
-        (f"surface_mm_12m ({maille_name})", "surface_12m"),
-        (f"VF_mm_3m ({maille_name})", "valeur_3m"),
-        (f"VF_mm_12m ({maille_name})", "valeur_12m")
-    ]
-    
-    #DEBUG: Vérifier si les colonnes de stats existent
-    print(f"\n  DEBUG - Colonnes de statistiques:")
-    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
-        if col in result.columns:
-            print(f"    ✓ {col}: min={result[col].min()}, max={result[col].max()}, mean={result[col].mean():.1f}")
-        else:
-            print(f"    ✗ {col}: MANQUANTE")
-    
-    final_rows = []
-    
-    for _, row in result.iterrows():
-        ville = row["Ville"]
-        periode = row["Periode"]
-        
-        # Boucle sur toutes les variables
-        for col_source, dic_name in variables_mapping:
-            if col_source in result.columns and pd.notna(row[col_source]):
-                # Déterminer si c'est 3m ou 12m pour extraire les bonnes stats
-                if "_3m" in dic_name:
-                    nb_obs = row.get("nb_observations_3m", 0)
-                    nb_univ = row.get("nb_univers_3m", 0)
-                elif "_12m" in dic_name:
-                    nb_obs = row.get("nb_observations_12m", 0)
-                    nb_univ = row.get("nb_univers_12m", 0)
-                else:
-                    nb_obs = 0
-                    nb_univ = 0
-                
-                final_rows.append({
-                    "VAL_MAILLE_GEO": ville,
-                    "TYPE_MAILLE": maille_col,
-                    "CD_TYPE_BIEN": cd_type_bien if cd_type_bien is not None else "APT",
-                    "Periode": periode,
-                    "DIC_NAME": dic_name,
-                    "prix_mm_value": row[col_source],
-                    "nb_observations": int(nb_obs) if pd.notna(nb_obs) else 0,
-                    "nb_univers": int(nb_univ) if pd.notna(nb_univ) else 0
-                })
-    
-    if not final_rows:
-        print(f"Aucune donnée après conversion pour {maille_name}")
-        return None
-    
-    final_result = pd.DataFrame(final_rows)
-    
-    # Calcul des taux d'inflation
-    final_result = final_result.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    # données mensuelles → 12 mois = 12 périodes, 3 mois = 3 périodes
-    final_result["TAUX_INFL_12M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=12)
-    final_result["TAUX_INFL_3M"]  = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=3)
-    
-    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
-    print(f"  → {len(final_result)} lignes générées")
-    return final_result
+# Normalisation + clé de fusion
+for df in (df_final, insee_final):
+    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df["CD_TYPE_BIEN"]   = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
 
+df_final["Periode_Key"]    = df_final["Periode"].dt.to_period("Q").astype(str)
+insee_final["Periode_Key"] = insee_final["Periode"].dt.to_period("Q").astype(str)
 
+# Dédoublonnage INSEE
+dupes = insee_final.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]).size()
+if (dupes > 1).any():
+    insee_final = insee_final.groupby(
+        ["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"], as_index=False
+    ).agg({"Periode": "first", "Indice de prix (INSEE)": "mean", "Indice de prix (INSEE) - Base 2020": "mean"})
 
-def extract_and_save_structure(df, maille_col, maille_name, resultats_dir):
-    """Extrait et sauvegarde la structure de marché pour une maille donnée."""
-    print(f"\n   Extraction structure {maille_name}...")
-    
-    # Calcul de la structure (volume par univers élémentaire)
-    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
-    
-    # Nettoyage
-    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
-    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
-    structure = structure[mask_coherence].drop(columns=["PB"])
-    
-    # Calcul des poids relatifs
-    structure["poids_ref"] = structure.groupby(maille_col)["volume_ref"].transform(lambda x: x / x.sum())
-    
-    # Sauvegarde
-    filename = f"structure_poids_{maille_name}.csv"
-    path = os.path.join(resultats_dir, filename)
-    structure.to_csv(path, index=False, encoding='utf-8-sig')
-    
-    print(f"      -> {filename}")
-    print(f"         {len(structure)} univers, {structure[maille_col].nunique()} {maille_name}")
-    
-    return structure
+# Fusion inner
+merge = pd.merge(
+    df_final,
+    insee_final.drop(columns=["Periode"], errors="ignore"),
+    how="inner",
+    on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
+)
+merge = merge.rename(columns={"Periode_Key": "Periode_Trimestre_Str"})
+merge = merge[merge["Periode_Trimestre_Str"].str.match(r"^\d{4}Q\d$", na=False)]
+merge["Periode"] = pd.PeriodIndex(merge["Periode_Trimestre_Str"], freq="Q").to_timestamp(how="start")
+merge = merge.drop(columns=["Periode_Trimestre_Str"], errors="ignore")
+merge = merge.loc[:, ~merge.columns.duplicated()]
+merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
+merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
 
+print(f"\nFusion réussie : {len(merge)} lignes")
+print(f"   Types de bien dans merge : {sorted(merge['CD_TYPE_BIEN'].unique())}")
+print(f"   Zones : {merge['VAL_MAILLE_GEO'].nunique()}")
 
-if __name__ == "__main__":
-    start_global = datetime.now()
-    
-    # 1. Chargement des données
-    base_ml = load_and_preprocess_data()
-    
-    # Renommer CITY en Ville pour compatibilité
-    if "CITY" in base_ml.columns:
-        base_ml = base_ml.rename(columns={"CITY": "Ville"})
-    
-    # Créer le répertoire de résultats
-    resultats_dir = os.path.join(current_dir, "resultats")
-    os.makedirs(resultats_dir, exist_ok=True)
-    
-    print("\n" + "="*80)
-    print("EXTRACTION ET SAUVEGARDE DES STRUCTURES DE MARCHÉ")
-    print("="*80)
-    
-    # 2. Traitement PROVINCE
-    df_province_input = base_ml.copy()
-    mask_province = ~df_province_input["DEPT"].isin(params.CONFIG['idf_depts'])
-    df_province_input.loc[mask_province, "Ville"] = "PROVINCE"
-    df_province_input = df_province_input[df_province_input["Ville"] == "PROVINCE"]
-    
-    structure_province = extract_and_save_structure(df_province_input, "Ville", "PROVINCE", resultats_dir)
-    res_province_list = [process_maille_wrapper(df_province_input, "Ville", "PROVINCE", cd_type_bien=tb) for tb in ["APT", "MAI"]]
-    res_province = pd.concat([r for r in res_province_list if r is not None], ignore_index=True)
-    save_results(res_province, "PROVINCE")
-    
-    # 3. Traitement VILLES 
-    df_villes = apply_nice_correction(base_ml.copy())
-    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG['top_cities'])]
-    
-    # Extraction de la structure de référence pour les villes
-    print("\n   Extraction structure CITY (avec arrondissements)...")
-    structure_villes, structure_arr = get_structure_reference_city(base_ml)
-    
-    # Sauvegarde structures villes
-    path_structure_villes = os.path.join(resultats_dir, "structure_poids_CITY.csv")
-    structure_villes.to_csv(path_structure_villes, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_CITY.csv")
-    print(f"         {len(structure_villes)} univers, {structure_villes['Ville'].nunique()} villes")
-    
-    path_structure_arr = os.path.join(resultats_dir, "structure_poids_arrondissements.csv")
-    structure_arr.to_csv(path_structure_arr, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_arrondissements.csv")
-    print(f"         {len(structure_arr)} arrondissements")
-    if 'Ville_source' in structure_arr.columns:
-        print(f"         Villes: {', '.join(structure_arr['Ville_source'].unique())}")
-    
-    res_villes_list = [process_maille_wrapper(df_villes, "Ville", "CITY", df_structure=structure_villes, cd_type_bien=tb) for tb in ["APT", "MAI"]]
-    res_villes = pd.concat([r for r in res_villes_list if r is not None], ignore_index=True)
-    save_results(res_villes, "CITY")
-    
-    # 4. Traitement DEPARTEMENTS
-    structure_dept = extract_and_save_structure(base_ml, "DEPT", "DEPT", resultats_dir)
-    res_dept_list = [process_maille_wrapper(base_ml, "DEPT", "DEPT", cd_type_bien=tb) for tb in ["APT", "MAI"]]
-    res_dept = pd.concat([r for r in res_dept_list if r is not None], ignore_index=True)
-    save_results(res_dept, "DEPT")
-    
-    # 5. Traitement REGIONS
-    structure_region = extract_and_save_structure(base_ml, "REGION", "REGION", resultats_dir)
-    res_region_list = [process_maille_wrapper(base_ml, "REGION", "REGION", cd_type_bien=tb) for tb in ["APT", "MAI"]]
-    res_region = pd.concat([r for r in res_region_list if r is not None], ignore_index=True)
-    save_results(res_region, "REGION")
-    
-    # 6. Traitement NATIONAL
-    df_national = base_ml.copy()
-    df_national["PAYS"] = "FRANCE"
-    structure_national = extract_and_save_structure(df_national, "PAYS", "NATIONAL", resultats_dir)
-    res_national_list = [process_maille_wrapper(df_national, "PAYS", "NATIONAL", cd_type_bien=tb) for tb in ["APT", "MAI"]]
-    res_national = pd.concat([r for r in res_national_list if r is not None], ignore_index=True)
-    save_results(res_national, "NATIONAL")
-    
-    print("\n" + "="*80)
-    print(f"Traitement global terminé en {datetime.now() - start_global}")
-    print("="*80)
+# Vérification rapide de l'échelle (doit être proche de 100 en 2020)
+check = merge[merge["Periode"].dt.year == 2020].groupby("CD_TYPE_BIEN")[["Indice de prix (CL)", "Indice de prix (INSEE) - Base 2020"]].mean().round(1)
+print("\nVérification échelle 2020 (doit être ~100) :")
+print(check)
+merge.head()
