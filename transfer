@@ -1,9 +1,123 @@
-{
-	"name": "SyntaxError",
-	"message": "f-string: unmatched '[' (2161803523.py, line 21)",
-	"stack": "  Cell In[2], line 21
-    print(f\"Total brut : {len(df_raw)} lignes | DIC_NAME uniques : {df_raw[\"DIC_NAME\"].unique().tolist()}\")
-                                                                            ^
-SyntaxError: f-string: unmatched '['
-"
-}
+# =============================================================================
+# CHARGEMENT INSEE + FUSION CL x INSEE → merge
+# =============================================================================
+import sys, os
+
+insee_path = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
+source_file = os.path.join(insee_path, "valeurs_trimestrielles.csv")
+
+try:
+    df_insee_raw = pd.read_csv(source_file, sep=';'
+)
+    print(f"Fichier INSEE chargé : {len(df_insee_raw)} lignes")
+except FileNotFoundError:
+    print(f"ERREUR: {source_file} introuvable.")
+    sys.exit(1)
+
+# Filtrage métadonnées et CVS
+df_insee_raw = df_insee_raw[df_insee_raw['Libellé'] != 'Codes'].copy()
+df_insee_raw = df_insee_raw[~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)].copy()
+
+# Filtrage subdivisions
+series_a_garder = ["Île-de-France : Maisons", "Île-de-France : Appartements", "Île-de-France : Ensemble"]
+mask_garder = df_insee_raw['Libellé'].apply(lambda x: any(s in str(x) for s in series_a_garder))
+mask_subdiv = df_insee_raw['Libellé'].str.contains(' : ', na=False) & ~mask_garder
+df_insee_raw = df_insee_raw[~mask_subdiv].copy()
+
+# Parsing Libellé → VAL_MAILLE_GEO + CD_TYPE_BIEN
+def parse_libelle(txt):
+    if not isinstance(txt, str): return None, None
+    if "Île-de-France : Maisons" in txt:       return "ÎLE-DE-FRANCE", "MAI"
+    if "Île-de-France : Appartements" in txt:  return "ÎLE-DE-FRANCE", "APT"
+    if "Île-de-France : Ensemble" in txt:      return "ÎLE-DE-FRANCE", "ENSEMBLE"
+    geo_map = {
+        "Agglomération de Marseille": "MARSEILLE", "Agglomération de Lyon": "LYON",
+        "Agglomération de Lille": "LILLE", "Seine-et-Marne": "77", "Yvelines": "78",
+        "Essonne": "91", "Hauts-de-Seine": "92", "Seine-Saint-Denis": "93",
+        "Val-de-Marne": "94", "Val-d'Oise": "95", "Province": "PROVINCE",
+        "Île-de-France": "ÎLE-DE-FRANCE", "Ile-de-France": "ÎLE-DE-FRANCE",
+        "Rhône-Alpes": "RHÔNE-ALPES", "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
+        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS", "Auvergne": "AUVERGNE",
+        "Marseille": "MARSEILLE", "Paris": "PARIS", "Lille": "LILLE"
+    }
+    type_map = {"Appartements": "APT", "Maisons": "MAI", "Ensemble": "ENSEMBLE"}
+    parts = [p.strip() for p in txt.split(' - ')]
+    geo = next((v for p in parts for k, v in geo_map.items() if k.lower() in p.lower()), None)
+    tb  = next((v for p in parts for k, v in type_map.items() if k in p), None)
+    return geo, tb
+
+df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].apply(
+    lambda x: pd.Series(parse_libelle(x)))
+df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
+
+perimetre_whitelist = [
+    '77', '78', '91', '92', '93', '94', '95',
+    'MARSEILLE', 'LYON', 'LILLE', 'PARIS',
+    'NORD-PAS-DE-CALAIS', "PROVENCE-ALPES-CÔTE D'AZUR", 'RHÔNE-ALPES',
+    'PROVINCE', 'AUVERGNE', 'ÎLE-DE-FRANCE'
+]
+df_insee_clean = df_insee_clean[df_insee_clean['VAL_MAILLE_GEO'].isin(perimetre_whitelist)].copy()
+print(f"Périmètres INSEE retenus : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
+
+# Pivot wide → long (colonnes trimestrielles)
+quarter_cols = [c for c in df_insee_clean.columns if c and '-T' in c and c[0].isdigit()]
+df_insee_long = df_insee_clean.melt(
+    id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'], value_vars=quarter_cols,
+    var_name='Periode_Str', value_name='Indice de prix (INSEE)'
+)
+df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
+    df_insee_long['Indice de prix (INSEE)'].astype(str)
+        .replace([r'\(s\)', r'\(p\)', r'\(r\)', 'nan', ''], np.nan, regex=True)
+        .str.replace(',', '.').str.strip(),
+    errors='coerce'
+)
+df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
+df_insee_long['Date code'] = (
+    df_insee_long['Periode_Str'].str.split('-T').str[0] + 'Q' +
+    df_insee_long['Periode_Str'].str.split('T').str[-1]
+)
+df_insee_long['Periode'] = pd.PeriodIndex(df_insee_long['Date code'], freq='Q').to_timestamp()
+
+insee_final = df_insee_long[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode', 'Indice de prix (INSEE)']].copy()
+
+# Rebase INSEE 2020
+insee_final['Periode'] = pd.to_datetime(insee_final['Periode'])
+mask_2020_insee = insee_final['Periode'].dt.year == 2020
+pivot_2020_insee = insee_final.loc[mask_2020_insee].groupby(['CD_TYPE_BIEN', 'VAL_MAILLE_GEO'])['Indice de prix (INSEE)'].mean()
+insee_final['Indice de prix (INSEE) - Base 2020'] = (
+    insee_final['Indice de prix (INSEE)']
+    / insee_final.set_index(['CD_TYPE_BIEN', 'VAL_MAILLE_GEO']).index.map(pivot_2020_insee)
+    * 100
+).round(2)
+
+# Normalisation clés
+for df in (df_final, insee_final):
+    df['VAL_MAILLE_GEO'] = df['VAL_MAILLE_GEO'].astype(str).str.strip().str.upper()
+    df['CD_TYPE_BIEN']   = df['CD_TYPE_BIEN'].astype(str).str.strip().str.upper()
+
+df_final['Periode_Key']    = df_final['Periode'].dt.to_period('Q').astype(str)
+insee_final['Periode_Key'] = insee_final['Periode'].dt.to_period('Q').astype(str)
+
+# Dédoublonnage INSEE
+dupes = insee_final.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']).size()
+if (dupes > 1).any():
+    insee_final = insee_final.groupby(
+        ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key'], as_index=False
+    ).agg({'Periode': 'first', 'Indice de prix (INSEE)': 'mean', 'Indice de prix (INSEE) - Base 2020': 'mean'})
+
+# Fusion
+merge = pd.merge(
+    df_final, insee_final.drop(columns=['Periode'], errors='ignore'),
+    how='inner',
+    on=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']
+)
+merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
+merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
+merge['Periode'] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how='start')
+merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str'], errors='ignore')
+merge = merge.loc[:, ~merge.columns.duplicated()]
+merge = merge.sort_values(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode'])
+merge = merge[~merge['Indice de prix (INSEE) - Base 2020'].isna()]
+
+print(f"Fusion réussie : {len(merge)} lignes | Zones : {merge['VAL_MAILLE_GEO'].nunique()}")
+merge.head()
