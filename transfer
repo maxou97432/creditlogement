@@ -1,25 +1,3 @@
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import numpy as np
-
-# Comparer RMSE backtest avec/sans saisonnalité sur un segment représentatif
-segments_test = [("ÎLE-DE-FRANCE", "APT"), ("91", "MAI"), ("RHÔNE-ALPES", "APT")]
-
-for zone, tb in segments_test:
-    grp = merge[(merge["VAL_MAILLE_GEO"]==zone) & (merge["CD_TYPE_BIEN"]==tb)]
-    ts  = grp.sort_values("Periode").set_index("Periode")["Dif"].dropna()
-    
-    rmse_results = {}
-    for seasonal in ["add", None]:
-        try:
-            fit = ExponentialSmoothing(
-                ts, trend="add", seasonal=seasonal,
-                seasonal_periods=4 if seasonal else None,
-                damped_trend=True, initialization_method="estimated"
-            ).fit()
-            resid = ts - fit.fittedvalues
-            rmse_results[str(seasonal)] = np.sqrt((resid**2).mean())
-        except Exception as e:
-            rmse_results[str(seasonal)] = None
-    
-    gain = (rmse_results["None"] - rmse_results["add"]) if all(v for v in rmse_results.values()) else None
-    print(f"{zone}-{tb}: RMSE sans saison={rmse_results['None']:.3f}  |  avec saison={rmse_results['add']:.3f}  |  gain={gain:.3f if gain else 'N/A'}")
+ÎLE-DE-FRANCE-APT: RMSE sans saison=1.116  |  avec saison=0.860  |  gain=0.256
+91-MAI: RMSE sans saison=1.357  |  avec saison=1.129  |  gain=0.228
+RHÔNE-ALPES-APT: RMSE sans saison=1.693  |  avec saison=1.232  |  gain=0.461
