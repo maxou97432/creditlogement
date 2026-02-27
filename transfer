@@ -1,253 +1,49 @@
-# Guide d'utilisation — Projet Univers Élémentaires
+## Dossier `indice_prix_mlops/`
 
-## Vue d'ensemble
+> **Prototype** — Pipeline MLOps de correction des indices de prix immobiliers CL par recalage sur les données INSEE, produisant des taux d'inflation corrigés.
 
-Ce projet calcule des **indices de prix au m²** pour différentes mailles géographiques
-(région, département, ville, code postal) à partir des données de **Crédit Logement (CL)**
-et **DVF**. La méthode repose sur la construction d'**univers élémentaires** : des
-sous-segments du marché définis par le croisement de 4 dimensions.
+### Contexte
 
-```
-Données brutes (CL + DVF)
-        ↓
-  base_work.py          ← Nettoyage, détection d'anomalies, features engineering
-        ↓
-  base_complete_filtree.parquet
-        ↓
-  base_restreinte.py    ← Restriction au périmètre CL / France hexagonale / hors TVX-RAC
-        ↓
-  base_restreinte.parquet
-        ↓
-  univers_elementaire.py ← Construction des univers, statistiques, prix glissants
-        ↓
-  results/ (CSV + HTML)
-```
-
-> [!NOTE]
-> `base_demande.py` est un script d'analyse autonome sur la base de **demandes** (avant
-> transaction). Il ne produit pas de fichier `.parquet` réutilisé en aval.
+Les prix au m² calculés à partir des données **Crédit Logement (CL)** peuvent présenter un biais systématique par rapport aux indices de référence de l'**INSEE** (biais de sélection, effets de composition). Ce dossier implémente un pipeline de correction de ce biais afin de produire des **taux d'inflation plus robustes**, utilisables notamment pour estimer la valeur actuelle d'un bien immobilier.
 
 ---
 
-## Architecture des fichiers
+### Pipeline en 3 étapes
 
-| Fichier | Rôle |
-|---|---|
-| `fonctions.py` | Classes et fonctions partagées (détection d'anomalies, connexion SQL, moyennes mobiles) |
-| `param_generaux.py` | Paramètres globaux : chemins, identifiants SQL, seuils de filtrage |
-| `base_work.py` | Génère `base_complete_filtree.parquet` |
-| `base_restreinte.py` | Génère `base_restreinte.parquet` (périmètre restreint CL) |
-| `base_demande.py` | Statistiques sur la base de demandes (diagnostic uniquement) |
-| `univers_elementaire.py` | Construit les univers et calcule les indices de prix glissants |
-| `comparaison_restriction_VS_lpi.py` | Comparaison V1 vs V2 et vs LPI |
-| `indice_prix_mlops/` | Pipeline MLOps pour la mise en production des indices |
+```
+Données CL (mensuelles) + INSEE (trimestrielles)
+        ↓
+[Étape 1] train_holt_winters    → Modèles de correction du biais (par zone / type de bien)
+        ↓
+[Étape 2a] apply_corrections    → Prix corrigés (CSV)
+[Étape 2b] calculate_rates      → Taux d'inflation par maille et période (CSV)
+        ↓
+[Étape 3] estimate              → Valeur actuelle d'un bien
+```
+
+**Étape 1 – Modèles de correction (Holt-Winters)**
+Pour chaque couple [(zone géographique × type de bien)](cci:1://file:///Users/maximethiong-ly/Downloads/py/fonctions.py:306:4-307:19), un modèle de **lissage exponentiel avec tendance amortie** est entraîné sur le différentiel historique CL − INSEE. Les modèles sont sauvegardés dans `artifacts/models/latest/`.
+
+**Étape 2 – Prix corrigés & taux d'inflation**
+Les corrections apprises sont appliquées aux prix bruts CL. Les taux d'inflation sont ensuite calculés par maille (IRIS, Ville, Département), avec un **effectif minimum** par niveau garantissant la fiabilité statistique (≥ 10 pour IRIS, ≥ 30 pour Ville, ≥ 50 pour Département).
+
+**Étape 3 – Estimation de valeur foncière**
+En donnant la valeur initiale d'un bien et sa date d'achat, le pipeline estime sa valeur actuelle via `valeur_estimée = valeur_initiale × (1 + taux_inflation)`. Un **fallback géographique** (IRIS → Ville → Département) est appliqué si l'effectif est insuffisant au niveau fin.
 
 ---
 
-## Prérequis
-
-### Données
-
-Les fichiers suivants doivent être disponibles aux chemins définis dans `param_generaux.py` :
-
-| Fichier | Description |
-|---|---|
-| `df_transac_clean.parquet` | Transactions nettoyées (CL + DVF) |
-| `df_demandes_clean.parquet` | Demandes de prêt nettoyées |
-| Table SQL `BAN_ENRICHIE` | Codes IRIS par adresse (clé : `CLE_INTEROP_ADR`) |
-| Table SQL `BAT_ENRICHIE` | Année de construction par adresse |
-
-### Environnement Python
+### Utilisation rapide
 
 ```bash
-pip install pandas numpy plotly scipy sqlalchemy pyodbc pyarrow openpyxl
+# Entraîner les modèles
+python main.py --mode train_holt_winters
+
+# Appliquer les corrections et calculer les taux
+python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
+python main.py --mode calculate_rates --input prix_corriges.csv --output taux.csv
+
+# Estimer la valeur d'un bien
+python main.py --mode estimate --rates taux.csv \
+    --valeur_initiale 300000 --date_achat 2022-03-15 \
+    --type_bien APT --ville PARIS --dept 75
 ```
-
----
-
-## Ordre d'exécution
-
-### Étape 1 — Construction de la base globale
-
-```bash
-python base_work.py
-```
-
-**Paramètres à vérifier dans le script :**
-- `date_min` (ligne ~95) : `pd.Timestamp("2014-01-01")` — modifier si la fenêtre temporelle change
-- `n_years` dans `detect_ano_ml(input_df=cl_data, n_years=12)` — profondeur de la détection d'anomalies
-
-**Sorties :**
-- `stats_base_complete_filtree/base_complete_filtree.parquet` — base principale utilisée en aval
-- `stats_base_complete_filtree/outliers_analysis_<date>.xlsx` — rapport Excel des anomalies détectées
-- `stats_base_complete_filtree/*.html` — graphiques de volumétrie et de couverture
-
----
-
-### Étape 2 — Restriction du périmètre (optionnel selon le cas d'usage)
-
-```bash
-python base_restreinte.py
-```
-
-**Ce que fait ce script :**
-1. Filtre `SOURCE == "CL"` (exclut DVF)
-2. Filtre France hexagonale (depts 01-95, 2A, 2B)
-3. Exclut les natures d'opération `TVX` et `RAC`
-4. Applique la fenêtre temporelle depuis `2014-01-01`
-
-**Sortie :** `resultats/base_restreinte.parquet`
-
-> [!IMPORTANT]
-> Ce fichier est l'entrée de `comparaison_restriction_VS_lpi.py`. Si vous utilisez la base
-> complète (`base_complete_filtree.parquet`), passez cette étape.
-
----
-
-### Étape 3 — Construction des univers élémentaires et indices de prix
-
-```bash
-python univ_elem/univers_elementaire.py
-```
-
-**Ce que fait ce script :**
-
-1. **Statistiques univariées** sur la base (prix, surface, ancienneté, type de bien)
-2. **Construction des univers** par croisement de 4 dimensions :
-   - Maille géographique (`REGION`, `DEPT_Corse_2A_2B`, `Ville`, `CODE_POSTAL`)
-   - Ancienneté (`BIEN_NEUF` : NEUF / ANCIEN)
-   - Type de bien (`TYPE_BIEN` : APT / MAI)
-   - Gamme de pièces (`NB_PIECES_RANGE`)
-3. **Prix glissants pondérés** pour le Top 15 des villes :
-   - Moyenne mobile 3 mois (`prix_mm_3m`) avec indicatrice `I_3m`
-   - Moyenne mobile 12 mois (`prix_mm_12m`) avec indicatrice `I_12m`
-
-**Paramètre clé : le Top 15 des villes**
-
-```python
-# ligne ~730 dans univers_elementaire.py
-top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", "NICE",
-         "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", "SAINT-ETIENNE", "LE HAVRE"]
-```
-
-**Sorties (`univ_elem/results/`) :**
-
-| Fichier | Contenu |
-|---|---|
-| `univers_complet_reg.csv` | Univers par région |
-| `univers_complet_dep.csv` | Univers par département |
-| `univers_complet_ville.csv` | Univers par ville |
-| `univers_complet_cp.csv` | Univers par code postal |
-| `repartition_univ_elem_par_ville.csv` | Résumé des univers extrêmes et médians par ville |
-| `evolution_prix_moyen_m2_region.html` | Prix moyen par région |
-| `evolution_prix_median_m2_region.html` | Prix médian par région |
-| `anciennete.html` | Répartition neuf/ancien par année |
-| `type_bien.html` | Répartition APT/MAI par année |
-| `nb_piece_par_type.html` | Distribution des pièces par type |
-
----
-
-### Étape 4 (optionnelle) — Analyse de la base de demandes
-
-```bash
-python base_demande.py
-```
-
-Produit des statistiques descriptives sur `df_demandes_clean` (volumétrie, répartition géographique, nature d'opération). Ne génère pas de base `.parquet`.
-
----
-
-## Paramètres configurables
-
-### Dans `param_generaux.py`
-
-| Paramètre | Description | Valeur typique |
-|---|---|---|
-| `N_YEARS` | Profondeur historique pour le modèle ML | `3` |
-| `N_MIN` | Effectif minimum par ville pour les stats | `30` |
-| `OUTLIER_MODE` | Méthode de détection (`mult`, `iqr`, `std`) | `"mult"` |
-| `COEFF_ECART` | Coefficient de seuillage des anomalies | `4` |
-| `PRIX_M2_MIN` | Prix minimum absolu (€/m²) | `200` |
-| `PRIX_M2_MAX` | Prix maximum absolu (€/m²) | `20 000` |
-
-### Dans les scripts
-
-| Script | Paramètre | Description |
-|---|---|---|
-| `base_work.py` | `date_min` (~L95) | Date de début de la fenêtre temporelle |
-| `base_work.py` | `periode_reference` (~L91) | Date de référence (None = max disponible) |
-| `base_restreinte.py` | `DATE_MIN` (~L83) | Date de début du périmètre restreint |
-| `univers_elementaire.py` | `top15` (~L730) | Liste des villes pour les prix glissants |
-
----
-
-## Comprendre les univers élémentaires
-
-Un **univers élémentaire** est l'intersection de :
-
-```
-Maille géo  ×  Ancienneté  ×  Type de bien  ×  Gamme de pièces
-  (REGION)     (BIEN_NEUF)    (TYPE_BIEN)      (NB_PIECES_RANGE)
-```
-
-**Règle de cohérence `PB`** : la colonne temporaire `PB` (3 premières lettres de
-`NB_PIECES_RANGE`) est comparée à `TYPE_BIEN` pour supprimer les combinaisons
-incohérentes (ex. `TYPE_BIEN = APT` × `NB_PIECES_RANGE = "MAI: 4-5 pièces"`).
-
-**Classes de pièces dans `base_work.py`** (peuvent différer de `univers_elementaire.py`) :
-
-| Type | Classe | Intervalle |
-|---|---|---|
-| APT | 1 pièce | ]0, 1] |
-| APT | 2-3 pièces | ]1, 3] |
-| APT | 4 pièces et plus | ]3, +∞] |
-| MAI | 3 pièces et moins | ]0, 3] |
-| MAI | 4-5 pièces | ]3, 5] |
-| MAI | 6 pièces et plus | ]5, +∞] |
-
-> [!WARNING]
-> Les tranches de pièces dans `base_work.py` (source des données) et dans
-> `univers_elementaire.py` (analyse exploratoire) **ne sont pas identiques**.
-> Les CSV exportés utilisent les tranches de `base_work.py`.
-
----
-
-## Calcul des prix glissants (Top 15 villes)
-
-### Principe
-
-Pour chaque mois `t` et chaque ville :
-
-1. **Agrégation mensuelle** par sous-univers (`prix_moyen`, `nb_transac`)
-2. **Complétion des mois manquants** (`complete_months`) : mois vides → `nb_transac=0`, `prix=NaN`
-3. **Poids structurels** (`poids_relatif`) calculés sur toute la période 2015-2025
-4. **Indicatrices d'activité** :
-   - `I_3m = 1` si ≥ 1 transaction dans les 3 derniers mois
-   - `I_12m = 1` si ≥ 1 transaction dans les 12 derniers mois (min 6 mois observés)
-5. **Moyenne mobile pondérée** : moyenne des prix des sous-univers actifs (`I=1`),
-   pondérée par `poids_relatif`
-
-### Variables dans `model_agg`
-
-| Colonne | Description |
-|---|---|
-| `Ville` | Ville |
-| `Periode` | Mois (format `YYYY-MM-01`) |
-| `prix_mm_3m` | Prix moyen glissant 3 mois (€/m²) |
-| `prix_mm_12m` | Prix moyen glissant 12 mois (€/m²) |
-| `nb_obs_3m` | Nombre de transactions sur 3 mois |
-| `nb_obs_12m` | Nombre de transactions sur 12 mois |
-| `nb_typo_3m` | Nombre de sous-univers actifs sur 3 mois |
-| `nb_typo_12m` | Nombre de sous-univers actifs sur 12 mois |
-
----
-
-## Erreurs courantes
-
-| Erreur | Cause probable | Solution |
-|---|---|---|
-| `FileNotFoundError` sur le `.parquet` | Chemin réseau non monté (lecteur `Z:`) | Vérifier la connexion réseau et les chemins dans `param_generaux.py` |
-| `KeyError: 'ville_'` | Colonne déjà renommée en `Ville` plus tôt dans le script | Supprimer le `rename` redondant |
-| `KernelError` / mémoire | Base trop volumineuse pour le RAM local | Filtrer la période temporelle avant le chargement |
-| Univers vides uniquement | `date_min` trop récente ou `top15` non présent dans les données | Vérifier les données et la liste `top15` |
-| Graphique Plotly vide | `pio.renderers.default = "png"` incompatible côté serveur | Changer en `"browser"` pour une exécution locale |
