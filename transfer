@@ -4,30 +4,45 @@
 
 ### Contexte
 
-Les prix au m² calculés à partir des données **Crédit Logement (CL)** peuvent présenter un biais systématique par rapport aux indices de référence de l'**INSEE** (biais de sélection, effets de composition). Ce dossier implémente un pipeline de correction de ce biais afin de produire des **taux d'inflation plus robustes**, utilisables notamment pour estimer la valeur actuelle d'un bien immobilier.
+Les indices de prix au m² calculés à partir des données **Crédit Logement (CL)** peuvent présenter un biais systématique par rapport aux indices de référence de l'**INSEE** (biais de sélection, effets de composition). Ce dossier implémente un pipeline de correction de ce biais afin de produire des **taux d'inflation corrigés**, utilisables notamment pour estimer la valeur actuelle d'un bien immobilier.
 
 ---
 
-### Pipeline en 3 étapes
+### Pipeline en 4 étapes
 
 ```
-Données CL (mensuelles) + INSEE (trimestrielles)
-        ↓
-[Étape 1] train_holt_winters    → Modèles de correction du biais (par zone / type de bien)
-        ↓
-[Étape 2a] apply_corrections    → Prix corrigés (CSV)
-[Étape 2b] calculate_rates      → Taux d'inflation par maille et période (CSV)
-        ↓
-[Étape 3] estimate              → Valeur actuelle d'un bien
+data_loader + data_processor
+        │
+        ├──────────────────────┐
+        ▼                      ▼
+[Étape 1]                 [Étape 2]
+train_holt_winters        apply_corrections
+→ Modèles HW              → Indices corrigés (CSV)
+(biais CL − INSEE)
+        └──────────────────────┘
+                      │
+                      ▼
+              [Étape 3] calculate_rates
+              → Taux d'inflation par maille (CSV)
+                      │
+                      ▼
+              [Étape 4] estimate
+              → Valeur actuelle d'un bien
 ```
+
+**Chargement des données (`data_loader` + `data_processor`)**
+Les données CL (mensuelles) et INSEE (trimestrielles) sont chargées et fusionnées au niveau trimestriel. `data_processor` calcule les indices en base 2020 pour chaque zone géographique et type de bien.
 
 **Étape 1 – Modèles de correction (Holt-Winters)**
-Pour chaque couple [(zone géographique × type de bien)](cci:1://file:///Users/maximethiong-ly/Downloads/py/fonctions.py:306:4-307:19), un modèle de **lissage exponentiel avec tendance amortie** est entraîné sur le différentiel historique CL − INSEE. Les modèles sont sauvegardés dans `artifacts/models/latest/`.
+Pour chaque couple [(zone × type de bien)](cci:1://file:///Users/maximethiong-ly/Downloads/py/fonctions.py:306:4-307:19), un modèle de **lissage exponentiel avec tendance amortie** est entraîné sur le différentiel historique CL − INSEE. Les modèles sont sauvegardés dans `artifacts/models/latest/`.
 
-**Étape 2 – Prix corrigés & taux d'inflation**
-Les corrections apprises sont appliquées aux prix bruts CL. Les taux d'inflation sont ensuite calculés par maille (IRIS, Ville, Département), avec un **effectif minimum** par niveau garantissant la fiabilité statistique (≥ 10 pour IRIS, ≥ 30 pour Ville, ≥ 50 pour Département).
+**Étape 2 – Application des corrections**
+Les modèles HW sont appliqués directement sur les indices déjà calculés par `data_processor` (pas de rechargement des données). L'indice corrigé est obtenu par soustraction du biais prédit : `indice_corrigé = indice_CL − biais_HW`.
 
-**Étape 3 – Estimation de valeur foncière**
+**Étape 3 – Calcul des taux d'inflation**
+Les taux d'inflation sont calculés par maille (IRIS, Ville, Département), avec un **effectif minimum** par niveau (≥ 10 pour IRIS, ≥ 30 pour Ville, ≥ 50 pour Département).
+
+**Étape 4 – Estimation de valeur foncière**
 En donnant la valeur initiale d'un bien et sa date d'achat, le pipeline estime sa valeur actuelle via `valeur_estimée = valeur_initiale × (1 + taux_inflation)`. Un **fallback géographique** (IRIS → Ville → Département) est appliqué si l'effectif est insuffisant au niveau fin.
 
 ---
@@ -35,15 +50,21 @@ En donnant la valeur initiale d'un bien et sa date d'achat, le pipeline estime s
 ### Utilisation rapide
 
 ```bash
-# Entraîner les modèles
+# Étape 1 : Entraîner les modèles
 python main.py --mode train_holt_winters
 
-# Appliquer les corrections et calculer les taux
-python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
-python main.py --mode calculate_rates --input prix_corriges.csv --output taux.csv
+# Étape 2 : Appliquer les corrections (données rechargées automatiquement)
+python main.py --mode apply_corrections \
+    --models_dir artifacts/models/latest \
+    --output artifacts/corrected_prices/prix_corriges.csv
 
-# Estimer la valeur d'un bien
-python main.py --mode estimate --rates taux.csv \
+# Étape 3 : Calculer les taux d'inflation
+python main.py --mode calculate_rates \
+    --input artifacts/corrected_prices/prix_corriges.csv \
+    --output artifacts/inflation_rates/taux.csv
+
+# Étape 4 : Estimer la valeur d'un bien
+python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv \
     --valeur_initiale 300000 --date_achat 2022-03-15 \
     --type_bien APT --ville PARIS --dept 75
 ```
