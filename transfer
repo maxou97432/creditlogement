@@ -1,244 +1,292 @@
-"""
-    Ce fichier a pour but de calculer le prix de chaque périmètre selon la méthodologie des univers élémentaires.
-    Il utilise la base_complete_filtree_complete.parquet, et un ensemble de fonctions dans fonctions.py.
+"""Ce fichier permets de générer une carte des prix dans les plus grandes villes Francaises, à la manière de LPI/IAD. 
+Il utilise les prix calculés sur la base_complete_filtree"""
 
-    Les résultats sont des prix trimestriels par périmètre dans le fichier resultat
-    
-    REFACTORÉ : Utilise maintenant process_dataset_restreint au lieu de process_maille
-"""
+
 import sys
 import os
-from datetime import datetime
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe 
+import geopandas as gpd
+from shapely.geometry import Point
+from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
+import locale
+from matplotlib.patches import FancyBboxPatch
 
-# Configuration des chemins
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-import param_generaux as params
-from fonctions import (
-    load_and_preprocess_data, 
-    apply_nice_correction, 
-    save_results,
-    process_dataset_restreint,
-    get_structure_reference_city,
-    clean_base
-)
+# Dossier de sortie pour les images PNG
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
 
 
-def process_maille_wrapper(df, maille_col, maille_name, df_structure=None):
-    """
-    Wrapper pour utiliser process_dataset_restreint avec n'importe quelle maille géographique.
+
+
+
+
+# Le chemin est conservé tel quel
+geojson_path = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\metropole-version-simplifiee.geojson" 
+
+# Chemins des données (conservés)
+prix_m2_univ_elem_MAJ_CITY = pd.read_csv(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee\prix_m2_univ_elem_MAJ_CITY.csv")
+df_communes = pd.read_excel(r"N:\uflujek\Commune_france.xlsx", sheet_name="Figure 1")
+df_geo_gps = pd.read_csv(r'N:\uflujek\commune_france_gps.csv', sep=';')
+
+# =============================================================================
+# --- PALETTE DE COULEURS & POLICE ---
+# =============================================================================
+CL_TURQUOISE = '#A8DADC' 
+CL_BLACK = '#1D3557' 
+CL_LIGHT_GREY = '#F5F5DC' 
+CL_BLUE_3M = '#000000' 
+CL_RED_12M = '#CB4735' 
+
+NOM_POLICE_CL = 'Century Gothic' 
+plt.rcParams['font.family'] = 'sans-serif' 
+plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+plt.rcParams['font.weight'] = 'medium' 
+TITRE_FONT_WEIGHT = 'heavy' 
+
+TAUX_FONT_SIZE = 11
+DEFAULT_FONT_SIZE = 20
+
+TARGET_CRS = "EPSG:2154"
+
+# =============================================================================
+# --- PRÉPARATION DES DONNÉES ---
+# =============================================================================
+
+prix_m2_univ_elem_MAJ_CITY = prix_m2_univ_elem_MAJ_CITY[prix_m2_univ_elem_MAJ_CITY["TYPE_MAILLE"] == "CITY"]
+df_communes['Commune'] = df_communes['Commune'].astype(str).str.upper()
+df_prix_m2 = df_communes.merge(prix_m2_univ_elem_MAJ_CITY, left_on='Commune', right_on='VAL_MAILLE_GEO', how='right')
+df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+    "HAVRE": "LE HAVRE",
+    "SAINT ETIENNE": "ST ETIENNE"})
+
+
+
+# =============================================================================
+# --- PRÉPARATION DU CONTOUR GÉOGRAPHIQUE ET PROJECTION ---
+# =============================================================================
+
+try:
+    france_gdf = gpd.read_file(geojson_path)
+    dissolved_france = france_gdf.dissolve(by=None)
     
-    Convertit la colonne maille_col en "Ville" pour compatibilité avec process_dataset_restreint,
-    puis reconvertit le résultat au format attendu.
-    """
-    print(f"\n--- Traitement de la maille : {maille_name} ---")
-    start_time = datetime.now()
+    # 1. Projeter et extraire la géométrie du MultiPolygon
+    france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
     
-    # Préparation : renommer la colonne maille en "Ville"
-    df_work = df.copy()
-    
-    # Si la colonne n'est pas déjà "Ville", on la renomme temporairement
-    if maille_col != "Ville":
-        if "Ville" in df_work.columns:
-            df_work = df_work.drop(columns=["Ville"])
-        df_work = df_work.rename(columns={maille_col: "Ville"})
-    
-    # Nettoyage standard
-    df_work["Ville"] = df_work["Ville"].astype(str).str.strip().str.upper()
-    df_work = df_work.dropna(subset=["Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
-    
-    # Si on a une structure de référence, on doit aussi renommer sa colonne
-    structure_adapted = None
-    if df_structure is not None:
-        structure_adapted = df_structure.copy()
-        if maille_col in structure_adapted.columns and maille_col != "Ville":
-            structure_adapted = structure_adapted.rename(columns={maille_col: "Ville"})
-    
-    # Appel de la fonction unifiée
-    result = process_dataset_restreint(
-        df_work, 
-        label=maille_name,
-        df_structure=structure_adapted,
-        df_arr=None  # Pas de gestion d'arrondissements pour les mailles génériques
-    )
-    
-    if result is None or result.empty:
-        print(f"Aucune donnée pour la maille {maille_name}")
-        return None
-    
-    # Conversion du format de sortie
-    # process_dataset_restreint retourne : Ville, Periode, prix_mm_3m, prix_mm_12m, surface_mm_3m, surface_mm_12m, VF_mm_3m, VF_mm_12m
-    # On veut : VAL_MAILLE_GEO, TYPE_MAILLE, CD_TYPE_BIEN, Periode, DIC_NAME, value
-    
-    # Mapping des colonnes source → DIC_NAME
-    variables_mapping = [
-        (f"prix_mm_3m ({maille_name})", "prix_m2_3m"),
-        (f"prix_mm_12m ({maille_name})", "prix_m2_12m"),
-        (f"surface_mm_3m ({maille_name})", "surface_3m"),
-        (f"surface_mm_12m ({maille_name})", "surface_12m"),
-        (f"VF_mm_3m ({maille_name})", "valeur_3m"),
-        (f"VF_mm_12m ({maille_name})", "valeur_12m")
-    ]
-    
-    #DEBUG: Vérifier si les colonnes de stats existent
-    print(f"\n  DEBUG - Colonnes de statistiques:")
-    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
-        if col in result.columns:
-            print(f"    ✓ {col}: min={result[col].min()}, max={result[col].max()}, mean={result[col].mean():.1f}")
-        else:
-            print(f"    ✗ {col}: MANQUANTE")
-    
-    final_rows = []
-    
-    for _, row in result.iterrows():
-        ville = row["Ville"]
-        periode = row["Periode"]
+    # 2. Séparer les différents polygones (continent et îles)
+    geometries_list = []
+    if france_geometry.geom_type == 'MultiPolygon':
+        geometries_list = list(france_geometry.geoms)
+    else:
+        geometries_list = [france_geometry]
+
+    # 3. Trouver le plus grand polygone (le continent)
+    if geometries_list:
+        # Trier par aire (surface) et prendre le plus grand (le continent)
+        geometries_list.sort(key=lambda x: x.area, reverse=True)
+        france_outline_geometry = geometries_list[0]
+        print("INFO: La Corse et les îles mineures ont été exclues.")
+    else:
+        raise ValueError("Aucune géométrie de contour trouvée après dissolution.")
         
-        # Boucle sur toutes les variables
-        for col_source, dic_name in variables_mapping:
-            if col_source in result.columns and pd.notna(row[col_source]):
-                # Déterminer si c'est 3m ou 12m pour extraire les bonnes stats
-                if "_3m" in dic_name:
-                    nb_obs = row.get("nb_observations_3m", 0)
-                    nb_univ = row.get("nb_univers_3m", 0)
-                elif "_12m" in dic_name:
-                    nb_obs = row.get("nb_observations_12m", 0)
-                    nb_univ = row.get("nb_univers_12m", 0)
-                else:
-                    nb_obs = 0
-                    nb_univ = 0
-                
-                final_rows.append({
-                    "VAL_MAILLE_GEO": ville,
-                    "TYPE_MAILLE": maille_col,
-                    "CD_TYPE_BIEN": "APT",  # process_dataset_restreint agrège tous les types
-                    "Periode": periode,
-                    "DIC_NAME": dic_name,
-                    "prix_mm_value": row[col_source],
-                    "nb_observations": int(nb_obs) if pd.notna(nb_obs) else 0,
-                    "nb_univers": int(nb_univ) if pd.notna(nb_univ) else 0
-                })
+except Exception as e:
+    print(f"!!! Échec critique lors du chargement ou de la projection du GeoJSON: {e}")
+    sys.exit(1)
+
+# =============================================================================
+# --- CRÉATION DE LA CARTE MATPLOTLIB ---
+# =============================================================================
+
+types_bien = ['APT', 'MAI']
+
+# --- DEFINITION DES OFFSETS EN MÈTRES (m) ---
+X_OFFSET_DEFAULT = 3000 # 3 km
+Y_OFFSET_DEFAULT = 3000 # 3 km
+
+# Offsets manuels conservés
+CUSTOM_LABEL_OFFSETS = {
+    'MONTPELLIER': {'x': -5000, 'y': 60000}, 
+    'MARSEILLE':   {'x': -5000,  'y': -5000},
+    'TOULON':      {'x': 5000,  'y': -10000},
+    'NICE':        {'x': 30000, 'y': 3000}, 
+    'GRENOBLE':    {'x': 5000, 'y': -10000},   
+    'ST ETIENNE':    {'x': -30000, 'y': -0},
+    'LE HAVRE':    {'x': 10000, 'y': -0},
+
+    'BORDEAUX':    {'x': 5000,  'y': 0},  
+    'NANTES':      {'x': 5000,  'y': 0},  
+    'RENNES':      {'x': 5000,  'y': 0},  
+    'LILLE':       {'x': 0,   'y': -10000}, 
+    'STRASBOURG':  {'x': -5000, 'y': 0},  
     
-    if not final_rows:
-        print(f"Aucune donnée après conversion pour {maille_name}")
-        return None
+    'PARIS':       {'x': 5000, 'y': 3000},
+    'LYON':        {'x': 6000, 'y': 60000}, 
+    'TOULOUSE':    {'x': -5000, 'y': 3000}, 
+}
+
+
+type_bien_labels = {
+    "APT": "APPARTEMENTS",
+    "MAI": "MAISONS"
+}
+
+for type_bien in types_bien:
+    print(f"\n--- Génération de la carte pour le type de bien : {type_bien} ---")
     
-    final_result = pd.DataFrame(final_rows)
+    df_prix_filtre = df_prix_m2[(df_prix_m2["CD_TYPE_BIEN"] == type_bien) & (df_prix_m2["DIC_NAME"] == "prix_m2_12m")].copy()
+    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper()
+    df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
     
-    # Calcul des taux d'inflation
-    final_result = final_result.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    # données mensuelles → 12 mois = 12 périodes, 3 mois = 3 périodes
-    final_result["TAUX_INFL_12M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=12)
-    final_result["TAUX_INFL_3M"]  = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=3)
+    df_map = df_map[['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']].copy()
+    df_map = df_map.dropna(subset=['latitude', 'longitude'])
+    df_map = df_map.drop_duplicates(subset='label', keep='first')
     
-    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
-    print(f"  → {len(final_result)} lignes générées")
-    return final_result
+    if df_map.empty: continue
+        
+    geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
+    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326")
+    gdf = gdf.to_crs(TARGET_CRS) 
+    
+    # --- DESSIN DE LA CARTE ---
+    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
+    fig.set_facecolor(CL_TURQUOISE) 
+    
+    geometries_to_plot = [france_outline_geometry]
+    if france_outline_geometry.geom_type == 'MultiPolygon':
+        geometries_to_plot = list(france_outline_geometry.geoms)
+
+    for geom in geometries_to_plot:
+        x, y = geom.exterior.xy
+        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
+        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
+    
+    xmin, ymin, xmax, ymax = france_outline_geometry.bounds
+    ax.set_xlim(xmin - 5000, xmax + 5000) 
+    ax.set_ylim(ymin - 5000, ymax + 5000)
+
+    # --- AJOUT DES ÉTIQUETTES ---
+    
+    # Espacement vertical réduit à 9 km (pour compacter 4 lignes)
+    LINE_SPACING = 15000 
+    
+    halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
+
+    for idx, row in gdf.iterrows():
+        x_coord = row.geometry.x 
+        y_coord = row.geometry.y 
+        city_label = row['label'] 
+        
+        if city_label in CUSTOM_LABEL_OFFSETS:
+            x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
+            y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
+        else:
+            x_offset_city = X_OFFSET_DEFAULT
+            y_offset_city = Y_OFFSET_DEFAULT
+
+        ville = str(row['label']).upper()
+        prix_val = row['prix_mm_value']
+        prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
+        ti_3m = row['TAUX_INFL_3M']
+        ti_12m = row['TAUX_INFL_12M']
+        
+        # Ancrage du texte
+        anchor_x = x_coord + x_offset_city
+        anchor_y = y_coord + y_offset_city
+        
+        ha_box_align = 'right' if x_offset_city < 0 else 'left'
+        va_align = 'top' 
+        
+        # 1. Nom de la Ville (Ligne 1) 
+        ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='normal', zorder=4, 
+                path_effects=halo_effect) 
+        
+        # 2. Prix M2 (Ligne 2) 
+        prix_y = anchor_y - 1.5 *LINE_SPACING 
+        ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='bold', zorder=4,
+                path_effects=halo_effect) 
+        
+        # 3. Taux d'inflation 3M (Ligne 3) - BLEU
+        ti_3m_y = prix_y - LINE_SPACING 
+        
+        if pd.notna(ti_3m):
+            text_3m = f"{ti_3m:+.1%}".replace('.', ',')
+        else:
+            text_3m = "N/A"
+
+        
+        # 4. Taux d'inflation 12M (Ligne 4) - ROUGE
+        ti_12m_y = ti_3m_y - LINE_SPACING 
+        
+        if pd.notna(ti_12m):
+            text_12m = f"{ti_12m:+.1%}".replace('.', ',')
+        else:
+            text_12m = "N/A"
+
+        # Dessin du 12M (ROUGE) - utilise la même ancre et le même alignement que les autres lignes
+        
+        
+        
+        
+        
+        
+        
+        # Construire les deux TextArea avec style
+        ta_3m = TextArea(text_3m, textprops=dict(
+            fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'
+        ))
+        ta_12m = TextArea(text_12m, textprops=dict(
+            fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'
+        ))
+
+        # Packer horizontal: 3M puis 12M, avec un espacement (sep) en pixels
+        # Ajuste 'sep' pour augmenter/diminuer l’espace entre les deux taux
+        hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)  # sep=8px par ex.
+        
+        box_x_align = 1.0 if ha_box_align == "right" else 0.0
+        # Placer le bloc au bon endroit (en unités de données)
+        ab = AnnotationBbox(
+            hpack,
+            (anchor_x, ti_12m_y),     # coordonnées données (comme tes autres lignes)
+            xybox=(0, 0),
+            xycoords='data',
+            boxcoords='offset points',   # le packer est géré en pixels
+            frameon=False,
+            box_alignment=(box_x_align, 0.5)       # ancrage du bloc: gauche / milieu vertical
+        )
+
+        ax.add_artist(ab)
+
+
+        # 5. Point Ville
+        ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
+                markeredgecolor='white', markeredgewidth=0.5) 
+
+    # --- FINALISATION ---
+    ax.axis('off')
+    title_text = f"LES PRIX DES {type_bien_labels[type_bien]} DANS LES 16 PLUS GRANDES VILLES"
+    ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', weight=TITRE_FONT_WEIGHT,bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
+
+    # LÉGENDE
+    
 
 
 
-def extract_and_save_structure(df, maille_col, maille_name, resultats_dir):
-    """Extrait et sauvegarde la structure de marché pour une maille donnée."""
-    print(f"\n   Extraction structure {maille_name}...")
-    
-    # Calcul de la structure (volume par univers élémentaire)
-    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
-    
-    # Nettoyage
-    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
-    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
-    structure = structure[mask_coherence].drop(columns=["PB"])
-    
-    # Calcul des poids relatifs
-    structure["poids_ref"] = structure.groupby(maille_col)["volume_ref"].transform(lambda x: x / x.sum())
-    
-    # Sauvegarde
-    filename = f"structure_poids_{maille_name}.csv"
-    path = os.path.join(resultats_dir, filename)
-    structure.to_csv(path, index=False, encoding='utf-8-sig')
-    
-    print(f"      -> {filename}")
-    print(f"         {len(structure)} univers, {structure[maille_col].nunique()} {maille_name}")
-    
-    return structure
+    fig.text(0.04, 0.05, "LEGENDE\nPrix/m² moyen sur 12 mois\nNoir: Evolution sur 3 mois\nRouge: Evolution sur 12 mois",
+         ha='left', va='bottom', fontsize=20,
+         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
+    locale.setlocale(locale.LC_TIME, 'French_France')
+    df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
+    date_texte = df_prix_m2["DT_MAJ_PM2"].iloc[-1].strftime("%B %Y").upper()
+    fig.text(0.04, 0.02, f"CREDIT LOGEMENET - {date_texte}",
+         ha='left', va='bottom', fontsize=12)
 
 
-if __name__ == "__main__":
-    start_global = datetime.now()
     
-    # 1. Chargement des données
-    base_ml = load_and_preprocess_data()
-    
-    # Renommer CITY en Ville pour compatibilité
-    if "CITY" in base_ml.columns:
-        base_ml = base_ml.rename(columns={"CITY": "Ville"})
-    
-    # Créer le répertoire de résultats
-    resultats_dir = os.path.join(current_dir, "resultats")
-    os.makedirs(resultats_dir, exist_ok=True)
-    
-    print("\n" + "="*80)
-    print("EXTRACTION ET SAUVEGARDE DES STRUCTURES DE MARCHÉ")
-    print("="*80)
-    
-    # 2. Traitement PROVINCE
-    df_province_input = base_ml.copy()
-    mask_province = ~df_province_input["DEPT"].isin(params.CONFIG['idf_depts'])
-    df_province_input.loc[mask_province, "Ville"] = "PROVINCE"
-    df_province_input = df_province_input[df_province_input["Ville"] == "PROVINCE"]
-    
-    structure_province = extract_and_save_structure(df_province_input, "Ville", "PROVINCE", resultats_dir)
-    res_province = process_maille_wrapper(df_province_input, "Ville", "PROVINCE")
-    save_results(res_province, "PROVINCE")
-    
-    # 3. Traitement VILLES 
-    df_villes = apply_nice_correction(base_ml.copy())
-    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG['top_cities'])]
-    
-    # Extraction de la structure de référence pour les villes
-    print("\n   Extraction structure CITY (avec arrondissements)...")
-    structure_villes, structure_arr = get_structure_reference_city(base_ml)
-    
-    # Sauvegarde structures villes
-    path_structure_villes = os.path.join(resultats_dir, "structure_poids_CITY.csv")
-    structure_villes.to_csv(path_structure_villes, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_CITY.csv")
-    print(f"         {len(structure_villes)} univers, {structure_villes['Ville'].nunique()} villes")
-    
-    path_structure_arr = os.path.join(resultats_dir, "structure_poids_arrondissements.csv")
-    structure_arr.to_csv(path_structure_arr, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_arrondissements.csv")
-    print(f"         {len(structure_arr)} arrondissements")
-    if 'Ville_source' in structure_arr.columns:
-        print(f"         Villes: {', '.join(structure_arr['Ville_source'].unique())}")
-    
-    res_villes = process_maille_wrapper(df_villes, "Ville", "CITY", df_structure=structure_villes)
-    save_results(res_villes, "CITY")
-    
-    # 4. Traitement DEPARTEMENTS
-    structure_dept = extract_and_save_structure(base_ml, "DEPT", "DEPT", resultats_dir)
-    res_dept = process_maille_wrapper(base_ml, "DEPT", "DEPT")
-    save_results(res_dept, "DEPT")
-    
-    # 5. Traitement REGIONS
-    structure_region = extract_and_save_structure(base_ml, "REGION", "REGION", resultats_dir)
-    res_region = process_maille_wrapper(base_ml, "REGION", "REGION")
-    save_results(res_region, "REGION")
-    
-    # 6. Traitement NATIONAL
-    df_national = base_ml.copy()
-    df_national["PAYS"] = "FRANCE"
-    structure_national = extract_and_save_structure(df_national, "PAYS", "NATIONAL", resultats_dir)
-    res_national = process_maille_wrapper(df_national, "PAYS", "NATIONAL")
-    save_results(res_national, "NATIONAL")
-    
-    print("\n" + "="*80)
-    print(f"Traitement global terminé en {datetime.now() - start_global}")
-    print("="*80)
+    output_file_png = os.path.join(output_dir, f"carte_prix_m2_CITY_{type_bien}.png")
+    plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
+    plt.close(fig) 
+    print(f"Génération terminée pour {type_bien}")
