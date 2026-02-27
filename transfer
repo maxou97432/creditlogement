@@ -1,336 +1,695 @@
 """
-Module : calc_prix_m2_univ_elem.py
-====================================
-Ce module calcule les **indices de prix au m²** pour chaque maille géographique
-(PROVINCE, CITY, DEPT, REGION, NATIONAL) selon la méthode des univers élémentaires.
-
-Il utilise `base_complete_filtree.parquet` (généré par `base_work.py`) et les fonctions
-de `fonctions.py`, notamment `process_dataset_restreint`.
-
-Pour chaque maille géographique, le script :
-    1. Extrait et sauvegarde la structure de marché (poids par univers élémentaire)
-    2. Calcule les prix glissants pondérés (3 mois et 12 mois) via `process_maille_wrapper`
-    3. Calcule les taux d'inflation 3M et 12M
-    4. Sauvegarde les résultats via `save_results` (fonctions.py)
-
-Mailles calculées (dans l'ordre) :
-    - PROVINCE   : France hors Île-de-France
-    - CITY        : Top villes (avec correction arrondissements Paris/Lyon/Marseille)
-    - DEPT        : Tous les départements
-    - REGION      : Toutes les régions
-    - NATIONAL    : France entière
-
-Sorties (`resultats/`) :
-    - `prix_m2_univ_elem_complet_<MAILLE>.csv`  : série mensuelle complète
-    - `prix_m2_univ_elem_MAJ_<MAILLE>.csv`      : dernière période disponible (mise à jour)
-    - `stat_volumeterie_<MAILLE>.csv`            : statistiques de volumétrie par univers
-    - `structure_poids_<MAILLE>.csv`             : poids structurels par univers élémentaire
+    ANALYSE ET DE VISUALISATION (base_restreinte vs LPI)
+    ------------------------------------------------
+    Ce code permet de
+    1. Charge les résultats de base_complete_filtree.parquet et base_restreinte.parquet déjà, et de realculer les prix selon la 
+    méthode des univers élémentaires (attention: spécificité pour Paris)
+    (on applique la structure de marché de la base complète et on l'applique à base restreinte)
+    2. Compare ces résultats avec le baromètre LPI-IAD.
+    3. Génère les cartes de prix des plus grandes villes de France.
 """
+
+
 import sys
 import os
-from datetime import datetime
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe 
+import geopandas as gpd
+from shapely.geometry import Point
+from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
+import plotly.graph_objects as go
+import plotly.io as pio
+import locale
+import logging
+from fonctions import load_cl_results, get_structure_ref_local, extract_arrondissement, clean_base, poids_arr, get_structure_reference_city, process_dataset_restreint
+import plotly.graph_objects as go
 
-# Configuration des chemins
+# --- CONFIGURATION ---
 current_dir = os.path.dirname(__file__)
 parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-import param_generaux as params
-from fonctions import (
-    load_and_preprocess_data, 
-    apply_nice_correction, 
-    save_results,
-    process_dataset_restreint,
-    get_structure_reference_city,
-    clean_base
-)
+try:
+    import param_generaux as params
+except ImportError:
+    class params:
+        CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
+
+# Configuration Graphique
+pio.renderers.default = "browser"
+logging.getLogger("cmdstanpy").disabled = True
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
+
+# CHEMINS 
+PATH_RESULTATS_V2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee"
+
+PATH_LPI = r"N:\uflumth\indicateur_marche\LPI-IAD donnees (v2).xlsx"
+
+PATH_BASE_V1 = r"Z:\uflumth\gits\univers_elementaire\TI\stats_base_complete_filtree\base_complete_filtree.parquet"
+PATH_BASE_V2 = r"Z:\uflumth\gits\univers_elementaire\TI\resultats\base_restreinte.parquet"
+
+# GÉOGRAPHIE
+PATH_GEOJSON = r"Z:\uflumth\gits\univers_elementaire\TI\metropole-version-simplifiee.geojson"
+PATH_GPS = r'N:\uflujek\commune_france_gps.csv'
+PATH_COMMUNES = r"N:\uflujek\Commune_france.xlsx" 
+
+# Config Graphique
+pio.renderers.default = "browser"
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
 
 
-def process_maille_wrapper(df, maille_col, maille_name, df_structure=None):
-    """
-    Calcule les prix glissants pour une maille géographique donnée.
-
-    Wrapper au-dessus de `process_dataset_restreint` (fonctions.py) qui :
-    - Renomme temporairement la colonne `maille_col` en ``"Ville"`` pour être
-      compatible avec la fonction sous-jacente
-    - Adapte également la structure de référence si fournie
-    - Reconvertit la sortie au format tabulaire attendu par `save_results`
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Base de données filtrée sur le périmètre voulu (ex. uniquement province).
-    maille_col : str
-        Nom de la colonne géographique dans `df` (ex. ``"DEPT"``, ``"REGION"``, ``"Ville"``).
-    maille_name : str
-        Libellé de la maille utilisé dans les logs et les colonnes de sortie
-        (ex. ``"PROVINCE"``, ``"CITY"``, ``"NATIONAL"``).
-    df_structure : pd.DataFrame, optionnel
-        Structure de référence (poids par univers élémentaire) issue de
-        `extract_and_save_structure` ou `get_structure_reference_city`.
-        Si ``None``, la structure est calculée directement sur `df`.
-
-    Returns
-    -------
-    pd.DataFrame or None
-        DataFrame au format long avec les colonnes :
-        ``VAL_MAILLE_GEO``, ``TYPE_MAILLE``, ``CD_TYPE_BIEN``, ``Periode``,
-        ``DIC_NAME``, ``prix_mm_value``, ``nb_observations``, ``nb_univers``,
-        ``TAUX_INFL_12M``, ``TAUX_INFL_3M``.
-        Retourne ``None`` si aucune donnée disponible pour cette maille.
-    """
-    print(f"\n--- Traitement de la maille : {maille_name} ---")
-    start_time = datetime.now()
-    
-    # Préparation : renommer la colonne maille en "Ville"
-    df_work = df.copy()
-    
-    # Si la colonne n'est pas déjà "Ville", on la renomme temporairement
-    if maille_col != "Ville":
-        if "Ville" in df_work.columns:
-            df_work = df_work.drop(columns=["Ville"])
-        df_work = df_work.rename(columns={maille_col: "Ville"})
-    
-    # Nettoyage standard
-    df_work["Ville"] = df_work["Ville"].astype(str).str.strip().str.upper()
-    df_work = df_work.dropna(subset=["Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
-    
-    # Si on a une structure de référence, on doit aussi renommer sa colonne
-    structure_adapted = None
-    if df_structure is not None:
-        structure_adapted = df_structure.copy()
-        if maille_col in structure_adapted.columns and maille_col != "Ville":
-            structure_adapted = structure_adapted.rename(columns={maille_col: "Ville"})
-    
-    # Appel de la fonction unifiée
-    result = process_dataset_restreint(
-        df_work, 
-        label=maille_name,
-        df_structure=structure_adapted,
-        df_arr=None  # Pas de gestion d'arrondissements pour les mailles génériques
-    )
-    
-    if result is None or result.empty:
-        print(f"Aucune donnée pour la maille {maille_name}")
-        return None
-    
-    # Conversion du format de sortie
-    # process_dataset_restreint retourne : Ville, Periode, prix_mm_3m, prix_mm_12m, surface_mm_3m, surface_mm_12m, VF_mm_3m, VF_mm_12m
-    # On veut : VAL_MAILLE_GEO, TYPE_MAILLE, CD_TYPE_BIEN, Periode, DIC_NAME, value
-    
-    # Mapping des colonnes source → DIC_NAME
-    variables_mapping = [
-        (f"prix_mm_3m ({maille_name})", "prix_m2_3m"),
-        (f"prix_mm_12m ({maille_name})", "prix_m2_12m"),
-        (f"surface_mm_3m ({maille_name})", "surface_3m"),
-        (f"surface_mm_12m ({maille_name})", "surface_12m"),
-        (f"VF_mm_3m ({maille_name})", "valeur_3m"),
-        (f"VF_mm_12m ({maille_name})", "valeur_12m")
-    ]
-    
-    # Vérification de la présence des colonnes de statistiques de volumique
-    # (utile pour diagnostiquer si process_dataset_restreint retourne bien les stats attendues)
-    print(f"\n  Colonnes de statistiques :")
-    for col in ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]:
-        if col in result.columns:
-            print(f"    ✓ {col}: min={result[col].min()}, max={result[col].max()}, mean={result[col].mean():.1f}")
-        else:
-            print(f"    ✗ {col}: MANQUANTE")
-    
-    final_rows = []
-    
-    for _, row in result.iterrows():
-        ville = row["Ville"]
-        periode = row["Periode"]
-        
-        # Boucle sur toutes les variables
-        for col_source, dic_name in variables_mapping:
-            if col_source in result.columns and pd.notna(row[col_source]):
-                # Déterminer si c'est 3m ou 12m pour extraire les bonnes stats
-                if "_3m" in dic_name:
-                    nb_obs = row.get("nb_observations_3m", 0)
-                    nb_univ = row.get("nb_univers_3m", 0)
-                elif "_12m" in dic_name:
-                    nb_obs = row.get("nb_observations_12m", 0)
-                    nb_univ = row.get("nb_univers_12m", 0)
-                else:
-                    nb_obs = 0
-                    nb_univ = 0
-                
-                final_rows.append({
-                    "VAL_MAILLE_GEO": ville,
-                    "TYPE_MAILLE": maille_col,
-                    # CD_TYPE_BIEN est fixé à "APT" car process_dataset_restreint agrège
-                    # tous les types de bien (APT + MAI) dans un même indice composite.
-                    # Ce champ est conservé pour compatibilité avec le format de sortie attendu.
-                    "CD_TYPE_BIEN": "APT",
-                    "Periode": periode,
-                    "DIC_NAME": dic_name,
-                    "prix_mm_value": row[col_source],
-                    "nb_observations": int(nb_obs) if pd.notna(nb_obs) else 0,
-                    "nb_univers": int(nb_univ) if pd.notna(nb_univ) else 0
-                })
-    
-    if not final_rows:
-        print(f"Aucune donnée après conversion pour {maille_name}")
-        return None
-    
-    final_result = pd.DataFrame(final_rows)
-    
-    # Calcul des taux d'inflation
-    final_result = final_result.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "DIC_NAME"])
-    # données mensuelles → 12 mois = 12 périodes, 3 mois = 3 périodes
-    final_result["TAUX_INFL_12M"] = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=12)
-    final_result["TAUX_INFL_3M"]  = final_result.groupby(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "DIC_NAME"])["prix_mm_value"].pct_change(periods=3)
-    
-    print(f"Traitement {maille_name} terminé en {datetime.now() - start_time}")
-    print(f"  → {len(final_result)} lignes générées")
-    return final_result
-
-
-
-def extract_and_save_structure(df, maille_col, maille_name, resultats_dir):
-    """
-    Calcule et sauvegarde la structure de marché (poids par univers élémentaire).
-
-    Pour chaque univers (maille × ancienneté × type × gamme de pièces), calcule le
-    volume de transactions et le poids relatif au sein de la maille géographique.
-    Les combinaisons incohérentes TYPE_BIEN / NB_PIECES_RANGE sont filtrées via la
-    variable temporaire ``PB``.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Base de transactions filtrée sur le périmètre voulu.
-    maille_col : str
-        Nom de la colonne géographique (ex. ``"DEPT"``, ``"REGION"``, ``"Ville"``).
-    maille_name : str
-        Libellé utilisé pour nommer le fichier de sortie.
-    resultats_dir : str
-        Chemin vers le répertoire de sortie.
-
-    Returns
-    -------
-    pd.DataFrame
-        Structure de marché avec colonnes :
-        `[maille_col, BIEN_NEUF, TYPE_BIEN, NB_PIECES_RANGE, volume_ref, poids_ref]`.
-    """
-    print(f"\n   Extraction structure {maille_name}...")
-    
-    # Calcul de la structure (volume par univers élémentaire)
-    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
-    structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
-    
-    # Nettoyage
-    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
-    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
-    mask_coherence = structure["TYPE_BIEN"] == structure["PB"]
-    structure = structure[mask_coherence].drop(columns=["PB"])
-    
-    # Calcul des poids relatifs
-    structure["poids_ref"] = structure.groupby(maille_col)["volume_ref"].transform(lambda x: x / x.sum())
-    
-    # Sauvegarde
-    filename = f"structure_poids_{maille_name}.csv"
-    path = os.path.join(resultats_dir, filename)
-    structure.to_csv(path, index=False, encoding='utf-8-sig')
-    
-    print(f"      -> {filename}")
-    print(f"         {len(structure)} univers, {structure[maille_col].nunique()} {maille_name}")
-    
-    return structure
 
 
 if __name__ == "__main__":
-    start_global = datetime.now()
-
-    # ==========================================================================
-    # 1. Chargement et préparation de la base
-    # ==========================================================================
-    base_ml = load_and_preprocess_data()
-
-    # La base est chargée avec la colonne "CITY" ; on la renomme en "Ville"
-    # pour homogénéité avec les autres mailles
-    if "CITY" in base_ml.columns:
-        base_ml = base_ml.rename(columns={"CITY": "Ville"})
-
-    resultats_dir = os.path.join(current_dir, "resultats")
-    os.makedirs(resultats_dir, exist_ok=True)
-
-    print("\n" + "="*80)
-    print("EXTRACTION ET SAUVEGARDE DES STRUCTURES DE MARCHÉ")
-    print("="*80)
-
-    # ==========================================================================
-    # 2. Maille PROVINCE (France hors Île-de-France)
-    # Toutes les lignes hors départements IDF sont étiquetées "PROVINCE"
-    # ==========================================================================
-    df_province_input = base_ml.copy()
-    mask_province = ~df_province_input["DEPT"].isin(params.CONFIG['idf_depts'])
-    df_province_input.loc[mask_province, "Ville"] = "PROVINCE"
-    df_province_input = df_province_input[df_province_input["Ville"] == "PROVINCE"]
-
-    structure_province = extract_and_save_structure(df_province_input, "Ville", "PROVINCE", resultats_dir)
-    res_province = process_maille_wrapper(df_province_input, "Ville", "PROVINCE")
-    save_results(res_province, "PROVINCE")
-    # ==========================================================================
-    # 3. Maille CITY (Top villes avec correction Paris/Lyon/Marseille)
-    # La correction Nice regroupe les IRIS niçois sous l'entité "NICE".
-    # Les arrondissements (Paris 75xxx, Lyon 690xx, Marseille 130xx) sont
-    # gérés séparément via get_structure_reference_city.
-    # ==========================================================================
-    df_villes = apply_nice_correction(base_ml.copy())
-    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG['top_cities'])]
-
-    # Structure de référence spécifique aux villes (inclut les arrondissements)
-    print("\n   Extraction structure CITY (avec arrondissements)...")
-    structure_villes, structure_arr = get_structure_reference_city(base_ml)
-
-    # Sauvegarde des structures villes et arrondissements
-    path_structure_villes = os.path.join(resultats_dir, "structure_poids_CITY.csv")
-    structure_villes.to_csv(path_structure_villes, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_CITY.csv")
-    print(f"         {len(structure_villes)} univers, {structure_villes['Ville'].nunique()} villes")
-
-    path_structure_arr = os.path.join(resultats_dir, "structure_poids_arrondissements.csv")
-    structure_arr.to_csv(path_structure_arr, index=False, encoding='utf-8-sig')
-    print(f"      -> structure_poids_arrondissements.csv")
-    print(f"         {len(structure_arr)} arrondissements")
-    if 'Ville_source' in structure_arr.columns:
-        print(f"         Villes: {', '.join(structure_arr['Ville_source'].unique())}")
-
-    res_villes = process_maille_wrapper(df_villes, "Ville", "CITY", df_structure=structure_villes)
-    save_results(res_villes, "CITY")
     
-    # ==========================================================================
-    # 4. Maille DEPARTEMENT (tous les départements de la base)
-    # ==========================================================================
-    structure_dept = extract_and_save_structure(base_ml, "DEPT", "DEPT", resultats_dir)
-    res_dept = process_maille_wrapper(base_ml, "DEPT", "DEPT")
-    save_results(res_dept, "DEPT")
+    # =============================================================================
+    # 2. PRÉPARATION DES DONNÉES POUR LA CARTE
+    # =============================================================================
+        
+    import importlib.util
+    comparaison_path = os.path.join(current_dir, "comparaison.py")
 
-    # ==========================================================================
-    # 5. Maille REGION (toutes les régions)
-    # La colonne REGION doit avoir été ajoutée par load_and_preprocess_data
-    # via la table de correspondance département → région de param_generaux.py
-    # ==========================================================================
-    structure_region = extract_and_save_structure(base_ml, "REGION", "REGION", resultats_dir)
-    res_region = process_maille_wrapper(base_ml, "REGION", "REGION")
-    save_results(res_region, "REGION")
+    
+    top15_local = ["PARIS","MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", 
+                   "NICE", "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", 
+                   "SAINT-ETIENNE", "LE HAVRE","GRENOBLE"]
+    
+    
 
-    # ==========================================================================
-    # 6. Maille NATIONAL (France entière)
-    # Toutes les lignes reçoivent l'étiquette "FRANCE" dans une colonne temporaire PAYS
-    # ==========================================================================
-    df_national = base_ml.copy()
-    df_national["PAYS"] = "FRANCE"
-    structure_national = extract_and_save_structure(df_national, "PAYS", "NATIONAL", resultats_dir)
-    res_national = process_maille_wrapper(df_national, "PAYS", "NATIONAL")
-    save_results(res_national, "NATIONAL")
+    # -------------------------------------------------------------------------
+    # B.1 CHARGEMENT DES DONNÉES BRUTES
+    # -------------------------------------------------------------------------
+    print("Chargement V1 (Base complète)...")
+    try:
+        raw_v1 = pd.read_parquet(PATH_BASE_V1)
+    except Exception as e:
+        sys.exit(f"Erreur chargement V1: {e}")
+        
+    print("Chargement V2 (Base réduite)...")
+    try:
+        raw_v2 = pd.read_parquet(PATH_BASE_V2)
+    except Exception as e:
+        sys.exit(f"Erreur chargement V2: {e}")
 
+    raw_v1 = raw_v1[raw_v1["DEMANDE"] == 0] #Pour calculer la structure de marché globale, on retire les transactions "DEMANDE"
+    
+    # Nettoyage des bases AVANT d'extraire les appartements
+    raw_v1 = clean_base(raw_v1, top15_local)
+    raw_v2 = clean_base(raw_v2, top15_local)
+    
+    # Extraction des appartements APRÈS le nettoyage (pour avoir la colonne Ville)
+    raw_v2_apt = raw_v2[raw_v2["TYPE_BIEN"] == "APT"].copy()
+
+    # -------------------------------------------------------------------------
+    # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - 
+    # -------------------------------------------------------------------------
+    df_v1_for_struct = raw_v1.copy()
+    structure_v1, structure_arrondissement = get_structure_reference_city(df_v1_for_struct)
+    
+    
+    # Filtrer la structure pour ne garder que les codes valides
+    # Pour Paris, Marseille, Lyon : garder les codes d'arrondissements
+    # Pour les autres villes : garder les noms de villes
+    codes_paris = [f"{75100 + i}" for i in range(1, 21)]  # 75101-75120
+    codes_marseille = [f"{13200 + i}" for i in range(1, 17)]  # 13201-13216
+    codes_lyon = [f"{69380 + i}" for i in range(1, 10)]  # 69381-69389
+    
+    # Autres villes du top15
+    autres_villes = ['BORDEAUX', 'LE HAVRE', 'LILLE', 'MONTPELLIER', 'NANTES', 
+                     'NICE', 'REIMS', 'RENNES', 'SAINT-ETIENNE', 'STRASBOURG', 
+                     'TOULON', 'TOULOUSE', 'GRENOBLE']
+    
+    codes_valides = codes_paris + codes_marseille + codes_lyon + autres_villes
+    structure_v1 = structure_v1[structure_v1['Ville'].isin(codes_valides)]
+    
+    print(f"DEBUG - Structure V1 après filtre: {structure_v1['Ville'].unique()[:20]}")    
+    # -------------------------------------------------------------------------
+    # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
+    # -------------------------------------------------------------------------
+    print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
+    
+    # DEBUG: Vérifier les données avant traitement
+    print(f"\nDEBUG - Villes uniques dans raw_v2_apt: {sorted(raw_v2_apt['Ville'].unique())[:20]}")
+    print(f"DEBUG - Nombre de lignes Paris: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('751', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Marseille: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('132', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Lyon: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('693', na=False)])}")
+    print(f"DEBUG - Structure arrondissement shape: {structure_arrondissement.shape}")
+    print(f"DEBUG - Villes dans structure_arrondissement: {structure_arrondissement['Ville'].unique()}")
+    
+    res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_arrondissement)
+    
+    # DEBUG: Vérifier les résultats après traitement
+    print(f"\nDEBUG - Villes dans res_v2_struct: {sorted(res_v2_struct['Ville'].unique())}")
+    
+    res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
+    res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=4, fill_method=None)
+    res_v2_struct["TAUX_INFL_3M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=1, fill_method=None)
+    print(f"res_v2_struct calculé : {res_v2_struct.shape[0]} lignes, {res_v2_struct.shape[1]} colonnes")
+    
+
+
+
+    
+    # -------------------------------------------------------------------------
+    # B.4 PRÉPARATION POUR LA CARTE (dernière période uniquement)
+    # -------------------------------------------------------------------------
+    if len(res_v2_struct) == 0:
+        print("ERREUR: Aucune donnée calculée")
+        df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
+        if df_v2 is None:
+            sys.exit("Erreur: Pas de données V2.")
+        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
+        df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
+        df_prix_m2 = df_prix_m2.rename(columns={"Prix_M2_V2": "prix_mm_value", "Periode": "DT_MAJ_PM2"})
+    else:
+        # Garder seulement la dernière période pour la carte
+        derniere_periode = res_v2_struct["Periode"].max()
+        print(f"Dernière période disponible : {derniere_periode}")
+        
+        res_v2_map = res_v2_struct[res_v2_struct["Periode"] == derniere_periode].copy()
+        print(f"Données pour la carte : {len(res_v2_map)} villes")
+        
+
+        df_prix_m2 = res_v2_map.rename(columns={
+            "Ville": "VAL_MAILLE_GEO",
+            "Periode": "DT_MAJ_PM2",
+            "prix_mm_3m (V2_STRUCT)": "prix_mm_value"
+        }).copy()
+        
+
+        df_prix_m2["MAILLE_TYPE"] = "CITY"
+        df_prix_m2["CD_TYPE_BIEN"] = "APT"
+        df_prix_m2["DIC_NAME"] = "prix_m2_3m"
+    
+    # -------------------------------------------------------------------------
+    # B.5 NETTOYAGE DES NOMS DE VILLES
+    # -------------------------------------------------------------------------
+    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+        "HAVRE": "LE HAVRE",
+        "SAINT ETIENNE": "ST ETIENNE",
+        "ST-ETIENNE": "ST ETIENNE",
+        "SAINT-ETIENNE": "ST ETIENNE"
+    })
+    
+    print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
+    
+    # -------------------------------------------------------------------------
+    # B.6 PRÉPARATION POUR ANALYSE LPI (toutes périodes)
+    # -------------------------------------------------------------------------
+    merge_cl = res_v2_struct.copy()  # On garde seulement V2_STRUCT
+    
+    # C. Chargement GPS
+    df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
+    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper().str.strip()
+
+    # =============================================================================
+    # 3. CODE GRAPHIQUE 
+    # =============================================================================
+    print("\n--- Génération des Cartes ---")
+
+    # --- PALETTE DE COULEURS & POLICE ---
+    CL_TURQUOISE = '#A8DADC' 
+    CL_BLACK = '#1D3557' 
+    CL_LIGHT_GREY = '#F5F5DC' 
+    CL_BLUE_3M = '#000000' 
+    CL_RED_12M = '#CB4735' 
+
+    # Police 
+    try:
+        NOM_POLICE_CL = 'Century Gothic' 
+        plt.rcParams['font.family'] = 'sans-serif' 
+        plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+    except:
+        pass
+
+    plt.rcParams['font.weight'] = 'medium' 
+    TITRE_FONT_WEIGHT = 'heavy' 
+
+    TAUX_FONT_SIZE = 11
+    DEFAULT_FONT_SIZE = 20
+    TARGET_CRS = "EPSG:2154"
+
+    # --- PRÉPARATION GEOJSON ---
+    try:
+        france_gdf = gpd.read_file(PATH_GEOJSON)
+        dissolved_france = france_gdf.dissolve(by=None)
+        france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
+    
+        geometries_list = list(france_geometry.geoms) if france_geometry.geom_type == 'MultiPolygon' else [france_geometry]
+        geometries_list.sort(key=lambda x: x.area, reverse=True)
+        france_outline_geometry = geometries_list[0]
+    
+    except Exception as e:
+        print(f"!!! Échec GeoJSON: {e}")
+        sys.exit(1)
+
+    X_OFFSET_DEFAULT = 3000
+    Y_OFFSET_DEFAULT = 3000
+    CUSTOM_LABEL_OFFSETS = {
+        'MONTPELLIER': {'x': -5000, 'y': 60000}, 
+        'MARSEILLE':   {'x': -5000,  'y': -5000},
+        'TOULON':      {'x': 5000,  'y': -10000},
+        'NICE':        {'x': 30000, 'y': 3000}, 
+        'GRENOBLE':    {'x': 5000, 'y': -10000},   
+        'ST ETIENNE':  {'x': -30000, 'y': -0},
+        'LE HAVRE':    {'x': 10000, 'y': -0},
+        'BORDEAUX':    {'x': 5000,  'y': 0},  
+        'NANTES':      {'x': 5000,  'y': 0},  
+        'RENNES':      {'x': 5000,  'y': 0},  
+        'LILLE':       {'x': 0,   'y': -10000}, 
+        'STRASBOURG':  {'x': -5000, 'y': 0},  
+        'PARIS':       {'x': 5000, 'y': 3000},
+        'LYON':        {'x': 6000, 'y': 60000}, 
+        'TOULOUSE':    {'x': -5000, 'y': 3000}, 
+    }
+
+    types_bien = ['APT']
+    type_bien_labels = {"APT": "APPARTEMENTS", "MAI": "MAISONS"}
+
+
+    for type_bien in types_bien:
+        print(f"   -> Carte : {type_bien}")
+    
+
+        df_prix_filtre = df_prix_m2[
+            (df_prix_m2["CD_TYPE_BIEN"] == type_bien) & 
+            (df_prix_m2["DIC_NAME"] == "prix_m2_3m")
+        ].copy()
+    
+
+        df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
+    
+
+        cols_needed = ['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']
+        # On ajoute les colonnes manquantes en NaN si besoin
+        for c in ["TAUX_INFL_3M", 'TAUX_INFL_12M']:
+            if c not in df_map.columns: df_map[c] = np.nan
+            
+        df_map = df_map[cols_needed].copy()
+        df_map = df_map.dropna(subset=['latitude', 'longitude'])
+        df_map = df_map.drop_duplicates(subset='label', keep='first')
+    
+        if df_map.empty: continue
+        
+        geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
+        gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS) 
+    
+        # --- DESSIN ---
+        fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
+        fig.set_facecolor(CL_TURQUOISE) 
+    
+        # Fond
+        x, y = france_outline_geometry.exterior.xy
+        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
+        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
+    
+        xmin, ymin, xmax, ymax = france_outline_geometry.bounds
+        ax.set_xlim(xmin - 5000, xmax + 5000) 
+        ax.set_ylim(ymin - 5000, ymax + 5000)
+
+        # --- ÉTIQUETTES ---
+        LINE_SPACING = 15000 
+        halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
+
+        for idx, row in gdf.iterrows():
+            x_coord, y_coord = row.geometry.x, row.geometry.y
+            city_label = row['label'] 
+        
+            if city_label in CUSTOM_LABEL_OFFSETS:
+                x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
+                y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
+            else:
+                x_offset_city = X_OFFSET_DEFAULT
+                y_offset_city = Y_OFFSET_DEFAULT
+
+            ville = str(city_label).upper()
+            prix_val = row['prix_mm_value']
+            prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
+            ti_3m = row['TAUX_INFL_3M']
+            ti_12m = row['TAUX_INFL_12M']
+        
+            # Ancrage
+            anchor_x = x_coord + x_offset_city
+            anchor_y = y_coord + y_offset_city
+            ha_box_align = 'right' if x_offset_city < 0 else 'left'
+            va_align = 'top' 
+        
+            # 1. Nom
+            ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='normal', zorder=4, path_effects=halo_effect) 
+        
+            # 2. Prix
+            prix_y = anchor_y - 1.5 * LINE_SPACING 
+            ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='bold', zorder=4, path_effects=halo_effect) 
+        
+            # 3. Evolutions (Packer)
+            ti_3m_y = prix_y - LINE_SPACING 
+            ti_12m_y = ti_3m_y - LINE_SPACING 
+        
+            text_3m = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
+            text_12m = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
+
+            ta_3m = TextArea(text_3m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'))
+            ta_12m = TextArea(text_12m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'))
+
+            hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)
+        
+            box_x_align = 1.0 if ha_box_align == "right" else 0.0
+            # On place le packer sur la ligne du 12m pour l'alignement vertical (ajusté via box_alignment)
+            ab = AnnotationBbox(hpack, (anchor_x, ti_12m_y), xybox=(0, 0), xycoords='data', 
+                            boxcoords='offset points', frameon=False, 
+                            box_alignment=(box_x_align, 0.5))
+            ax.add_artist(ab)
+
+            # 5. Point
+            ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
+                    markeredgecolor='white', markeredgewidth=0.5) 
+
+        # --- FINALISATION ---
+        ax.axis('off')
+        title_text = f"LES PRIX DES {type_bien_labels[type_bien]} DANS LES 16 PLUS GRANDES VILLES"
+        ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', 
+                    weight=TITRE_FONT_WEIGHT, bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
+
+        # Légende & Date
+        fig.text(0.04, 0.05, "LEGENDE\nPrix/m² moyen sur 12 mois\nNoir: Evolution sur 3 mois\nRouge: Evolution sur 12 mois",
+                ha='left', va='bottom', fontsize=20,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
+    
+        try:
+            locale.setlocale(locale.LC_TIME, 'fr_FR.UTF-8') 
+        except:
+            try:
+                locale.setlocale(locale.LC_TIME, 'French_France') 
+            except:
+                pass 
+
+        if not df_prix_m2.empty:
+
+            df_prix_m2 = df_prix_m2.loc[:, ~df_prix_m2.columns.duplicated()]
+
+            df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
+
+            last_dt = df_prix_m2["DT_MAJ_PM2"].max()
+        
+
+            if pd.notna(last_dt):
+                date_texte = last_dt.strftime("%B %Y").upper()
+            else:
+                date_texte = "DATE INCONNUE"
+        else:
+            date_texte = "DATE INCONNUE"
+
+        fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_texte}", ha='left', va='bottom', fontsize=12)
+    
+        # Sauvegarde
+        output_file_png = os.path.join(params.CONFIG["output_dir"], f"carte_prix_m2_CITY_{type_bien}_V2_RESTREINT.png")
+        plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
+        plt.close()
+        print(f"   -> Sauvegardé : {output_file_png}")
+    # =============================================================================
+    # B. COMPARAISON V1 vs V2_STRUCT vs LPI (Structure de marché)
+    # =============================================================================
+    print("\n=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===")
+    
+
+
+    # -------------------------------------------------------------------------
+    # B.4 CHARGEMENT ET FUSION LPI
+    # -------------------------------------------------------------------------
+    print("\n--- Chargement LPI/IAD ---")
+    try:
+        lpi = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
+        lpi = lpi.iloc[:, :3]
+        lpi.columns = ["DATE", "Ville", "Prix_LPI"]
+        lpi["DATE"] = pd.to_datetime(lpi["DATE"], errors='coerce')
+        lpi["Ville"] = lpi["Ville"].astype(str).str.strip().str.upper()
+        lpi["Prix_LPI"] = pd.to_numeric(lpi["Prix_LPI"], errors='coerce')
+        lpi = lpi[lpi["Ville"].isin(top15_local)]
+        date_max = lpi["DATE"].max()
+    except Exception as e:
+        print(f"Erreur LPI: {e}. Continuation sans.")
+        lpi = pd.DataFrame(columns=["DATE", "Ville", "Prix_LPI"])
+
+    # Fusion finale
+    merge_cl = merge_cl.rename(columns={"Periode": "DATE"})
+    merge_cl["DATE"] = pd.to_datetime(merge_cl["DATE"])
+    
+    final_fusion = pd.merge(lpi, merge_cl, on=["Ville", "DATE"], how="right")
+    
+    # Renommage pour clarté
+    final_fusion = final_fusion.rename(columns={
+        "prix_mm_3m (V2_STRUCT)": "Prix V2 (3 mois glissants)",
+        "prix_mm_12m (V2_STRUCT)": "Prix V2 (12 mois glissants)",
+        "Prix_LPI": "Prix LPI/IAD (12 mois)"
+    })
+    
+    # Filtre date
+    final_fusion = final_fusion[final_fusion["DATE"] <= date_max]
+
+    # -------------------------------------------------------------------------
+    # B.5 GÉNÉRATION DES GRAPHIQUES ET STATS
+    # -------------------------------------------------------------------------
+    print("\n--- Génération des graphiques ---")
+    
+    # Deux comparaisons séparées : 3m et 12m vs LPI
+    comparisons = [
+        {
+            "name": "3m",
+            "col_v2": "Prix V2 (3 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#28A745",  # Green
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (3 mois) vs LPI"
+        },
+        {
+            "name": "12m",
+            "col_v2": "Prix V2 (12 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#4C72B0",  # Blue
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (12 mois) vs LPI"
+        }
+    ]
+    
+    nb_villes = len(final_fusion["Ville"].dropna().unique())
+
+ 
+    # Initialisation des scores de correspondance
+    score_3m_total = 0
+    score_12m_total = 0
+    nb_villes_valides = 0
+
+    for ville in final_fusion["Ville"].dropna().unique():
+        df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
+        if df_ville.empty: continue
+
+        # --- Graphique unique avec toutes les courbes ---
+        fig = go.Figure()
+        
+        # Interpolation
+        cols = ["Prix V2 (3 mois glissants)", "Prix V2 (12 mois glissants)", "Prix LPI/IAD (12 mois)"]
+        df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
+
+        # Calcul IC pour 3M
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            std_3m = df_interp["Prix V2 (3 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_3m"] = df_interp["Prix V2 (3 mois glissants)"] - 1.96 * std_3m
+            df_interp["IC_sup_3m"] = df_interp["Prix V2 (3 mois glissants)"] + 1.96 * std_3m
+            
+            # Zone IC 3M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_3m"], df_interp["IC_inf_3m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(40,167,69,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (3M)",
+                showlegend=True
+            ))
+
+        # Calcul IC pour 12M
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            std_12m = df_interp["Prix V2 (12 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_12m"] = df_interp["Prix V2 (12 mois glissants)"] - 1.96 * std_12m
+            df_interp["IC_sup_12m"] = df_interp["Prix V2 (12 mois glissants)"] + 1.96 * std_12m
+            
+            # Zone IC 12M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_12m"], df_interp["IC_inf_12m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(76,114,176,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (12M)",
+                showlegend=True
+            ))
+
+        # Courbe Prix V2 (3 mois)
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (3 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (3M)",
+                line=dict(color="#28A745", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe Prix V2 (12 mois)
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (12 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (12M)",
+                line=dict(color="#4C72B0", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe LPI
+        if "Prix LPI/IAD (12 mois)" in df_interp.columns and not df_interp["Prix LPI/IAD (12 mois)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix LPI/IAD (12 mois)"],
+                mode="lines+markers",
+                name="Prix LPI/IAD",
+                line=dict(color="#DD8452", width=2, dash="dot"),
+                marker=dict(size=6, symbol="diamond")
+            ))
+
+        # Calcul des taux de couverture (% LPI dans IC)
+        annotations_text = []
+        match_3m = match_12m = np.nan
+        
+        if "IC_inf_3m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_3m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_3m"]) & 
+                        (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_3m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
+            score_3m_total += match_3m if pd.notna(match_3m) else 0
+        
+        if "IC_inf_12m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_12m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_12m"]) & 
+                         (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_12m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
+            score_12m_total += match_12m if pd.notna(match_12m) else 0
+        
+        if pd.notna(match_3m) or pd.notna(match_12m):
+            nb_villes_valides += 1
+
+        # Annotation
+        if annotations_text:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=0.01, y=0.99,
+                text="<br>".join(annotations_text),
+                showarrow=False,
+                bgcolor="white",
+                bordercolor="black",
+                borderwidth=1,
+                align="left"
+            )
+
+        # Mise en forme
+        fig.update_layout(
+            title=f"Comparaison Prix V2 (3M & 12M) vs LPI - {ville}",
+            xaxis_title="Date",
+            yaxis_title="Prix au m² (€)",
+            height=600,
+            template="plotly_white",
+            hovermode="x unified"
+        )
+        
+        # Sauvegarde
+        filename = f"Comparaison_V2_LPI_{ville}.html"
+        fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
+
+    # -------------------------------------------------------------------------
+    # B.6 SYNTHÈSE STATS
+    # -------------------------------------------------------------------------
     print("\n" + "="*80)
-    print(f"Traitement global terminé en {datetime.now() - start_global}")
+    print(" RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)")
     print("="*80)
+    
+    # Fonctions de calcul des métriques
+    def calc_rmse(g, col):
+        """RMSE absolu en €/m²"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                return np.sqrt(((valid[col] - valid[lpi])**2).mean())
+        return np.nan
+    
+    def calc_rmse_relative(g, col):
+        """RMSE relatif en % du prix moyen"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                rmse = np.sqrt(((valid[col] - valid[lpi])**2).mean())
+                mean_price = valid[lpi].mean()
+                if mean_price > 0:
+                    return (rmse / mean_price) * 100  
+        return np.nan
+    
+    def calc_correlation(g, col):
+        """Corrélation avec LPI"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 5:
+                return valid[col].corr(valid[lpi])
+        return np.nan
+
+    # Calcul des statistiques par ville
+    stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
+        "RMSE_3M": calc_rmse(x, "Prix V2 (3 mois glissants)"),
+        "RMSE_12M": calc_rmse(x, "Prix V2 (12 mois glissants)"),
+        "RMSE_REL_3M": calc_rmse_relative(x, "Prix V2 (3 mois glissants)"),
+        "RMSE_REL_12M": calc_rmse_relative(x, "Prix V2 (12 mois glissants)"),
+        "CORR_3M": calc_correlation(x, "Prix V2 (3 mois glissants)"),
+        "CORR_12M": calc_correlation(x, "Prix V2 (12 mois glissants)"),
+        "Prix_Moyen_LPI": x["Prix LPI/IAD (12 mois)"].mean()
+    }), include_groups=False).reset_index()
+    
+    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
+    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
+    
+    # Affichage
+    print("\nCORRESPONDANCE LPI dans IC (Couverture moyenne) :")
+    if nb_villes_valides > 0:
+        print(f"   IC 3M  : {score_3m_total/nb_villes_valides:.1%}")
+        print(f"   IC 12M : {score_12m_total/nb_villes_valides:.1%}")
+    
+    print("\nRMSE ABSOLU (€/m²) :")
+    print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
+    print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
+    print(f"   Δ   : {stats['Delta_RMSE'].mean():+.2f} €/m² {'(12M meilleur)' if stats['Delta_RMSE'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\nRMSE RELATIF (%) :")
+    print(f"   3M  : {stats['RMSE_REL_3M'].mean():.2f} %")
+    print(f"   12M : {stats['RMSE_REL_12M'].mean():.2f} %")
+    
+    print("\nCORRÉLATION avec LPI :")
+    print(f"   3M  : {stats['CORR_3M'].mean():.4f}")
+    print(f"   12M : {stats['CORR_12M'].mean():.4f}")
+    print(f"   Δ   : {stats['Delta_CORR'].mean():+.4f} {'(12M meilleur)' if stats['Delta_CORR'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\n" + "-" * 80)
+    print("\nDétail par ville :")
+    cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_3M", "RMSE_12M", "Delta_RMSE", 
+                    "RMSE_REL_3M", "RMSE_REL_12M", "CORR_3M", "CORR_12M"]
+    print(stats[cols_display].sort_values("Delta_RMSE", ascending=False).to_string(index=False))
+    
+    # Sauvegarde
+    output_path = os.path.join(params.CONFIG['output_dir'], "stats_comparaison_V2_LPI.csv")
+    stats.to_csv(output_path, index=False)
+    print(f"\n Statistiques sauvegardées : {output_path}")
+
+    print("\n=== ANALYSE TERMINÉE ===")
