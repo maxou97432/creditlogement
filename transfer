@@ -1,955 +1,1290 @@
-"""
-    ANALYSE ET DE VISUALISATION (base_restreinte vs LPI)
-    ------------------------------------------------
-    Ce code permet de
-    1. Charge les résultats de base_complete_filtree.parquet et base_restreinte.parquet déjà, et de realculer les prix selon la 
-    méthode des univers élémentaires (attention: spécificité pour Paris)
-    (on applique la structure de marché de la base complète et on l'applique à base restreinte)
-    2. Compare ces résultats avec le baromètre LPI-IAD.
-    3. Génère les cartes de prix des plus grandes villes de France.
-"""
-
-
-import sys
 import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe 
-import geopandas as gpd
-from shapely.geometry import Point
-from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
-import plotly.graph_objects as go
-import plotly.io as pio
-import locale
-import logging
-from fonctions import load_cl_results, get_structure_ref_local, extract_arrondissement, clean_base, poids_arr, get_structure_reference_city, process_dataset_restreint
-import plotly.graph_objects as go
+from datetime import datetime
+import yaml
+"""Ce fichier a pour but d'importer tous les paramètres utilisés dans classe.py"""
+## CONFIG est utilisé dans fonctions.py et calc_prix_m2_univ_elem.py afin de configurer l'ensemble des périmètres et paramètres
 
-# --- CONFIGURATION ---
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+# Configuration globale
 
+CONFIG = {
+    'input_file': "base_complete_filtree.parquet",
+    'output_dir': os.path.join(os.path.dirname(__file__), 'resultats'),
+    'top_cities': ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "NICE", "BORDEAUX", "STRASBOURG", "NANTES", "MONTPELLIER", "TOURS","BREST", "REIMS", "SAINT ETIENNE", "GRENOBLE", "HAVRE"],
+    'villes_arrondissements': ["PARIS", "LILLE", "MARSEILLE", "LYON"],
+    'idf_depts': ["75", "77", "78", "92", "93", "94", "95"],
+    'codes_insee_nice': [
+        "06159", "06157", "06156", "06153", "06151", "06149", "06147", "06146", "06144",
+        "06129", "06127", "06126", "06123", "06122", "06121", "06120", "06119", "06117",
+        "06114", "06111", "06110", "06109", "06103", "06102", "06088", "06080", "06075",
+        "06074", "06073", "06072", "06066", "06065", "06064", "06060", "06059", "06055",
+        "06054", "06046", "06042", "06039", "06034", "06033", "06032", "06027", "06025",
+        "06021", "06020", "06013", "06011", "06009", "06006"
+    ],
+    'dep_to_region': {
+
+        '01': 'Rhône-Alpes', '02': 'Picardie', '03': 'Auvergne', '04': "Provence-Alpes-Côte d'Azur", '05': "Provence-Alpes-Côte d'Azur",
+        '06': "Provence-Alpes-Côte d'Azur", '07': 'Rhône-Alpes', '08': 'Champagne', '09': 'Midi-Pyrénées', '10': 'Champagne',
+        '11': 'Languedoc-Roussillon', '12': 'Midi-Pyrénées', '13': "Provence-Alpes-Côte d'Azur", '14': 'Basse-Normandie', '15': 'Auvergne',
+        '16': 'Poitou-Charentes', '17': 'Poitou-Charentes', '18': 'Centre', '19': 'Limousin', '21': 'Bourgogne',
+        '22': 'Bretagne', '23': 'Limousin', '24': 'Aquitaine', '25': 'Franche-Comté', '26': 'Rhône-Alpes', '27': 'Haute-Normandie',
+        '28': 'Centre', '29': 'Bretagne', '30': 'Languedoc-Roussillon', '31': 'Midi-Pyrénées', '32': 'Midi-Pyrénées', '33': 'Aquitaine',
+        '34': 'Languedoc-Roussillon', '35': 'Bretagne', '36': 'Centre', '37': 'Centre', '38': 'Rhône-Alpes', '39': 'Franche-Comté',
+        '40': 'Aquitaine', '41': 'Centre', '42': 'Rhône-Alpes', '43': 'Auvergne', '44': 'Pays de la Loire', '45': 'Centre',
+        '46': 'Midi-Pyrénées', '47': 'Aquitaine', '48': 'Languedoc-Roussillon', '49': 'Pays de la Loire', '50': 'Basse-Normandie',
+        '51': 'Champagne', '52': 'Champagne', '53': 'Pays de la Loire', '54': 'Lorraine', '55': 'Lorraine', '56': 'Bretagne',
+        '57': 'Lorraine', '58': 'Bourgogne', '59': 'Nord-Pas-de-Calais', '60': 'Picardie', '61': 'Basse-Normandie', '62': 'Nord-Pas-de-Calais',
+        '63': 'Auvergne', '64': 'Aquitaine', '65': 'Midi-Pyrénées', '66': 'Languedoc-Roussillon', '67': 'Alsace', '68': 'Alsace',
+        '69': 'Rhône-Alpes', '70': 'Franche-Comté', '71': 'Bourgogne', '72': 'Pays de la Loire', '73': 'Rhône-Alpes', '74': 'Rhône-Alpes',
+        '75': 'Île-de-France', '76': 'Haute-Normandie', '77': 'Île-de-France', '78': 'Île-de-France', '79': 'Poitou-Charentes',
+        '80': 'Picardie', '81': 'Midi-Pyrénées', '82': 'Midi-Pyrénées', '83': "Provence-Alpes-Côte d'Azur", '84': "Provence-Alpes-Côte d'Azur",
+        '85': 'Pays de la Loire', '86': 'Poitou-Charentes', '87': 'Limousin', '88': 'Lorraine', '89': 'Bourgogne', '90': 'Franche-Comté',
+        '91': 'Île-de-France', '92': 'Île-de-France', '93': 'Île-de-France', '94': 'Île-de-France', '95': 'Île-de-France',
+        '2A': 'Corse', '2B': 'Corse'
+    }
+}
+
+###############################################################################
+# =====================================
+#               BDD SQL
+# =====================================
+config_file = os.path.join(os.path.dirname(__file__), "config.yml")
+with open(config_file, "r") as config_env:
+    config = yaml.safe_load(config_env)
+
+SERVEUR = config["database"]["server"]
+DATABASE = config["database"]["database"]
+SCHEMA = config["database"]["schema"]
+
+PROD_PWD = config["database"]["password"]
+PROD_ID = config["database"]["login"]
+
+CONN_PARAMS_OPTIONAL = config["database"]["conn_params_optional"]
+
+DF_BAN_SERVEUR = SERVEUR
+DF_BAN_DATABASE = DATABASE
+DF_BAN_TABLE = "BAN"
+DF_BAN = f"{DF_BAN_DATABASE}.{SCHEMA}.{DF_BAN_TABLE}"
+
+ADRESSES_CADASTRES_SERVEUR = SERVEUR
+ADRESSES_CADASTRES_DATABASE = DATABASE
+ADRESSES_CADASTRES_TABLE = "ADRESSES_CADASTRES"
+ADRESSES_CADASTRES = (
+    f"{ADRESSES_CADASTRES_DATABASE}.{SCHEMA}.{ADRESSES_CADASTRES_TABLE}"
+)
+
+ADRESSES_CADASTRES_CLE_SERVEUR = SERVEUR
+ADRESSES_CADASTRES_CLE_DATABASE = DATABASE
+ADRESSES_CADASTRES_CLE_TABLE = "LIENS_CADASTRES_ADRESSES"
+ADRESSES_CADASTRES_CLE = (
+    f"{ADRESSES_CADASTRES_CLE_DATABASE}.{SCHEMA}.{ADRESSES_CADASTRES_CLE_TABLE}"
+)
+
+BATI_SERVEUR = SERVEUR
+BATI_DATABASE = DATABASE
+BATI_TABLE = "BDNB"
+BATI = f"{BATI_DATABASE}.{SCHEMA}.{BATI_TABLE}"
+
+BATI_cle_SERVEUR = SERVEUR
+BATI_cle_DATABASE = DATABASE
+BATI_cle_TABLE = "BDNB_PASSAGE"
+BATI_cle = f"{BATI_cle_DATABASE}.{SCHEMA}.{BATI_cle_TABLE}"
+
+CL_OPERATIONS_SERVEUR = SERVEUR
+CL_OPERATIONS_DATABASE = DATABASE
+CL_OPERATIONS_TABLE = "CL_OPERATIONS"
+CL_OPERATIONS = f"{CL_OPERATIONS_DATABASE}.{SCHEMA}.{CL_OPERATIONS_TABLE}"
+
+CL_OPES_ENCOURS_SERVEUR = SERVEUR
+CL_OPES_ENCOURS_DATABASE = DATABASE
+CL_OPES_ENCOURS_TABLE = "CL_OPES_ENCOURS"
+CL_OPES_ENCOURS = f"{CL_OPES_ENCOURS_DATABASE}.{SCHEMA}.{CL_OPES_ENCOURS_TABLE}"
+
+DVF_AGREGEES_SERVEUR = SERVEUR
+DVF_AGREGEES_DATABASE = DATABASE
+DVF_AGREGEES_TABLE = "DVF_AGREGEES"
+DVF_AGREGEES = f"{DVF_AGREGEES_DATABASE}.{SCHEMA}.{DVF_AGREGEES_TABLE}"
+
+OPES_ENRICHIES_SERVEUR = SERVEUR
+OPES_ENRICHIES_DATABASE = DATABASE
+OPES_ENRICHIES_TABLE = "OPES_ENRICHIES"
+OPES_ENRICHIES = f"{OPES_ENRICHIES_DATABASE}.{SCHEMA}.{OPES_ENRICHIES_TABLE}"
+
+OPES_ESTIMEES_SERVEUR = SERVEUR
+OPES_ESTIMEES_DATABASE = DATABASE
+OPES_ESTIMEES_TABLE = "OPES_ESTIMEES"
+OPES_ESTIMEES = f"{OPES_ESTIMEES_DATABASE}.{SCHEMA}.{OPES_ESTIMEES_TABLE}"
+
+ESTIM_TI_BIENS_CONNUS_SERVEUR = SERVEUR
+ESTIM_TI_BIENS_CONNUS_DATABASE = DATABASE
+ESTIM_TI_BIENS_CONNUS_TABLE = "ESTIM_TI_BIENS_CONNUS"
+ESTIM_TI_BIENS_CONNUS = (
+    f"{ESTIM_TI_BIENS_CONNUS_DATABASE}.{SCHEMA}.{ESTIM_TI_BIENS_CONNUS_TABLE}"
+)
+
+EFFECTIFS_VILLE_SERVEUR = SERVEUR
+EFFECTIFS_VILLE_DATABASE = DATABASE
+EFFECTIFS_VILLE_TABLE = "EFFECTIFS_VILLES"
+EFFECTIFS_VILLE = f"{EFFECTIFS_VILLE_DATABASE}.{SCHEMA}.{EFFECTIFS_VILLE_TABLE}"
+
+EFFECTIFS_IRIS_SERVEUR = SERVEUR
+EFFECTIFS_IRIS_DATABASE = DATABASE
+EFFECTIFS_IRIS_TABLE = "EFFECTIFS_IRIS"
+EFFECTIFS_IRIS = f"{EFFECTIFS_IRIS_DATABASE}.{SCHEMA}.{EFFECTIFS_IRIS_TABLE}"
+
+TI_IRIS_SERVEUR = SERVEUR
+TI_IRIS_DATABASE = DATABASE
+TI_IRIS_TABLE = "TI_IRIS"
+TI_IRIS = f"{TI_IRIS_DATABASE}.{SCHEMA}.{TI_IRIS_TABLE}"
+
+TI_ARR_SERVEUR = SERVEUR
+TI_ARR_DATABASE = DATABASE
+TI_ARR_TABLE = "TI_ARR"
+TI_ARR = f"{TI_ARR_DATABASE}.{SCHEMA}.{TI_ARR_TABLE}"
+
+TI_VILLE_SERVEUR = SERVEUR
+TI_VILLE_DATABASE = DATABASE
+TI_VILLE_TABLE = "TI_VILLE"
+TI_VILLE = f"{TI_VILLE_DATABASE}.{SCHEMA}.{TI_VILLE_TABLE}"
+
+TI_DEPT_SERVEUR = SERVEUR
+TI_DEPT_DATABASE = DATABASE
+TI_DEPT_TABLE = "TI_DEPT"
+TI_DEPT = f"{TI_DEPT_DATABASE}.{SCHEMA}.{TI_DEPT_TABLE}"
+
+PRIX_M2_SERVEUR = SERVEUR
+PRIX_M2_DATABASE = DATABASE
+PRIX_M2_TABLE = "PRIX_M2"
+PRIX_M2 = f"{PRIX_M2_DATABASE}.{SCHEMA}.{PRIX_M2_TABLE}"
+
+REF_PRENOMS_SERVEUR = SERVEUR
+REF_PRENOMS_DATABASE = DATABASE
+REF_PRENOMS_TABLE = "REF_PRENOMS"
+REF_PRENOMS = f"{REF_PRENOMS_DATABASE}.{SCHEMA}.{REF_PRENOMS_TABLE}"
+
+REF_VOIES_SERVEUR = SERVEUR
+REF_VOIES_DATABASE = DATABASE
+REF_VOIES_TABLE = "REF_VOIES"
+REF_VOIES = f"{REF_VOIES_DATABASE}.{SCHEMA}.{REF_VOIES_TABLE}"
+
+REF_GPS_MER_SERVEUR = SERVEUR
+REF_GPS_MER_DATABASE = DATABASE
+REF_GPS_MER_TABLE = "REF_GPS_MER"
+REF_GPS_MER = f"{REF_GPS_MER_DATABASE}.{SCHEMA}.{REF_GPS_MER_TABLE}"
+
+REF_INDICES_PRIX_SERVEUR = SERVEUR
+REF_INDICES_PRIX_DATABASE = DATABASE
+REF_INDICES_PRIX_TABLE = "REF_INDICES_PRIX"
+REF_INDICES_PRIX = f"{REF_INDICES_PRIX_DATABASE}.{SCHEMA}.{REF_INDICES_PRIX_TABLE}"
+
+REF_POPULATION_COMMUNE_SERVEUR = SERVEUR
+REF_POPULATION_COMMUNE_DATABASE = DATABASE
+REF_POPULATION_COMMUNE_TABLE = "REF_POPULATION_COMMUNE"
+REF_POPULATION_COMMUNE = (
+    f"{REF_POPULATION_COMMUNE_DATABASE}.{SCHEMA}.{REF_POPULATION_COMMUNE_TABLE}"
+)
+
+REF_CONTOURS_IRIS_SERVEUR = SERVEUR
+REF_CONTOURS_IRIS_DATABASE = DATABASE
+REF_CONTOURS_IRIS_TABLE = "REF_IRIS_CONTOURS"
+REF_CONTOURS_IRIS = f"{REF_CONTOURS_IRIS_DATABASE}.{SCHEMA}.{REF_CONTOURS_IRIS_TABLE}"
+
+REF_IRIS_LOGEMENT_SERVEUR = SERVEUR
+REF_IRIS_LOGEMENT_DATABASE = DATABASE
+REF_IRIS_LOGEMENT_TABLE = "REF_IRIS_LOGEMENT"
+REF_IRIS_LOGEMENT = f"{REF_IRIS_LOGEMENT_DATABASE}.{SCHEMA}.{REF_IRIS_LOGEMENT_TABLE}"
+
+REF_IRIS_REVENUS_SERVEUR = SERVEUR
+REF_IRIS_REVENUS_DATABASE = DATABASE
+REF_IRIS_REVENUS_TABLE = "REF_IRIS_REVENUS"
+REF_IRIS_REVENUS = f"{REF_IRIS_REVENUS_DATABASE}.{SCHEMA}.{REF_IRIS_REVENUS_TABLE}"
+
+REF_IRIS_POPULATION_SERVEUR = SERVEUR
+REF_IRIS_POPULATION_DATABASE = DATABASE
+REF_IRIS_POPULATION_TABLE = "REF_IRIS_POPULATION"
+REF_IRIS_POPULATION = (
+    f"{REF_IRIS_POPULATION_DATABASE}.{SCHEMA}.{REF_IRIS_POPULATION_TABLE}"
+)
+
+REF_IRIS_RESIDENT_SERVEUR = SERVEUR
+REF_IRIS_RESIDENT_DATABASE = DATABASE
+REF_IRIS_RESIDENT_TABLE = "REF_IRIS_RESIDENT"
+REF_IRIS_RESIDENT = f"{REF_IRIS_RESIDENT_DATABASE}.{SCHEMA}.{REF_IRIS_RESIDENT_TABLE}"
+
+ADEME_ANCIEN_SERVEUR = SERVEUR
+ADEME_ANCIEN_DATABASE = DATABASE
+ADEME_ANCIEN_TABLE = "ADEME_ANCIEN"
+ADEME_ANCIEN = f"{ADEME_ANCIEN_DATABASE}.{SCHEMA}.{ADEME_ANCIEN_TABLE}"
+
+ADEME_SERVEUR = SERVEUR
+ADEME_DATABASE = DATABASE
+ADEME_TABLE = "ADEME"
+ADEME = f"{ADEME_DATABASE}.{SCHEMA}.{ADEME_TABLE}"
+
+DPE_ESTIMATION_SERVEUR = SERVEUR
+DPE_ESTIMATION_DATABASE = DATABASE
+DPE_ESTIMATION_TABLE = "DPE_ESTIMATION"
+DPE_ESTIMATION = f"{DPE_ESTIMATION_DATABASE}.{SCHEMA}.{DPE_ESTIMATION_TABLE}"
+
+TRANSAC_BIEN_SERVEUR = SERVEUR
+TRANSAC_BIEN_DATABASE = DATABASE
+TRANSAC_BIEN_TABLE = "TRANSAC_BIEN"
+TRANSAC_BIEN = f"{TRANSAC_BIEN_DATABASE}.{SCHEMA}.{TRANSAC_BIEN_TABLE}"
+
+SYNT_TRANSAC_SERVEUR = SERVEUR
+SYNT_TRANSAC_DATABASE = DATABASE
+SYNT_TRANSAC_TABLE = "SYNT_TRANSAC"
+SYNT_TRANSAC = f"{SYNT_TRANSAC_DATABASE}.{SCHEMA}.{SYNT_TRANSAC_TABLE}"
+
+PROXIM_CADASTRE_SERVEUR = SERVEUR
+PROXIM_CADASTRE_DATABASE = DATABASE
+PROXIM_CADASTRE_TABLE = "PROXIM_CADASTRE"
+PROXIM_CADASTRE = f"{PROXIM_CADASTRE_DATABASE}.{SCHEMA}.{PROXIM_CADASTRE_TABLE}"
+
+PROXIM_ADRESSE_SERVEUR = SERVEUR
+PROXIM_ADRESSE_DATABASE = DATABASE
+PROXIM_ADRESSE_TABLE = "PROXIM_ADRESSE"
+PROXIM_ADRESSE = f"{PROXIM_ADRESSE_DATABASE}.{SCHEMA}.{PROXIM_ADRESSE_TABLE}"
+
+PPRT_SERVEUR = SERVEUR
+PPRT_DATABASE = DATABASE
+PPRT_TABLE = "PPRT"
+PPRT = f"{PPRT_DATABASE}.{SCHEMA}.{PPRT_TABLE}"
+
+POLSOLS_SERVEUR = SERVEUR
+POLSOLS_DATABASE = DATABASE
+POLSOLS_TABLE = "POLSOLS"
+POLSOLS = f"{POLSOLS_DATABASE}.{SCHEMA}.{POLSOLS_TABLE}"
+
+TRANSAC_BIEN_SERVEUR = SERVEUR
+TRANSAC_BIEN_DATABASE = DATABASE
+TRANSAC_BIEN_TABLE = "TRANSAC_BIEN"
+TRANSAC_BIEN = f"{TRANSAC_BIEN_DATABASE}.{SCHEMA}.{TRANSAC_BIEN_TABLE}"
+
+SYNT_TRANSAC_SERVEUR = SERVEUR
+SYNT_TRANSAC_DATABASE = DATABASE
+SYNT_TRANSAC_TABLE = "SYNT_TRANSAC"
+SYNT_TRANSAC = f"{SYNT_TRANSAC_DATABASE}.{SCHEMA}.{SYNT_TRANSAC_TABLE}"
+
+PROXIM_CADASTRE_SERVEUR = SERVEUR
+PROXIM_CADASTRE_DATABASE = DATABASE
+PROXIM_CADASTRE_TABLE = "PROXIM_CADASTRE"
+PROXIM_CADASTRE = f"{PROXIM_CADASTRE_DATABASE}.{SCHEMA}.{PROXIM_CADASTRE_TABLE}"
+
+PROXIM_ADRESSE_SERVEUR = SERVEUR
+PROXIM_ADRESSE_DATABASE = DATABASE
+PROXIM_ADRESSE_TABLE = "PROXIM_ADRESSE"
+PROXIM_ADRESSE = f"{PROXIM_ADRESSE_DATABASE}.{SCHEMA}.{PROXIM_ADRESSE_TABLE}"
+
+PRIX_PROXIM_SERVEUR = SERVEUR
+PRIX_PROXIM_DATABASE = DATABASE
+PRIX_PROXIM_TABLE = "PRIX_PROXIM"
+PRIX_PROXIM = f"{PRIX_PROXIM_DATABASE}.{SCHEMA}.{PRIX_PROXIM_TABLE}"
+
+MAPPING_PROXIM_SERVEUR = SERVEUR
+MAPPING_PROXIM_DATABASE = DATABASE
+MAPPING_PROXIM_TABLE = "MAPPING_PROXIM"
+MAPPING_PROXIM = f"{MAPPING_PROXIM_DATABASE}.{SCHEMA}.{MAPPING_PROXIM_TABLE}"
+
+COMPARATIFS_PROXIM_SERVEUR = SERVEUR
+COMPARATIFS_PROXIM_DATABASE = DATABASE
+COMPARATIFS_PROXIM_TABLE = "COMPARATIF_PROXIM"
+COMPARATIFS_PROXIM = (
+    f"{COMPARATIFS_PROXIM_DATABASE}.{SCHEMA}.{COMPARATIFS_PROXIM_TABLE}"
+)
+
+CAD_ENRICHIE_SERVEUR = SERVEUR
+CAD_ENRICHIE_DATABASE = DATABASE
+CAD_ENRICHIE_TABLE = "CAD_ENRICHIE"
+CAD_ENRICHIE = f"{CAD_ENRICHIE_DATABASE}.{SCHEMA}.{CAD_ENRICHIE_TABLE}"
+
+BAT_ENRICHIE_SERVEUR = SERVEUR
+BAT_ENRICHIE_DATABASE = DATABASE
+BAT_ENRICHIE_TABLE = "BAT_ENRICHIE"
+BAT_ENRICHIE = f"{BAT_ENRICHIE_DATABASE}.{SCHEMA}.{BAT_ENRICHIE_TABLE}"
+
+BAN_ENRICHIE_SERVEUR = SERVEUR
+BAN_ENRICHIE_DATABASE = DATABASE
+BAN_ENRICHIE_TABLE = "BAN_ENRICHIE"
+BAN_ENRICHIE = f"{BAN_ENRICHIE_DATABASE}.{SCHEMA}.{BAN_ENRICHIE_TABLE}"
+
+###############################################################################
+# REPERTOIRE CONTENANT LE MODELE ML A UTILISER POUR LES ESTIMATIONS
+MODEL_ML_DATA_DIR = os.path.abspath(config["model_ml"]["model_ml_folder"])
+# EST-CE QUE LE MODELE ML MODELISE LE LOG DU PRIX AU M2
+MODELE_ML_LOG_TARGET = config["model_ml"]["log_target"]
+
+###############################################################################
+# =====================================
+#             MODE TEST
+# =====================================
+
+TEST_MODE = config["developpment"]["test_mode"]
+# nombre de lignes à filtrer en test mode
+N_ROWS = config["developpment"]["sample_length"]
+
+# SUFFIXES
+SUFF_TEST_MODE = "_test"
+today = datetime.now().strftime("%Y-%m-%d")
+
+if TEST_MODE and N_ROWS is not None:
+    SUFF = SUFF_TEST_MODE
+    SUFF_DATE = ""
+else:
+    SUFF = ""
+    SUFF_DATE = f"_{today}"
+
+###############################################################################
+# =====================================
+#             REPERTOIRES
+# =====================================
+
+# REPERTOIRES RACINES
+REPO_DIR = os.path.abspath(os.path.dirname(
+    os.path.dirname(os.path.dirname(__file__))))
+PACKAGE_DIR = os.path.join(REPO_DIR, "codes")
+
+# REPERTOIRES CONTENANT DES DONNEES
+DATA_DIR = os.path.abspath(config["directories"]["data"])
+SOURCE_DATA_DIR = os.path.abspath(config["directories"]["source_data"])
+DVF_SOURCE_DATA_DIR = os.path.join(SOURCE_DATA_DIR, "dvf")
+ADEME_ANCIEN_SOURCE_DATA_DIR = os.path.join(
+    SOURCE_DATA_DIR, "ademe", "ademe_ancien")
+CLEANED_DATA_DIR = os.path.join(DATA_DIR, "cleaned_data")
+PREPROCESSED_DATA_DIR = os.path.join(DATA_DIR, "preprocessed_data")
+OUTPUT_DATA_DIR = os.path.join(DATA_DIR, "output")
+CALCULS_INDICATEURS_DATA_DIR = os.path.join(
+    OUTPUT_DATA_DIR, "dict_indicateurs_glissants"
+)
+REPORT_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "report")
+PREDICTIONS_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "predictions")
+MODELS_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "models")
+MODEL_TI_DATA_DIR = os.path.join(MODELS_DATA_DIR, "model_TI")
+MODEL_ERREUR_DATA_DIR = os.path.join(MODELS_DATA_DIR, "model_erreur_ML")
+MODELE_DPE = os.path.join(MODELS_DATA_DIR, "model_corr.sav")
+MODELE_ERREUR_ML = os.path.join(MODEL_ERREUR_DATA_DIR, "model_erreur")
+TEMPLATES_DIR = os.path.join(PACKAGE_DIR, "templates")
+
+# REPERTOIRES DE LOGS
+LOG_DIR = os.path.abspath(config["directories"]["logs"])
+MAJ_DONNEES_INSEE_LOG_DIR = os.path.join(LOG_DIR, "maj_donnees_insee")
+MAJ_CONTOURS_IRIS_LOG_DIR = os.path.join(LOG_DIR, "maj_contours_iris")
+CLEAN_ADEME_LOG_DIR = os.path.join(LOG_DIR, "clean_ademe")
+
+###############################################################################
+# =====================================
+#               FICHIERS
+# =====================================
+
+# EXTENSIONS DE FICHIERS
+EXT_PKL = ".pkl"
+EXT_PARQUET = ".parquet"
+EXT_XLSX = ".xlsx"
+EXT_CSV = ".csv"
+
+###############################################################################
+# FICHIERS SOURCE (DVF, GARES, ECOLES, METROS, ADEME, RISQUES CLIMATIQUES, IRIS, INSEE, JUDICIAIRE)
 try:
-    import param_generaux as params
-except ImportError:
-    class params:
-        CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
-
-# Configuration Graphique
-pio.renderers.default = "browser"
-logging.getLogger("cmdstanpy").disabled = True
-os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
-
-# CHEMINS 
-PATH_RESULTATS_V2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI\bdd_univ_elem_zone_insee"
-
-PATH_LPI = r"N:\uflumth\indicateur_marche\LPI-IAD donnees (v2).xlsx"
-
-PATH_BASE_V1 = r"Z:\uflumth\gits\univers_elementaire\TI - V2\stats_base_complete_filtree\base_complete_filtree.parquet"
-PATH_BASE_V2 = r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats\base_restreinte.parquet"
-
-# GÉOGRAPHIE
-PATH_GEOJSON = r"Z:\uflumth\gits\univers_elementaire\TI\metropole-version-simplifiee.geojson"
-PATH_GPS = r'N:\uflujek\commune_france_gps.csv'
-PATH_COMMUNES = r"N:\uflujek\Commune_france.xlsx" 
-
-# Config Graphique
-pio.renderers.default = "browser"
-os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
-
-
-
-
-if __name__ == "__main__":
-    
-    # =============================================================================
-    # 2. PRÉPARATION DES DONNÉES POUR LA CARTE
-    # =============================================================================
-        
-    import importlib.util
-    comparaison_path = os.path.join(current_dir, "comparaison.py")
-
-    
-    top_ville = params.CONFIG['top_cities']
-    
-    
-
-    # -------------------------------------------------------------------------
-    # B.1 CHARGEMENT DES DONNÉES BRUTES
-    # -------------------------------------------------------------------------
-    print("Chargement V1 (Base complète)...")
-    try:
-        raw_v1 = pd.read_parquet(PATH_BASE_V1)
-    except Exception as e:
-        sys.exit(f"Erreur chargement V1: {e}")
-        
-    print("Chargement V2 (Base réduite)...")
-    try:
-        raw_v2 = pd.read_parquet(PATH_BASE_V2)
-    except Exception as e:
-        sys.exit(f"Erreur chargement V2: {e}")
-    raw_v2_full = raw_v2.copy()  # Copie avant filtrage villes – pour analyse nationale du neuf
-
-    raw_v1 = raw_v1[raw_v1["DEMANDE"] == 0] #Pour calculer la structure de marché globale, on retire les transactions "DEMANDE"
-    
-    # Nettoyage des bases AVANT d'extraire les appartements
-    raw_v1 = clean_base(raw_v1, top_ville)
-    raw_v2 = clean_base(raw_v2, top_ville)
-    
-    # Extraction des appartements APRÈS le nettoyage (pour avoir la colonne Ville)
-    raw_v2_apt = raw_v2[raw_v2["TYPE_BIEN"] == "APT"].copy()
-
-    # -------------------------------------------------------------------------
-    # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - 
-    # -------------------------------------------------------------------------
-    df_v1_for_struct = raw_v1.copy()
-    structure_v1, structure_arrondissement = get_structure_reference_city(df_v1_for_struct)
-    
-    
-    # Filtrer la structure pour ne garder que les codes valides
-    # Pour Paris, Marseille, Lyon : garder les codes d'arrondissements
-    # Pour les autres villes : garder les noms de villes
-    codes_paris = [f"{75100 + i}" for i in range(1, 21)]  # 75101-75120
-    codes_marseille = [f"{13200 + i}" for i in range(1, 17)]  # 13201-13216
-    codes_lyon = [f"{69380 + i}" for i in range(1, 10)]  # 69381-69389
-    
-    # Autres villes du top
-    autres_villes = ['BORDEAUX', 'LE HAVRE', 'LILLE', 'MONTPELLIER', 'NANTES', 
-                     'NICE', 'REIMS', 'RENNES', 'SAINT-ETIENNE', 'STRASBOURG', 'TOULOUSE', 'TOURS', 'GRENOBLE', 'BREST']
-    
-    codes_valides = codes_paris + codes_marseille + codes_lyon + autres_villes
-    structure_v1 = structure_v1[structure_v1['Ville'].isin(codes_valides)]
-    
-    print(f"DEBUG - Structure V1 après filtre: {structure_v1['Ville'].unique()[:20]}")    
-    # -------------------------------------------------------------------------
-    # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
-    # -------------------------------------------------------------------------
-    print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
-    
-    # DEBUG: Vérifier les données avant traitement
-    print(f"\nDEBUG - Villes uniques dans raw_v2_apt: {sorted(raw_v2_apt['Ville'].unique())[:20]}")
-    print(f"DEBUG - Nombre de lignes Paris: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('751', na=False)])}")
-    print(f"DEBUG - Nombre de lignes Marseille: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('132', na=False)])}")
-    print(f"DEBUG - Nombre de lignes Lyon: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('693', na=False)])}")
-    print(f"DEBUG - Structure arrondissement shape: {structure_arrondissement.shape}")
-    print(f"DEBUG - Villes dans structure_arrondissement: {structure_arrondissement['Ville'].unique()}")
-    
-    res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_arrondissement)
-    
-    # DEBUG: Vérifier les résultats après traitement
-    print(f"\nDEBUG - Villes dans res_v2_struct: {sorted(res_v2_struct['Ville'].unique())}")
-    
-    res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
-    res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=4, fill_method=None)
-    res_v2_struct["TAUX_INFL_3M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=1, fill_method=None)
-    print(f"res_v2_struct calculé : {res_v2_struct.shape[0]} lignes, {res_v2_struct.shape[1]} colonnes")
-    
-
-
-
-    
-    # -------------------------------------------------------------------------
-    # B.4 PRÉPARATION POUR LA CARTE (dernière période uniquement)
-    # -------------------------------------------------------------------------
-    if len(res_v2_struct) == 0:
-        print("ERREUR: Aucune donnée calculée")
-        df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
-        if df_v2 is None:
-            sys.exit("Erreur: Pas de données V2.")
-        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
-        df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
-        df_prix_m2 = df_prix_m2.rename(columns={"Prix_M2_V2": "prix_mm_value", "Periode": "DT_MAJ_PM2"})
-    else:
-        # Garder seulement la dernière période pour la carte
-        derniere_periode = res_v2_struct["Periode"].max()
-        print(f"Dernière période disponible : {derniere_periode}")
-        
-        res_v2_map = res_v2_struct[res_v2_struct["Periode"] == derniere_periode].copy()
-        print(f"Données pour la carte : {len(res_v2_map)} villes")
-        
-
-        df_prix_m2 = res_v2_map.rename(columns={
-            "Ville": "VAL_MAILLE_GEO",
-            "Periode": "DT_MAJ_PM2",
-            "prix_mm_3m (V2_STRUCT)": "prix_mm_value"
-        }).copy()
-        
-
-        df_prix_m2["MAILLE_TYPE"] = "CITY"
-        df_prix_m2["CD_TYPE_BIEN"] = "APT"
-        df_prix_m2["DIC_NAME"] = "prix_m2_3m"
-
-    
-    # -------------------------------------------------------------------------
-    # B.5 NETTOYAGE DES NOMS DE VILLES
-    # -------------------------------------------------------------------------
-    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
-        "HAVRE": "LE HAVRE",
-        "SAINT ETIENNE": "ST ETIENNE",
-        "ST-ETIENNE": "ST ETIENNE",
-        "SAINT-ETIENNE": "ST ETIENNE"
-    })
-    
-    print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
-    
-    # -------------------------------------------------------------------------
-    # B.6 PRÉPARATION POUR ANALYSE LPI (toutes périodes)
-    # -------------------------------------------------------------------------
-    merge_cl = res_v2_struct.copy()  # On garde seulement V2_STRUCT
-    
-    # C. Chargement GPS
-    df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
-    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper().str.strip()
-
-    # =============================================================================
-    # 3. CODE GRAPHIQUE 
-    # =============================================================================
-    print("\n--- Génération des Cartes ---")
-
-    # --- PALETTE DE COULEURS & POLICE ---
-    CL_TURQUOISE = '#A8DADC' 
-    CL_BLACK = '#1D3557' 
-    CL_LIGHT_GREY = '#F5F5DC' 
-    CL_BLUE_3M = '#000000' 
-    CL_RED_12M = '#CB4735' 
-
-    # Police 
-    try:
-        NOM_POLICE_CL = 'Century Gothic' 
-        plt.rcParams['font.family'] = 'sans-serif' 
-        plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
-    except:
-        pass
-
-    plt.rcParams['font.weight'] = 'medium' 
-    TITRE_FONT_WEIGHT = 'heavy' 
-
-    TAUX_FONT_SIZE = 11
-    DEFAULT_FONT_SIZE = 20
-    TARGET_CRS = "EPSG:2154"
-
-    # --- PRÉPARATION GEOJSON ---
-    try:
-        france_gdf = gpd.read_file(PATH_GEOJSON)
-        dissolved_france = france_gdf.dissolve(by=None)
-        france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
-    
-        geometries_list = list(france_geometry.geoms) if france_geometry.geom_type == 'MultiPolygon' else [france_geometry]
-        geometries_list.sort(key=lambda x: x.area, reverse=True)
-        france_outline_geometry = geometries_list[0]
-    
-    except Exception as e:
-        print(f"!!! Échec GeoJSON: {e}")
-        sys.exit(1)
-
-    X_OFFSET_DEFAULT = 3000
-    Y_OFFSET_DEFAULT = 3000
-    CUSTOM_LABEL_OFFSETS = {
-        'MONTPELLIER': {'x': 5000, 'y': 90000}, 
-        'MARSEILLE':   {'x': 5000,  'y': -15000},
-        'TOULON':      {'x': 5000,  'y': -10000},
-        'NICE':        {'x': 30000, 'y': 3000}, 
-        'GRENOBLE':    {'x': 5000, 'y': 10000},   
-        'ST ETIENNE':  {'x': -30000, 'y': -0},
-        'LE HAVRE':    {'x': 10000, 'y': -0},
-        'BORDEAUX':    {'x': 5000,  'y': 20000},  
-        'NANTES':      {'x': 5000,  'y': 20000},  
-        'RENNES':      {'x': 5000,  'y': 40000},  
-        'LILLE':       {'x': 0,   'y': -10000}, 
-        'STRASBOURG':  {'x': -5000, 'y': 0},  
-        'PARIS':       {'x': 5000, 'y': 3000},
-        'LYON':        {'x': 0, 'y': 90000},
-        'TOULOUSE':    {'x': -5000, 'y': 20000},
-        'TOURS':       {'x': 5000,  'y': -3000},
-        'BREST':       {'x': -35000, 'y': 0},
-        'REIMS':       {'x': 20000, 'y': 30000},
-    }
-
-    # =========================================================================
-    # CARTE 1 – COÛTS DES OPÉRATIONS (APT Ancien)
-    # =========================================================================
-    print("\n--- Carte 1 : Coûts des opérations (APT Ancien) ---")
-
-    df_apt_ancien = raw_v2_apt[raw_v2_apt["BIEN_NEUF"] == "ANCIEN"].copy() if "BIEN_NEUF" in raw_v2_apt.columns else raw_v2_apt.copy()
-
-    if "VALEUR_FONCIERE" not in df_apt_ancien.columns or df_apt_ancien["VALEUR_FONCIERE"].isna().all():
-        df_apt_ancien["VALEUR_FONCIERE"] = df_apt_ancien["Prix_m2"] * df_apt_ancien["NB_SURF_HAB"]
-
-    # Regrouper Paris/Lyon/Marseille (codes arrondissements → nom de ville)
-    ARRT_TO_CITY = {
-        **{f"{75100+i}": "PARIS"     for i in range(1, 21)},
-        **{f"{13200+i}": "MARSEILLE" for i in range(1, 17)},
-        **{f"{69380+i}": "LYON"      for i in range(1, 10)},
-    }
-    df_apt_ancien["Ville_carte"] = df_apt_ancien["Ville"].astype(str).map(ARRT_TO_CITY).fillna(df_apt_ancien["Ville"])
-
-    df_apt_ancien["DATE"] = pd.to_datetime(df_apt_ancien["DATE"], errors="coerce")
-    annee_max_c1 = df_apt_ancien["DATE"].dt.year.max()
-    df_apt_recent = df_apt_ancien[df_apt_ancien["DATE"].dt.year >= annee_max_c1 - 1]
-
-    # --- Prix, Surface et VF depuis res_v2_struct à la dernière période ---
-    derniere_p_c1 = res_v2_struct["Periode"].max()
-    derniere_date_c1 = pd.Timestamp(derniere_p_c1) if not pd.isna(derniere_p_c1) else df_apt_ancien["DATE"].max()
-
-    cols_c1_src = {
-        "prix_mm_3m (V2_STRUCT)":    "prix_m2",
-        "surface_mm_3m (V2_STRUCT)": "surface",
-        "VF_mm_3m (V2_STRUCT)":      "valeur_fonciere",
-    }
-    cols_disponibles = [c for c in cols_c1_src if c in res_v2_struct.columns]
-    stats_c1 = (
-        res_v2_struct[res_v2_struct["Periode"] == derniere_p_c1][["Ville"] + cols_disponibles]
-        .rename(columns=cols_c1_src)
-        .copy()
-    )
-
-    df_map_c1 = df_geo_gps.merge(stats_c1, left_on="label", right_on="Ville", how="inner")
-    df_map_c1 = df_map_c1.dropna(subset=["latitude", "longitude", "prix_m2"])
-    df_map_c1 = df_map_c1.drop_duplicates(subset="label", keep="first")
-
-    if not df_map_c1.empty:
-        geometry_c1 = [Point(xy) for xy in zip(df_map_c1["longitude"], df_map_c1["latitude"])]
-        gdf_c1 = gpd.GeoDataFrame(df_map_c1, geometry=geometry_c1, crs="EPSG:4326").to_crs(TARGET_CRS)
-
-        fig_c1, ax_c1 = plt.subplots(1, 1, figsize=(14, 14), dpi=300)
-        fig_c1.set_facecolor(CL_TURQUOISE)
-        x_fr, y_fr = france_outline_geometry.exterior.xy
-        ax_c1.fill(x_fr, y_fr, color=CL_LIGHT_GREY, zorder=1)
-        ax_c1.plot(x_fr, y_fr, color=CL_BLACK, linewidth=1.0, zorder=2)
-        xmin_c1, ymin_c1, xmax_c1, ymax_c1 = france_outline_geometry.bounds
-        ax_c1.set_xlim(xmin_c1 - 5000, xmax_c1 + 5000)
-        ax_c1.set_ylim(ymin_c1 - 5000, ymax_c1 + 5000)
-
-        halo_c1 = [pe.withStroke(linewidth=2.5, foreground="white")]
-        LS_C1 = 15000
-
-        for _, row_c1 in gdf_c1.iterrows():
-            cx, cy = row_c1.geometry.x, row_c1.geometry.y
-            city_lbl = str(row_c1["label"]).upper()
-            offsets = CUSTOM_LABEL_OFFSETS.get(city_lbl, {"x": X_OFFSET_DEFAULT, "y": Y_OFFSET_DEFAULT})
-            ax_off, ay_off = offsets["x"], offsets["y"]
-            anc_x, anc_y = cx + ax_off, cy + ay_off
-            ha_c1 = "right" if ax_off < 0 else "left"
-
-            prix_str = f"{int(row_c1['prix_m2']):,} EUR/m2".replace(",", " ")    if pd.notna(row_c1.get("prix_m2")) else "N/A"
-            surf_str = f"{int(row_c1['surface']):,} m2".replace(",", " ")          if pd.notna(row_c1.get("surface")) else "N/A"
-            vf_val   = row_c1.get("valeur_fonciere")
-            vf_str   = f"{int(vf_val):,} EUR".replace(",", " ")                   if pd.notna(vf_val) else "N/A"
-
-            ax_c1.text(anc_x, anc_y,              city_lbl, fontsize=DEFAULT_FONT_SIZE,     ha=ha_c1, va="top", color=CL_BLACK,    weight="normal", zorder=4, path_effects=halo_c1)
-            ax_c1.text(anc_x, anc_y - 1.5*LS_C1, prix_str, fontsize=0.85*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color=CL_BLACK,    weight="bold",   zorder=4, path_effects=halo_c1)
-            ax_c1.text(anc_x, anc_y - 3.0*LS_C1, surf_str, fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color="#4A4A8A",  weight="normal", zorder=4, path_effects=halo_c1)
-            ax_c1.text(anc_x, anc_y - 4.5*LS_C1, vf_str,   fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color="#8B0000",  weight="normal", zorder=4, path_effects=halo_c1)
-            ax_c1.plot(cx, cy, marker="o", color=CL_BLACK, markersize=5, zorder=4, markeredgecolor="white", markeredgewidth=0.5)
-
-        ax_c1.axis("off")
-        ax_c1.set_title("CO\u00dbTS DES OP\u00c9RATIONS \u2013 APPARTEMENTS ANCIENS",
-                        fontsize=28, loc="center", pad=20, color=CL_BLACK, weight=TITRE_FONT_WEIGHT,
-                        bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.4"))
-        fig_c1.text(0.04, 0.07,
-                    "L\u00c9GENDE\nPrix m\u00e9dian au m\u00b2\nSurface m\u00e9diane\nCo\u00fbt m\u00e9dian de l'op\u00e9ration",
-                    ha="left", va="bottom", fontsize=16,
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-        _MOIS_FR = {1:"JANVIER",2:"FEVRIER",3:"MARS",4:"AVRIL",5:"MAI",6:"JUIN",
-                    7:"JUILLET",8:"AOUT",9:"SEPTEMBRE",10:"OCTOBRE",11:"NOVEMBRE",12:"DECEMBRE"}
-        _date_c1 = f"{_MOIS_FR[derniere_date_c1.month]} {derniere_date_c1.year}" if pd.notna(derniere_date_c1) else str(annee_max_c1)
-        fig_c1.text(0.04, 0.02, f"CREDIT LOGEMENT - {_date_c1}", ha="left", va="bottom", fontsize=12)
-        out_c1 = os.path.join(params.CONFIG["output_dir"], "carte_couts_operations_APT_ANCIEN.png")
-        plt.savefig(out_c1, dpi=300, bbox_inches=None, facecolor=fig_c1.get_facecolor())
-        plt.close()
-        print(f"   -> Sauvegard\u00e9 : {out_c1}")
-    else:
-        print("   \u26a0\ufe0f Aucune donn\u00e9e pour la Carte 1.")
-
-    # =========================================================================
-    # CARTE 2 – PRIX AU M² + ÉVOLUTIONS (APT Ancien)
-    # =========================================================================
-    print("\n--- Carte 2 : Prix au m\u00b2 + \u00c9volutions (APT Ancien) ---")
-
-    types_bien = ['APT']
-    type_bien_labels = {"APT": "APPARTEMENTS", "MAI": "MAISONS"}
-
-
-    for type_bien in types_bien:
-        print(f"   -> Carte : {type_bien}")
-    
-
-        df_prix_filtre = df_prix_m2[
-            (df_prix_m2["CD_TYPE_BIEN"] == type_bien) & 
-            (df_prix_m2["DIC_NAME"] == "prix_m2_3m")
-        ].copy()
-    
-
-        df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
-    
-
-        cols_needed = ['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']
-        # On ajoute les colonnes manquantes en NaN si besoin
-        for c in ["TAUX_INFL_3M", 'TAUX_INFL_12M']:
-            if c not in df_map.columns: df_map[c] = np.nan
-            
-        df_map = df_map[cols_needed].copy()
-        df_map = df_map.dropna(subset=['latitude', 'longitude'])
-        df_map = df_map.drop_duplicates(subset='label', keep='first')
-    
-        if df_map.empty: continue
-        
-        geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
-        gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS) 
-    
-        # --- DESSIN ---
-        fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
-        fig.set_facecolor(CL_TURQUOISE) 
-    
-        # Fond
-        x, y = france_outline_geometry.exterior.xy
-        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
-        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
-    
-        xmin, ymin, xmax, ymax = france_outline_geometry.bounds
-        ax.set_xlim(xmin - 5000, xmax + 5000) 
-        ax.set_ylim(ymin - 5000, ymax + 5000)
-
-        # --- ÉTIQUETTES ---
-        LINE_SPACING = 15000 
-        halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
-
-        for idx, row in gdf.iterrows():
-            x_coord, y_coord = row.geometry.x, row.geometry.y
-            city_label = row['label'] 
-        
-            if city_label in CUSTOM_LABEL_OFFSETS:
-                x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
-                y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
-            else:
-                x_offset_city = X_OFFSET_DEFAULT
-                y_offset_city = Y_OFFSET_DEFAULT
-
-            ville = str(city_label).upper()
-            prix_val = row['prix_mm_value']
-            prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
-            ti_3m = row['TAUX_INFL_3M']
-            ti_12m = row['TAUX_INFL_12M']
-        
-            # Ancrage
-            anchor_x = x_coord + x_offset_city
-            anchor_y = y_coord + y_offset_city
-            ha_box_align = 'right' if x_offset_city < 0 else 'left'
-            va_align = 'top' 
-        
-            # 1. Nom
-            ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='normal', zorder=4, path_effects=halo_effect) 
-        
-            # 2. Prix
-            prix_y = anchor_y - 1.5 * LINE_SPACING 
-            ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
-                color=CL_BLACK, weight='bold', zorder=4, path_effects=halo_effect) 
-        
-            # 3. Evolutions (Packer)
-            ti_3m_y = prix_y - LINE_SPACING 
-            ti_12m_y = ti_3m_y - LINE_SPACING 
-        
-            text_3m = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
-            text_12m = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
-
-            ta_3m = TextArea(text_3m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'))
-            ta_12m = TextArea(text_12m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'))
-
-            hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)
-        
-            box_x_align = 1.0 if ha_box_align == "right" else 0.0
-            # On place le packer sur la ligne du 12m pour l'alignement vertical (ajusté via box_alignment)
-            ab = AnnotationBbox(hpack, (anchor_x, ti_12m_y), xybox=(0, 0), xycoords='data', 
-                            boxcoords='offset points', frameon=False, 
-                            box_alignment=(box_x_align, 0.5))
-            ax.add_artist(ab)
-
-            # 5. Point
-            ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
-                    markeredgecolor='white', markeredgewidth=0.5) 
-
-        # --- FINALISATION ---
-        ax.axis('off')
-        title_text = f"LES PRIX DES {type_bien_labels[type_bien]} DANS LES 16 PLUS GRANDES VILLES"
-        ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', 
-                    weight=TITRE_FONT_WEIGHT, bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
-
-        # Légende & Date
-        fig.text(0.04, 0.05, "LEGENDE\nPrix/m² moyen sur 12 mois\nNoir: Evolution sur 3 mois\nRouge: Evolution sur 12 mois",
-                ha='left', va='bottom', fontsize=20,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-    
-        try:
-            locale.setlocale(locale.LC_TIME, 'fr_FR.UTF-8') 
-        except:
-            try:
-                locale.setlocale(locale.LC_TIME, 'French_France') 
-            except:
-                pass 
-
-        if not df_prix_m2.empty:
-
-            df_prix_m2 = df_prix_m2.loc[:, ~df_prix_m2.columns.duplicated()]
-
-            df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
-
-            last_dt = df_prix_m2["DT_MAJ_PM2"].max()
-        
-
-            if pd.notna(last_dt):
-                date_texte = last_dt.strftime("%B %Y").upper()
-            else:
-                date_texte = "DATE INCONNUE"
-        else:
-            date_texte = "DATE INCONNUE"
-
-        fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_texte}", ha='left', va='bottom', fontsize=12)
-    
-        # Sauvegarde
-        output_file_png = os.path.join(params.CONFIG["output_dir"], f"carte_prix_m2_CITY_{type_bien}_V2_RESTREINT.png")
-        plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
-        plt.close()
-        print(f"   -> Sauvegardé : {output_file_png}")
-    # =========================================================================
-    # GRAPHIQUES NEUF – NATIONAL + 3 R\u00c9GIONS
-    # =========================================================================
-    print("\n--- Graphiques Neuf (National + R\u00e9gions) ---")
-
-    DEPT_REGION = {
-        **{d: "\u00cele-de-France" for d in ["75","77","78","91","92","93","94","95"]},
-        **{d: "Nouvelle-Aquitaine" for d in ["16","17","19","23","24","33","40","47","64","79","86","87"]},
-        **{d: "Auvergne-Rh\u00f4ne-Alpes" for d in ["01","03","07","15","26","38","42","43","63","69","73","74"]},
-    }
-    COLORS_NEUF = {
-        "France enti\u00e8re":      "#1D3557",
-        "\u00cele-de-France":       "#E63946",
-        "Nouvelle-Aquitaine":   "#2A9D8F",
-        "Auvergne-Rh\u00f4ne-Alpes": "#F4A261",
-    }
-
-    # Save raw_v2_full before any potential city filter
-    raw_v2_full_unfiltered = raw_v2_full.copy()
-
-    if "BIEN_NEUF" in raw_v2_full_unfiltered.columns:
-        raw_neuf = raw_v2_full_unfiltered[raw_v2_full_unfiltered["BIEN_NEUF"] == "NEUF"].copy()
-    else:
-        raw_neuf = pd.DataFrame()
-
-    if not raw_neuf.empty:
-        raw_neuf["DATE"] = pd.to_datetime(raw_neuf["DATE"], errors="coerce")
-        dept_col = "DEPT" if "DEPT" in raw_neuf.columns else ("DEPT_Corse_2A_2B" if "DEPT_Corse_2A_2B" in raw_neuf.columns else None)
-        if dept_col:
-            raw_neuf["DEPT_str"] = raw_neuf[dept_col].astype(str).str.zfill(2)
-            raw_neuf["REGION"] = raw_neuf["DEPT_str"].map(DEPT_REGION).fillna("AUTRES")
-        else:
-            raw_neuf["REGION"] = "AUTRES"
-
-        raw_neuf["YM"] = raw_neuf["DATE"].dt.to_period("M")
-        nat_monthly = raw_neuf.groupby("YM")["Prix_m2"].median().reset_index()
-        nat_monthly["DATE"] = nat_monthly["YM"].dt.to_timestamp()
-        nat_monthly["Prix_12M"] = nat_monthly["Prix_m2"].rolling(12, min_periods=6).mean()
-        nat_monthly["LABEL"] = "France enti\u00e8re"
-
-        reg_data = []
-        for region in ["\u00cele-de-France", "Nouvelle-Aquitaine", "Auvergne-Rh\u00f4ne-Alpes"]:
-            df_reg = raw_neuf[raw_neuf["REGION"] == region]
-            if df_reg.empty:
-                continue
-            m = df_reg.groupby("YM")["Prix_m2"].median().reset_index()
-            m["DATE"] = m["YM"].dt.to_timestamp()
-            m["Prix_12M"] = m["Prix_m2"].rolling(12, min_periods=6).mean()
-            m["LABEL"] = region
-            reg_data.append(m)
-
-        df_neuf_all = pd.concat(
-            [nat_monthly[["DATE", "Prix_12M", "LABEL"]]] + [d[["DATE", "Prix_12M", "LABEL"]] for d in reg_data],
-            ignore_index=True
-        )
-
-        # Graphique 1 – Prix au m² Neuf
-        fig_n1 = go.Figure()
-        for label, grp in df_neuf_all.groupby("LABEL"):
-            fig_n1.add_trace(go.Scatter(
-                x=grp["DATE"], y=grp["Prix_12M"],
-                mode="lines", name=label,
-                line=dict(color=COLORS_NEUF.get(label, "grey"), width=2.5)
-            ))
-        fig_n1.update_layout(
-            title="Prix au m\u00b2 \u2013 Logements Neufs (moyenne 12 mois glissants)",
-            xaxis_title="Date", yaxis_title="Prix m\u00e9dian au m\u00b2 (\u20ac)",
-            template="plotly_white", height=550, hovermode="x unified"
-        )
-        out_n1 = os.path.join(params.CONFIG["output_dir"], "graphique_neuf_prix_national_regions.html")
-        fig_n1.write_html(out_n1)
-        print(f"   -> Sauvegard\u00e9 : {out_n1}")
-
-        # Graphique 2 – Évolution 12M Neuf
-        fig_n2 = go.Figure()
-        for label, grp in df_neuf_all.groupby("LABEL"):
-            grp = grp.sort_values("DATE").copy()
-            grp["EVOL_12M"] = grp["Prix_12M"].pct_change(periods=12) * 100
-            fig_n2.add_trace(go.Scatter(
-                x=grp["DATE"], y=grp["EVOL_12M"],
-                mode="lines", name=label,
-                line=dict(color=COLORS_NEUF.get(label, "grey"), width=2.5)
-            ))
-        fig_n2.add_hline(y=0, line_dash="dot", line_color="black")
-        fig_n2.update_layout(
-            title="\u00c9volution sur 12 mois \u2013 Logements Neufs (%)",
-            xaxis_title="Date", yaxis_title="\u00c9volution sur 12 mois (%)",
-            template="plotly_white", height=550, hovermode="x unified"
-        )
-        out_n2 = os.path.join(params.CONFIG["output_dir"], "graphique_neuf_evol_national_regions.html")
-        fig_n2.write_html(out_n2)
-        print(f"   -> Sauvegard\u00e9 : {out_n2}")
-    else:
-        print("   \u26a0\ufe0f Pas de donn\u00e9es NEUF disponibles (colonne BIEN_NEUF introuvable).")
-
-    # =========================================================================
-    # GRAPHIQUES \u00c9VOLUTIONS 12M \u2013 TOP 12 VILLES (APT Ancien)
-    # =========================================================================
-    print("\n--- Graphiques \u00c9volutions 12M \u2013 Top 12 villes ---")
-
-    PALETTE_12 = [
-        "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
-        "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
-        "#aec7e8","#ffbb78"
+    DVF_FILES = [
+        os.path.join(DVF_SOURCE_DATA_DIR, filename)
+        for filename in os.listdir(DVF_SOURCE_DATA_DIR)
+        if "dvf" in filename
     ]
-    top12 = top_ville[:12] if len(top_ville) >= 12 else top_ville
-    df_evol = res_v2_struct[res_v2_struct["Ville"].isin(top12)].sort_values(["Ville", "Periode"]).copy()
+except FileNotFoundError:
+    DVF_FILES = []
+LISTE_GARES_FILE = os.path.join(
+    SOURCE_DATA_DIR, "gares", "liste-des-gares.csv")
+LISTE_GARES_SEP = ";"
+LISTE_ECOLES_FILE = os.path.join(
+    SOURCE_DATA_DIR,
+    "ecoles",
+    "fr-en-adresse-et-geolocalisation-etablissements-premier-et-second-degre.csv",
+)
+LISTE_ECOLES_SEP = ";"
+LISTE_METROS_FILE = os.path.join(
+    SOURCE_DATA_DIR, "gares", "emplacement-des-gares-idf-data-generalisee.csv"
+)
+LISTE_METROS_SEP = ";"
+BPE_FILE = os.path.join(SOURCE_DATA_DIR, "bpe", "bpe21_ensemble_xy.csv")
+BPE_SEP = ";"
 
-    if not df_evol.empty and "TAUX_INFL_12M" in df_evol.columns:
-        # Graphique 1 – Barres : dernière période
-        derniere_p = df_evol["Periode"].max()
-        df_last = df_evol[df_evol["Periode"] == derniere_p].dropna(subset=["TAUX_INFL_12M"])
-        df_last = df_last.sort_values("TAUX_INFL_12M", ascending=True)
-        bar_colors = ["#CB4735" if v >= 0 else "#1D3557" for v in df_last["TAUX_INFL_12M"]]
-        date_lbl = derniere_p.strftime("%B %Y") if hasattr(derniere_p, "strftime") else str(derniere_p)
+# Risques climatiques
+CATNAT_FILE = os.path.join(
+    SOURCE_DATA_DIR, "risque_climatique", "gaspar", "catnat_gaspar.csv"
+)
+CATNAT_FILE_SEP = ";"
+PPRT_FILE = os.path.join(
+    SOURCE_DATA_DIR, "risque_climatique", "gaspar", "pprt_gaspar.csv"
+)
+PPRT_FILE_SEP = ";"
+PROMETHEE_FILE = os.path.join(
+    SOURCE_DATA_DIR, "risque_climatique", "incendies", "liste_incendies.csv"
+)
+PROMETHEE_FILE_SEP = ";"
+RADON_FILE = os.path.join(
+    SOURCE_DATA_DIR, "risque_climatique", "radon", "radon.csv")
+RADON_FILE_SEP = ";"
+POLSOLS_FILE = os.path.join(
+    SOURCE_DATA_DIR,
+    "risque_climatique",
+    "pollution_des_sols",
+    "liste_sols_pollues.xlsx",
+)
+POLSOLS_FILE_SEP = ";"
 
-        fig_e1 = go.Figure(go.Bar(
-            x=df_last["TAUX_INFL_12M"] * 100,
-            y=df_last["Ville"],
-            orientation="h",
-            marker_color=bar_colors,
-            text=[f"{v:+.1f}%" for v in df_last["TAUX_INFL_12M"] * 100],
-            textposition="outside"
-        ))
-        fig_e1.add_vline(x=0, line_color="black", line_width=1)
-        fig_e1.update_layout(
-            title=f"\u00c9volution sur 12 mois \u2013 APT Ancien \u2013 {date_lbl}",
-            xaxis_title="\u00c9volution 12 mois (%)",
-            template="plotly_white", height=600
-        )
-        out_e1 = os.path.join(params.CONFIG["output_dir"], "graphique_evol_12m_barres_villes.html")
-        fig_e1.write_html(out_e1)
-        print(f"   -> Sauvegard\u00e9 : {out_e1}")
+ARGILE_FILE = os.path.join(
+    SOURCE_DATA_DIR, "risque_climatique", "argile", "ExpoArgile_Fxx_L93.shp"
+)
+ARGILE_GEOMETRY_COL = "geometry"
+ARGILE_INDICATOR_COL = "NIVEAU"
 
-        # Graphique 2 – Multi-lignes historique
-        fig_e2 = go.Figure()
-        for i, ville in enumerate(top12):
-            df_v = df_evol[df_evol["Ville"] == ville].dropna(subset=["TAUX_INFL_12M"])
-            if df_v.empty:
-                continue
-            fig_e2.add_trace(go.Scatter(
-                x=df_v["Periode"], y=df_v["TAUX_INFL_12M"] * 100,
-                mode="lines", name=ville,
-                line=dict(color=PALETTE_12[i % len(PALETTE_12)], width=1.8)
-            ))
-        fig_e2.add_hline(y=0, line_dash="dot", line_color="black")
-        fig_e2.update_layout(
-            title="\u00c9volution historique 12M \u2013 APT Ancien \u2013 Top 12 villes",
-            xaxis_title="Date", yaxis_title="\u00c9volution 12 mois (%)",
-            template="plotly_white", height=600, hovermode="x unified"
-        )
-        out_e2 = os.path.join(params.CONFIG["output_dir"], "graphique_evol_12m_historique_villes.html")
-        fig_e2.write_html(out_e2)
-        print(f"   -> Sauvegard\u00e9 : {out_e2}")
-    else:
-        print("   \u26a0\ufe0f Donn\u00e9es d'\u00e9volution insuffisantes pour les graphiques.")
+LATITUDE_COL = "LATITUDE"
+LONGITUDE_COL = "LONGITUDE"
 
-    # =============================================================================
-    # B. COMPARAISON V1 vs V2_STRUCT vs LPI (Structure de march\u00e9)
-    # =============================================================================
-    print("\n=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===")
-    
+ADEME_EXISTANTS = os.path.join(
+    SOURCE_DATA_DIR,
+    "ademe",
+    "ademe_existants_et_neufs",
+    "dpe-v2-logements-existants.csv",
+)
+ADEME_NEUFS = os.path.join(
+    SOURCE_DATA_DIR, "ademe", "ademe_existants_et_neufs", "dpe-v2-logements-neufs.csv"
+)
+
+departements = [str(i).zfill(2)
+                for i in range(1, 96) if i != 20] + ["2a", "2b"]
+ADEME_ANCIEN_FILE_LIST = [
+    os.path.join(ADEME_ANCIEN_SOURCE_DATA_DIR, f"dpe-{dept}.csv")
+    for dept in departements
+]
+
+INSEE_AGREGEE_FILE = os.path.join(
+    SOURCE_DATA_DIR, "insee", "data_INSEE_agregees")
+CONTOURS_IRIS_PREP_FILE = os.path.join(
+    SOURCE_DATA_DIR, "iris", "contours-iris_prep")
+
+ABATTEMENT_VILLE_FILE = os.path.join(
+    SOURCE_DATA_DIR, "judiciaire", "abattement_ville.csv"
+)
+
+# CLEANED DATA
+DVF_PREP_FILE = os.path.join(CLEANED_DATA_DIR, "dvf_prep_adresses")
+CL_PREP_FILE = os.path.join(CLEANED_DATA_DIR, "cl_prep")
+DF_MATCH_DVF_CL_FILE = os.path.join(CLEANED_DATA_DIR, "all_match_dvf_cl")
+DF_TRANSAC_FILE = os.path.join(CLEANED_DATA_DIR, "df_transac")
+DF_TRANSAC_CLEAN_FILE = os.path.join(CLEANED_DATA_DIR, "df_transac_clean")
+DF_DEMANDES_CLEAN_FILE = os.path.join(CLEANED_DATA_DIR, "df_demandes_clean")
+
+DICT_COLUMNS_DVF_AGREGE_FILE = os.path.join(
+    CLEANED_DATA_DIR, "DICT_COLUMNS_DVF_AGREGE")
+DICT_TYPAGES_DVF_AGREGE_FILE = os.path.join(
+    CLEANED_DATA_DIR, "DICT_TYPAGES_DVF_AGREGE")
+CL_PREP_INIT_FILE = os.path.join(CLEANED_DATA_DIR, "CL_prep_init")
+FUZZY_MATCHING_FILE = os.path.join(CLEANED_DATA_DIR, "res_fuzzy_matching")
+CLEANED_CATNAT_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_catnat")
+CLEANED_PROMETHEE_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_promethee")
+
+CLEANED_RADON_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_radon")
+CLEANED_PPRT_FILE = os.path.join(
+    CLEANED_DATA_DIR, "cleaned_risques_industriels")
+CLEANED_POLSOLS_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_pollution_sols")
+
+# PREPROCESSED DATA
+BASE_BAN_ENRICHIE_FILE = os.path.join(
+    PREPROCESSED_DATA_DIR, "base_ban_enrichie_TO_SQL")
+BASE_BAT_ENRICHIE_FILE = os.path.join(
+    PREPROCESSED_DATA_DIR, "base_bat_enrichie_TO_SQL")
+BASE_CAD_ENRICHIE_FILE = os.path.join(
+    PREPROCESSED_DATA_DIR, "base_cad_enrichie_TO_SQL")
+
+BASE_GEOCODEE_FILE = os.path.join(PREPROCESSED_DATA_DIR, "base_geocodee")
+BASE_ANALYSE_ML_FILE = os.path.join(PREPROCESSED_DATA_DIR, "base_analyse_ML")
+
+BASE_TI = os.path.join(PREPROCESSED_DATA_DIR, "base_ti")
+BASE_TRANSAC_KNOWN_APP = os.path.join(PREPROCESSED_DATA_DIR, "df_transac_app")
+DF_SYNTH_TRANSAC = os.path.join(
+    PREPROCESSED_DATA_DIR, "df_synt_transac_TO_SQL")
+DF_TRANSAC_BIEN = os.path.join(PREPROCESSED_DATA_DIR, "df_transac_bien_TO_SQL")
+
+BASE_PROXIM_APP = os.path.join(PREPROCESSED_DATA_DIR, "df_proxim_app")
+DF_PRIX_PROXIM = os.path.join(PREPROCESSED_DATA_DIR, "df_prix_proxim_TO_SQL")
+DF_MAPPING_PROXIM = os.path.join(
+    PREPROCESSED_DATA_DIR, "df_mapping_proxim_TO_SQL")
+DF_COMPARATIFS_PROXIM = os.path.join(
+    PREPROCESSED_DATA_DIR, "df_comparatifs_proxim_TO_SQL")
+DF_PROXIM_ADRESSE = os.path.join(
+    PREPROCESSED_DATA_DIR, "df_proxim_adresse_TO_SQL")
+DF_PROXIM_CADASTRE = os.path.join(
+    PREPROCESSED_DATA_DIR, "df_proxim_cadastre_TO_SQL")
 
 
-    # -------------------------------------------------------------------------
-    # B.4 CHARGEMENT ET FUSION LPI
-    # -------------------------------------------------------------------------
-    print("\n--- Chargement LPI/IAD ---")
-    try:
-        lpi = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
-        lpi = lpi.iloc[:, :3]
-        lpi.columns = ["DATE", "Ville", "Prix_LPI"]
-        lpi["DATE"] = pd.to_datetime(lpi["DATE"], errors='coerce')
-        lpi["Ville"] = lpi["Ville"].astype(str).str.strip().str.upper()
-        lpi["Prix_LPI"] = pd.to_numeric(lpi["Prix_LPI"], errors='coerce')
-        lpi = lpi[lpi["Ville"].isin(top_ville)]
-        date_max = lpi["DATE"].max()
-    except Exception as e:
-        print(f"Erreur LPI: {e}. Continuation sans.")
-        lpi = pd.DataFrame(columns=["DATE", "Ville", "Prix_LPI"])
+# OUTPUT DATA
+# POUR LES INDICATEURS DE FIABILITE ET QUALITE
+VARIABILITE_PM2_MAX_FILE = os.path.join(
+    CALCULS_INDICATEURS_DATA_DIR, "variabilite_pm2_max"
+)
+SCO_COMP_MAX_FILE = os.path.join(CALCULS_INDICATEURS_DATA_DIR, "sco_comp_max")
 
-    # Fusion finale
-    merge_cl = merge_cl.rename(columns={"Periode": "DATE"})
-    merge_cl["DATE"] = pd.to_datetime(merge_cl["DATE"])
-    
-    final_fusion = pd.merge(lpi, merge_cl, on=["Ville", "DATE"], how="right")
-    
-    # Renommage pour clarté
-    final_fusion = final_fusion.rename(columns={
-        "prix_mm_3m (V2_STRUCT)": "Prix V2 (3 mois glissants)",
-        "prix_mm_12m (V2_STRUCT)": "Prix V2 (12 mois glissants)",
-        "Prix_LPI": "Prix LPI/IAD (12 mois)"
-    })
-    
-    # Filtre date
-    final_fusion = final_fusion[final_fusion["DATE"] <= date_max]
+DIST_ELT_CLASS_PIPE_FILE = os.path.join(
+    CALCULS_INDICATEURS_DATA_DIR, "dist_elt_class_pipe_v1"
+)
+BIENS_PROCHES_PIPE_FILE = os.path.join(
+    CALCULS_INDICATEURS_DATA_DIR, "biens_proches_pipe"
+)
+BIEN_PROCHE_INFOS_FILE = os.path.join(
+    CALCULS_INDICATEURS_DATA_DIR, "bien_proche_info")
 
-    # -------------------------------------------------------------------------
-    # B.5 GÉNÉRATION DES GRAPHIQUES ET STATS
-    # -------------------------------------------------------------------------
-    print("\n--- Génération des graphiques ---")
-    
-    # Deux comparaisons séparées : 3m et 12m vs LPI
-    comparisons = [
-        {
-            "name": "3m",
-            "col_v2": "Prix V2 (3 mois glissants)",
-            "col_lpi": "Prix LPI/IAD (12 mois)",
-            "color_v2": "#28A745",  # Green
-            "color_lpi": "#DD8452",  # Orange
-            "title": "Comparaison Prix V2 (3 mois) vs LPI"
-        },
-        {
-            "name": "12m",
-            "col_v2": "Prix V2 (12 mois glissants)",
-            "col_lpi": "Prix LPI/IAD (12 mois)",
-            "color_v2": "#4C72B0",  # Blue
-            "color_lpi": "#DD8452",  # Orange
-            "title": "Comparaison Prix V2 (12 mois) vs LPI"
-        }
+
+# MODELE TI
+DIC_GEO_META_TI_FILE = os.path.join(MODEL_TI_DATA_DIR, "dic_geo_meta")
+PERIOD_COLUMN_CREATOR_FILE = os.path.join(
+    MODEL_TI_DATA_DIR, "period_column_creator")
+
+# REPORT
+DVF_AGREGE_REPORT_FILE = os.path.join(
+    REPORT_DATA_DIR, f"report_agregations_dvf{SUFF_DATE}{SUFF}{EXT_XLSX}"
+)
+OPTIM_PARAMS_FILE = os.path.join(REPORT_DATA_DIR, f"optim_params{SUFF_DATE}")
+COMPARAISON_MODELES_FILE = os.path.join(
+    REPORT_DATA_DIR, f"Resultats_comparaison_modeles{SUFF_DATE}{SUFF}{EXT_XLSX}"
+)
+BACKTEST_CARTE_FILE = os.path.join(
+    REPORT_DATA_DIR, f"map_pm2_iris{SUFF_DATE}{SUFF}.html"
+)
+TEMPLATE_COMPARAISON_MODELE_FILE = os.path.join(
+    TEMPLATES_DIR, f"template_comparaison_modeles{EXT_XLSX}"
+)
+
+# LOGS PROCESS SECONDAIRES (PAS DE MODE TEST)
+MAJ_DONNEES_INSEE_LOG_FILE = os.path.join(
+    MAJ_DONNEES_INSEE_LOG_DIR, "maj_donnees_insee.log"
+)
+MAJ_CONTOURS_IRIS_LOG_FILE = os.path.join(
+    MAJ_CONTOURS_IRIS_LOG_DIR, "maj_contours_iris.log"
+)
+CLEAN_ADEME_LOG_FILE = os.path.join(CLEAN_ADEME_LOG_DIR, "clean_ademe.log")
+###############################################################################
+# =====================================
+#              PARAMETRES
+# =====================================
+
+# COLONNES
+LATITUDE_COL = "LATITUDE"
+LONGITUDE_COL = "LONGITUDE"
+
+# PREPARATION DES DONNEES D'ENTRAINEMENT
+VALEUR_FONCIERE_MIN = 10000
+VALEUR_FONCIERE_MAX = 2000000
+
+###############################################################################
+# PARAMETRES NETTOYAGE DONNEES ADEME
+
+COLS_VALUE_TO_UPPER = [
+    "TYPE_BIEN",
+    "NOM_COMMUNE",
+    "NUM_VOIE",
+    "ADRESSE",
+    "NOM_RUE",
+    "ADRESSE_BRUTE",
+]
+MIN_YEAR_CONSTRUCTION = 1800
+
+
+COLS_POUR_ENRICHIR = [
+    "NUM_DPE",
+    "NUM_DPE_NEW",
+    "ETIQUETTE_DPE",
+    "ETIQUETTE_DPE_NEW",
+    "ETIQUETTE_GES",
+    "ETIQUETTE_GES_NEW",
+    "EMISSION_GES_USAGES",
+    "EMISSION_GES_USAGES_NEW",
+    "ADRESSE_DPE_COMPLETE",
+    "ADRESSE_DPE_COMPLETE_NEW",
+    "DATE_ETABLISSEMENT_DPE",
+    "DATE_ETABLISSEMENT_DPE_NEW",
+    "DATE_FIN_VALIDITE_DPE",
+    "DATE_FIN_VALIDITE_DPE_NEW",
+    "CONSO_USAGES_PRIMAIRES",
+    "CONSO_USAGES_PRIMAIRES_NEW",
+    "ANNEE_CONSTRUCTION",
+    "NOMBRE_NIVEAU_LOGEMENT",
+    "NUM_ETAGE_APPARTEMENT",
+    "TYPOLOGIE_LOGEMENT",
+    "BIEN_NEUF",
+]
+
+TYPOLOGIE_LOGEMENT_NEW_VALUES = {
+    "T1": 1,
+    "T2": 2,
+    "T3": 3,
+    "T4": 4,
+    "T5": 5,
+    "T6": 6,
+    "T7 ou plus": 7,
+}
+
+###############################################################################
+# PARAMETRES NETTOYAGE DONNEES DPE ESTIMATION
+COLS_VALUE_TO_UPPER_DPE = [
+    "NOM_COMMUNE",
+    "TYPE_VOIE",
+    "NOM_RUE",
+]
+
+###############################################################################
+# PARAMETRES DONNEES RISQUE CLIMATIQUE
+
+REACTEURS_NUCLEAIRES = {
+    "CIVAUX": [46.45667, 0.65278],
+    "CHOOZ": [50.09, 4.79056],
+    "PENLY": [49.97611, 1.21194],
+    "GLOFECH": [44.10667, 0.84528],
+    "NOGENT": [48.51528, 3.51778],
+    "BELLEVILLE": [47.50972, 2.875],
+    "CATTENOM": [49.41583, 6.21806],
+    "SAINT ALBAN": [45.40444, 4.75528],
+    "FLAMANVILLE": [49.53639, -1.88167],
+    "CRUAS": [44.63306, 4.75667],
+    "PALUEL": [49.85778, 0.63528],
+    "BLAYAIS": [45.25532, -0.68842],
+    "GRAVELINES": [51.01444, 2.135],
+    "DAMPIERRE": [47.73306, 2.516667],
+    "TRICASTIN": [44.335698, 4.72249],
+    "FESSENHEIM": [47.9031083, 7.5630361],
+    "BUGEY": [45.8010472, 5.2661154],
+    "SAINT LAURENT": [47.72, 1.5775],
+    "CHINON": [47.23056, 0.17028],
+}
+
+###############################################################################
+# FUZZY MATCHING
+
+nb_jours = 90  # Nombre de jours d'ecart maximal pour conserver un match
+ratio_val = 0.3  # Ratio de valeur fonciere d'ecart maximal pour conserver un match
+score_min = 700  # Score minimum pour conserver un match
+
+###############################################################################
+# IRIS GEOCODING
+
+LIM_DIST = 1000  # Distance maximale (en m) pour affecter l'IRIS la plus proche
+
+###############################################################################
+# DETECTION ANOMALIES
+
+# VARIABLES SUR LESQUELLES ON APPLIQUE LA DETECTION D'ANOMALIES
+VAR_NUM = ["Prix_m2", "Prix_piece", "nb_m2_by_piece"]  # pour le modele ML
+VAR_NUM_TI = ["Prix_m2"]  # pour le modele TI
+
+# NOMBRE D'ANNEES RECENTES A IMPORTER (N DERNIERES ANNEES)
+N_YEARS = 2  # pour le modele ML
+
+# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
+N_MIN = 30  # pour les deux modeles
+
+# Méthode de détection d'anomalies (la même pour les deux modèles)
+# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
+# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
+# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
+OUTLIER_MODE = "mult"
+# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
+COEFF_ECART = 4
+PRIX_M2_MIN = 200
+PRIX_M2_MAX = 20000
+
+###############################################################################
+# ML FEATURE ENGINEERING
+
+# RAYONS POUR LE NOMBRE D'ITEMS PROCHES D'UN BIEN (EN KM)
+GARES_RADII = [1, 5, 10, 20]
+ECOLES_RADII = [0.5, 1, 2, 3]
+METROS_RADII = [0.2, 0.5, 1, 2]
+COMMERCES_RADII = [0.2, 0.5, 1, 2]
+
+# EFFECTIFS MINIMUM POUR LE CALCUL DES INDICATEURS DE PRIX AU METRE CARRE
+EFF_MIN = 7
+
+# POUR L'AJOUTS DE STATS SUR LES BIENS PROCHES
+SURF_HAB_BINS = [12, 25, 40, 60, 80, 100, 120, 150, 200]
+ARRONDI_PROXIM = 2
+NUM_BIENS_PROCHES_RESTIT = 3
+EFF_MIN_BIENS_PROCHES = 1
+
+# BIENS CONNUS
+ARRONDI_EXACT = 5
+
+###############################################################################
+# MODEL TI
+
+# EFFECTIFS MINIMUMS POUR LE CALCUL DES TAUX D'INFLATION
+# EFF_MIN_IRIS = 10
+# EFF_MIN_ARR = 15
+EFF_MIN_IRIS = 30
+EFF_MIN_ARR = 30
+EFF_MIN_VILLE = 30
+EFF_MIN_DEPT = 50
+
+# TRIMESTRE DE REFERENCE POUR LA RECUPERATION DES TAUX D'INFLATION DE L'OPEN DATA
+TRIMESTRE_REF_TI = "T1 2020"
+
+###############################################################################
+# INDICATEURS DE FIABILITE
+# ECARTS. Dictionnaire de la forme
+# {colonne_de_sortie_i: {colonne_a_comparer_i: colonne_avec_qui_comparer_i}}
+ECARTS_A_CALCULER = {
+    "ecart_bien_proche": {"pm2_pred": "Prix_moy"},
+    "ecart_bien_connu": {"pm2_pred": "Prix_act_bien"},
+    "ecart_iris_12m": {"pm2_pred": "mean___pm2_iris_12m"},
+}
+ECARTS_A_CALCULER = {
+    "ecart_bien_connu1": {"Prix_moy": "pm2_pred"},
+    "ecart_bien_connu2": {"Prix_act_bien": "pm2_pred"},
+    "ecart_bien_connu3": {"selected_median_price": "pm2_pred"},
+    "ecart_bien_connu4": {"Prix_moy": "selected_median_price"},
+    "ecart_bien_connu5": {"Prix_moy": "Prix_act_bien"},
+}
+
+
+# PENALITES.
+# LES PENALITES SE CUMULENT ENTRE ELLES
+PENALITES_PETITES_VALEURS = {
+    "pm2_pred": {2500: 42, 1500: 36, 1000: 32, 800: 56, 500: 13},
+    "annee_construction": {1970: 27},
+}
+
+PENALITES_GRANDES_VALEURS = {
+    "std___pm2_iris_L10": {650: 20, 800: 10, 1200: 10, 1500: 15},
+    "ecart_bien_proche": {0.2: 25, 0.3: 11},
+    "ecart_bien_connu": {20: 8},
+    "ecart_iris_12m": {0.2: 9},
+    "NB_SURF_TER": {500: 3, 1500: 20},
+}
+
+PENALITES_VALEURS_MANQUANTES = {
+    "ecart_bien_proche": 25,
+    "ecart_bien_connu": 8,
+    "ecart_iris_12m": 9,
+    "annee_construction": 27,
+}
+
+# DECOUPAGE DE LA FIBILITE EN FONCTION DES PENALITES AJOUTEES
+# x < DECOUPAGE_FIABILITE[0] --> 5
+# DECOUPAGE_FIABILITE[0] <= x < DECOUPAGE_FIABILITE[1] --> 4
+# DECOUPAGE_FIABILITE[1] <= x < DECOUPAGE_FIABILITE[2] --> 3,...
+DECOUPAGE_FIABILITE = [60, 90, 120, 150]
+# Valeur à mettre en apprentissage?
+DECOUPAGE_FIABILITE = [0.13, 0.17, 0.21, 0.25]
+# Valeur à mettre en application
+DECOUPAGE_FIABILITE = [0.16, 0.19, 0.23, 0.26]
+
+# TAILLE DE L'INTERVALLE D'ESTIMATION DU PRIX AU M2 EN FONCTION DE LA FIABILITE
+INTERVAL_SIZE_MAP = {5: 0.12, 4: 0.16, 3: 0.24, 2: 0.28, 1: 0.36}
+
+###############################################################################
+# SORTIES ESTIMATIONS
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_LOCALISATION_BIEN = {
+    "ville_": "RES_VILLE",
+    "CODE_POSTAL": "RES_CODE_POSTAL",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_BIEN = {
+    "NB_PIECES": "RES_NB_PIECES",
+    "NB_SURF_HAB": "RES_NB_SURF_HAB",
+    "NB_SURF_TER": "RES_NB_SURF_TER",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_ESTIM_VF = {
+    "pm2_pred": "RES_PRIX_M2_PRED",
+    "pm2_pred_min": "RES_PRIX_M2_PRED_MIN",
+    "pm2_pred_max": "RES_PRIX_M2_PRED_MAX",
+    "taux_acc": "RES_TAUX_INFL",
+    "VALEUR_FONCIERE_PREDITE_ML": "RES_VALEUR_FONCIERE_PREDITE_ML",
+    "VALEUR_FONCIERE_PREDITE_MIN": "RES_VALEUR_FONCIERE_PREDITE_ML_MIN",
+    "VALEUR_FONCIERE_PREDITE_MAX": "RES_VALEUR_FONCIERE_PREDITE_ML_MAX",
+    "VALEUR_FONCIERE_PREDITE_TI": "RES_VALEUR_FONCIERE_PREDITE_TI",
+    "VALEUR_FONCIERE_PREDITE_RECC": "RES_VALEUR_FONCIERE_PREDITE_RECC",
+    "VALEUR_JUDICIAIRE_PREDITE": "RES_VALEUR_JUDICIAIRE_PREDITE",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_FIAB_QUALI = {
+    "Indice_fiabilite_ML": "RES_INDICE_FIAB_ML",
+    "Indice_fiabilite_TI": "RES_INDICE_FIAB_TI",
+    "Indice_qualite": "RES_INDICE_QUALITE",
+    "INDICE_FIABILITE_JUDICIAIRE": "RES_INDICE_FIAB_JUDICIAIRE",
+    "METHODE_RECC": "RES_METHODE_RECC",
+    "maille_geo_loc_ML": "RES_MAILLE_GEO_LOC_ML",
+    "maille_geo_loc_TI": "RES_MAILLE_GEO_LOC_TI",
+    "SOURCE_IPI": "RES_SOURCE_IPI",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_ESTIM = {
+    "CD_OP": "REF_EXTERNE",
+    "DT_ESTIMATION": "RES_DT_ESTIMATION",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CONS_ERREUR = {
+    "VALEUR_FONCIERE_INITIALE": "RES_VALEUR_FONCIERE_INITIALE",
+    "DT_MEP": "RES_DT_MEP",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_IRIS_PM2 = {
+    "TENDANCE_MARCHE": "TENDANCE_MARCHE",
+    "median___pm2_iris_12m": "MEDIANE_PM2_IRIS",
+    "Q1___pm2_iris_12m": "Q1_PM2_IRIS",
+    "Q3___pm2_iris_12m": "Q3_PM2_IRIS",
+}
+
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM = {
+    f"{key}_{i}": f"{key}_{i}".upper()
+    for i in range(1, 4)
+    for key in [
+        "DATE_proxim",
+        "TYPE_BIEN_proxim",
+        "NB_SURF_HAB_proxim",
+        "VALEUR_FONCIERE_proxim",
+        "DIST_proxim",
     ]
-    
-    nb_villes = len(final_fusion["Ville"].dropna().unique())
+}
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM.update(
+    {"Prix_med": "MEDIANE_PROXIM"})
 
- 
-    # Initialisation des scores de correspondance
-    score_3m_total = 0
-    score_12m_total = 0
-    nb_villes_valides = 0
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DIST_ELEMENTS = {
+    "DIST_cotiere": "DISTANCE_A_LA_MER",
+    "DIST_commerces_class": "DIST_COMMERCE_CLASSE",
+    "DIST_metro_rer_transilien_class": "DIST_TRANSPORT_IDF_CLASSE",
+    "DIST_gare_class": "DIST_GARE_CLASSE",
+    "DIST_ecole_primaire_class": "DIST_ECOLE_PRIMAIRE_CLASSE",
+    "DIST_college_lycee_class": "DIST_ECOLE_SECONDAIRE_CLASSE",
+}
 
-    for ville in final_fusion["Ville"].dropna().unique():
-        df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
-        if df_ville.empty: continue
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DPE = {
+    "ORIGINE_DPE": "ORIGINE_DPE",
+    "INDICE_FIAB_DPE_EST": "INDICE_FIAB_DPE_EST",
+    "DATE_ETABLISSEMENT_DPE": "DATE_ETABLISSEMENT_DPE",
+    "DATE_FIN_VALIDITE_DPE": "DATE_FIN_VALIDITE_DPE",
+    "NUM_DPE": "NUM_DPE",
+    "ADRESSE_DPE_COMPLETE": "ADRESSE_DPE_COMPLETE",
+    "ETIQUETTE_DPE": "ETIQUETTE_DPE",
+    "ETIQUETTE_GES": "ETIQUETTE_GES",
+    "CONSO_USAGES_PRIMAIRES": "CONSO_USAGES_PRIMAIRES",
+    "EMISSION_GES_USAGES": "EMISSION_GES_USAGES",
+    "annee_construction": "ANNEE_CONSTRUCTION",
+}
 
-        # --- Graphique unique avec toutes les courbes ---
-        fig = go.Figure()
-        
-        # Interpolation
-        cols = ["Prix V2 (3 mois glissants)", "Prix V2 (12 mois glissants)", "Prix LPI/IAD (12 mois)"]
-        df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_IRIS = {
+    "POP15P_CS3": "POP15P_CS3",
+    "prop_RP": "PROPORTION_RESIDENCES_PRINCIPALES",
+    "prop_RSECOCC": "PROPORTION_RESIDENCES_SECONDAIRES",
+    "ACH19": "PROPORTION_TYPE_BIEN_19",
+    "ACH45": "PROPORTION_TYPE_BIEN_45",
+    "ACH70": "PROPORTION_TYPE_BIEN_70",
+    "ACH90": "PROPORTION_TYPE_BIEN_90",
+    "ACH05": "PROPORTION_TYPE_BIEN_05",
+    "ACH12": "PROPORTION_TYPE_BIEN_12",
+}
 
-        # Calcul IC pour 3M
-        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
-            std_3m = df_interp["Prix V2 (3 mois glissants)"].rolling(12, min_periods=3).std()
-            df_interp["IC_inf_3m"] = df_interp["Prix V2 (3 mois glissants)"] - 1.96 * std_3m
-            df_interp["IC_sup_3m"] = df_interp["Prix V2 (3 mois glissants)"] + 1.96 * std_3m
-            
-            # Zone IC 3M
-            fig.add_trace(go.Scatter(
-                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
-                y=pd.concat([df_interp["IC_sup_3m"], df_interp["IC_inf_3m"][::-1]]),
-                fill="toself",
-                fillcolor="rgba(40,167,69,0.1)",
-                line=dict(color="rgba(0,0,0,0)"),
-                name="IC 95% (3M)",
-                showlegend=True
-            ))
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_RISQUE_CLIM = {
+    "NOMBRE_SECHERESSES": "NOMBRE_SECHERESSES",
+    "NOMBRE_SECOUSSES_SISMIQUES": "NOMBRE_SECOUSSES_SISMIQUES",
+    "NOMBRE_INONDATIONS": "NOMBRE_INONDATIONS",
+    "NOMBRE_MVT_TERRAIN": "NOMBRE_MVT_TERRAIN",
+    "NOMBRE_TEMPETES": "NOMBRE_TEMPETES",
+    "NOMBRE_INCENDIES": "NOMBRE_INCENDIES",
+    "CLASSE_RADON": "CLASSE_RADON",
+    "NOMBRE_RISQUES_INDUSTRIELS": "NOMBRE_RISQUES_INDUSTRIELS",
+    "SOL_POLLUE": "SOL_POLLUE",
+    "RISQUE_NUCLEAIRE": "RISQUE_NUCLEAIRE",
+    "ZONE_RGA": "ZONE_RGA",
+}
 
-        # Calcul IC pour 12M
-        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
-            std_12m = df_interp["Prix V2 (12 mois glissants)"].rolling(12, min_periods=3).std()
-            df_interp["IC_inf_12m"] = df_interp["Prix V2 (12 mois glissants)"] - 1.96 * std_12m
-            df_interp["IC_sup_12m"] = df_interp["Prix V2 (12 mois glissants)"] + 1.96 * std_12m
-            
-            # Zone IC 12M
-            fig.add_trace(go.Scatter(
-                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
-                y=pd.concat([df_interp["IC_sup_12m"], df_interp["IC_inf_12m"][::-1]]),
-                fill="toself",
-                fillcolor="rgba(76,114,176,0.1)",
-                line=dict(color="rgba(0,0,0,0)"),
-                name="IC 95% (12M)",
-                showlegend=True
-            ))
+OUTPUT_FEATURES_ESTIMATIONS_EXTERNES = {
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_ESTIM,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_LOCALISATION_BIEN,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_BIEN,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_FIAB_QUALI,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_ESTIM_VF,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CONS_ERREUR,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_IRIS_PM2,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DPE,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_IRIS,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_RISQUE_CLIM,
+    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DIST_ELEMENTS,
+}
 
-        # Courbe Prix V2 (3 mois)
-        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
-            fig.add_trace(go.Scatter(
-                x=df_interp["DATE"],
-                y=df_interp["Prix V2 (3 mois glissants)"],
-                mode="lines+markers",
-                name="Prix V2 (3M)",
-                line=dict(color="#28A745", width=2),
-                marker=dict(size=4)
-            ))
 
-        # Courbe Prix V2 (12 mois)
-        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
-            fig.add_trace(go.Scatter(
-                x=df_interp["DATE"],
-                y=df_interp["Prix V2 (12 mois glissants)"],
-                mode="lines+markers",
-                name="Prix V2 (12M)",
-                line=dict(color="#4C72B0", width=2),
-                marker=dict(size=4)
-            ))
+###############################################################################
+# =====================================
+#              CONSTANTES
+# =====================================
 
-        # Courbe LPI
-        if "Prix LPI/IAD (12 mois)" in df_interp.columns and not df_interp["Prix LPI/IAD (12 mois)"].isna().all():
-            fig.add_trace(go.Scatter(
-                x=df_interp["DATE"],
-                y=df_interp["Prix LPI/IAD (12 mois)"],
-                mode="lines+markers",
-                name="Prix LPI/IAD",
-                line=dict(color="#DD8452", width=2, dash="dot"),
-                marker=dict(size=6, symbol="diamond")
-            ))
+LL_MAI = [
+    "Paris",
+    "Hauts-de-Seine",
+    "Seine-St-Denis",
+    "Val-de-Marne",
+    "Seine-et-Marne",
+    "Yvelines",
+    "Essonne",
+    "Val-d'Oise",
+    "Agglomération de Lille",
+    "Province",
+    "Nord-Pas-de-Calais",
+    "Rhone-Alpes",
+    "Provence-Alpes-Cote d'Azur",
+]
 
-        # Calcul des taux de couverture (% LPI dans IC)
-        annotations_text = []
-        match_3m = match_12m = np.nan
-        
-        if "IC_inf_3m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
-            match_3m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_3m"]) & 
-                        (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_3m"])).mean()
-            annotations_text.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
-            score_3m_total += match_3m if pd.notna(match_3m) else 0
-        
-        if "IC_inf_12m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
-            match_12m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_12m"]) & 
-                         (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_12m"])).mean()
-            annotations_text.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
-            score_12m_total += match_12m if pd.notna(match_12m) else 0
-        
-        if pd.notna(match_3m) or pd.notna(match_12m):
-            nb_villes_valides += 1
+LL_APT = [
+    "Paris",
+    "Hauts-de-Seine",
+    "Seine-St-Denis",
+    "Val-de-Marne",
+    "Seine-et-Marne",
+    "Yvelines",
+    "Essonne",
+    "Val-d'Oise",
+    "Agglomération de Marseille",
+    "Agglomération de Lyon",
+    "Province : agglomérations de plus de 10 000 habitants - Banlieues ",
+    "Province : agglomérations de plus de 10 000 habitants - Villes centres",
+    "Province : agglomérations de moins de 10 000 habitants et zones rurales ",
+    "Nord-Pas-de-Calais",
+    "Rhone-Alpes",
+    "Provence-Alpes-Cote d'Azur",
+]
 
-        # Annotation
-        if annotations_text:
-            fig.add_annotation(
-                xref="paper", yref="paper",
-                x=0.01, y=0.99,
-                text="<br>".join(annotations_text),
-                showarrow=False,
-                bgcolor="white",
-                bordercolor="black",
-                borderwidth=1,
-                align="left"
-            )
+MARSEILLE_AGGLO = [
+    "MARSEILLE",
+    "ALLAUCH",
+    "CARNOUX EN PROVENCE",
+    "CARRY ROUET",
+    "CASSIS",
+    "CEYRESTE",
+    "CHATEAUNEUF MARTIGUES",
+    "ENSUES REDONNE",
+    "GENEMOS",
+    "GIGNAC NERTHE",
+    "CIOTAT",
+    "ROVE",
+    "MARIGNANE",
+    "PLAN CUQUES",
+    "ROQUEFORT BEDOULE",
+    "SAINT VICTORET",
+    "SAUSSET PINS",
+    "SEPTEMES VALLONS",
+]
 
-        # Mise en forme
-        fig.update_layout(
-            title=f"Comparaison Prix V2 (3M & 12M) vs LPI - {ville}",
-            xaxis_title="Date",
-            yaxis_title="Prix au m² (€)",
-            height=600,
-            template="plotly_white",
-            hovermode="x unified"
-        )
-        
-        # Sauvegarde
-        filename = f"Comparaison_V2_LPI_{ville}.html"
-        fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
+LYON_AGGLO = [
+    "LYON",
+    "VILLEURBANNE",
+    "OULLINS",
+    "VENISSIEUX",
+    "CALUIRE ET CUIRE",
+    "MULATIERE",
+    "SAINTE FOY LYON",
+    "SAINT FONS",
+    "FONTAINES SUR SAONE",
+    "SATHONAY CAMP",
+    "TASSIN DEMI LUNE",
+    "CRAPONNE",
+    "VAULX EN VELIN",
+    "PIERRE BENITE",
+    "ECULLY",
+    "CHAMPAGNE MONT OR",
+    "RILLIEUX PAPE",
+    "FRANCHEVILLE",
+    "DECINES CHARPIEU",
+    "GRIGNY",
+    "SAINT GENIS LAVAL",
+    "SAINT PRIEST",
+    "MEYZIEU",
+    "NEUVILLE SUR SAONE",
+    "SAINT GENIS OLLIERES",
+    "VERNAISON",
+    "CHARBONNIERES BAINS",
+    "ROCHETAILLEE SUR SAONE",
+    "MIONS",
+    "GIVORS",
+    "ALBIGNY SUR SAONE",
+    "BRON",
+    "FONTAINES SAINT MARTIN",
+    "COLLONGES MONT OR",
+    "FEYZIN",
+    "IRIGNY",
+    "CORBAS",
+    "CHASSIEU",
+    "CHARLY",
+    "SAINT DIDIER MONT OR",
+    "COUZON MONT OR",
+    "SAINT CYR MONT OR",
+    "MARCY ETOILE",
+    "GENAY",
+    "DARDILLY",
+    "SAINT GERMAIN MONT OR",
+    "LISSIEU",
+    "FLEURIEU SUR SAONE",
+    "JONAGE",
+    "TOUR SALVAGNY",
+    "SAINT ROMAIN MONT OR",
+    "SATHONAY VILLAGE",
+    "MONTANAY",
+    "LIMONEST",
+    "CURIS MONT OR",
+    "SOLAIZE",
+    "CAILLOUX SUR FONTAINES",
+    "POLEYMIEUX MONT OR",
+    "QUINCIEUX",
+]
 
-    # -------------------------------------------------------------------------
-    # B.6 SYNTHÈSE STATS
-    # -------------------------------------------------------------------------
-    print("\n" + "="*80)
-    print(" RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)")
-    print("="*80)
-    
-    # Fonctions de calcul des métriques
-    def calc_rmse(g, col):
-        """RMSE absolu en €/m²"""
-        lpi = "Prix LPI/IAD (12 mois)"
-        if col in g.columns and lpi in g.columns:
-            valid = g[[col, lpi]].dropna()
-            if len(valid) > 0:
-                return np.sqrt(((valid[col] - valid[lpi])**2).mean())
-        return np.nan
-    
-    def calc_rmse_relative(g, col):
-        """RMSE relatif en % du prix moyen"""
-        lpi = "Prix LPI/IAD (12 mois)"
-        if col in g.columns and lpi in g.columns:
-            valid = g[[col, lpi]].dropna()
-            if len(valid) > 0:
-                rmse = np.sqrt(((valid[col] - valid[lpi])**2).mean())
-                mean_price = valid[lpi].mean()
-                if mean_price > 0:
-                    return (rmse / mean_price) * 100  
-        return np.nan
-    
-    def calc_correlation(g, col):
-        """Corrélation avec LPI"""
-        lpi = "Prix LPI/IAD (12 mois)"
-        if col in g.columns and lpi in g.columns:
-            valid = g[[col, lpi]].dropna()
-            if len(valid) > 5:
-                return valid[col].corr(valid[lpi])
-        return np.nan
+VILLES_CENTRES = [  # PARIS exclu car indices spécifiques pour PARIS
+    "MARSEILLE",
+    "LYON",
+    "TOULOUSE",
+    "NICE",
+    "NANTES",
+    "STRASBOURG",
+    "MONTPELLIER",
+    "BORDEAUX",
+    "LILLE",
+    "RENNES",
+    "REIMS",
+    "HAVRE",
+    "SAINT ETIENNE",
+    "TOULON",
+    "GRENOBLE",
+    "DIJON",
+    "ANGERS",
+    "MANS",
+    "BREST",
+    "NIMES",
+    "AIX EN PROVENCE",
+    "CLERMONT FERRAND",
+    "LIMOGES",
+    "TOURS",
+    "AMIENS",
+    "METZ",
+    "BESANCON",
+    "PERPIGNAN",
+    "ORLEANS",
+    "ROUEN",
+    "CAEN",
+]
 
-    # Calcul des statistiques par ville
-    stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
-        "RMSE_3M": calc_rmse(x, "Prix V2 (3 mois glissants)"),
-        "RMSE_12M": calc_rmse(x, "Prix V2 (12 mois glissants)"),
-        "RMSE_REL_3M": calc_rmse_relative(x, "Prix V2 (3 mois glissants)"),
-        "RMSE_REL_12M": calc_rmse_relative(x, "Prix V2 (12 mois glissants)"),
-        "CORR_3M": calc_correlation(x, "Prix V2 (3 mois glissants)"),
-        "CORR_12M": calc_correlation(x, "Prix V2 (12 mois glissants)"),
-        "Prix_Moyen_LPI": x["Prix LPI/IAD (12 mois)"].mean()
-    }), include_groups=False).reset_index()
-    
-    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
-    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
-    
-    # Affichage
-    print("\nCORRESPONDANCE LPI dans IC (Couverture moyenne) :")
-    if nb_villes_valides > 0:
-        print(f"   IC 3M  : {score_3m_total/nb_villes_valides:.1%}")
-        print(f"   IC 12M : {score_12m_total/nb_villes_valides:.1%}")
-    
-    print("\nRMSE ABSOLU (€/m²) :")
-    print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
-    print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
-    print(f"   Δ   : {stats['Delta_RMSE'].mean():+.2f} €/m² {'(12M meilleur)' if stats['Delta_RMSE'].mean() > 0 else '(3M meilleur)'}")
-    
-    print("\nRMSE RELATIF (%) :")
-    print(f"   3M  : {stats['RMSE_REL_3M'].mean():.2f} %")
-    print(f"   12M : {stats['RMSE_REL_12M'].mean():.2f} %")
-    
-    print("\nCORRÉLATION avec LPI :")
-    print(f"   3M  : {stats['CORR_3M'].mean():.4f}")
-    print(f"   12M : {stats['CORR_12M'].mean():.4f}")
-    print(f"   Δ   : {stats['Delta_CORR'].mean():+.4f} {'(12M meilleur)' if stats['Delta_CORR'].mean() > 0 else '(3M meilleur)'}")
-    
-    print("\n" + "-" * 80)
-    print("\nDétail par ville :")
-    cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_3M", "RMSE_12M", "Delta_RMSE", 
-                    "RMSE_REL_3M", "RMSE_REL_12M", "CORR_3M", "CORR_12M"]
-    print(stats[cols_display].sort_values("Delta_RMSE", ascending=False).to_string(index=False))
-    
-    # Sauvegarde
-    output_path = os.path.join(params.CONFIG['output_dir'], "stats_comparaison_V2_LPI.csv")
-    stats.to_csv(output_path, index=False)
-    print(f"\n Statistiques sauvegardées : {output_path}")
+DEPT_RHONE_ALPES = ["01", "07", "26", "38", "42", "69", "73", "74"]
 
-    print("\n=== ANALYSE TERMINÉE ===")
+DEPT_PACA = ["04", "05", "06", "13", "83", "84"]
+
+DEPT_COTIERS = [
+    "971",
+    "972",
+    "973",
+    "974",
+    "976",
+    "20",
+    "59",
+    "62",
+    "80",
+    "76",
+    "27",
+    "14",
+    "50",
+    "35",
+    "22",
+    "29",
+    "56",
+    "44",
+    "85",
+    "17",
+    "33",
+    "40",
+    "64",
+    "66",
+    "11",
+    "34",
+    "30",
+    "13",
+    "83",
+    "06",
+]
+
+DEPT_METROPOLITAIN_SANS_CORSE = [str(i).zfill(2)
+                                 for i in range(1, 96) if i != 20]
+
+DEPT_METROPOLITAIN = DEPT_METROPOLITAIN_SANS_CORSE + ["2A", "2B"]
+
+DEPT_IDF = ["75", "92", "93", "94", "77", "78", "91", "95"]
+
+
+###############################################################################
+# =====================================
+#            PARALLELISATION
+# =====================================
+# PREP_ADRESSES
+BATCH_SIZE_VILLES = 2**15
+N_JOBS_VILLES = -1
+BACKEND_VILLES = "loky"  # "threading" = if memory overhead
+PREFER_VILLES = "threads"
+VERBOSE_VILLES = 1  # 10
+
+###############################################################################
+# FICHIERS SAUVEGARDES TEMPORAIREMENT
+# INDICATEURS DE PRIX AU METRE CARRE
+VAR_NBMOIS = ["3", "6", "12"]  # TEMPORELLES EN NOMBRE DE MOIS
+VAR_CTYEFF = ["20", "50"]  # PAR EFFECTIFS (à la ville)
+VAR_IRISEFF = ["10", "20"]  # PAR EFFECTIFS (à l'iris)
+VAR_TOADD = list(set(VAR_IRISEFF).difference(set(VAR_CTYEFF)))
+
+DICT_NAMES_CTY_M = ["__pm2_cty_" + var + "m" for var in VAR_NBMOIS]
+DICT_NAMES_CTY_COMP_M = ["__pm2_cty_comp_" + var + "m" for var in VAR_NBMOIS]
+DICT_NAMES_IRIS_M = ["__pm2_iris_" + var + "m" for var in VAR_NBMOIS]
+DICT_NAMES_IRIS_COMP_M = ["__pm2_iris_comp_" + var + "m" for var in VAR_NBMOIS]
+DICT_NAMES_CTY_L = ["__pm2_cty_L" + var for var in (VAR_CTYEFF + VAR_TOADD)]
+DICT_NAMES_CTY_COMP_L = ["__pm2_cty_comp_L" +
+                         var for var in (VAR_CTYEFF + VAR_TOADD)]
+DICT_NAMES_IRIS_L = ["__pm2_iris_L" + var for var in VAR_IRISEFF]
+DICT_NAMES_IRIS_COMP_L = ["__pm2_iris_comp_L" + var for var in VAR_IRISEFF]
+DICT_NAMES = (
+    DICT_NAMES_CTY_M
+    + DICT_NAMES_CTY_COMP_M
+    + DICT_NAMES_IRIS_M
+    + DICT_NAMES_IRIS_COMP_M
+    + DICT_NAMES_CTY_L
+    + DICT_NAMES_CTY_COMP_L
+    + DICT_NAMES_IRIS_L
+    + DICT_NAMES_IRIS_COMP_L
+)
+
+###############################################################################
+# =====================================
+#               LOGGING
+# =====================================
+LOGGING_LEVEL = (
+    # CRITICAL (50) #ERROR (40) #WARNING (30) #INFO (20) #DEBUG (10) #NOTSET (0)
+    20
+)
+# 'r': open for reading (default), 'w': open for writing, truncating the file first, 'x': open for exclusive creation, failing if the file already exists, 'a': open for writing, appending to the end of the file if it exists,
+FILE_MODE = "a"
+# 'b': binary mode, 't': text mode (default), '+': open for updating (reading and writing)
+
+###############################################################################
+# =====================================
+#    CHAMPS A CONSERVER / SUPPRIMER
+# =====================================
+
+# CHAMPS A CONSERVER DANS LE FUZZY MATCHING
+cols_to_keep = [
+    "CD_OP",
+    "ID_MUTATION",
+    "RNVP_GEO_PG",
+    "RNVP_SCORING",
+    "VALEUR_FONCIERE_CL",
+    "VALEUR_FONCIERE_DVF",
+    "same_val",
+    "DT_MEP",
+    "DATE_MUTATION",
+    "same_date",
+    "BONUS_VAL_DATE",
+    "TYPE_BIEN_CL",
+    "TYPE_BIEN_DVF",
+    "BONUS_TYPE_BIEN",
+    "ADRESSEM_CL",
+    "ADRESSEM_DVF",
+    "adr__CL",
+    "adr__DVF",
+    "SIM_lev_ADRESSE",
+    "SIM_ADRESSE",
+    "NUM_VOIE_SUFF_CL",
+    "NUM_VOIE_SUFF_DVF",
+    "same_num_voie",
+    "type_voie__CL",
+    "type_voie__DVF",
+    "same_type_voie",
+    "ville__CL",
+    "ville__DVF",
+    "same_ville",
+    "SIM_lev_ville",
+    "SIM_ville",
+    "CODE_POSTAL_CL",
+    "CODE_POSTAL_DVF",
+    "same_cp",
+    "LATITUDE_CL",
+    "LATITUDE_DVF",
+    "LONGITUDE_CL",
+    "LONGITUDE_DVF",
+    "DIST_",
+    "BONUS_GPS",
+    "NB_SURF_HAB",
+    "surface_reelle_bati_unique",
+    "NB_PIECES",
+    "nombre_pieces_principales_unique",
+    "NB_SURF_TER",
+    "surface_terrain_unique",
+    "BONUS_TYPOLOGIE_BIEN",
+    "DEPT_DVF",
+    "MAX_surface_reelle_bati_unique",
+    "NOMBRE_LOTS",
+    "nb_PARCELLES",
+    "Habitation_unique",
+    "Dependance_unique",
+    "Terrain_unique",
+    "nb_TYPE_LOCAL_Maison",
+    "nb_TYPE_LOCAL_Appartement",
+    "nb_TYPE_LOCAL_Dépendance",
+    "ID_PARCELLE",
+]
+
+# CHAMPS A SUPPRIMER APRES LE GEOCODAGE IRIS
+FEATURES_TO_DEL = ["coords"]
+
+# CHAMPS A CONSERVER DANS LES DONNEES INSEE
+FEATURES_BIL = [
+    "CD_IRIS",
+    "CD_TYP_IRIS",
+    "prop_RP",
+    "prop_RSECOCC",
+    "APT_prop",
+    "MAI_prop",
+    "MAI_NBPI_RP",
+    "APT_NBPI_RP",
+    "prop_PROP",
+    "prop_LOC",
+    "NPER_RP",
+    "ANEM_RP",
+    "RP_VOIT1P",
+    "MAI_ACH19",
+    "MAI_ACH45",
+    "MAI_ACH70",
+    "MAI_ACH90",
+    "MAI_ACH05",
+    "MAI_ACH12",
+    "APT_ACH19",
+    "APT_ACH45",
+    "APT_ACH70",
+    "APT_ACH90",
+    "APT_ACH05",
+    "APT_ACH12",
+]
+FEATURES_BTFDI = ["CD_IRIS", "DEC_MED16"]
+FEATURES_BIESP = [
+    "CD_IRIS",
+    "POP15P_CS1",
+    "POP15P_CS2",
+    "POP15P_CS3",
+    "POP15P_CS4",
+    "POP15P_CS5",
+    "POP15P_CS6",
+    "POP15P_CS7",
+    "POP15P_CS8",
+    "POP1529",
+    "POP3059",
+    "POP60P",
+]
+FEATURES_BIAR = [
+    "CD_IRIS",
+    "ACTOCC1564",
+    "CHOM1564",
+    "ETUD1564",
+    "RETR1564",
+    "AINACT1564",
+]
+
+###############################################################################
