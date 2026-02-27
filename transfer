@@ -1,147 +1,137 @@
+
 """
-Module : base_demande.py
-========================
-Ce module produit des statistiques descriptives sur la base `df_demandes_clean`,
-c'est-à-dire les **demandes de prêt** (enregistrées avant la réalisation de la
-transaction), contrairement aux transactions effectives utilisées dans `base_work.py`.
+Module : base_restreinte.py
+============================
+Ce module produit une version filtrée de la base `base_complete_filtree.parquet`,
+en ne conservant que le périmètre d'étude de référence :
 
-Il réalise les mêmes étapes de fusion (BAN, BAT) et de définition des variables
-clés (`BIEN_NEUF`, `NB_PIECES_RANGE`), puis produit des graphiques HTML et des
-statistiques console pour analyser la base de demandes.
+    1. Source = Crédit Logement (SOURCE == 'CL')
+    2. Géographie : France hexagonale uniquement (départements 01-95, 2A, 2B)
+    3. Nature d'opération : exclusion des opérations TVX (travaux) et RAC (rachat de crédit)
+    4. Plage temporelle : à partir du 2014-01-01
 
-ℹ️  Ce fichier ne génère pas de base `.parquet` utilisée en aval — il sert
-   uniquement à l'analyse et au diagnostic de la base de demandes.
+Chaque étape de filtrage est tracée dans le DataFrame `metrics` pour conserver
+la traçabilité du nombre de lignes supprimées.
 
-Sorties (dossier `base_demandes_results/`) :
-    - Graphique HTML de l'évolution annuelle du nombre de transactions
-    - Graphique HTML de la répartition par nature d'opération
+La base produite (`base_restreinte.parquet`) est entrée pour les traitements aval
+(notamment `comparaison_restriction_VS_lpi.py`) qui appliquent les poids structurels
+de l'univers élémentaire à ce périmètre restreint.
+
+Sortie : `resultats/base_restreinte.parquet`
 """
-
 import sys
 import os
-
-
-import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-from fonctions import (DateOffset,
-                         ImportRecentData,
-                         CalcMetaNum,
-                         EffectifsParMailleGeo,
-                         DefMailleGeoCITY,
-                         DetectAno
-)
-from fonctions import detect_ano_ml as detect_ano_ml_fct
-import numpy as np
-
-import pandas as pd
 import time
-from fonctions import Connector
-import param_generaux as params
-import os
+import logging
+import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.io as pio
+from fonctions import Connector
+from fonctions import load_and_preprocess_data, save_results, filter_villes_top
+import param_generaux as params
 
-pio.renderers.default = "png"  
-# Dossier de sortie
-output_dir = os.path.join(os.path.dirname(__file__), "base_demandes_results")
-os.makedirs(output_dir, exist_ok=True)
+pio.renderers.default = "browser"  
+# Configuration de l'environnement
+current_dir = os.getcwd()
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(r"N:\uflumth\indicateur_marche\univers_elementaire\TI\resultats")
 
 
+
+# Configuration des dossiers
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "resultats")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
+
+def add_metric(metrics, step, before, after, note=""):
+    """
+    Enregistre une étape de filtrage dans la liste de métriques.
+
+    Parameters
+    ----------
+    metrics : list
+        Liste cumulée des métriques (une entrée dict par étape).
+    step : str
+        Nom ou description de l'étape de filtrage.
+    before : int
+        Nombre de lignes avant filtrage.
+    after : int
+        Nombre de lignes après filtrage.
+    note : str, optionnel
+        Information complémentaire sur l'étape.
+    """
+    metrics.append({
+        "étape": step,
+        "lignes_avant": int(before),
+        "lignes_après": int(after),
+        "retirées": int(before - after),
+        "note": note
+    })
+
+# --- 0. Init ---
+t0 = time.time()
+metrics = []
 co = Connector()
 
-################ Importation de la base ################
-start_time = time.time()
-df = pd.read_parquet(r"Z:\data\cl_estim\cleaned_data\df_demandes_clean.parquet")
-end_time = time.time()
-print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+# --- 1. IMPORTATION ---
+base_clean = pd.read_parquet(r"Z:\uflumth\gits\univers_elementaire\TI - V2\stats_base_complete_filtree\base_complete_filtree.parquet")
 
 
-################ Fusion avec la base BAN_ENRICHI contenant les codes IRIS ################
-df_ban = co.read_sql(
-            f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
-cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
-cl_data = cl_data.copy()
 
-# Note : le chronomètre end_time / start_time correspond ici au chargement du parquet
-# (la détection d'anomalies n'est pas appliquée sur la base de demandes)
-print(f"Temps de fusion avec BAN_ENRICHIE : {end_time - start_time:.2f} secondes")
 
-# periode_reference: paramètre permettant de choisir le mois de référence 
+
+# --- 2. RESTRICTIONS DU PÉRIMÈTRE D'ÉTUDE ---
+
+# A. Source = CL
+before = len(base_clean)
+mask_source = base_clean["SOURCE"].eq("CL")
+cl_data = base_clean[mask_source].copy()
+add_metric(metrics, "Filtre SOURCE = CL", before, len(cl_data))
+
+# B. Métropole (01-95 + 2A/2B)
+before = len(cl_data)
+dept = cl_data["DEPT_Corse_2A_2B"].astype(str).str.upper().str.strip()
+metropole_set = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
+mask_metro = dept.isin(metropole_set)
+cl_data = cl_data[mask_metro].copy()
+cl_data = cl_data.rename(columns={"DEPT_Corse_2A_2B":"DEPT"})
+add_metric(metrics, "Filtre Géographie (métropole)", before, len(cl_data))
+
+# C. Nature d'opération : exclure TVX et RAC
+before = len(cl_data)
+cl_data["CD_NATUR_OP"] = cl_data["CD_NATUR_OP"].fillna("Non renseigné")
+mask_valid_op = ~cl_data["CD_NATUR_OP"].isin(["TVX", "RAC"])
+cl_data = cl_data[mask_valid_op].copy()
+add_metric(metrics, "Filtre Nature d’opération (excl. TVX/RAC)", before, len(cl_data))
+
+# --- 3. FILTRE TEMPOREL ---
+before = len(cl_data)
+cl_data["DATE"] = cl_data["DATE"].apply(lambda x: x.replace(day=1))
 cl_data["DATE"] = pd.to_datetime(cl_data["DATE"], errors="coerce")
-periode_reference = None # à changer en fonction de la plage de temps souhaitée
-ref_date = periode_reference or cl_data["DATE"].max()
+DATE_MIN = pd.Timestamp("2014-01-01")
+DATE_MAX = cl_data["DATE"].max()  # ou date précise à choisir
+mask_date = (cl_data["DATE"] >= DATE_MIN) & (cl_data["DATE"] <= DATE_MAX)
+base_ml = cl_data[mask_date].copy()
+add_metric(metrics, "Filtre Date (>= 2014-01-01, < DATE_MAX)", before, len(base_ml))
 
-date_max = ref_date
-date_min = pd.Timestamp("2014-01-01") ##### à réadapter en fonction
+resume_operation = pd.DataFrame(metrics)
+print(resume_operation)
+# =============================================================================
+# 4. EXPORT
+# =============================================================================
+colonnes_finales = ["ID", "ville_","code_iris", "LIBELLE_DEPT", "DEPT", 
+                        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE","VALEUR_FONCIERE",
+                        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES_RANGE", 
+                        "CODE_POSTAL", "BIEN_NEUF","DEMANDE"]
 
-base_ml = cl_data[(cl_data["DATE"] >= date_min) & (cl_data["DATE"] < date_max)]
-df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
-start_time = time.time()
+base_ml = base_ml[colonnes_finales]
+output_path = os.path.join(OUTPUT_DIR, "base_restreinte.parquet")
+base_ml.to_parquet(output_path, index=False)
+print(f"\n✓ Fichier sauvegardé : {output_path}")
 
-################ Fusion avec la base BAT_ENRICHI contenant les années de construction ################
-base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
-end_time = time.time()
-print(f"Temps de fusion avec BAT_ENRICHIE : {end_time - start_time:.2f} secondes")
-
-
-start_time = time.time()
-
-# Définition de la variable BIEN_NEUF
-base_ml.loc[
-    base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
-    "annee_construction"
-] = base_ml["DATE"].dt.year
-
-
-base_ml["BIEN_NEUF"] = np.where(
-        (base_ml["NATURE_MUTATION"]  == "Vente en l'état futur d'achèvement")
-        | (base_ml["CD_NATUR_OP"] == "AQN")
-        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
-        "NEUF",
-        "ANCIEN",
-    )
-
-end_time = time.time()
-print(f"Temps de traitement variable BIEN_NEUF : {end_time - start_time:.2f} secondes")
-
-base_ml = base_ml.copy()
-base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
-
-
-bins_apt   = [0, 2, 4, np.inf]
-labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
-
-bins_mai   = [0, 4, np.inf]
-labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
-
-
-
-mask_apt = base_ml["TYPE_BIEN"].eq("APT")
-mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
-
-base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_apt, "NB_PIECES"],
-    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
-).astype(str)
-
-base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_mai, "NB_PIECES"],
-    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
-).astype(str)
-
-base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
-
-base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
-base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
-
-# Sous-ensemble des colonnes numériques utiles pour les statistiques univariées
-analyse = base_ml[["DATE","Prix_m2","NB_SURF_HAB","NB_PIECES_RANGE","annee_construction"]]
+analyse = base_ml[["DATE","Prix_m2","NB_SURF_HAB","NB_PIECES_RANGE",'VALEUR_FONCIERE']]
 # Statistiques globales sur colonnes numériques
 print("STATISTIQUES NUMÉRIQUES")
 print("-" * 80)
@@ -149,7 +139,7 @@ print(analyse.describe())
 
 # Médiane et quartiles
 print("\nMédianes et quartiles :")
-for col in ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]:
+for col in ["Prix_m2", "NB_SURF_HAB", "NB_PIECES","VALEUR_FONCIERE"]:
     if col in analyse.columns:
         print(f"\n{col}:")
         print(f"  Médiane     : {analyse[col].median():,.0f}")
@@ -157,104 +147,36 @@ for col in ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]:
         print(f"  Q3 (75%)    : {analyse[col].quantile(0.75):,.0f}")
         print(f"  Écart-type  : {analyse[col].std():,.0f}")
 
-# Répartition par année de construction
-print("\nRÉPARTITION PAR ANNÉE DE CONSTRUCTION")
-print("-" * 80)
-print(analyse["annee_construction"].value_counts().sort_index())
-
-# Répartition par nombre de pièces
-print("\nRÉPARTITION PAR NOMBRE DE PIÈCES")
-print("-" * 80)
-print(analyse["NB_PIECES_RANGE"].value_counts().sort_index())
-
-def analyse_geo(data_class):
-    """
-    Affiche la répartition géographique des transactions.
-
-    Parameters
-    ----------
-    data_class : pd.DataFrame
-        Base de transactions contenant les colonnes `LIBELLE_DEPT` et `ville_`.
-    """
-    print("RÉPARTITION GÉOGRAPHIQUE")
-    print("-" * 80)
-    
-    print("\nTop 10 départements avec le plus de transactions :")
-    top_dept = data_class['LIBELLE_DEPT'].value_counts().head(10)
-    for dept, count in top_dept.items():
-        pct = count / len(data_class) * 100
-        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Top 10 villes avec le plus de transactions :")
-    top_ville = data_class['ville_'].value_counts().head(10)
-    for ville, count in top_ville.items():
-        pct = count / len(data_class) * 100
-        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-
-geo = analyse_geo(base_ml)
-print(geo)
+# La suite du fichier permet de calculer les prix des différentes mailles géographiques selon la méthode des univers élémentaires
+# Ici on applique les poids structurels issus de cette base de données
+# Dans comparaison V1 vs V2.py, on applique les poids de la base originale DVF + CL à cette base restreinte
 
 
-by_year = base_ml.groupby("YEAR")["ID"].count().reset_index(name="Nombre de transactions")
+if False:
+    # =============================================================================
+    # 5. CALCUL DES PRIX V2_STRUCT (avec fonctions.py)
+    # =============================================================================
+    print("\n" + "="*80)
+    print(" CALCUL DES PRIX V2_STRUCT (Poids V1 sur Base Restreinte)")
+    print("="*80)
 
-# Évolution annuelle du nombre de transactions
-total_tx = by_year["Nombre de transactions"].sum()
+    path_base_v1 = r"N:\uflumth\indicateur_marche\univers_elementaire\base_complete_filtree.parquet"
+    path_base_v2 = output_path
 
-fig = px.bar(
-    by_year.sort_values("YEAR"),
-    x="YEAR",
-    y="Nombre de transactions",
-    text="Nombre de transactions",
-    color="Nombre de transactions",
-    color_continuous_scale="Viridis",
-    title=f"Évolution annuelle du nombre de transactions (Total 2015–2026 : {total_tx:,})"
-)
+    df_v1 = load_and_preprocess_data(specific_path=path_base_v1)
+    df_v1 = df_v1[df_v1["DEMANDE"] == 0]
+    df_v1 = filter_villes_top(df_v1)
+    structure_v1 = get_structure_reference(df_v1, maille_col="CITY")
 
-fig.update_traces(textposition="outside")
-fig.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Nombre de transactions",
-    title_x=0.5,
-    plot_bgcolor="white",
-    xaxis_tickmode="linear",  
-    coloraxis_showscale=False
-)
+    df_v2 = load_and_preprocess_data(specific_path=path_base_v2)
 
+    res_v2_struct = process_maille(
+        df=df_v2,
+        maille_col="CITY",
+        maille_name="CITY_V2_STRUCT",
+        filter_func=filter_villes_top,
+        df_structure_ref=structure_v1
+    )
 
-fig.write_html(os.path.join(output_dir, f"Evolution nombre de transactions.html"))
-
-
-
-
-
-# Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) par source
-
-# Comptage par CD_NATUR_OP
-df_grouped = (
-    base_ml
-    .groupby(["CD_NATUR_OP"])["ID"]
-    .count()
-    .reset_index(name="Nombre_nature_op")
-)
-
-# Total global (scalaire)
-total = base_ml["ID"].count()
-
-# Pourcentage (sans colonne 'Total' et sans merge)
-df_grouped["Pourcentage"] = df_grouped["Nombre_nature_op"] / total * 100
-
-# Exemple de graphique adapté (pas de YEAR)
-import plotly.express as px
-
-fig2 = px.bar(
-    df_grouped,
-    x="CD_NATUR_OP",
-    y="Pourcentage",
-    text_auto=".1f",
-    labels={"CD_NATUR_OP": "Nature opération", "Pourcentage": "Pourcentage (%)"},
-    title="Répartition par nature d'opération (pourcentage global)"
-)
-fig2.update_layout(yaxis_ticksuffix=" %")
-fig2.write_html(os.path.join(output_dir, f"Repartition type de transaction.html"))
+    save_results(res_v2_struct, "CITY_RESTREINT")
+    print("\n✓ Prix V2_STRUCT calculé et sauvegardé")
