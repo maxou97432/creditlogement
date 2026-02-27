@@ -1,1290 +1,1080 @@
+import sys
 import os
-from datetime import datetime
-import yaml
-"""Ce fichier a pour but d'importer tous les paramètres utilisés dans classe.py"""
-## CONFIG est utilisé dans fonctions.py et calc_prix_m2_univ_elem.py afin de configurer l'ensemble des périmètres et paramètres
 
-# Configuration globale
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.append(parent_dir)
 
-CONFIG = {
-    'input_file': "base_complete_filtree.parquet",
-    'output_dir': os.path.join(os.path.dirname(__file__), 'resultats'),
-    'top_cities': ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "NICE", "BORDEAUX", "STRASBOURG", "NANTES", "MONTPELLIER", "TOURS","BREST", "REIMS", "SAINT ETIENNE", "GRENOBLE", "HAVRE"],
-    'villes_arrondissements': ["PARIS", "LILLE", "MARSEILLE", "LYON"],
-    'idf_depts': ["75", "77", "78", "92", "93", "94", "95"],
-    'codes_insee_nice': [
-        "06159", "06157", "06156", "06153", "06151", "06149", "06147", "06146", "06144",
-        "06129", "06127", "06126", "06123", "06122", "06121", "06120", "06119", "06117",
-        "06114", "06111", "06110", "06109", "06103", "06102", "06088", "06080", "06075",
-        "06074", "06073", "06072", "06066", "06065", "06064", "06060", "06059", "06055",
-        "06054", "06046", "06042", "06039", "06034", "06033", "06032", "06027", "06025",
-        "06021", "06020", "06013", "06011", "06009", "06006"
-    ],
-    'dep_to_region': {
+import time
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import plotly.express as px
+import plotly.io as pio
+from fonctions import Connector
+import param_generaux as params
+pio.renderers.default = "png"
 
-        '01': 'Rhône-Alpes', '02': 'Picardie', '03': 'Auvergne', '04': "Provence-Alpes-Côte d'Azur", '05': "Provence-Alpes-Côte d'Azur",
-        '06': "Provence-Alpes-Côte d'Azur", '07': 'Rhône-Alpes', '08': 'Champagne', '09': 'Midi-Pyrénées', '10': 'Champagne',
-        '11': 'Languedoc-Roussillon', '12': 'Midi-Pyrénées', '13': "Provence-Alpes-Côte d'Azur", '14': 'Basse-Normandie', '15': 'Auvergne',
-        '16': 'Poitou-Charentes', '17': 'Poitou-Charentes', '18': 'Centre', '19': 'Limousin', '21': 'Bourgogne',
-        '22': 'Bretagne', '23': 'Limousin', '24': 'Aquitaine', '25': 'Franche-Comté', '26': 'Rhône-Alpes', '27': 'Haute-Normandie',
-        '28': 'Centre', '29': 'Bretagne', '30': 'Languedoc-Roussillon', '31': 'Midi-Pyrénées', '32': 'Midi-Pyrénées', '33': 'Aquitaine',
-        '34': 'Languedoc-Roussillon', '35': 'Bretagne', '36': 'Centre', '37': 'Centre', '38': 'Rhône-Alpes', '39': 'Franche-Comté',
-        '40': 'Aquitaine', '41': 'Centre', '42': 'Rhône-Alpes', '43': 'Auvergne', '44': 'Pays de la Loire', '45': 'Centre',
-        '46': 'Midi-Pyrénées', '47': 'Aquitaine', '48': 'Languedoc-Roussillon', '49': 'Pays de la Loire', '50': 'Basse-Normandie',
-        '51': 'Champagne', '52': 'Champagne', '53': 'Pays de la Loire', '54': 'Lorraine', '55': 'Lorraine', '56': 'Bretagne',
-        '57': 'Lorraine', '58': 'Bourgogne', '59': 'Nord-Pas-de-Calais', '60': 'Picardie', '61': 'Basse-Normandie', '62': 'Nord-Pas-de-Calais',
-        '63': 'Auvergne', '64': 'Aquitaine', '65': 'Midi-Pyrénées', '66': 'Languedoc-Roussillon', '67': 'Alsace', '68': 'Alsace',
-        '69': 'Rhône-Alpes', '70': 'Franche-Comté', '71': 'Bourgogne', '72': 'Pays de la Loire', '73': 'Rhône-Alpes', '74': 'Rhône-Alpes',
-        '75': 'Île-de-France', '76': 'Haute-Normandie', '77': 'Île-de-France', '78': 'Île-de-France', '79': 'Poitou-Charentes',
-        '80': 'Picardie', '81': 'Midi-Pyrénées', '82': 'Midi-Pyrénées', '83': "Provence-Alpes-Côte d'Azur", '84': "Provence-Alpes-Côte d'Azur",
-        '85': 'Pays de la Loire', '86': 'Poitou-Charentes', '87': 'Limousin', '88': 'Lorraine', '89': 'Bourgogne', '90': 'Franche-Comté',
-        '91': 'Île-de-France', '92': 'Île-de-France', '93': 'Île-de-France', '94': 'Île-de-France', '95': 'Île-de-France',
-        '2A': 'Corse', '2B': 'Corse'
+# Dossier de sortie
+output_dir = os.path.join(os.path.dirname(__file__), "results")
+os.makedirs(output_dir, exist_ok=True)
+
+
+
+
+
+start_time = time.time()
+base_ml = pd.read_parquet(r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats\base_complete_filtree.parquet")
+end_time = time.time()
+print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
+
+base_ml = base_ml.rename(columns={"ville_":"Ville"})
+
+################# STATISTIQUES UNIVARIEES SUR CHAQUE UNIVERS #################
+dep_to_region = {
+    # Picardie
+    '02': 'Picardie', '60': 'Picardie', '80': 'Picardie',
+
+    # Auvergne
+    '03': 'Auvergne', '15': 'Auvergne', '43': 'Auvergne', '63': 'Auvergne',
+
+    # Provence-Alpes-Côte d'Azur
+    '04': "Provence-Alpes-Côte d'Azur", '05': "Provence-Alpes-Côte d'Azur", '06': "Provence-Alpes-Côte d'Azur",
+    '13': "Provence-Alpes-Côte d'Azur", '83': "Provence-Alpes-Côte d'Azur", '84': "Provence-Alpes-Côte d'Azur",
+
+    # Rhône-Alpes
+    '07': 'Rhône-Alpes', '01': 'Rhône-Alpes', '26': 'Rhône-Alpes', '38': 'Rhône-Alpes',
+    '42': 'Rhône-Alpes', '69': 'Rhône-Alpes', '73': 'Rhône-Alpes', '74': 'Rhône-Alpes',
+
+    # Champagne
+    '08': 'Champagne', '10': 'Champagne', '51': 'Champagne', '52': 'Champagne',
+
+    # Midi-Pyrénées
+    '09': 'Midi-Pyrénées', '12': 'Midi-Pyrénées', '31': 'Midi-Pyrénées', '32': 'Midi-Pyrénées',
+    '46': 'Midi-Pyrénées', '65': 'Midi-Pyrénées', '81': 'Midi-Pyrénées', '82': 'Midi-Pyrénées',
+
+    # Languedoc-Roussillon
+    '11': 'Languedoc-Roussillon', '30': 'Languedoc-Roussillon', '34': 'Languedoc-Roussillon',
+    '48': 'Languedoc-Roussillon', '66': 'Languedoc-Roussillon',
+
+    # Basse-Normandie
+    '14': 'Basse-Normandie', '50': 'Basse-Normandie', '61': 'Basse-Normandie',
+
+    # Poitou-Charentes
+    '16': 'Poitou-Charentes', '17': 'Poitou-Charentes', '86': 'Poitou-Charentes', '79': 'Poitou-Charentes',
+
+    # Centre
+    '18': 'Centre', '28': 'Centre', '36': 'Centre', '37': 'Centre',
+    '41': 'Centre', '45': 'Centre',
+
+    # Limousin
+    '19': 'Limousin', '23': 'Limousin', '87': 'Limousin',
+
+    # Corse
+    '20': 'Corse', '2A': 'Corse', '2B': 'Corse',
+
+    # Bourgogne
+    '21': 'Bourgogne', '58': 'Bourgogne', '71': 'Bourgogne', '89': 'Bourgogne',
+
+    # Bretagne
+    '22': 'Bretagne', '29': 'Bretagne', '35': 'Bretagne', '56': 'Bretagne',
+
+    # Aquitaine
+    '24': 'Aquitaine', '40': 'Aquitaine', '47': 'Aquitaine', '33': 'Aquitaine', '64': 'Aquitaine',
+
+    # Franche-Comté
+    '25': 'Franche-Comté', '39': 'Franche-Comté', '70': 'Franche-Comté', '90': 'Franche-Comté',
+
+    # Haute-Normandie
+    '27': 'Haute-Normandie', '76': 'Haute-Normandie',
+
+    # Pays de la Loire
+    '44': 'Pays de la Loire', '49': 'Pays de la Loire', '53': 'Pays de la Loire',
+    '72': 'Pays de la Loire', '85': 'Pays de la Loire',
+
+    # Lorraine
+    '54': 'Lorraine', '55': 'Lorraine', '57': 'Lorraine', '88': 'Lorraine',
+
+    # Nord
+    '59': 'Nord', '62': 'Nord',
+
+    # Alsace
+    '67': 'Alsace', '68': 'Alsace',
+
+    # Île-de-France
+    '75': 'Île-de-France', '77': 'Île-de-France', '78': 'Île-de-France',
+    '91': 'Île-de-France', '92': 'Île-de-France', '93': 'Île-de-France',
+    '94': 'Île-de-France', '95': 'Île-de-France',
+
+    # DOM
+    '97': 'DOM',
+
+    # Monaco, TOM
+    '98': 'Monaco, TOM', '99': 'Monaco, TOM',
+
+    # Non renseigné
+    '': 'Non Renseigné'
+}
+
+
+base_ml['DEPT_Corse_2A_2B'] = base_ml['DEPT_Corse_2A_2B'].astype(str).str.zfill(2)
+
+base_ml['REGION'] = base_ml['DEPT_Corse_2A_2B'].map(dep_to_region)
+
+analyse = base_ml[["DATE","Prix_m2","NB_SURF_HAB","NB_PIECES_RANGE","annee_construction"]]
+# Statistiques globales sur colonnes numériques
+("STATISTIQUES NUMÉRIQUES")
+print("-" * 80)
+print(analyse.describe())
+
+# Médiane et quartiles
+print("\nMédianes et quartiles :")
+for col in ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]:
+    if col in analyse.columns:
+        print(f"\n{col}:")
+        print(f"  Médiane     : {analyse[col].median():,.0f}")
+        print(f"  Q1 (25%)    : {analyse[col].quantile(0.25):,.0f}")
+        print(f"  Q3 (75%)    : {analyse[col].quantile(0.75):,.0f}")
+        print(f"  Écart-type  : {analyse[col].std():,.0f}")
+        
+#Statistiques de prix par région
+prix_my_reg = (
+    base_ml.groupby('REGION')["Prix_m2"].mean()
+    .reset_index(name="Prix moyen €/m²")
+)
+
+prix_med_reg = (
+    base_ml.groupby('REGION')["Prix_m2"].median()
+    .reset_index(name="Prix médian €/m²")
+)
+
+nb_trans_reg = (
+    base_ml.groupby('REGION')["ID"].count()
+    .reset_index(name="Nombre de transactions")
+)
+
+
+fig1 = px.bar(
+    prix_my_reg.sort_values(by="Prix moyen €/m²", ascending=False),
+    x="REGION",
+    y="Prix moyen €/m²",
+    title="Prix moyen par région (€ / m²)",
+    text="Prix moyen €/m²",
+    color="Prix moyen €/m²",
+    color_continuous_scale="Viridis"
+)
+fig1.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig1.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Prix moyen (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig2 = px.bar(
+    prix_med_reg.sort_values(by="Prix médian €/m²", ascending=False),
+    x="REGION",
+    y="Prix médian €/m²",
+    title="Prix médian par région (€ / m²)",
+    text="Prix médian €/m²",
+    color="Prix médian €/m²",
+    color_continuous_scale="Blues"
+)
+fig2.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig2.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Prix médian (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+fig3 = px.bar(
+    nb_trans_reg.sort_values(by="Nombre de transactions", ascending=False),
+    x="REGION",
+    y="Nombre de transactions",
+    title="Nombre total de transactions par région (sur 10 ans)",
+    text="Nombre de transactions",
+    color="Nombre de transactions",
+    color_continuous_scale="Sunset"
+)
+fig3.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig3.update_layout(
+    xaxis_title="Région",
+    yaxis_title="Nombre de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+
+fig1.write_html(os.path.join(output_dir, "evolution_prix_moyen_m2_region.html"))
+fig2.write_html(os.path.join(output_dir, "evolution_prix_median_m2_region.html"))
+fig3.write_html(os.path.join(output_dir, "evolution_nb_transac_region.html"))
+
+# Statistiques de prix par départements
+prix_moy_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["Prix_m2"].mean()
+    .reset_index(name="Prix moyen €/m²")
+)
+
+prix_med_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["Prix_m2"].median()
+    .reset_index(name="Prix médian €/m²")
+)
+
+nb_trans_dept = (
+    base_ml.groupby('DEPT_Corse_2A_2B')["ID"].count()
+    .reset_index(name="Nombre de transactions")
+    .sort_values(by="Nombre de transactions", ascending=False)
+)
+
+
+top10_depts = nb_trans_dept.head(10)["DEPT_Corse_2A_2B"]
+prix_moy_dept = prix_moy_dept[prix_moy_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+prix_med_dept = prix_med_dept[prix_med_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+nb_trans_dept = nb_trans_dept[nb_trans_dept["DEPT_Corse_2A_2B"].isin(top10_depts)]
+
+
+fig4 = px.bar(
+    prix_moy_dept.sort_values(by="Prix moyen €/m²", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Prix moyen €/m²",
+    title="Prix moyen par département (€ / m²) — Top 10 départements",
+    text="Prix moyen €/m²",
+    color="Prix moyen €/m²",
+    color_continuous_scale="Viridis"
+)
+fig4.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig4.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Prix moyen (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig5 = px.bar(
+    prix_med_dept.sort_values(by="Prix médian €/m²", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Prix médian €/m²",
+    title="Prix médian par département (€ / m²) — Top 10 départements",
+    text="Prix médian €/m²",
+    color="Prix médian €/m²",
+    color_continuous_scale="Blues"
+)
+fig5.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig5.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Prix médian (€ / m²)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+fig6 = px.bar(
+    nb_trans_dept.sort_values(by="Nombre de transactions", ascending=False),
+    x="DEPT_Corse_2A_2B",
+    y="Nombre de transactions",
+    title="Nombre de transactions par département (sur 10 ans) — Top 10",
+    text="Nombre de transactions",
+    color="Nombre de transactions",
+    color_continuous_scale="Sunset"
+)
+fig6.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+fig6.update_layout(
+    xaxis_title="Département",
+    yaxis_title="Nombre de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white"
+)
+
+
+fig1.write_html(os.path.join(output_dir, "evolution_prix_moyen_m2_dep.html"))
+fig2.write_html(os.path.join(output_dir, "evolution_prix_median_m2_dep.html"))
+fig3.write_html(os.path.join(output_dir, "evolution_nb_transac_dep.html"))
+
+#Statistiques sur le'ancienneté des biens
+
+
+
+counts = base_ml["BIEN_NEUF"].value_counts()
+percentages = (counts / len(base_ml)) * 100
+
+result_df = pd.DataFrame({
+    "Type de bien": counts.index,
+    "Nombre": counts.values,
+    "Pourcentage (%)": percentages.round(2)
+})
+
+print("Répartition de l'ancienneté des biens sur l'ensemble de la base")
+print("--" * 22)
+print(result_df)
+
+
+df_grouped = (
+    base_ml.groupby(["YEAR", "BIEN_NEUF"])["ID"]
+    .count()
+    .reset_index(name="Nombre_transactions")
+)
+
+total_per_year = df_grouped.groupby("YEAR")["Nombre_transactions"].sum()
+pivot_df = df_grouped.pivot(index="YEAR", columns="BIEN_NEUF", values="Nombre_transactions")
+pourcentage_df = pivot_df.div(total_per_year, axis=0) * 100
+
+
+pourcentage_df = pourcentage_df.reset_index().melt(
+    id_vars="YEAR",
+    var_name="Type de bien",
+    value_name="Pourcentage"
+)
+
+
+fig4 = px.bar(
+    pourcentage_df,
+    x="YEAR",
+    y="Pourcentage",
+    color="Type de bien",
+    barmode="group",
+    text="Pourcentage",
+    color_discrete_map={"Neuf": "#1f77b4", "Ancien": "#ff7f0e"},
+    title="Évolution annuelle du pourcentage de transactions par ancienneté de bien"
+)
+
+fig4.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+fig4.update_layout(
+    xaxis_title="Année",
+    yaxis_title="Pourcentage de transactions",
+    title_x=0.5,
+    plot_bgcolor="white",
+    legend_title="Type de bien"
+)
+
+fig4.write_html(os.path.join(output_dir, "anciennete.html"))
+
+# Statistiques sur les types de bien
+
+r = (base_ml[base_ml['TYPE_BIEN'] == 'APT']
+     .groupby('YEAR')['ID'].count()
+     .reset_index(name='Nombre_transactions'))
+l = (base_ml[base_ml['TYPE_BIEN'] == 'MAI']
+     .groupby('YEAR')['ID'].count()
+     .reset_index(name='Nombre_transactions'))
+
+fig_r = px.bar(
+    r.sort_values('YEAR'),
+    x='YEAR', y='Nombre_transactions',
+    title="Transactions d'appartements par année",
+    text='Nombre_transactions',
+    color_discrete_sequence=['#1f77b4']
+)
+fig_r.update_traces(textposition='outside')
+fig_r.update_layout(xaxis_title="Année", yaxis_title="Nombre de transactions",
+                    title_x=0.5, plot_bgcolor="white")
+
+
+fig_l = px.bar(
+    l.sort_values('YEAR'),
+    x='YEAR', y='Nombre_transactions',
+    title="Transactions de maisons par année",
+    text='Nombre_transactions',
+    color_discrete_sequence=['#ff7f0e']
+)
+fig_l.update_traces(textposition='outside')
+fig_l.update_layout(xaxis_title="Année", yaxis_title="Nombre de transactions",
+                    title_x=0.5, plot_bgcolor="white")
+
+
+
+df_grouped = (base_ml.groupby(['YEAR', 'TYPE_BIEN'])['ID']
+                     .count()
+                     .reset_index(name='Nombre_transactions'))
+
+
+total_per_year = df_grouped.groupby('YEAR')['Nombre_transactions'].transform('sum')
+df_grouped['Pourcentage'] = df_grouped['Nombre_transactions'] / total_per_year * 100
+
+
+fig_pct = px.bar(
+    df_grouped.sort_values('YEAR'),
+    x='YEAR', y='Pourcentage', color='TYPE_BIEN',
+    barmode='group', text='Pourcentage',
+    color_discrete_map={'APT': '#1f77b4', 'MAI': '#ff7f0e'},
+    title="Évolution annuelle de la répartition du type de bien"
+)
+fig_pct.update_traces(texttemplate="%{text:.1f}%", textposition='outside')
+fig_pct.update_layout(
+    xaxis_title="Année", yaxis_title="Pourcentage de transactions",
+    title_x=0.5, plot_bgcolor="white", legend_title="Type de bien"
+)
+
+fig_pct.write_html(os.path.join(output_dir, "type_bien.html"))
+
+# Statistiques sur la répartition du nombre de pièces
+
+base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
+
+
+bins_apt   = [0, 2, 4, np.inf]
+labels_apt = ["APT: 1-2 pièces", "APT : 3-4 pièces", "APT: 5 pièces et plus"] # on regroupe les pièces
+
+bins_mai   = [0, 4, np.inf]
+labels_mai = ["MAI: 4 pièces et moins", "MAI: 5 pièces et plus"]
+
+
+base_ml["NB_PIECES_RANGE"] = np.nan
+
+mask_apt = base_ml["TYPE_BIEN"].eq("APT")
+mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+
+base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_apt, "NB_PIECES"],
+    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
+)
+
+base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
+    base_ml.loc[mask_mai, "NB_PIECES"],
+    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
+)
+
+base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
+
+base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
+base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
+
+distribution = (
+    base_ml.groupby(['TYPE_BIEN', 'NB_PIECES_RANGE'])['ID']
+           .count()
+           .reset_index(name='Nombre')
+)
+tot = distribution.groupby("TYPE_BIEN")["Nombre"].transform("sum")
+distribution['Pourcentage'] = (distribution['Nombre'] / tot) * 100
+
+
+
+
+fig_group = px.bar(
+    distribution.sort_values(['NB_PIECES_RANGE','TYPE_BIEN']),
+    x='NB_PIECES_RANGE', y='Pourcentage',
+    color='TYPE_BIEN',
+    barmode='group',
+    text=distribution['Pourcentage'].round(1).astype(str) + '%',
+    title="Distribution du nombre de pièces par type de bien (en %)"
+)
+fig_group.update_traces(textposition='outside')
+fig_group.update_layout(
+    xaxis_title="Classe de pièces",
+    yaxis_title="Pourcentage de transactions",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white",
+    legend_title="Type de bien",
+    uniformtext_minsize=8, uniformtext_mode='hide'
+)
+
+fig_group.write_html(os.path.join(output_dir, "nb_piece_par_type.html"))
+
+distribution_global = (
+    base_ml.groupby(['TYPE_BIEN', 'NB_PIECES_RANGE'])['ID']
+           .count()
+           .reset_index(name='Nombre')
+)
+
+total_global = distribution_global['Nombre'].sum()
+distribution_global['Pourcentage_total'] = (
+    distribution_global['Nombre'] / total_global * 100
+)
+
+
+distribution_global = distribution_global.sort_values(['NB_PIECES_RANGE', 'TYPE_BIEN'])
+
+
+figt = px.bar(
+    distribution_global,
+    x='NB_PIECES_RANGE',
+    y='Pourcentage_total',
+    color='TYPE_BIEN',
+    text=distribution_global['Pourcentage_total'].round(1).astype(str) + '%',
+    title="Répartition des catégories de nombre de pièces (tous biens confondus)",
+    color_discrete_map={'APT': '#1f77b4', 'MAI': '#ff7f0e'},
+    barmode='group'
+)
+
+figt.update_traces(textposition='outside')
+figt.update_layout(
+    xaxis_title="Catégorie (nombre de pièces)",
+    yaxis_title="Part dans le total (%)",
+    title_x=0.5,
+    xaxis_tickangle=45,
+    plot_bgcolor="white",
+    legend_title="Type de bien"
+)
+
+figt.write_html(os.path.join(output_dir, "nb_piece_tout_confondu.html"))
+
+
+################# CONSTRUCTION DES UNIVERS ELEMENTAIRES #################
+
+# REGIONS
+dims = ["REGION", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"] #on regroupe selon le croisement de ces univers
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          median_price = ("Prix_m2", "median"),
+          mean_price = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["REGION"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+univers_complet_reg = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+univers_complet_reg["nb_transac"] = univers_complet_reg["nb_transac"].fillna(0).astype(int)
+
+univers_complet_reg["PB"] = (
+    univers_complet_reg["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_reg["TYPE_BIEN"] = univers_complet_reg["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_reg["TYPE_BIEN"] != univers_complet_reg["PB"]
+
+univers_complet_reg = univers_complet_reg.loc[~mask].copy()
+univers_complet_reg = univers_complet_reg.drop(columns=["PB"])
+if (univers_complet_reg["nb_transac"]).all() == 0:
+    univers_complet_reg.groupby("REGION")["nb_transac"].transform(sum)
+
+univers_complet_reg["Repartition (%)"] = (univers_complet_reg["nb_transac"] / univers_complet_reg.groupby("REGION")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_reg.csv")
+univers_complet_reg.to_csv(csv_path, index=False)
+
+
+# DEPARTEMENTS
+
+dims = ["DEPT_Corse_2A_2B", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["DEPT_Corse_2A_2B"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+univers_complet_dep = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+univers_complet_dep["nb_transac"] = univers_complet_dep["nb_transac"].fillna(0).astype(int)
+univers_complet_dep["PB"] = (
+    univers_complet_dep["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_dep["TYPE_BIEN"] = univers_complet_dep["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_dep["TYPE_BIEN"] != univers_complet_dep["PB"]
+
+univers_complet_dep = univers_complet_dep.loc[~mask].copy()
+univers_complet_dep = univers_complet_dep.drop(columns=["PB"])
+univers_complet_dep["Repartition (%)"] = (univers_complet_dep["nb_transac"] / univers_complet_dep.groupby("DEPT_Corse_2A_2B")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_dep.csv")
+univers_complet_dep.to_csv(csv_path, index=False)
+
+# VILLES
+
+
+dims = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+          surface_moyenne = ("NB_SURF_HAB", "mean")
+
+      )
+      .reset_index()
+)
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["Ville"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+
+univers_complet_ville = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+
+univers_complet_ville["nb_transac"] = univers_complet_ville["nb_transac"].fillna(0).astype(int)
+
+univers_complet_ville["PB"] = (
+    univers_complet_ville["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_ville["TYPE_BIEN"] = univers_complet_ville["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_ville["TYPE_BIEN"] != univers_complet_ville["PB"]
+
+univers_complet_ville = univers_complet_ville.loc[~mask].copy()
+univers_complet_ville = univers_complet_ville.drop(columns=["PB"])
+univers_complet_ville["Repartition (%)"] = (univers_complet_ville["nb_transac"] / univers_complet_ville.groupby("Ville")["nb_transac"].transform(sum)) * 100
+
+
+csv_path = os.path.join(output_dir, "univers_complet_ville.csv")
+univers_complet_ville.to_csv(csv_path, index=False)
+
+#CODE POSTAL
+
+
+dims = ["CODE_POSTAL", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+
+univers = (
+    base_ml.groupby(dims, dropna=False)
+      .agg(
+          nb_transac = ("ID", "size"),
+          prix_median = ("Prix_m2", "median"),
+          prix_moyen = ("Prix_m2", "mean"),
+      )
+      .reset_index()
+)
+
+grille = (
+    pd.MultiIndex.from_product(
+        [base_ml["CODE_POSTAL"].unique(),
+         base_ml["BIEN_NEUF"].unique(),
+         base_ml["TYPE_BIEN"].unique(),
+         base_ml["NB_PIECES_RANGE"].unique()],
+        names=dims
+    ).to_frame(index=False)
+)
+
+
+univers_complet_cp = grille.merge(univers, on=dims, how="left").sort_values(dims)
+
+
+univers_complet_cp["nb_transac"] = univers_complet_cp["nb_transac"].fillna(0).astype(int)
+univers_complet_cp["PB"] = (
+    univers_complet_cp["NB_PIECES_RANGE"]
+    .astype(str)
+    .str.strip()
+    .str[:3]
+    .str.upper()
+)
+univers_complet_cp["TYPE_BIEN"] = univers_complet_cp["TYPE_BIEN"].astype(str).str.strip().str.upper()
+
+
+mask = univers_complet_cp["TYPE_BIEN"] != univers_complet_cp["PB"]
+
+univers_complet_cp = univers_complet_cp.loc[~mask].copy()
+univers_complet_cp = univers_complet_cp.drop(columns=["PB"])
+univers_complet_cp["Repartition (%)"] = (univers_complet_cp["nb_transac"] / univers_complet_cp.groupby("CODE_POSTAL")["nb_transac"].transform(sum)) * 100
+
+csv_path = os.path.join(output_dir, "univers_complet_cp.csv")
+univers_complet_cp.to_csv(csv_path, index=False)
+
+################## Construction des prix glissants aggrégés par ville ##################
+
+
+
+top15 = ["PARIS", "MARSEILLE", "LYON", "LILLE", "RENNES", "TOULOUSE", "BORDEAUX", "NICE",
+         "STRASBOURG", "NANTES", "MONTPELLIER", "TOULON", "REIMS", "SAINT-ETIENNE", "LE HAVRE"]
+
+
+base_ml2 = base_ml.copy()
+base_ml2 = base_ml2.rename(columns={"ville_": "Ville"})
+base_ml2["Ville"] = base_ml2["Ville"].astype(str).str.strip().str.upper()
+base_ml2 = base_ml2[base_ml2["Ville"].isin(top15)]
+
+
+base_ml2["DATE"] = pd.to_datetime(base_ml2["DATE"])
+base_ml2["Periode"] = base_ml2["DATE"].dt.to_period("M").dt.to_timestamp()
+
+# =============================================================================
+# AGRÉGATION MENSUELLE PAR UNIVERS
+# =============================================================================
+
+keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+
+univers_mensuel = (
+    base_ml2
+    .groupby(keys, dropna=False)
+    .agg(
+        nb_transac=("ID", "size"),
+        prix_moyen=("Prix_m2", "mean"),
+        prix_median=("Prix_m2", "median"),
+        surface_moyenne=("NB_SURF_HAB", "mean")
+    )
+    .reset_index()
+)
+
+print(f"✓ Aggrégation des sous univers par mois")
+
+univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+mask = univers_mensuel["TYPE_BIEN"] != univers_mensuel["PB"]
+univers_mensuel = univers_mensuel.loc[~mask].drop(columns="PB")
+
+
+def complete_months(g):  #complète les mois manquants dans un sous univers en attribuant des valeurs nulles pour nb_transac et na pour prix_m2_moyen
+    g = g.sort_values("Periode").set_index("Periode")
+    idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+    g = g.reindex(idx)
+    
+    for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+        g[col] = g[col].ffill().bfill()
+    
+    g["nb_transac"] = g["nb_transac"].fillna(0)
+    g["prix_moyen"] = g["prix_moyen"]  # Garde NaN
+    
+    return g.reset_index().rename(columns={"index": "Periode"})
+
+univers_complet = (
+    univers_mensuel
+    .groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], group_keys=False)
+    .apply(complete_months)
+)
+
+
+
+# =============================================================================
+# CALCUL DES POIDS STRUCTURELS SUR 2015-2025
+# =============================================================================
+
+poids_global = (
+    univers_mensuel
+    .groupby(["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"], as_index=False)["nb_transac"]
+    .sum()
+    .rename(columns={"nb_transac": "poids_total"})
+)
+
+poids_global["poids_relatif"] = (
+    poids_global.groupby('Ville')["poids_total"].transform(lambda x: x / x.sum())
+)
+
+univers_complet = univers_complet.merge(
+    poids_global,
+    on=["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"],
+    how="left"
+)
+
+print(f"✓ Poids structurels calculés")
+
+# =============================================================================
+# CALCUL DES INDICATRICES I_3m ET I_12m PAR TYPOLOGIE
+# =============================================================================
+#création d'une variable indicatrice représentant la présence ou non de transaction sur 3 et 12 mois
+
+typokeys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+
+univers_complet = univers_complet.sort_values(typokeys + ["Periode"])
+
+univers_complet["I_3m"] = (
+    univers_complet
+    .groupby(typokeys, group_keys=False)["nb_transac"]
+    .transform(lambda s: (s.rolling(window=3, min_periods=1).sum() > 0).astype(int))
+)
+
+univers_complet["I_12m"] = (
+    univers_complet
+    .groupby(typokeys, group_keys=False)["nb_transac"]
+    .transform(lambda s: (s.rolling(window=12, min_periods=6).sum() > 0).astype(int))
+)
+
+print("✓ Indicatrices I_3m et I_12m calculées")
+
+
+
+# =============================================================================
+# MOYENNES MOBILES PONDÉRÉES AVEC INDICATRICES
+# =============================================================================
+
+
+def calcule_moyenne_mobile_ponderee(g, window, col_prix, col_indicatrice):
+    """
+    Calcule une moyenne mobile pondérée sur 3 et 12 mois.
+    
+    Pour chaque mois t :
+    - Regarde les 3/12 derniers mois
+    - Pour chaque typologie : prend les prix où indicatrice = 1
+    - Fait une moyenne pondérée de tous ces prix
+
+    """
+    result = []
+    
+    g = g.sort_values("Periode")
+    periodes = g["Periode"].unique()
+    
+    for i, periode in enumerate(periodes):
+        # Fenêtre : 'window' derniers mois incluant le mois actuel
+        start_idx = max(0, i - window + 1)
+        periodes_fenetre = periodes[start_idx:i+1]
+        
+        # Données de la fenêtre
+        df_fenetre = g[g["Periode"].isin(periodes_fenetre)].copy()
+        
+        # Filtrer : seulement les lignes avec prix ET indicatrice = 1
+        df_actif = df_fenetre[
+            (df_fenetre[col_prix].notna()) & 
+            (df_fenetre[col_indicatrice] == 1)
+        ].copy()
+        
+        if len(df_actif) == 0:
+            result.append({
+                "Periode": periode,
+                "prix_mm": np.nan,
+                "nb_observations": 0,
+                "nb_typologies": 0
+            })
+            continue
+        
+        # Pondération : poids_relatif pour chaque observation
+        total_poids = df_actif["poids_relatif"].sum()
+        
+        if total_poids > 0:
+            poids_norm = df_actif["poids_relatif"] / total_poids
+            prix_mm = np.average(df_actif[col_prix], weights=poids_norm)
+        else:
+            prix_mm = np.nan
+        nb_transac_mois = g[(g['Periode']==periode)]["nb_transac"].sum()
+        result.append({
+            "Periode": periode,
+            "prix_mm": prix_mm,
+            "nb_observations": nb_transac_mois,
+            "nb_typologies": df_actif.groupby(typokeys).ngroups
+        })
+    
+    return pd.DataFrame(result)
+
+
+# Calcul par ville
+print("Calcul des moyennes mobiles par ville")
+
+resultats_mm = []
+
+for ville in univers_complet["Ville"].unique():
+    df_ville = univers_complet[univers_complet["Ville"] == ville].copy()
+    
+    # Moyenne mobile 3 mois
+    mm_3m = calcule_moyenne_mobile_ponderee(
+        df_ville, 
+        window=3, 
+        col_prix='prix_moyen',
+        col_indicatrice='I_3m'
+    )
+    mm_3m = mm_3m.rename(columns={
+        "prix_mm": "prix_mm_3m",
+        "nb_observations": "nb_obs_3m",
+        "nb_typologies": "nb_typo_3m"
+    })
+    
+    # Moyenne mobile 12 mois
+    mm_12m = calcule_moyenne_mobile_ponderee(
+        df_ville, 
+        window=12, 
+        col_prix='prix_moyen',
+        col_indicatrice='I_12m'
+    )
+    mm_12m = mm_12m.rename(columns={
+        "prix_mm": "prix_mm_12m",
+        "nb_observations": "nb_obs_12m",
+        "nb_typologies": "nb_typo_12m"
+    })
+    
+    # Fusion
+    mm_ville = mm_3m.merge(mm_12m, on="Periode", how="outer")
+    mm_ville["Ville"] = ville
+    
+    resultats_mm.append(mm_ville)
+
+
+model_agg = pd.concat(resultats_mm, ignore_index=True)
+model_agg = model_agg.sort_values(["Ville", "Periode"])
+
+
+
+
+
+    
+def resume_ville(g):
+    g = g.dropna(subset=["prix_moyen"]).sort_values("nb_transac", ascending=True)
+    
+    if len(g) == 0:
+        return pd.DataFrame()
+    
+    idx_min = g.index[0]
+    idx_max = g.index[-1]
+    idx_med = g.index[len(g)//2]
+    idx_q1 = g.index[int(len(g) * 0.25)]
+    idx_q3 = g.index[int(len(g) * 0.75)]
+
+    
+    return pd.DataFrame([
+        {
+            "Ville": g.loc[idx_min, "Ville"],
+            "Univers": "Moins de transactions",
+            "BIEN_NEUF": g.loc[idx_min, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_min, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_min, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_min, "nb_transac"],
+            "prix_median": g.loc[idx_min, "prix_median"],
+            "prix_moyen": g.loc[idx_min, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_q1, "Ville"],
+            "Univers": "Premier quartile",
+            "BIEN_NEUF": g.loc[idx_q1, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_q1, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_q1, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_q1, "nb_transac"],
+            "prix_median": g.loc[idx_q1, "prix_median"],
+            "prix_moyen": g.loc[idx_q1, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_med, "Ville"],
+            "Univers": "Médian (transactions)",
+            "BIEN_NEUF": g.loc[idx_med, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_med, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_med, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_med, "nb_transac"],
+            "prix_median": g.loc[idx_med, "prix_median"],
+            "prix_moyen": g.loc[idx_med, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_q3, "Ville"],
+            "Univers": "Troisième quartile",
+            "BIEN_NEUF": g.loc[idx_q3, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_q3, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_q3, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_q3, "nb_transac"],
+            "prix_median": g.loc[idx_q3, "prix_median"],
+            "prix_moyen": g.loc[idx_q3, "prix_moyen"]
+        },
+        {
+            "Ville": g.loc[idx_max, "Ville"],
+            "Univers": "Plus de transactions",
+            "BIEN_NEUF": g.loc[idx_max, "BIEN_NEUF"],
+            "TYPE_BIEN": g.loc[idx_max, "TYPE_BIEN"],
+            "NB_PIECES_RANGE": g.loc[idx_max, "NB_PIECES_RANGE"],
+            "nb_transac": g.loc[idx_max, "nb_transac"],
+            "prix_median": g.loc[idx_max, "prix_median"],
+            "prix_moyen": g.loc[idx_max, "prix_moyen"]
+        }
+    ])
+
+resume_global = (
+    univers_complet_ville
+      .groupby("Ville", group_keys=False)
+      .apply(resume_ville)
+      .reset_index(drop=True)
+)
+
+
+
+fig = px.bar(
+    resume_global,
+    x="Ville",
+    y="nb_transac",
+    color="Univers",
+    text=resume_global["prix_moyen"].round(0).astype(str) + " €",
+    barmode="group",
+    title="Univers les plus petits, médians et plus grands (en %)",
+    hover_data={
+        "prix_median": True,
+        "prix_moyen": True,
+        "BIEN_NEUF": True,
+        "TYPE_BIEN": True,
+        "NB_PIECES_RANGE": True,
+        "nb_transac": True
+    },
+    color_discrete_map={
+        "Moins de transactions": "#2ca02c",
+        "Premier quartile": "#9467bd",
+        "Médian (transactions)": "#1f77b4",
+        "Troisième quartile": "#8c564b",
+        "Plus de transactions": "#d62728"
     }
-}
-
-###############################################################################
-# =====================================
-#               BDD SQL
-# =====================================
-config_file = os.path.join(os.path.dirname(__file__), "config.yml")
-with open(config_file, "r") as config_env:
-    config = yaml.safe_load(config_env)
-
-SERVEUR = config["database"]["server"]
-DATABASE = config["database"]["database"]
-SCHEMA = config["database"]["schema"]
-
-PROD_PWD = config["database"]["password"]
-PROD_ID = config["database"]["login"]
-
-CONN_PARAMS_OPTIONAL = config["database"]["conn_params_optional"]
-
-DF_BAN_SERVEUR = SERVEUR
-DF_BAN_DATABASE = DATABASE
-DF_BAN_TABLE = "BAN"
-DF_BAN = f"{DF_BAN_DATABASE}.{SCHEMA}.{DF_BAN_TABLE}"
-
-ADRESSES_CADASTRES_SERVEUR = SERVEUR
-ADRESSES_CADASTRES_DATABASE = DATABASE
-ADRESSES_CADASTRES_TABLE = "ADRESSES_CADASTRES"
-ADRESSES_CADASTRES = (
-    f"{ADRESSES_CADASTRES_DATABASE}.{SCHEMA}.{ADRESSES_CADASTRES_TABLE}"
 )
 
-ADRESSES_CADASTRES_CLE_SERVEUR = SERVEUR
-ADRESSES_CADASTRES_CLE_DATABASE = DATABASE
-ADRESSES_CADASTRES_CLE_TABLE = "LIENS_CADASTRES_ADRESSES"
-ADRESSES_CADASTRES_CLE = (
-    f"{ADRESSES_CADASTRES_CLE_DATABASE}.{SCHEMA}.{ADRESSES_CADASTRES_CLE_TABLE}"
+
+fig.update_traces(
+    texttemplate="%{text}",
+    textposition="outside"
 )
 
-BATI_SERVEUR = SERVEUR
-BATI_DATABASE = DATABASE
-BATI_TABLE = "BDNB"
-BATI = f"{BATI_DATABASE}.{SCHEMA}.{BATI_TABLE}"
-
-BATI_cle_SERVEUR = SERVEUR
-BATI_cle_DATABASE = DATABASE
-BATI_cle_TABLE = "BDNB_PASSAGE"
-BATI_cle = f"{BATI_cle_DATABASE}.{SCHEMA}.{BATI_cle_TABLE}"
-
-CL_OPERATIONS_SERVEUR = SERVEUR
-CL_OPERATIONS_DATABASE = DATABASE
-CL_OPERATIONS_TABLE = "CL_OPERATIONS"
-CL_OPERATIONS = f"{CL_OPERATIONS_DATABASE}.{SCHEMA}.{CL_OPERATIONS_TABLE}"
-
-CL_OPES_ENCOURS_SERVEUR = SERVEUR
-CL_OPES_ENCOURS_DATABASE = DATABASE
-CL_OPES_ENCOURS_TABLE = "CL_OPES_ENCOURS"
-CL_OPES_ENCOURS = f"{CL_OPES_ENCOURS_DATABASE}.{SCHEMA}.{CL_OPES_ENCOURS_TABLE}"
-
-DVF_AGREGEES_SERVEUR = SERVEUR
-DVF_AGREGEES_DATABASE = DATABASE
-DVF_AGREGEES_TABLE = "DVF_AGREGEES"
-DVF_AGREGEES = f"{DVF_AGREGEES_DATABASE}.{SCHEMA}.{DVF_AGREGEES_TABLE}"
-
-OPES_ENRICHIES_SERVEUR = SERVEUR
-OPES_ENRICHIES_DATABASE = DATABASE
-OPES_ENRICHIES_TABLE = "OPES_ENRICHIES"
-OPES_ENRICHIES = f"{OPES_ENRICHIES_DATABASE}.{SCHEMA}.{OPES_ENRICHIES_TABLE}"
-
-OPES_ESTIMEES_SERVEUR = SERVEUR
-OPES_ESTIMEES_DATABASE = DATABASE
-OPES_ESTIMEES_TABLE = "OPES_ESTIMEES"
-OPES_ESTIMEES = f"{OPES_ESTIMEES_DATABASE}.{SCHEMA}.{OPES_ESTIMEES_TABLE}"
-
-ESTIM_TI_BIENS_CONNUS_SERVEUR = SERVEUR
-ESTIM_TI_BIENS_CONNUS_DATABASE = DATABASE
-ESTIM_TI_BIENS_CONNUS_TABLE = "ESTIM_TI_BIENS_CONNUS"
-ESTIM_TI_BIENS_CONNUS = (
-    f"{ESTIM_TI_BIENS_CONNUS_DATABASE}.{SCHEMA}.{ESTIM_TI_BIENS_CONNUS_TABLE}"
+fig.update_layout(
+    title_x=0.5,
+    yaxis_title="Nombre de transactions (log)",
+    yaxis_type = "log",
+    xaxis_title="Ville",
+    plot_bgcolor="white",
+    xaxis_tickangle=45,
+    legend_title="Type d'univers",
+    uniformtext_minsize=8,
+    uniformtext_mode='hide',
+    height=650
 )
 
-EFFECTIFS_VILLE_SERVEUR = SERVEUR
-EFFECTIFS_VILLE_DATABASE = DATABASE
-EFFECTIFS_VILLE_TABLE = "EFFECTIFS_VILLES"
-EFFECTIFS_VILLE = f"{EFFECTIFS_VILLE_DATABASE}.{SCHEMA}.{EFFECTIFS_VILLE_TABLE}"
 
-EFFECTIFS_IRIS_SERVEUR = SERVEUR
-EFFECTIFS_IRIS_DATABASE = DATABASE
-EFFECTIFS_IRIS_TABLE = "EFFECTIFS_IRIS"
-EFFECTIFS_IRIS = f"{EFFECTIFS_IRIS_DATABASE}.{SCHEMA}.{EFFECTIFS_IRIS_TABLE}"
 
-TI_IRIS_SERVEUR = SERVEUR
-TI_IRIS_DATABASE = DATABASE
-TI_IRIS_TABLE = "TI_IRIS"
-TI_IRIS = f"{TI_IRIS_DATABASE}.{SCHEMA}.{TI_IRIS_TABLE}"
+#enregistrement des données
+df_sorted = resume_global.sort_values(["Ville", "Univers"])
 
-TI_ARR_SERVEUR = SERVEUR
-TI_ARR_DATABASE = DATABASE
-TI_ARR_TABLE = "TI_ARR"
-TI_ARR = f"{TI_ARR_DATABASE}.{SCHEMA}.{TI_ARR_TABLE}"
+csv_path = os.path.join(output_dir, "repartition_univ_elem_par_ville.csv")
+df_sorted.to_csv(csv_path, index=False)
 
-TI_VILLE_SERVEUR = SERVEUR
-TI_VILLE_DATABASE = DATABASE
-TI_VILLE_TABLE = "TI_VILLE"
-TI_VILLE = f"{TI_VILLE_DATABASE}.{SCHEMA}.{TI_VILLE_TABLE}"
 
-TI_DEPT_SERVEUR = SERVEUR
-TI_DEPT_DATABASE = DATABASE
-TI_DEPT_TABLE = "TI_DEPT"
-TI_DEPT = f"{TI_DEPT_DATABASE}.{SCHEMA}.{TI_DEPT_TABLE}"
 
-PRIX_M2_SERVEUR = SERVEUR
-PRIX_M2_DATABASE = DATABASE
-PRIX_M2_TABLE = "PRIX_M2"
-PRIX_M2 = f"{PRIX_M2_DATABASE}.{SCHEMA}.{PRIX_M2_TABLE}"
 
-REF_PRENOMS_SERVEUR = SERVEUR
-REF_PRENOMS_DATABASE = DATABASE
-REF_PRENOMS_TABLE = "REF_PRENOMS"
-REF_PRENOMS = f"{REF_PRENOMS_DATABASE}.{SCHEMA}.{REF_PRENOMS_TABLE}"
 
-REF_VOIES_SERVEUR = SERVEUR
-REF_VOIES_DATABASE = DATABASE
-REF_VOIES_TABLE = "REF_VOIES"
-REF_VOIES = f"{REF_VOIES_DATABASE}.{SCHEMA}.{REF_VOIES_TABLE}"
-
-REF_GPS_MER_SERVEUR = SERVEUR
-REF_GPS_MER_DATABASE = DATABASE
-REF_GPS_MER_TABLE = "REF_GPS_MER"
-REF_GPS_MER = f"{REF_GPS_MER_DATABASE}.{SCHEMA}.{REF_GPS_MER_TABLE}"
-
-REF_INDICES_PRIX_SERVEUR = SERVEUR
-REF_INDICES_PRIX_DATABASE = DATABASE
-REF_INDICES_PRIX_TABLE = "REF_INDICES_PRIX"
-REF_INDICES_PRIX = f"{REF_INDICES_PRIX_DATABASE}.{SCHEMA}.{REF_INDICES_PRIX_TABLE}"
-
-REF_POPULATION_COMMUNE_SERVEUR = SERVEUR
-REF_POPULATION_COMMUNE_DATABASE = DATABASE
-REF_POPULATION_COMMUNE_TABLE = "REF_POPULATION_COMMUNE"
-REF_POPULATION_COMMUNE = (
-    f"{REF_POPULATION_COMMUNE_DATABASE}.{SCHEMA}.{REF_POPULATION_COMMUNE_TABLE}"
-)
-
-REF_CONTOURS_IRIS_SERVEUR = SERVEUR
-REF_CONTOURS_IRIS_DATABASE = DATABASE
-REF_CONTOURS_IRIS_TABLE = "REF_IRIS_CONTOURS"
-REF_CONTOURS_IRIS = f"{REF_CONTOURS_IRIS_DATABASE}.{SCHEMA}.{REF_CONTOURS_IRIS_TABLE}"
-
-REF_IRIS_LOGEMENT_SERVEUR = SERVEUR
-REF_IRIS_LOGEMENT_DATABASE = DATABASE
-REF_IRIS_LOGEMENT_TABLE = "REF_IRIS_LOGEMENT"
-REF_IRIS_LOGEMENT = f"{REF_IRIS_LOGEMENT_DATABASE}.{SCHEMA}.{REF_IRIS_LOGEMENT_TABLE}"
-
-REF_IRIS_REVENUS_SERVEUR = SERVEUR
-REF_IRIS_REVENUS_DATABASE = DATABASE
-REF_IRIS_REVENUS_TABLE = "REF_IRIS_REVENUS"
-REF_IRIS_REVENUS = f"{REF_IRIS_REVENUS_DATABASE}.{SCHEMA}.{REF_IRIS_REVENUS_TABLE}"
-
-REF_IRIS_POPULATION_SERVEUR = SERVEUR
-REF_IRIS_POPULATION_DATABASE = DATABASE
-REF_IRIS_POPULATION_TABLE = "REF_IRIS_POPULATION"
-REF_IRIS_POPULATION = (
-    f"{REF_IRIS_POPULATION_DATABASE}.{SCHEMA}.{REF_IRIS_POPULATION_TABLE}"
-)
-
-REF_IRIS_RESIDENT_SERVEUR = SERVEUR
-REF_IRIS_RESIDENT_DATABASE = DATABASE
-REF_IRIS_RESIDENT_TABLE = "REF_IRIS_RESIDENT"
-REF_IRIS_RESIDENT = f"{REF_IRIS_RESIDENT_DATABASE}.{SCHEMA}.{REF_IRIS_RESIDENT_TABLE}"
-
-ADEME_ANCIEN_SERVEUR = SERVEUR
-ADEME_ANCIEN_DATABASE = DATABASE
-ADEME_ANCIEN_TABLE = "ADEME_ANCIEN"
-ADEME_ANCIEN = f"{ADEME_ANCIEN_DATABASE}.{SCHEMA}.{ADEME_ANCIEN_TABLE}"
-
-ADEME_SERVEUR = SERVEUR
-ADEME_DATABASE = DATABASE
-ADEME_TABLE = "ADEME"
-ADEME = f"{ADEME_DATABASE}.{SCHEMA}.{ADEME_TABLE}"
-
-DPE_ESTIMATION_SERVEUR = SERVEUR
-DPE_ESTIMATION_DATABASE = DATABASE
-DPE_ESTIMATION_TABLE = "DPE_ESTIMATION"
-DPE_ESTIMATION = f"{DPE_ESTIMATION_DATABASE}.{SCHEMA}.{DPE_ESTIMATION_TABLE}"
-
-TRANSAC_BIEN_SERVEUR = SERVEUR
-TRANSAC_BIEN_DATABASE = DATABASE
-TRANSAC_BIEN_TABLE = "TRANSAC_BIEN"
-TRANSAC_BIEN = f"{TRANSAC_BIEN_DATABASE}.{SCHEMA}.{TRANSAC_BIEN_TABLE}"
-
-SYNT_TRANSAC_SERVEUR = SERVEUR
-SYNT_TRANSAC_DATABASE = DATABASE
-SYNT_TRANSAC_TABLE = "SYNT_TRANSAC"
-SYNT_TRANSAC = f"{SYNT_TRANSAC_DATABASE}.{SCHEMA}.{SYNT_TRANSAC_TABLE}"
-
-PROXIM_CADASTRE_SERVEUR = SERVEUR
-PROXIM_CADASTRE_DATABASE = DATABASE
-PROXIM_CADASTRE_TABLE = "PROXIM_CADASTRE"
-PROXIM_CADASTRE = f"{PROXIM_CADASTRE_DATABASE}.{SCHEMA}.{PROXIM_CADASTRE_TABLE}"
-
-PROXIM_ADRESSE_SERVEUR = SERVEUR
-PROXIM_ADRESSE_DATABASE = DATABASE
-PROXIM_ADRESSE_TABLE = "PROXIM_ADRESSE"
-PROXIM_ADRESSE = f"{PROXIM_ADRESSE_DATABASE}.{SCHEMA}.{PROXIM_ADRESSE_TABLE}"
-
-PPRT_SERVEUR = SERVEUR
-PPRT_DATABASE = DATABASE
-PPRT_TABLE = "PPRT"
-PPRT = f"{PPRT_DATABASE}.{SCHEMA}.{PPRT_TABLE}"
-
-POLSOLS_SERVEUR = SERVEUR
-POLSOLS_DATABASE = DATABASE
-POLSOLS_TABLE = "POLSOLS"
-POLSOLS = f"{POLSOLS_DATABASE}.{SCHEMA}.{POLSOLS_TABLE}"
-
-TRANSAC_BIEN_SERVEUR = SERVEUR
-TRANSAC_BIEN_DATABASE = DATABASE
-TRANSAC_BIEN_TABLE = "TRANSAC_BIEN"
-TRANSAC_BIEN = f"{TRANSAC_BIEN_DATABASE}.{SCHEMA}.{TRANSAC_BIEN_TABLE}"
-
-SYNT_TRANSAC_SERVEUR = SERVEUR
-SYNT_TRANSAC_DATABASE = DATABASE
-SYNT_TRANSAC_TABLE = "SYNT_TRANSAC"
-SYNT_TRANSAC = f"{SYNT_TRANSAC_DATABASE}.{SCHEMA}.{SYNT_TRANSAC_TABLE}"
-
-PROXIM_CADASTRE_SERVEUR = SERVEUR
-PROXIM_CADASTRE_DATABASE = DATABASE
-PROXIM_CADASTRE_TABLE = "PROXIM_CADASTRE"
-PROXIM_CADASTRE = f"{PROXIM_CADASTRE_DATABASE}.{SCHEMA}.{PROXIM_CADASTRE_TABLE}"
-
-PROXIM_ADRESSE_SERVEUR = SERVEUR
-PROXIM_ADRESSE_DATABASE = DATABASE
-PROXIM_ADRESSE_TABLE = "PROXIM_ADRESSE"
-PROXIM_ADRESSE = f"{PROXIM_ADRESSE_DATABASE}.{SCHEMA}.{PROXIM_ADRESSE_TABLE}"
-
-PRIX_PROXIM_SERVEUR = SERVEUR
-PRIX_PROXIM_DATABASE = DATABASE
-PRIX_PROXIM_TABLE = "PRIX_PROXIM"
-PRIX_PROXIM = f"{PRIX_PROXIM_DATABASE}.{SCHEMA}.{PRIX_PROXIM_TABLE}"
-
-MAPPING_PROXIM_SERVEUR = SERVEUR
-MAPPING_PROXIM_DATABASE = DATABASE
-MAPPING_PROXIM_TABLE = "MAPPING_PROXIM"
-MAPPING_PROXIM = f"{MAPPING_PROXIM_DATABASE}.{SCHEMA}.{MAPPING_PROXIM_TABLE}"
-
-COMPARATIFS_PROXIM_SERVEUR = SERVEUR
-COMPARATIFS_PROXIM_DATABASE = DATABASE
-COMPARATIFS_PROXIM_TABLE = "COMPARATIF_PROXIM"
-COMPARATIFS_PROXIM = (
-    f"{COMPARATIFS_PROXIM_DATABASE}.{SCHEMA}.{COMPARATIFS_PROXIM_TABLE}"
-)
-
-CAD_ENRICHIE_SERVEUR = SERVEUR
-CAD_ENRICHIE_DATABASE = DATABASE
-CAD_ENRICHIE_TABLE = "CAD_ENRICHIE"
-CAD_ENRICHIE = f"{CAD_ENRICHIE_DATABASE}.{SCHEMA}.{CAD_ENRICHIE_TABLE}"
-
-BAT_ENRICHIE_SERVEUR = SERVEUR
-BAT_ENRICHIE_DATABASE = DATABASE
-BAT_ENRICHIE_TABLE = "BAT_ENRICHIE"
-BAT_ENRICHIE = f"{BAT_ENRICHIE_DATABASE}.{SCHEMA}.{BAT_ENRICHIE_TABLE}"
-
-BAN_ENRICHIE_SERVEUR = SERVEUR
-BAN_ENRICHIE_DATABASE = DATABASE
-BAN_ENRICHIE_TABLE = "BAN_ENRICHIE"
-BAN_ENRICHIE = f"{BAN_ENRICHIE_DATABASE}.{SCHEMA}.{BAN_ENRICHIE_TABLE}"
-
-###############################################################################
-# REPERTOIRE CONTENANT LE MODELE ML A UTILISER POUR LES ESTIMATIONS
-MODEL_ML_DATA_DIR = os.path.abspath(config["model_ml"]["model_ml_folder"])
-# EST-CE QUE LE MODELE ML MODELISE LE LOG DU PRIX AU M2
-MODELE_ML_LOG_TARGET = config["model_ml"]["log_target"]
-
-###############################################################################
-# =====================================
-#             MODE TEST
-# =====================================
-
-TEST_MODE = config["developpment"]["test_mode"]
-# nombre de lignes à filtrer en test mode
-N_ROWS = config["developpment"]["sample_length"]
-
-# SUFFIXES
-SUFF_TEST_MODE = "_test"
-today = datetime.now().strftime("%Y-%m-%d")
-
-if TEST_MODE and N_ROWS is not None:
-    SUFF = SUFF_TEST_MODE
-    SUFF_DATE = ""
-else:
-    SUFF = ""
-    SUFF_DATE = f"_{today}"
-
-###############################################################################
-# =====================================
-#             REPERTOIRES
-# =====================================
-
-# REPERTOIRES RACINES
-REPO_DIR = os.path.abspath(os.path.dirname(
-    os.path.dirname(os.path.dirname(__file__))))
-PACKAGE_DIR = os.path.join(REPO_DIR, "codes")
-
-# REPERTOIRES CONTENANT DES DONNEES
-DATA_DIR = os.path.abspath(config["directories"]["data"])
-SOURCE_DATA_DIR = os.path.abspath(config["directories"]["source_data"])
-DVF_SOURCE_DATA_DIR = os.path.join(SOURCE_DATA_DIR, "dvf")
-ADEME_ANCIEN_SOURCE_DATA_DIR = os.path.join(
-    SOURCE_DATA_DIR, "ademe", "ademe_ancien")
-CLEANED_DATA_DIR = os.path.join(DATA_DIR, "cleaned_data")
-PREPROCESSED_DATA_DIR = os.path.join(DATA_DIR, "preprocessed_data")
-OUTPUT_DATA_DIR = os.path.join(DATA_DIR, "output")
-CALCULS_INDICATEURS_DATA_DIR = os.path.join(
-    OUTPUT_DATA_DIR, "dict_indicateurs_glissants"
-)
-REPORT_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "report")
-PREDICTIONS_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "predictions")
-MODELS_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, "models")
-MODEL_TI_DATA_DIR = os.path.join(MODELS_DATA_DIR, "model_TI")
-MODEL_ERREUR_DATA_DIR = os.path.join(MODELS_DATA_DIR, "model_erreur_ML")
-MODELE_DPE = os.path.join(MODELS_DATA_DIR, "model_corr.sav")
-MODELE_ERREUR_ML = os.path.join(MODEL_ERREUR_DATA_DIR, "model_erreur")
-TEMPLATES_DIR = os.path.join(PACKAGE_DIR, "templates")
-
-# REPERTOIRES DE LOGS
-LOG_DIR = os.path.abspath(config["directories"]["logs"])
-MAJ_DONNEES_INSEE_LOG_DIR = os.path.join(LOG_DIR, "maj_donnees_insee")
-MAJ_CONTOURS_IRIS_LOG_DIR = os.path.join(LOG_DIR, "maj_contours_iris")
-CLEAN_ADEME_LOG_DIR = os.path.join(LOG_DIR, "clean_ademe")
-
-###############################################################################
-# =====================================
-#               FICHIERS
-# =====================================
-
-# EXTENSIONS DE FICHIERS
-EXT_PKL = ".pkl"
-EXT_PARQUET = ".parquet"
-EXT_XLSX = ".xlsx"
-EXT_CSV = ".csv"
-
-###############################################################################
-# FICHIERS SOURCE (DVF, GARES, ECOLES, METROS, ADEME, RISQUES CLIMATIQUES, IRIS, INSEE, JUDICIAIRE)
-try:
-    DVF_FILES = [
-        os.path.join(DVF_SOURCE_DATA_DIR, filename)
-        for filename in os.listdir(DVF_SOURCE_DATA_DIR)
-        if "dvf" in filename
-    ]
-except FileNotFoundError:
-    DVF_FILES = []
-LISTE_GARES_FILE = os.path.join(
-    SOURCE_DATA_DIR, "gares", "liste-des-gares.csv")
-LISTE_GARES_SEP = ";"
-LISTE_ECOLES_FILE = os.path.join(
-    SOURCE_DATA_DIR,
-    "ecoles",
-    "fr-en-adresse-et-geolocalisation-etablissements-premier-et-second-degre.csv",
-)
-LISTE_ECOLES_SEP = ";"
-LISTE_METROS_FILE = os.path.join(
-    SOURCE_DATA_DIR, "gares", "emplacement-des-gares-idf-data-generalisee.csv"
-)
-LISTE_METROS_SEP = ";"
-BPE_FILE = os.path.join(SOURCE_DATA_DIR, "bpe", "bpe21_ensemble_xy.csv")
-BPE_SEP = ";"
-
-# Risques climatiques
-CATNAT_FILE = os.path.join(
-    SOURCE_DATA_DIR, "risque_climatique", "gaspar", "catnat_gaspar.csv"
-)
-CATNAT_FILE_SEP = ";"
-PPRT_FILE = os.path.join(
-    SOURCE_DATA_DIR, "risque_climatique", "gaspar", "pprt_gaspar.csv"
-)
-PPRT_FILE_SEP = ";"
-PROMETHEE_FILE = os.path.join(
-    SOURCE_DATA_DIR, "risque_climatique", "incendies", "liste_incendies.csv"
-)
-PROMETHEE_FILE_SEP = ";"
-RADON_FILE = os.path.join(
-    SOURCE_DATA_DIR, "risque_climatique", "radon", "radon.csv")
-RADON_FILE_SEP = ";"
-POLSOLS_FILE = os.path.join(
-    SOURCE_DATA_DIR,
-    "risque_climatique",
-    "pollution_des_sols",
-    "liste_sols_pollues.xlsx",
-)
-POLSOLS_FILE_SEP = ";"
-
-ARGILE_FILE = os.path.join(
-    SOURCE_DATA_DIR, "risque_climatique", "argile", "ExpoArgile_Fxx_L93.shp"
-)
-ARGILE_GEOMETRY_COL = "geometry"
-ARGILE_INDICATOR_COL = "NIVEAU"
-
-LATITUDE_COL = "LATITUDE"
-LONGITUDE_COL = "LONGITUDE"
-
-ADEME_EXISTANTS = os.path.join(
-    SOURCE_DATA_DIR,
-    "ademe",
-    "ademe_existants_et_neufs",
-    "dpe-v2-logements-existants.csv",
-)
-ADEME_NEUFS = os.path.join(
-    SOURCE_DATA_DIR, "ademe", "ademe_existants_et_neufs", "dpe-v2-logements-neufs.csv"
-)
-
-departements = [str(i).zfill(2)
-                for i in range(1, 96) if i != 20] + ["2a", "2b"]
-ADEME_ANCIEN_FILE_LIST = [
-    os.path.join(ADEME_ANCIEN_SOURCE_DATA_DIR, f"dpe-{dept}.csv")
-    for dept in departements
-]
-
-INSEE_AGREGEE_FILE = os.path.join(
-    SOURCE_DATA_DIR, "insee", "data_INSEE_agregees")
-CONTOURS_IRIS_PREP_FILE = os.path.join(
-    SOURCE_DATA_DIR, "iris", "contours-iris_prep")
-
-ABATTEMENT_VILLE_FILE = os.path.join(
-    SOURCE_DATA_DIR, "judiciaire", "abattement_ville.csv"
-)
-
-# CLEANED DATA
-DVF_PREP_FILE = os.path.join(CLEANED_DATA_DIR, "dvf_prep_adresses")
-CL_PREP_FILE = os.path.join(CLEANED_DATA_DIR, "cl_prep")
-DF_MATCH_DVF_CL_FILE = os.path.join(CLEANED_DATA_DIR, "all_match_dvf_cl")
-DF_TRANSAC_FILE = os.path.join(CLEANED_DATA_DIR, "df_transac")
-DF_TRANSAC_CLEAN_FILE = os.path.join(CLEANED_DATA_DIR, "df_transac_clean")
-DF_DEMANDES_CLEAN_FILE = os.path.join(CLEANED_DATA_DIR, "df_demandes_clean")
-
-DICT_COLUMNS_DVF_AGREGE_FILE = os.path.join(
-    CLEANED_DATA_DIR, "DICT_COLUMNS_DVF_AGREGE")
-DICT_TYPAGES_DVF_AGREGE_FILE = os.path.join(
-    CLEANED_DATA_DIR, "DICT_TYPAGES_DVF_AGREGE")
-CL_PREP_INIT_FILE = os.path.join(CLEANED_DATA_DIR, "CL_prep_init")
-FUZZY_MATCHING_FILE = os.path.join(CLEANED_DATA_DIR, "res_fuzzy_matching")
-CLEANED_CATNAT_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_catnat")
-CLEANED_PROMETHEE_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_promethee")
-
-CLEANED_RADON_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_radon")
-CLEANED_PPRT_FILE = os.path.join(
-    CLEANED_DATA_DIR, "cleaned_risques_industriels")
-CLEANED_POLSOLS_FILE = os.path.join(CLEANED_DATA_DIR, "cleaned_pollution_sols")
-
-# PREPROCESSED DATA
-BASE_BAN_ENRICHIE_FILE = os.path.join(
-    PREPROCESSED_DATA_DIR, "base_ban_enrichie_TO_SQL")
-BASE_BAT_ENRICHIE_FILE = os.path.join(
-    PREPROCESSED_DATA_DIR, "base_bat_enrichie_TO_SQL")
-BASE_CAD_ENRICHIE_FILE = os.path.join(
-    PREPROCESSED_DATA_DIR, "base_cad_enrichie_TO_SQL")
-
-BASE_GEOCODEE_FILE = os.path.join(PREPROCESSED_DATA_DIR, "base_geocodee")
-BASE_ANALYSE_ML_FILE = os.path.join(PREPROCESSED_DATA_DIR, "base_analyse_ML")
-
-BASE_TI = os.path.join(PREPROCESSED_DATA_DIR, "base_ti")
-BASE_TRANSAC_KNOWN_APP = os.path.join(PREPROCESSED_DATA_DIR, "df_transac_app")
-DF_SYNTH_TRANSAC = os.path.join(
-    PREPROCESSED_DATA_DIR, "df_synt_transac_TO_SQL")
-DF_TRANSAC_BIEN = os.path.join(PREPROCESSED_DATA_DIR, "df_transac_bien_TO_SQL")
-
-BASE_PROXIM_APP = os.path.join(PREPROCESSED_DATA_DIR, "df_proxim_app")
-DF_PRIX_PROXIM = os.path.join(PREPROCESSED_DATA_DIR, "df_prix_proxim_TO_SQL")
-DF_MAPPING_PROXIM = os.path.join(
-    PREPROCESSED_DATA_DIR, "df_mapping_proxim_TO_SQL")
-DF_COMPARATIFS_PROXIM = os.path.join(
-    PREPROCESSED_DATA_DIR, "df_comparatifs_proxim_TO_SQL")
-DF_PROXIM_ADRESSE = os.path.join(
-    PREPROCESSED_DATA_DIR, "df_proxim_adresse_TO_SQL")
-DF_PROXIM_CADASTRE = os.path.join(
-    PREPROCESSED_DATA_DIR, "df_proxim_cadastre_TO_SQL")
-
-
-# OUTPUT DATA
-# POUR LES INDICATEURS DE FIABILITE ET QUALITE
-VARIABILITE_PM2_MAX_FILE = os.path.join(
-    CALCULS_INDICATEURS_DATA_DIR, "variabilite_pm2_max"
-)
-SCO_COMP_MAX_FILE = os.path.join(CALCULS_INDICATEURS_DATA_DIR, "sco_comp_max")
-
-DIST_ELT_CLASS_PIPE_FILE = os.path.join(
-    CALCULS_INDICATEURS_DATA_DIR, "dist_elt_class_pipe_v1"
-)
-BIENS_PROCHES_PIPE_FILE = os.path.join(
-    CALCULS_INDICATEURS_DATA_DIR, "biens_proches_pipe"
-)
-BIEN_PROCHE_INFOS_FILE = os.path.join(
-    CALCULS_INDICATEURS_DATA_DIR, "bien_proche_info")
-
-
-# MODELE TI
-DIC_GEO_META_TI_FILE = os.path.join(MODEL_TI_DATA_DIR, "dic_geo_meta")
-PERIOD_COLUMN_CREATOR_FILE = os.path.join(
-    MODEL_TI_DATA_DIR, "period_column_creator")
-
-# REPORT
-DVF_AGREGE_REPORT_FILE = os.path.join(
-    REPORT_DATA_DIR, f"report_agregations_dvf{SUFF_DATE}{SUFF}{EXT_XLSX}"
-)
-OPTIM_PARAMS_FILE = os.path.join(REPORT_DATA_DIR, f"optim_params{SUFF_DATE}")
-COMPARAISON_MODELES_FILE = os.path.join(
-    REPORT_DATA_DIR, f"Resultats_comparaison_modeles{SUFF_DATE}{SUFF}{EXT_XLSX}"
-)
-BACKTEST_CARTE_FILE = os.path.join(
-    REPORT_DATA_DIR, f"map_pm2_iris{SUFF_DATE}{SUFF}.html"
-)
-TEMPLATE_COMPARAISON_MODELE_FILE = os.path.join(
-    TEMPLATES_DIR, f"template_comparaison_modeles{EXT_XLSX}"
-)
-
-# LOGS PROCESS SECONDAIRES (PAS DE MODE TEST)
-MAJ_DONNEES_INSEE_LOG_FILE = os.path.join(
-    MAJ_DONNEES_INSEE_LOG_DIR, "maj_donnees_insee.log"
-)
-MAJ_CONTOURS_IRIS_LOG_FILE = os.path.join(
-    MAJ_CONTOURS_IRIS_LOG_DIR, "maj_contours_iris.log"
-)
-CLEAN_ADEME_LOG_FILE = os.path.join(CLEAN_ADEME_LOG_DIR, "clean_ademe.log")
-###############################################################################
-# =====================================
-#              PARAMETRES
-# =====================================
-
-# COLONNES
-LATITUDE_COL = "LATITUDE"
-LONGITUDE_COL = "LONGITUDE"
-
-# PREPARATION DES DONNEES D'ENTRAINEMENT
-VALEUR_FONCIERE_MIN = 10000
-VALEUR_FONCIERE_MAX = 2000000
-
-###############################################################################
-# PARAMETRES NETTOYAGE DONNEES ADEME
-
-COLS_VALUE_TO_UPPER = [
-    "TYPE_BIEN",
-    "NOM_COMMUNE",
-    "NUM_VOIE",
-    "ADRESSE",
-    "NOM_RUE",
-    "ADRESSE_BRUTE",
-]
-MIN_YEAR_CONSTRUCTION = 1800
-
-
-COLS_POUR_ENRICHIR = [
-    "NUM_DPE",
-    "NUM_DPE_NEW",
-    "ETIQUETTE_DPE",
-    "ETIQUETTE_DPE_NEW",
-    "ETIQUETTE_GES",
-    "ETIQUETTE_GES_NEW",
-    "EMISSION_GES_USAGES",
-    "EMISSION_GES_USAGES_NEW",
-    "ADRESSE_DPE_COMPLETE",
-    "ADRESSE_DPE_COMPLETE_NEW",
-    "DATE_ETABLISSEMENT_DPE",
-    "DATE_ETABLISSEMENT_DPE_NEW",
-    "DATE_FIN_VALIDITE_DPE",
-    "DATE_FIN_VALIDITE_DPE_NEW",
-    "CONSO_USAGES_PRIMAIRES",
-    "CONSO_USAGES_PRIMAIRES_NEW",
-    "ANNEE_CONSTRUCTION",
-    "NOMBRE_NIVEAU_LOGEMENT",
-    "NUM_ETAGE_APPARTEMENT",
-    "TYPOLOGIE_LOGEMENT",
-    "BIEN_NEUF",
-]
-
-TYPOLOGIE_LOGEMENT_NEW_VALUES = {
-    "T1": 1,
-    "T2": 2,
-    "T3": 3,
-    "T4": 4,
-    "T5": 5,
-    "T6": 6,
-    "T7 ou plus": 7,
-}
-
-###############################################################################
-# PARAMETRES NETTOYAGE DONNEES DPE ESTIMATION
-COLS_VALUE_TO_UPPER_DPE = [
-    "NOM_COMMUNE",
-    "TYPE_VOIE",
-    "NOM_RUE",
-]
-
-###############################################################################
-# PARAMETRES DONNEES RISQUE CLIMATIQUE
-
-REACTEURS_NUCLEAIRES = {
-    "CIVAUX": [46.45667, 0.65278],
-    "CHOOZ": [50.09, 4.79056],
-    "PENLY": [49.97611, 1.21194],
-    "GLOFECH": [44.10667, 0.84528],
-    "NOGENT": [48.51528, 3.51778],
-    "BELLEVILLE": [47.50972, 2.875],
-    "CATTENOM": [49.41583, 6.21806],
-    "SAINT ALBAN": [45.40444, 4.75528],
-    "FLAMANVILLE": [49.53639, -1.88167],
-    "CRUAS": [44.63306, 4.75667],
-    "PALUEL": [49.85778, 0.63528],
-    "BLAYAIS": [45.25532, -0.68842],
-    "GRAVELINES": [51.01444, 2.135],
-    "DAMPIERRE": [47.73306, 2.516667],
-    "TRICASTIN": [44.335698, 4.72249],
-    "FESSENHEIM": [47.9031083, 7.5630361],
-    "BUGEY": [45.8010472, 5.2661154],
-    "SAINT LAURENT": [47.72, 1.5775],
-    "CHINON": [47.23056, 0.17028],
-}
-
-###############################################################################
-# FUZZY MATCHING
-
-nb_jours = 90  # Nombre de jours d'ecart maximal pour conserver un match
-ratio_val = 0.3  # Ratio de valeur fonciere d'ecart maximal pour conserver un match
-score_min = 700  # Score minimum pour conserver un match
-
-###############################################################################
-# IRIS GEOCODING
-
-LIM_DIST = 1000  # Distance maximale (en m) pour affecter l'IRIS la plus proche
-
-###############################################################################
-# DETECTION ANOMALIES
-
-# VARIABLES SUR LESQUELLES ON APPLIQUE LA DETECTION D'ANOMALIES
-VAR_NUM = ["Prix_m2", "Prix_piece", "nb_m2_by_piece"]  # pour le modele ML
-VAR_NUM_TI = ["Prix_m2"]  # pour le modele TI
-
-# NOMBRE D'ANNEES RECENTES A IMPORTER (N DERNIERES ANNEES)
-N_YEARS = 2  # pour le modele ML
-
-# EFFECTIF MIMIMUM PAR VILLE SUR 2 DERNIERES ANNEES POUR FAIRE DES STATISTIQUES
-N_MIN = 30  # pour les deux modeles
-
-# Méthode de détection d'anomalies (la même pour les deux modèles)
-# - 'mult' : BORNE_MIN = MEDIAN/COEFF_ECART, BORNE_MAX = MEDIAN*COEFF_ECART
-# - 'iqr' : BORNE_MIN = MEDIAN - COEFF_ECART*IQR, BORNE_MAX = MEDIAN + COEFF_ECART*IQR
-# - 'std' : BORNE_MIN = MEAN - COEFF_ECART*STD, BORNE_MAX = MEAN + COEFF_ECART*STD
-OUTLIER_MODE = "mult"
-# Coefficient d'écart pour définir les bornes min et max selon la méthode choisie dans le paramètre OUTLIER_MODE
-COEFF_ECART = 4
-PRIX_M2_MIN = 200
-PRIX_M2_MAX = 20000
-
-###############################################################################
-# ML FEATURE ENGINEERING
-
-# RAYONS POUR LE NOMBRE D'ITEMS PROCHES D'UN BIEN (EN KM)
-GARES_RADII = [1, 5, 10, 20]
-ECOLES_RADII = [0.5, 1, 2, 3]
-METROS_RADII = [0.2, 0.5, 1, 2]
-COMMERCES_RADII = [0.2, 0.5, 1, 2]
-
-# EFFECTIFS MINIMUM POUR LE CALCUL DES INDICATEURS DE PRIX AU METRE CARRE
-EFF_MIN = 7
-
-# POUR L'AJOUTS DE STATS SUR LES BIENS PROCHES
-SURF_HAB_BINS = [12, 25, 40, 60, 80, 100, 120, 150, 200]
-ARRONDI_PROXIM = 2
-NUM_BIENS_PROCHES_RESTIT = 3
-EFF_MIN_BIENS_PROCHES = 1
-
-# BIENS CONNUS
-ARRONDI_EXACT = 5
-
-###############################################################################
-# MODEL TI
-
-# EFFECTIFS MINIMUMS POUR LE CALCUL DES TAUX D'INFLATION
-# EFF_MIN_IRIS = 10
-# EFF_MIN_ARR = 15
-EFF_MIN_IRIS = 30
-EFF_MIN_ARR = 30
-EFF_MIN_VILLE = 30
-EFF_MIN_DEPT = 50
-
-# TRIMESTRE DE REFERENCE POUR LA RECUPERATION DES TAUX D'INFLATION DE L'OPEN DATA
-TRIMESTRE_REF_TI = "T1 2020"
-
-###############################################################################
-# INDICATEURS DE FIABILITE
-# ECARTS. Dictionnaire de la forme
-# {colonne_de_sortie_i: {colonne_a_comparer_i: colonne_avec_qui_comparer_i}}
-ECARTS_A_CALCULER = {
-    "ecart_bien_proche": {"pm2_pred": "Prix_moy"},
-    "ecart_bien_connu": {"pm2_pred": "Prix_act_bien"},
-    "ecart_iris_12m": {"pm2_pred": "mean___pm2_iris_12m"},
-}
-ECARTS_A_CALCULER = {
-    "ecart_bien_connu1": {"Prix_moy": "pm2_pred"},
-    "ecart_bien_connu2": {"Prix_act_bien": "pm2_pred"},
-    "ecart_bien_connu3": {"selected_median_price": "pm2_pred"},
-    "ecart_bien_connu4": {"Prix_moy": "selected_median_price"},
-    "ecart_bien_connu5": {"Prix_moy": "Prix_act_bien"},
-}
-
-
-# PENALITES.
-# LES PENALITES SE CUMULENT ENTRE ELLES
-PENALITES_PETITES_VALEURS = {
-    "pm2_pred": {2500: 42, 1500: 36, 1000: 32, 800: 56, 500: 13},
-    "annee_construction": {1970: 27},
-}
-
-PENALITES_GRANDES_VALEURS = {
-    "std___pm2_iris_L10": {650: 20, 800: 10, 1200: 10, 1500: 15},
-    "ecart_bien_proche": {0.2: 25, 0.3: 11},
-    "ecart_bien_connu": {20: 8},
-    "ecart_iris_12m": {0.2: 9},
-    "NB_SURF_TER": {500: 3, 1500: 20},
-}
-
-PENALITES_VALEURS_MANQUANTES = {
-    "ecart_bien_proche": 25,
-    "ecart_bien_connu": 8,
-    "ecart_iris_12m": 9,
-    "annee_construction": 27,
-}
-
-# DECOUPAGE DE LA FIBILITE EN FONCTION DES PENALITES AJOUTEES
-# x < DECOUPAGE_FIABILITE[0] --> 5
-# DECOUPAGE_FIABILITE[0] <= x < DECOUPAGE_FIABILITE[1] --> 4
-# DECOUPAGE_FIABILITE[1] <= x < DECOUPAGE_FIABILITE[2] --> 3,...
-DECOUPAGE_FIABILITE = [60, 90, 120, 150]
-# Valeur à mettre en apprentissage?
-DECOUPAGE_FIABILITE = [0.13, 0.17, 0.21, 0.25]
-# Valeur à mettre en application
-DECOUPAGE_FIABILITE = [0.16, 0.19, 0.23, 0.26]
-
-# TAILLE DE L'INTERVALLE D'ESTIMATION DU PRIX AU M2 EN FONCTION DE LA FIABILITE
-INTERVAL_SIZE_MAP = {5: 0.12, 4: 0.16, 3: 0.24, 2: 0.28, 1: 0.36}
-
-###############################################################################
-# SORTIES ESTIMATIONS
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_LOCALISATION_BIEN = {
-    "ville_": "RES_VILLE",
-    "CODE_POSTAL": "RES_CODE_POSTAL",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_BIEN = {
-    "NB_PIECES": "RES_NB_PIECES",
-    "NB_SURF_HAB": "RES_NB_SURF_HAB",
-    "NB_SURF_TER": "RES_NB_SURF_TER",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_ESTIM_VF = {
-    "pm2_pred": "RES_PRIX_M2_PRED",
-    "pm2_pred_min": "RES_PRIX_M2_PRED_MIN",
-    "pm2_pred_max": "RES_PRIX_M2_PRED_MAX",
-    "taux_acc": "RES_TAUX_INFL",
-    "VALEUR_FONCIERE_PREDITE_ML": "RES_VALEUR_FONCIERE_PREDITE_ML",
-    "VALEUR_FONCIERE_PREDITE_MIN": "RES_VALEUR_FONCIERE_PREDITE_ML_MIN",
-    "VALEUR_FONCIERE_PREDITE_MAX": "RES_VALEUR_FONCIERE_PREDITE_ML_MAX",
-    "VALEUR_FONCIERE_PREDITE_TI": "RES_VALEUR_FONCIERE_PREDITE_TI",
-    "VALEUR_FONCIERE_PREDITE_RECC": "RES_VALEUR_FONCIERE_PREDITE_RECC",
-    "VALEUR_JUDICIAIRE_PREDITE": "RES_VALEUR_JUDICIAIRE_PREDITE",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_FIAB_QUALI = {
-    "Indice_fiabilite_ML": "RES_INDICE_FIAB_ML",
-    "Indice_fiabilite_TI": "RES_INDICE_FIAB_TI",
-    "Indice_qualite": "RES_INDICE_QUALITE",
-    "INDICE_FIABILITE_JUDICIAIRE": "RES_INDICE_FIAB_JUDICIAIRE",
-    "METHODE_RECC": "RES_METHODE_RECC",
-    "maille_geo_loc_ML": "RES_MAILLE_GEO_LOC_ML",
-    "maille_geo_loc_TI": "RES_MAILLE_GEO_LOC_TI",
-    "SOURCE_IPI": "RES_SOURCE_IPI",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_ESTIM = {
-    "CD_OP": "REF_EXTERNE",
-    "DT_ESTIMATION": "RES_DT_ESTIMATION",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CONS_ERREUR = {
-    "VALEUR_FONCIERE_INITIALE": "RES_VALEUR_FONCIERE_INITIALE",
-    "DT_MEP": "RES_DT_MEP",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_IRIS_PM2 = {
-    "TENDANCE_MARCHE": "TENDANCE_MARCHE",
-    "median___pm2_iris_12m": "MEDIANE_PM2_IRIS",
-    "Q1___pm2_iris_12m": "Q1_PM2_IRIS",
-    "Q3___pm2_iris_12m": "Q3_PM2_IRIS",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM = {
-    f"{key}_{i}": f"{key}_{i}".upper()
-    for i in range(1, 4)
-    for key in [
-        "DATE_proxim",
-        "TYPE_BIEN_proxim",
-        "NB_SURF_HAB_proxim",
-        "VALEUR_FONCIERE_proxim",
-        "DIST_proxim",
-    ]
-}
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM.update(
-    {"Prix_med": "MEDIANE_PROXIM"})
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DIST_ELEMENTS = {
-    "DIST_cotiere": "DISTANCE_A_LA_MER",
-    "DIST_commerces_class": "DIST_COMMERCE_CLASSE",
-    "DIST_metro_rer_transilien_class": "DIST_TRANSPORT_IDF_CLASSE",
-    "DIST_gare_class": "DIST_GARE_CLASSE",
-    "DIST_ecole_primaire_class": "DIST_ECOLE_PRIMAIRE_CLASSE",
-    "DIST_college_lycee_class": "DIST_ECOLE_SECONDAIRE_CLASSE",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DPE = {
-    "ORIGINE_DPE": "ORIGINE_DPE",
-    "INDICE_FIAB_DPE_EST": "INDICE_FIAB_DPE_EST",
-    "DATE_ETABLISSEMENT_DPE": "DATE_ETABLISSEMENT_DPE",
-    "DATE_FIN_VALIDITE_DPE": "DATE_FIN_VALIDITE_DPE",
-    "NUM_DPE": "NUM_DPE",
-    "ADRESSE_DPE_COMPLETE": "ADRESSE_DPE_COMPLETE",
-    "ETIQUETTE_DPE": "ETIQUETTE_DPE",
-    "ETIQUETTE_GES": "ETIQUETTE_GES",
-    "CONSO_USAGES_PRIMAIRES": "CONSO_USAGES_PRIMAIRES",
-    "EMISSION_GES_USAGES": "EMISSION_GES_USAGES",
-    "annee_construction": "ANNEE_CONSTRUCTION",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_IRIS = {
-    "POP15P_CS3": "POP15P_CS3",
-    "prop_RP": "PROPORTION_RESIDENCES_PRINCIPALES",
-    "prop_RSECOCC": "PROPORTION_RESIDENCES_SECONDAIRES",
-    "ACH19": "PROPORTION_TYPE_BIEN_19",
-    "ACH45": "PROPORTION_TYPE_BIEN_45",
-    "ACH70": "PROPORTION_TYPE_BIEN_70",
-    "ACH90": "PROPORTION_TYPE_BIEN_90",
-    "ACH05": "PROPORTION_TYPE_BIEN_05",
-    "ACH12": "PROPORTION_TYPE_BIEN_12",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_RISQUE_CLIM = {
-    "NOMBRE_SECHERESSES": "NOMBRE_SECHERESSES",
-    "NOMBRE_SECOUSSES_SISMIQUES": "NOMBRE_SECOUSSES_SISMIQUES",
-    "NOMBRE_INONDATIONS": "NOMBRE_INONDATIONS",
-    "NOMBRE_MVT_TERRAIN": "NOMBRE_MVT_TERRAIN",
-    "NOMBRE_TEMPETES": "NOMBRE_TEMPETES",
-    "NOMBRE_INCENDIES": "NOMBRE_INCENDIES",
-    "CLASSE_RADON": "CLASSE_RADON",
-    "NOMBRE_RISQUES_INDUSTRIELS": "NOMBRE_RISQUES_INDUSTRIELS",
-    "SOL_POLLUE": "SOL_POLLUE",
-    "RISQUE_NUCLEAIRE": "RISQUE_NUCLEAIRE",
-    "ZONE_RGA": "ZONE_RGA",
-}
-
-OUTPUT_FEATURES_ESTIMATIONS_EXTERNES = {
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_ESTIM,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_LOCALISATION_BIEN,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_BIEN,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_FIAB_QUALI,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_ESTIM_VF,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CONS_ERREUR,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_IRIS_PM2,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_PROXIM,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DPE,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_CARAC_IRIS,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_RISQUE_CLIM,
-    **OUTPUT_FEATURES_ESTIMATIONS_EXTERNES_DIST_ELEMENTS,
-}
-
-
-###############################################################################
-# =====================================
-#              CONSTANTES
-# =====================================
-
-LL_MAI = [
-    "Paris",
-    "Hauts-de-Seine",
-    "Seine-St-Denis",
-    "Val-de-Marne",
-    "Seine-et-Marne",
-    "Yvelines",
-    "Essonne",
-    "Val-d'Oise",
-    "Agglomération de Lille",
-    "Province",
-    "Nord-Pas-de-Calais",
-    "Rhone-Alpes",
-    "Provence-Alpes-Cote d'Azur",
-]
-
-LL_APT = [
-    "Paris",
-    "Hauts-de-Seine",
-    "Seine-St-Denis",
-    "Val-de-Marne",
-    "Seine-et-Marne",
-    "Yvelines",
-    "Essonne",
-    "Val-d'Oise",
-    "Agglomération de Marseille",
-    "Agglomération de Lyon",
-    "Province : agglomérations de plus de 10 000 habitants - Banlieues ",
-    "Province : agglomérations de plus de 10 000 habitants - Villes centres",
-    "Province : agglomérations de moins de 10 000 habitants et zones rurales ",
-    "Nord-Pas-de-Calais",
-    "Rhone-Alpes",
-    "Provence-Alpes-Cote d'Azur",
-]
-
-MARSEILLE_AGGLO = [
-    "MARSEILLE",
-    "ALLAUCH",
-    "CARNOUX EN PROVENCE",
-    "CARRY ROUET",
-    "CASSIS",
-    "CEYRESTE",
-    "CHATEAUNEUF MARTIGUES",
-    "ENSUES REDONNE",
-    "GENEMOS",
-    "GIGNAC NERTHE",
-    "CIOTAT",
-    "ROVE",
-    "MARIGNANE",
-    "PLAN CUQUES",
-    "ROQUEFORT BEDOULE",
-    "SAINT VICTORET",
-    "SAUSSET PINS",
-    "SEPTEMES VALLONS",
-]
-
-LYON_AGGLO = [
-    "LYON",
-    "VILLEURBANNE",
-    "OULLINS",
-    "VENISSIEUX",
-    "CALUIRE ET CUIRE",
-    "MULATIERE",
-    "SAINTE FOY LYON",
-    "SAINT FONS",
-    "FONTAINES SUR SAONE",
-    "SATHONAY CAMP",
-    "TASSIN DEMI LUNE",
-    "CRAPONNE",
-    "VAULX EN VELIN",
-    "PIERRE BENITE",
-    "ECULLY",
-    "CHAMPAGNE MONT OR",
-    "RILLIEUX PAPE",
-    "FRANCHEVILLE",
-    "DECINES CHARPIEU",
-    "GRIGNY",
-    "SAINT GENIS LAVAL",
-    "SAINT PRIEST",
-    "MEYZIEU",
-    "NEUVILLE SUR SAONE",
-    "SAINT GENIS OLLIERES",
-    "VERNAISON",
-    "CHARBONNIERES BAINS",
-    "ROCHETAILLEE SUR SAONE",
-    "MIONS",
-    "GIVORS",
-    "ALBIGNY SUR SAONE",
-    "BRON",
-    "FONTAINES SAINT MARTIN",
-    "COLLONGES MONT OR",
-    "FEYZIN",
-    "IRIGNY",
-    "CORBAS",
-    "CHASSIEU",
-    "CHARLY",
-    "SAINT DIDIER MONT OR",
-    "COUZON MONT OR",
-    "SAINT CYR MONT OR",
-    "MARCY ETOILE",
-    "GENAY",
-    "DARDILLY",
-    "SAINT GERMAIN MONT OR",
-    "LISSIEU",
-    "FLEURIEU SUR SAONE",
-    "JONAGE",
-    "TOUR SALVAGNY",
-    "SAINT ROMAIN MONT OR",
-    "SATHONAY VILLAGE",
-    "MONTANAY",
-    "LIMONEST",
-    "CURIS MONT OR",
-    "SOLAIZE",
-    "CAILLOUX SUR FONTAINES",
-    "POLEYMIEUX MONT OR",
-    "QUINCIEUX",
-]
-
-VILLES_CENTRES = [  # PARIS exclu car indices spécifiques pour PARIS
-    "MARSEILLE",
-    "LYON",
-    "TOULOUSE",
-    "NICE",
-    "NANTES",
-    "STRASBOURG",
-    "MONTPELLIER",
-    "BORDEAUX",
-    "LILLE",
-    "RENNES",
-    "REIMS",
-    "HAVRE",
-    "SAINT ETIENNE",
-    "TOULON",
-    "GRENOBLE",
-    "DIJON",
-    "ANGERS",
-    "MANS",
-    "BREST",
-    "NIMES",
-    "AIX EN PROVENCE",
-    "CLERMONT FERRAND",
-    "LIMOGES",
-    "TOURS",
-    "AMIENS",
-    "METZ",
-    "BESANCON",
-    "PERPIGNAN",
-    "ORLEANS",
-    "ROUEN",
-    "CAEN",
-]
-
-DEPT_RHONE_ALPES = ["01", "07", "26", "38", "42", "69", "73", "74"]
-
-DEPT_PACA = ["04", "05", "06", "13", "83", "84"]
-
-DEPT_COTIERS = [
-    "971",
-    "972",
-    "973",
-    "974",
-    "976",
-    "20",
-    "59",
-    "62",
-    "80",
-    "76",
-    "27",
-    "14",
-    "50",
-    "35",
-    "22",
-    "29",
-    "56",
-    "44",
-    "85",
-    "17",
-    "33",
-    "40",
-    "64",
-    "66",
-    "11",
-    "34",
-    "30",
-    "13",
-    "83",
-    "06",
-]
-
-DEPT_METROPOLITAIN_SANS_CORSE = [str(i).zfill(2)
-                                 for i in range(1, 96) if i != 20]
-
-DEPT_METROPOLITAIN = DEPT_METROPOLITAIN_SANS_CORSE + ["2A", "2B"]
-
-DEPT_IDF = ["75", "92", "93", "94", "77", "78", "91", "95"]
-
-
-###############################################################################
-# =====================================
-#            PARALLELISATION
-# =====================================
-# PREP_ADRESSES
-BATCH_SIZE_VILLES = 2**15
-N_JOBS_VILLES = -1
-BACKEND_VILLES = "loky"  # "threading" = if memory overhead
-PREFER_VILLES = "threads"
-VERBOSE_VILLES = 1  # 10
-
-###############################################################################
-# FICHIERS SAUVEGARDES TEMPORAIREMENT
-# INDICATEURS DE PRIX AU METRE CARRE
-VAR_NBMOIS = ["3", "6", "12"]  # TEMPORELLES EN NOMBRE DE MOIS
-VAR_CTYEFF = ["20", "50"]  # PAR EFFECTIFS (à la ville)
-VAR_IRISEFF = ["10", "20"]  # PAR EFFECTIFS (à l'iris)
-VAR_TOADD = list(set(VAR_IRISEFF).difference(set(VAR_CTYEFF)))
-
-DICT_NAMES_CTY_M = ["__pm2_cty_" + var + "m" for var in VAR_NBMOIS]
-DICT_NAMES_CTY_COMP_M = ["__pm2_cty_comp_" + var + "m" for var in VAR_NBMOIS]
-DICT_NAMES_IRIS_M = ["__pm2_iris_" + var + "m" for var in VAR_NBMOIS]
-DICT_NAMES_IRIS_COMP_M = ["__pm2_iris_comp_" + var + "m" for var in VAR_NBMOIS]
-DICT_NAMES_CTY_L = ["__pm2_cty_L" + var for var in (VAR_CTYEFF + VAR_TOADD)]
-DICT_NAMES_CTY_COMP_L = ["__pm2_cty_comp_L" +
-                         var for var in (VAR_CTYEFF + VAR_TOADD)]
-DICT_NAMES_IRIS_L = ["__pm2_iris_L" + var for var in VAR_IRISEFF]
-DICT_NAMES_IRIS_COMP_L = ["__pm2_iris_comp_L" + var for var in VAR_IRISEFF]
-DICT_NAMES = (
-    DICT_NAMES_CTY_M
-    + DICT_NAMES_CTY_COMP_M
-    + DICT_NAMES_IRIS_M
-    + DICT_NAMES_IRIS_COMP_M
-    + DICT_NAMES_CTY_L
-    + DICT_NAMES_CTY_COMP_L
-    + DICT_NAMES_IRIS_L
-    + DICT_NAMES_IRIS_COMP_L
-)
-
-###############################################################################
-# =====================================
-#               LOGGING
-# =====================================
-LOGGING_LEVEL = (
-    # CRITICAL (50) #ERROR (40) #WARNING (30) #INFO (20) #DEBUG (10) #NOTSET (0)
-    20
-)
-# 'r': open for reading (default), 'w': open for writing, truncating the file first, 'x': open for exclusive creation, failing if the file already exists, 'a': open for writing, appending to the end of the file if it exists,
-FILE_MODE = "a"
-# 'b': binary mode, 't': text mode (default), '+': open for updating (reading and writing)
-
-###############################################################################
-# =====================================
-#    CHAMPS A CONSERVER / SUPPRIMER
-# =====================================
-
-# CHAMPS A CONSERVER DANS LE FUZZY MATCHING
-cols_to_keep = [
-    "CD_OP",
-    "ID_MUTATION",
-    "RNVP_GEO_PG",
-    "RNVP_SCORING",
-    "VALEUR_FONCIERE_CL",
-    "VALEUR_FONCIERE_DVF",
-    "same_val",
-    "DT_MEP",
-    "DATE_MUTATION",
-    "same_date",
-    "BONUS_VAL_DATE",
-    "TYPE_BIEN_CL",
-    "TYPE_BIEN_DVF",
-    "BONUS_TYPE_BIEN",
-    "ADRESSEM_CL",
-    "ADRESSEM_DVF",
-    "adr__CL",
-    "adr__DVF",
-    "SIM_lev_ADRESSE",
-    "SIM_ADRESSE",
-    "NUM_VOIE_SUFF_CL",
-    "NUM_VOIE_SUFF_DVF",
-    "same_num_voie",
-    "type_voie__CL",
-    "type_voie__DVF",
-    "same_type_voie",
-    "ville__CL",
-    "ville__DVF",
-    "same_ville",
-    "SIM_lev_ville",
-    "SIM_ville",
-    "CODE_POSTAL_CL",
-    "CODE_POSTAL_DVF",
-    "same_cp",
-    "LATITUDE_CL",
-    "LATITUDE_DVF",
-    "LONGITUDE_CL",
-    "LONGITUDE_DVF",
-    "DIST_",
-    "BONUS_GPS",
-    "NB_SURF_HAB",
-    "surface_reelle_bati_unique",
-    "NB_PIECES",
-    "nombre_pieces_principales_unique",
-    "NB_SURF_TER",
-    "surface_terrain_unique",
-    "BONUS_TYPOLOGIE_BIEN",
-    "DEPT_DVF",
-    "MAX_surface_reelle_bati_unique",
-    "NOMBRE_LOTS",
-    "nb_PARCELLES",
-    "Habitation_unique",
-    "Dependance_unique",
-    "Terrain_unique",
-    "nb_TYPE_LOCAL_Maison",
-    "nb_TYPE_LOCAL_Appartement",
-    "nb_TYPE_LOCAL_Dépendance",
-    "ID_PARCELLE",
-]
-
-# CHAMPS A SUPPRIMER APRES LE GEOCODAGE IRIS
-FEATURES_TO_DEL = ["coords"]
-
-# CHAMPS A CONSERVER DANS LES DONNEES INSEE
-FEATURES_BIL = [
-    "CD_IRIS",
-    "CD_TYP_IRIS",
-    "prop_RP",
-    "prop_RSECOCC",
-    "APT_prop",
-    "MAI_prop",
-    "MAI_NBPI_RP",
-    "APT_NBPI_RP",
-    "prop_PROP",
-    "prop_LOC",
-    "NPER_RP",
-    "ANEM_RP",
-    "RP_VOIT1P",
-    "MAI_ACH19",
-    "MAI_ACH45",
-    "MAI_ACH70",
-    "MAI_ACH90",
-    "MAI_ACH05",
-    "MAI_ACH12",
-    "APT_ACH19",
-    "APT_ACH45",
-    "APT_ACH70",
-    "APT_ACH90",
-    "APT_ACH05",
-    "APT_ACH12",
-]
-FEATURES_BTFDI = ["CD_IRIS", "DEC_MED16"]
-FEATURES_BIESP = [
-    "CD_IRIS",
-    "POP15P_CS1",
-    "POP15P_CS2",
-    "POP15P_CS3",
-    "POP15P_CS4",
-    "POP15P_CS5",
-    "POP15P_CS6",
-    "POP15P_CS7",
-    "POP15P_CS8",
-    "POP1529",
-    "POP3059",
-    "POP60P",
-]
-FEATURES_BIAR = [
-    "CD_IRIS",
-    "ACTOCC1564",
-    "CHOM1564",
-    "ETUD1564",
-    "RETR1564",
-    "AINACT1564",
-]
-
-###############################################################################
