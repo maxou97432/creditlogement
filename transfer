@@ -1,70 +1,262 @@
-## Dossier `indice_prix_mlops/`
+# MLOps System - Price Index Models & Property Valuation
 
-> **Prototype** — Pipeline MLOps de correction des indices de prix immobiliers CL par recalage sur les données INSEE, produisant des taux d'inflation corrigés.
+Système MLOps production-ready pour la modélisation d'indices de prix immobiliers et l'estimation de valeur foncière.
 
-### Contexte
+## 🎯 Fonctionnalités
 
-Les indices de prix au m² calculés à partir des données **Crédit Logement (CL)** peuvent présenter un biais systématique par rapport aux indices de référence de l'**INSEE** (biais de sélection, effets de composition). Ce dossier implémente un pipeline de correction de ce biais afin de produire des **taux d'inflation corrigés**, utilisables notamment pour estimer la valeur actuelle d'un bien immobilier.
+### Étape 1 : Correction Holt-Winters
+- Correction dynamique des biais CL vs INSEE
+- Lissage exponentiel avec tendance amortie
+- Sauvegarde/chargement des modèles
 
----
+### Étape 2 : Calcul des Taux d'Inflation
+- Taux par maille géographique (IRIS, Ville, Département)
+- Gestion des effectifs minimums
+- Table de taux par période
 
-### Pipeline en 4 étapes
+### Étape 3 : Estimation de Valeur Foncière
+- Estimation basée sur taux d'inflation
+- Fallback géographique (IRIS → Ville → Département)
+- Mode batch pour estimations massives
+
+## 📁 Structure
 
 ```
-data_loader + data_processor
-        │
-        ├──────────────────────┐
-        ▼                      ▼
-[Étape 1]                 [Étape 2]
-train_holt_winters        apply_corrections
-→ Modèles HW              → Indices corrigés (CSV)
-(biais CL − INSEE)
-        └──────────────────────┘
-                      │
-                      ▼
-              [Étape 3] calculate_rates
-              → Taux d'inflation par maille (CSV)
-                      │
-                      ▼
-              [Étape 4] estimate
-              → Valeur actuelle d'un bien
+indice_prix_mlops/
+├── config/
+│   └── config.yaml              # Configuration centralisée
+├── data/
+│   ├── data_loader.py          # Chargement CL + INSEE
+│   └── data_processor.py       # Preprocessing et fusion
+├── models/
+│   ├── holt_winters_model.py   # Modèle Holt-Winters
+│   └── inflation_rate_calculator.py  # Calcul taux inflation
+├── inference/
+│   ├── apply_corrections.py    # Application corrections HW
+│   └── estimate_property_value.py    # Estimation valeur foncière
+├── artifacts/
+│   ├── models/                 # Modèles HW sauvegardés
+│   ├── corrected_prices/       # Prix corrigés
+│   └── inflation_rates/        # Tables de taux
+└── main.py                     # Point d'entrée CLI
 ```
 
-**Chargement des données (`data_loader` + `data_processor`)**
-Les données CL (mensuelles) et INSEE (trimestrielles) sont chargées et fusionnées au niveau trimestriel. `data_processor` calcule les indices en base 2020 pour chaque zone géographique et type de bien.
+## 🚀 Workflow Complet
 
-**Étape 1 – Modèles de correction (Holt-Winters)**
-Pour chaque couple [(zone × type de bien)](cci:1://file:///Users/maximethiong-ly/Downloads/py/fonctions.py:306:4-307:19), un modèle de **lissage exponentiel avec tendance amortie** est entraîné sur le différentiel historique CL − INSEE. Les modèles sont sauvegardés dans `artifacts/models/latest/`.
+### Étape 1 : Entraînement Holt-Winters
 
-**Étape 2 – Application des corrections**
-Les modèles HW sont appliqués directement sur les indices déjà calculés par `data_processor` (pas de rechargement des données). L'indice corrigé est obtenu par soustraction du biais prédit : `indice_corrigé = indice_CL − biais_HW`.
-
-**Étape 3 – Calcul des taux d'inflation**
-Les taux d'inflation sont calculés par maille (IRIS, Ville, Département), avec un **effectif minimum** par niveau (≥ 10 pour IRIS, ≥ 30 pour Ville, ≥ 50 pour Département).
-
-**Étape 4 – Estimation de valeur foncière**
-En donnant la valeur initiale d'un bien et sa date d'achat, le pipeline estime sa valeur actuelle via `valeur_estimée = valeur_initiale × (1 + taux_inflation)`. Un **fallback géographique** (IRIS → Ville → Département) est appliqué si l'effectif est insuffisant au niveau fin.
-
----
-
-### Utilisation rapide
+Entraîne les modèles de correction de biais pour chaque zone/type de bien.
 
 ```bash
-# Étape 1 : Entraîner les modèles
 python main.py --mode train_holt_winters
+```
 
-# Étape 2 : Appliquer les corrections (données rechargées automatiquement)
+**Output** : Modèles sauvegardés dans `artifacts/models/latest/`
+
+### Étape 2a : Application des Corrections
+
+Applique les corrections HW aux prix bruts pour produire des prix corrigés.
+
+```bash
 python main.py --mode apply_corrections \
+    --input_dir Z:/uflumth/gits/univers_elementaire/TI/resultats \
     --models_dir artifacts/models/latest \
     --output artifacts/corrected_prices/prix_corriges.csv
+```
 
-# Étape 3 : Calculer les taux d'inflation
+**Output** : Fichier CSV avec prix corrigés
+
+### Étape 2b : Calcul des Taux d'Inflation
+
+Calcule les taux d'inflation par maille géographique à partir des prix corrigés.
+
+```bash
 python main.py --mode calculate_rates \
     --input artifacts/corrected_prices/prix_corriges.csv \
-    --output artifacts/inflation_rates/taux.csv
-
-# Étape 4 : Estimer la valeur d'un bien
-python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv \
-    --valeur_initiale 300000 --date_achat 2022-03-15 \
-    --type_bien APT --ville PARIS --dept 75
+    --output artifacts/inflation_rates/taux_inflation.csv
 ```
+
+**Output** : Table de taux d'inflation par maille et période
+
+### Étape 3a : Estimation Unitaire
+
+Estime la valeur actuelle d'un bien immobilier.
+
+```bash
+python main.py --mode estimate \
+    --rates artifacts/inflation_rates/taux_inflation.csv \
+    --valeur_initiale 300000 \
+    --date_achat 2022-03-15 \
+    --type_bien APT \
+    --code_iris 75101 \
+    --ville PARIS \
+    --dept 75
+```
+
+**Output** :
+```
+================================================================================
+ESTIMATION DE VALEUR FONCIÈRE
+================================================================================
+
+� Période:
+   Date d'achat      : 2022
+   Année de référence: 2025
+   Écart             : 3 ans
+
+💰 Valeurs:
+   Valeur initiale : 300,000.00 €
+   Valeur estimée  : 321,600.00 €
+   Variation       : +21,600.00 €
+
+📊 Taux d'inflation:
+   Taux appliqué   : +7.20%
+   Niveau géo      : IRIS (75101)
+   Effectif        : 145 transactions
+
+✅ Taux trouvé au niveau IRIS
+```
+
+### Étape 3b : Estimation Batch
+
+Estime la valeur pour un lot de biens depuis un fichier CSV.
+
+**Format du fichier d'entrée** (`biens.csv`) :
+```csv
+valeur_initiale,date_achat,type_bien,code_iris,ville,dept
+300000,2022-03-15,APT,75101,PARIS,75
+250000,2023-06-20,APT,,PARIS,75
+180000,2021-11-10,MAI,,,92
+```
+
+```bash
+python main.py --mode estimate_batch \
+    --rates artifacts/inflation_rates/taux_inflation.csv \
+    --input biens.csv \
+    --output estimations.csv
+```
+
+**Output** : Fichier CSV avec colonnes d'estimation ajoutées
+
+## ⚙️ Configuration
+
+Modifiez `config/config.yaml` pour :
+
+### Chemins des Données
+```yaml
+data:
+  base_path: "Z:\\uflumth\\gits\\univers_elementaire\\TI\\resultats"
+  insee_path: "Z:\\uflumth\\gits\\univers_elementaire\\TI\\table_rapport (2025)"
+```
+
+### Hyperparamètres Holt-Winters
+```yaml
+model:
+  holt_winters:
+    trend: 'add'
+    damped_trend: true
+    min_observations: 8
+    n_forecast: 2
+```
+
+### Effectifs Minimums
+```yaml
+# Dans inflation_rate_calculator.py
+min_effectifs = {
+    'IRIS': 10,
+    'CITY': 30,
+    'DEPT': 50
+}
+```
+
+## 📊 Méthodologie
+
+### Fréquence Temporelle
+
+**Données sources** :
+- CL : Mensuelles
+- INSEE : **Trimestrielles**
+
+**Traitement** : Fusion au niveau **trimestriel**
+- Les données CL mensuelles sont agrégées par trimestre
+- Cohérence avec la fréquence INSEE
+- Corrections HW appliquées sur données trimestrielles
+
+### Calcul des Taux d'Inflation
+
+1. **Période de référence** : Année la plus récente dans les données
+2. **Périodes** : Distance en années depuis la référence (0, 1, 2, ...)
+3. **Formule** : `taux = (prix_periode_0 - prix_periode_t) / prix_periode_t`
+4. **Effectif** : `min(effectif_periode_0, effectif_periode_t)`
+5. **Filtrage** : Effectif >= seuil minimum par niveau géographique
+
+### Hiérarchie de Fallback
+
+Lors de l'estimation, recherche du taux dans l'ordre :
+
+1. **IRIS** (code à 5 chiffres) : Si effectif >= 10
+2. **Ville** (nom) : Si effectif >= 30
+3. **Département** (code à 2 chiffres) : Si effectif >= 50
+
+### Propagation des Corrections HW
+
+Les corrections sont propagées hiérarchiquement :
+- **IRIS** → Cherche modèle IRIS, sinon hérite de la Ville
+- **Ville** → Cherche modèle Ville, sinon hérite du Département
+- **Département** → Cherche modèle Département, sinon hérite de la Région
+
+**Exemple** : IRIS 75101 sans modèle → Utilise correction de PARIS
+
+### Estimation de Valeur
+
+```
+valeur_estimee = valeur_initiale × (1 + taux_inflation)
+```
+
+## 🔧 Installation
+
+```bash
+# Cloner le projet
+cd /Users/maximethiong-ly/Downloads/py/indice_prix_mlops
+
+# Installer les dépendances
+pip install -r requirements.txt
+```
+
+## 📝 Dépendances
+
+- pandas >= 1.5.0
+- numpy >= 1.23.0
+- pyyaml >= 6.0
+- statsmodels >= 0.14.0
+- scipy >= 1.10.0
+
+## � Debugging
+
+### Vérifier les modèles entraînés
+```bash
+ls artifacts/models/latest/
+```
+
+### Vérifier les prix corrigés
+```bash
+head artifacts/corrected_prices/prix_corriges.csv
+```
+
+### Vérifier la table de taux
+```bash
+head artifacts/inflation_rates/taux_inflation.csv
+```
+
+## 📈 Prochaines Étapes
+
+- [ ] Monitoring des performances
+- [ ] API REST pour inférence en ligne
+- [ ] Dashboard de visualisation
+- [ ] Tests unitaires complets
+- [ ] CI/CD pipeline
+
+## 📄 Licence
+
+Crédit Logement - Usage interne
+
