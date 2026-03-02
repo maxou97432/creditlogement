@@ -117,8 +117,8 @@ if __name__ == "__main__":
     codes_lyon = [f"{69380 + i}" for i in range(1, 10)]  # 69381-69389
     
     # Autres villes du top
-    autres_villes = ['BORDEAUX', 'HAVRE', 'LILLE', 'MONTPELLIER', 'NANTES', 
-                     'NICE', 'REIMS', 'RENNES', 'SAINT ETIENNE', 'STRASBOURG', 'TOULOUSE', 'TOURS', 'GRENOBLE', 'BREST']
+    autres_villes = ['BORDEAUX', 'LE HAVRE', 'LILLE', 'MONTPELLIER', 'NANTES', 
+                     'NICE', 'REIMS', 'RENNES', 'SAINT-ETIENNE', 'STRASBOURG', 'TOULOUSE', 'TOURS', 'GRENOBLE', 'BREST']
     
     codes_valides = codes_paris + codes_marseille + codes_lyon + autres_villes
     structure_v1 = structure_v1[structure_v1['Ville'].isin(codes_valides)]
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
     df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
         "HAVRE": "LE HAVRE",
-        "SAINT ETIENNE": "ST ETIENNE"
+        "SAINT-ETIENNE": "ST ETIENNE"
     })
     
     print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
@@ -304,7 +304,7 @@ if __name__ == "__main__":
         .rename(columns=cols_c1_src)
         .copy()
     )
-
+    stats_c1["Ville"] = stats_c1["Ville"].replace({"SAINT-ETIENNE":"ST ETIENNE"})
     df_map_c1 = df_geo_gps.merge(stats_c1, left_on="label", right_on="Ville", how="inner")
     df_map_c1 = df_map_c1.dropna(subset=["latitude", "longitude", "prix_m2"])
     df_map_c1 = df_map_c1.drop_duplicates(subset="label", keep="first")
@@ -951,117 +951,3 @@ if __name__ == "__main__":
     print(f"\n Statistiques sauvegardées : {output_path}")
 
     print("\n=== ANALYSE TERMINÉE ===")
-
-(.venv) PS Z:\uflumth\gits\univers_elementaire> & z:/uflumth/gits/univers_elementaire/.venv/Scripts/python.exe "z:/uflumth/gits/univers_elementaire/TI - V2/comparaison_restriction_VS_lpi.py"
-Chargement V1 (Base complète)...
-Chargement V2 (Base réduite)...
-DEBUG - Structure V1 après filtre: ['13201' '13202' '13203' '13204' '13205' '13206' '13207' '13208' '13209'
- '13210' '13211' '13212' '13213' '13214' '13215' '13216' '69381' '69382'
- '69383' '69384']
-
---- Calcul des prix glissants V2_STRUCT (avec structure V1) ---
-
-DEBUG - Villes uniques dans raw_v2_apt: ['13075', '13106', '13201', '13202', '13203', '13204', '13205', '13206', '13207', '13208', '13209', '13210', '13211', '13212', '13213', '13214', '13215', '13216', '69040', '69191']
-DEBUG - Nombre de lignes Paris: 144925
-DEBUG - Nombre de lignes Marseille: 35277
-DEBUG - Nombre de lignes Lyon: 29125
-DEBUG - Structure arrondissement shape: (45, 3)
-DEBUG - Villes dans structure_arrondissement: ['75101' '75102' '75103' '75104' '75105' '75106' '75107' '75108' '75109'
- '75110' '75111' '75112' '75113' '75114' '75115' '75116' '75117' '75118'
- '75119' '75120' '13201' '13202' '13203' '13204' '13205' '13206' '13207'
- '13208' '13209' '13210' '13211' '13212' '13213' '13214' '13215' '13216'
- '69381' '69382' '69383' '69384' '69385' '69386' '69387' '69388' '69389']
-
---- Traitement du dataset : V2_STRUCT ---
-z:\uflumth\gits\univers_elementaire\TI - V2\fonctions.py:1203: FutureWarning:
-
-DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
-
-   -> Application des poids (Structure V1)
-
-  DEBUG AVANT MERGE - Ville: 13201
-    mm_prix_12m colonnes: ['Periode', 'prix_mm_12m (V2_STRUCT)', 'nb_observations_12m', 'nb_univers_12m']
-    mm_prix_3m colonnes: ['Periode', 'prix_mm_3m (V2_STRUCT)', 'nb_observations_3m', 'nb_univers_3m']
-
-  DEBUG fonctions.py - Colonnes dans res_final_arr:
-    ✓ nb_observations_3m: min=0, max=1097
-    ✓ nb_observations_12m: min=0, max=3881
-    ✓ nb_univers_3m: min=0, max=18
-    ✓ nb_univers_12m: min=0, max=72
-  Colonnes disponibles: ['Periode', 'VF_mm_12m (V2_STRUCT)', 'VF_mm_3m (V2_STRUCT)', 'Ville', 'nb_observations_12m', 'nb_observations_3m', 'nb_univers_12m', 'nb_univers_3m', 'prix_mm_12m (V2_STRUCT)', 'prix_mm_3m (V2_STRUCT)', 'surface_mm_12m (V2_STRUCT)', 'surface_mm_3m (V2_STRUCT)']
-
-
-DEBUG - Villes dans res_v2_struct: ['BORDEAUX', 'BREST', 'GRENOBLE', 'LILLE', 'LYON', 'MARSEILLE', 'MONTPELLIER', 'NANTES', 'NICE', 'PARIS', 'REIMS', 'RENNES', 'STRASBOURG', 'TOULOUSE', 'TOURS']
-res_v2_struct calculé : 2175 lignes, 14 colonnes
-Dernière période disponible : 2026-01-01 00:00:00
-Données pour la carte : 15 villes
-Villes dans df_prix_m2 : ['BORDEAUX', 'BREST', 'GRENOBLE', 'LILLE', 'LYON', 'MARSEILLE', 'MONTPELLIER', 'NANTES', 'NICE', 'PARIS', 'REIMS', 'RENNES', 'STRASBOURG', 'TOULOUSE', 'TOURS']
-
---- Génération des Cartes ---
-
---- Carte 1 : Coûts des opérations (APT Ancien) ---
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\carte_couts_operations_APT_ANCIEN.png
-
---- Carte 2 : Prix au m² + Évolutions (APT Ancien) ---
-   -> Carte : APT
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\carte_prix_m2_CITY_APT_V2_RESTREINT.png
-
---- Graphiques Neuf (National + Régions) ---
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\graphique_neuf_prix_national_regions.html
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\graphique_neuf_evol_national_regions.html
-
---- Graphiques Évolutions 12M – Top 12 villes ---
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\graphique_evol_12m_barres_villes.html
-   -> Sauvegardé : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\graphique_evol_12m_historique_villes.html
-
-=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===
-
---- Chargement LPI/IAD ---
-
---- Génération des graphiques ---
-
-================================================================================
- RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)
-================================================================================
-
-CORRESPONDANCE LPI dans IC (Couverture moyenne) :
-   IC 3M  : 40.8%
-   IC 12M : 28.5%
-
-RMSE ABSOLU (€/m²) :
-   3M  : 243.91 €/m²
-   12M : 239.84 €/m²
-   Δ   : +4.07 €/m² (12M meilleur)
-
-RMSE RELATIF (%) :
-   3M  : 6.34 %
-   12M : 6.04 %
-
-CORRÉLATION avec LPI :
-   3M  : 0.9400
-   12M : 0.9452
-   Δ   : +0.0052 (12M meilleur)
-
---------------------------------------------------------------------------------
-
-Détail par ville :
-      Ville  Prix_Moyen_LPI    RMSE_3M   RMSE_12M  Delta_RMSE  RMSE_REL_3M  RMSE_REL_12M  CORR_3M  CORR_12M
-      LILLE     3405.891892 155.871699  95.575632   60.296068     4.576531      2.806185 0.963386  0.988852
-MONTPELLIER     3188.054054 487.310199 446.504179   40.806020    15.285506     14.005540 0.940682  0.924174
-   TOULOUSE     3379.072072 332.924031 298.817723   34.106309     9.852528      8.843189 0.962435  0.953026
-      REIMS     2609.828829 271.208837 243.993813   27.215024    10.391825      9.349035 0.875961  0.882639
-     RENNES     3517.873874 241.749017 216.362890   25.386127     6.872021      6.150388 0.957954  0.951345
-  MARSEILLE     3168.252252 193.789112 169.046020   24.743092     6.116594      5.335624 0.917273  0.916848
-   GRENOBLE     2714.486486 104.681255  82.667776   22.013479     3.856393      3.045430 0.845067  0.894761
- STRASBOURG     3620.873874 134.768523 120.481983   14.286540     3.721989      3.327428 0.949770  0.970474
-     NANTES     3642.216216 127.790430 143.999488  -16.209058     3.508590      3.953623 0.967266  0.960278
-       NICE     4491.612613 168.409643 185.089247  -16.679604     3.749425      4.120775 0.956197  0.966587
-      PARIS    10071.018018 516.175787 559.871291  -43.695505     5.125359      5.559232 0.944990  0.966167
-   BORDEAUX     4440.846847 163.053163 212.026494  -48.973332     3.671668      4.774461 0.963511  0.951386
-       LYON     4770.792793 273.157360 343.502980  -70.345619     5.725618      7.200124 0.975732  0.961482
-      BREST             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
-      TOURS             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
-
- Statistiques sauvegardées : z:\uflumth\gits\univers_elementaire\TI - V2\resultats\stats_comparaison_V2_LPI.csv
-
-=== ANALYSE TERMINÉE ===
