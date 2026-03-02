@@ -1,864 +1,953 @@
-
 """
-Module : base_work.py
-======================
-Ce module crée et traite la base de données globale.
-
-Il concatène les fichiers `df_transac_clean.parquet` et `df_demandes_clean.parquet`,
-qui contiennent l'ensemble des transactions et demandes issues des données de
-Crédit Logement et DVF. Un filtre de détection d'anomalies (détaillé dans
-`fonctions.py`) est ensuite appliqué.
-
-La base est enrichie par des jointures avec :
-- `BAN_ENRICHIE` : codes IRIS associés à chaque adresse
-- `BAT_ENRICHIE` : année de construction des logements
-
-Le features engineering produit notamment :
-- `BIEN_NEUF` : ancienneté du bien (NEUF / ANCIEN)
-- `NB_PIECES_RANGE` : tranche de pièces par type de bien
-
-La base finale est exportée sous `base_complete_filtree.parquet` dans le dossier
-`stats_base_complete_filtree/`. Ce fichier est l'entrée principale de
-`univers_elementaire.py`.
-
-Sorties également disponibles : rapport HTML / Excel sur les outliers, graphiques
-de volumographie et de couverture des données.
+    ANALYSE ET DE VISUALISATION (base_restreinte vs LPI)
+    ------------------------------------------------
+    Ce code permet de
+    1. Charge les résultats de base_complete_filtree.parquet et base_restreinte.parquet déjà, et de realculer les prix selon la 
+    méthode des univers élémentaires (attention: spécificité pour Paris)
+    (on applique la structure de marché de la base complète et on l'applique à base restreinte)
+    2. Compare ces résultats avec le baromètre LPI-IAD.
+    3. Génère les cartes de prix des plus grandes villes de France.
 """
 
 
 import sys
 import os
 import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-from datetime import datetime
-import logging
-import math
-from datetime import timedelta, datetime
-from dateutil.relativedelta import relativedelta
-from fonctions import (DateOffset,
-                         ImportRecentData,
-                         CalcMetaNum,
-                         EffectifsParMailleGeo,
-                         DefMailleGeoCITY,
-                         DetectAno
-)
-from fonctions import detect_ano_ml as detect_ano_ml_fct
 import numpy as np
-
-import pandas as pd
-import time
-from fonctions import Connector
-import param_generaux as params
-import os
-import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe 
+import geopandas as gpd
+from shapely.geometry import Point
+from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
+import plotly.graph_objects as go
 import plotly.io as pio
-import pandas as pd
-import time
+import locale
+import logging
+from fonctions import load_cl_results, get_structure_ref_local, extract_arrondissement, clean_base, poids_arr, get_structure_reference_city, process_dataset_restreint
+import plotly.graph_objects as go
 
-import os
+# --- CONFIGURATION ---
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
+try:
+    import param_generaux as params
+except ImportError:
+    class params:
+        CONFIG = {'output_dir': os.path.join(current_dir, 'outputs')} 
 
+# Configuration Graphique
+pio.renderers.default = "browser"
+logging.getLogger("cmdstanpy").disabled = True
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
 
+# CHEMINS 
+PATH_RESULTATS_V2 = r"N:\uflumth\indicateur_marche\univers_elementaire\TI - V2\bdd_univ_elem_zone_insee"
 
-pio.renderers.default = "png"  
+PATH_LPI = r"N:\uflumth\indicateur_marche\LPI-IAD donnees (v2).xlsx"
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "stats_base_complete_filtree")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+PATH_BASE_V1 = r"Z:\uflumth\gits\univers_elementaire\TI - V2\stats_base_complete_filtree\base_complete_filtree.parquet"
+PATH_BASE_V2 = r"Z:\uflumth\gits\univers_elementaire\TI - V2\resultats\base_restreinte.parquet"
 
+# GÉOGRAPHIE
+PATH_GEOJSON = r"Z:\uflumth\gits\univers_elementaire\TI\metropole-version-simplifiee.geojson"
+PATH_GPS = r'N:\uflujek\commune_france_gps.csv'
+PATH_COMMUNES = r"N:\uflujek\Commune_france.xlsx" 
 
-DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
-co = Connector()
-
-################ Importation de la base ################
-start_time = time.time()
-base_clean = pd.read_parquet(os.path.join(DATA_PATH, "df_transac_clean.parquet"))
-base_clean["DEMANDE"] = 0
-base_clean_date_max = base_clean["DATE"].max()
-demandes = pd.read_parquet(os.path.join(DATA_PATH, "df_demandes_clean.parquet"))
-demandes["DEMANDE"] = 1
-demandes = demandes[demandes["DATE"] <= base_clean_date_max]
-
-df = pd.concat([base_clean, demandes], axis=0, ignore_index=True)
-df = df[df["SOURCE"] == "CL"] # Pour cette version, on ne garde plus les données DVF
-end_time = time.time()
-print(f"Temps d'importation : {end_time - start_time:.2f} secondes")
-
-
-################ Fusion avec la base BAN_ENRICHI contenant les codes IRIS ################
-df_ban = co.read_sql(
-            f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
-cl_data = pd.merge(df, df_ban, how='left', on='CLE_INTEROP_ADR')
-cl_data = cl_data.copy()
-
-start_time = time.time()
-base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years = 12) #Algorithme de détection d'anomalies, détaillé dans fonctions.py
-                                                                           #On prend 12 ans ici de sorte à pouvoir calculer les prix pour 2015
-end_time = time.time()
-print(f"Temps de détections d'anomalies : {end_time - start_time:.2f} secondes")
-
-# DEBUG : vérification de la présence de VALEUR_FONCIERE (nécessaire pour le ratio
-# monte du prêt / valeur foncière dans la détection d'anomalies)
-print(f"\nDEBUG - Colonnes dans base_ml_full:")
-print(f"   VALEUR_FONCIERE existe: {'VALEUR_FONCIERE' in base_ml_full.columns}")
-if 'VALEUR_FONCIERE' in base_ml_full.columns:
-    print(f"   Valeurs non-NaN: {base_ml_full['VALEUR_FONCIERE'].notna().sum():,}")
-else:
-    print(f"   Colonnes disponibles: {sorted(base_ml_full.columns.tolist())}")
-
-# periode_reference: paramètre permettant de choisir le mois de référence 
-base_ml_full["DATE"] = pd.to_datetime(base_ml_full["DATE"], errors="coerce")
-periode_reference = None # à changer en fonction de la plage de temps souhaitée
-ref_date = periode_reference or base_ml_full["DATE"].max()
-
-date_max = ref_date
-date_min = pd.Timestamp("2014-01-01") ##### à réadapter en fonction
-
-base_ml = base_ml_full[(base_ml_full["DATE"] >= date_min) & (base_ml_full["DATE"] < date_max)]
-df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
-start_time = time.time()
-
-################ Fusion avec la base BAT_ENRICHI contenant les années de construction ################
-base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
-end_time = time.time()
-print(f"Temps de fusion avec BAT_ENRICHIE : {end_time - start_time:.2f} secondes")
-
-
-start_time = time.time()
-
-# Définition de la variable BIEN_NEUF
-base_ml.loc[
-    base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
-    "annee_construction"
-] = base_ml["DATE"].dt.year
-
-
-base_ml["BIEN_NEUF"] = np.where(
-        (base_ml["NATURE_MUTATION"]  == "Vente en l'état futur d'achèvement")
-        | (base_ml["CD_NATUR_OP"] == "AQN")
-        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
-        "NEUF",
-        "ANCIEN",
-    )
-
-end_time = time.time()
-print(f"Temps de traitement variable BIEN_NEUF : {end_time - start_time:.2f} secondes")
-base_ml = base_ml.drop(
-        columns=["NATURE_MUTATION"]
-    )
-
-base_ml = base_ml.copy()
-base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
-
-
-bins_apt = [0, 1, 3, np.inf]
-
-labels_apt = [
-    "APT: 1 pièce",
-    "APT: 2-3 pièces",
-    "APT: 4 pièces et plus"
-]
-
-bins_mai = [0, 3, 5, np.inf]
-
-labels_mai = [
-    "MAI: 3 pièces et moins",
-    "MAI: 4-5 pièces",
-    "MAI: 6 pièces et plus"
-]
+# Config Graphique
+pio.renderers.default = "browser"
+os.makedirs(params.CONFIG['output_dir'], exist_ok=True)
 
 
 
-mask_apt = base_ml["TYPE_BIEN"].eq("APT")
-mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
 
-base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_apt, "NB_PIECES"],
-    bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
-).astype(str)
-
-base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
-    base_ml.loc[mask_mai, "NB_PIECES"],
-    bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
-).astype(str)
-
-base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
-
-base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
-base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
-
-
-output_path = os.path.join(OUTPUT_DIR, "base_complete_filtree.parquet")
-base_ml.to_parquet(output_path, index=False)
-
-
-############### Statistiques sur les anomalies ###############
-colonnes = ["Prix_m2", "NB_SURF_HAB", "NB_PIECES"]
-
-def analyse_generale_outliers(data_mauvais, data_recent):
-    total = len(data_mauvais) + len(data_recent)
-    print("STATISTIQUES GÉNÉRALES")
-    print("-" * 80)
-    print(f"Nombre total de biens sur 2015-2025 : {total:,}")
-    print(f"Biens valides : {len(data_recent):,} ({len(data_recent)/total*100:.2f}%)")
-    print(f"Outliers détectés : {len(data_mauvais):,} ({len(data_mauvais)/total*100:.2f}%)")
-    print()
+if __name__ == "__main__":
     
-    
-    print("Prix au m² - Outliers :")
-    print(f"  Min : {data_mauvais['Prix_m2'].min():,.0f} €")
-    print(f"  Max : {data_mauvais['Prix_m2'].max():,.0f} €")
-    print(f"  Médiane : {data_mauvais['Prix_m2'].median():,.0f} €")
-    print(f"  Moyenne : {data_mauvais['Prix_m2'].mean():,.0f} €")
-    print()
-
-
-def classifier_outliers(data_mauvais, data_recent):
-    print("CLASSIFICATION DES OUTLIERS")
-    print("-" * 80)
-    
-    medianes = data_recent.groupby(['YEAR', 'ville_', 'TYPE_BIEN'])['Prix_m2'].median().reset_index()
-    medianes.rename(columns={'Prix_m2': 'mediane'}, inplace=True)
-    
-    data_outliers_class = data_mauvais.merge(medianes, on=['YEAR', 'ville_', 'TYPE_BIEN'], how='left')
-    
-    def classifier(row):
-        prix = row['Prix_m2']
-        if pd.isna(row['mediane']):
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            else:
-                return 'Autre'
-        else:
-            mediane = row['mediane']
-            if prix < 200:
-                return 'Prix < 200€'
-            elif prix > 20000:
-                return 'Prix > 20000€'
-            elif prix < mediane / 4:
-                return 'Prix < médiane/4'
-            elif prix > 4 * mediane:
-                return 'Prix > 4×médiane'
-            else:
-                return 'Autre'
-    
-    data_outliers_class['type_anomalie'] = data_outliers_class.apply(classifier, axis=1)
-    
-    repartition = data_outliers_class['type_anomalie'].value_counts()
-    print("\nRépartition par type d'anomalie :")
-    for anomalie, count in repartition.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {anomalie:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    return data_outliers_class
-
-
-def analyse_geo_outliers(data_outliers_class):
-    print("RÉPARTITION GÉOGRAPHIQUE")
-    print("-" * 80)
-    
-    print("\nTop 10 départements avec le plus d'outliers :")
-    top_dept = data_outliers_class['LIBELLE_DEPT'].value_counts().head(10)
-    for dept, count in top_dept.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {dept:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Top 10 villes avec le plus d'outliers :")
-    top_ville = data_outliers_class['ville_'].value_counts().head(10)
-    for ville, count in top_ville.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {ville:30s} : {count:5d} ({pct:5.2f}%)")
-    print()
-
-
-def analyse_typologie_outliers(data_outliers_class):
-    print("RÉPARTITION PAR TYPE DE BIEN")
-    print("-" * 80)
-    
-    print("\nPar type de bien :")
-    type_bien = data_outliers_class['TYPE_BIEN'].value_counts()
-    for tb, count in type_bien.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {tb:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-    print("Par année :")
-    annee = data_outliers_class['YEAR'].value_counts().sort_index()
-    for year, count in annee.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {year} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-
-
-def analyse_sources_outliers(data_outliers_class):
-
-    print("ANALYSE PAR SOURCE DE DONNÉES")
-    print("-" * 80)
-    
-    print("\nPar source :")
-    source = data_outliers_class['SOURCE'].value_counts()
-    for src, count in source.items():
-        pct = count / len(data_outliers_class) * 100
-        print(f"  {src:20s} : {count:5d} ({pct:5.2f}%)")
-    print()
-    
-
-
-def exemples_outliers(data_outliers_class):
-    print("=" * 80)
-    print("EXEMPLES D'OUTLIERS EXTRÊMES")
-    print("=" * 80)
-    
-    print("\n5 prix au m² les plus bas :")
-    cols_display = ['ville_', 'TYPE_BIEN', 'Prix_m2', 'NB_SURF_HAB', 'NB_PIECES', 'type_anomalie']
-    print(data_outliers_class.nsmallest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
-    
-    print("5 prix au m² les plus hauts :")
-    print(data_outliers_class.nlargest(5, 'Prix_m2')[cols_display].to_string(index=False))
-    print()
-
-
-
-
-def analyser_outliers_complet(data_mauvais, data_recent):
-    analyse_generale_outliers(data_mauvais, data_recent)
-    data_outliers_class = classifier_outliers(data_mauvais, data_recent)
-    analyse_geo_outliers(data_outliers_class)
-    analyse_typologie_outliers(data_outliers_class)
-    analyse_sources_outliers(data_outliers_class)
-    exemples_outliers(data_outliers_class)
-    return data_outliers_class
-
-
-def analyser_par_critere(outliers_df):
-    """Analyse la répartition des outliers par critère d'élimination"""
-    print("\n" + "="*80)
-    print("ANALYSE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Séparer les critères multiples (séparés par |)
-    criteres_list = []
-    for idx, row in outliers_df.iterrows():
-        reason_val = row["OUTLIER_REASON"]
-        if pd.notna(reason_val) and str(reason_val).strip() != "":
-            reasons = str(reason_val).split("|")
-        else:
-            reasons = ["Non_specifie"]
-
-        for reason in reasons:
-            criteres_list.append(reason.strip())
-    
-    criteres_counts = pd.Series(criteres_list).value_counts()
-    
-    print(f"\nNombre total d'outliers : {len(outliers_df):,}")
-    print(f"\nRépartition par critère (un outlier peut avoir plusieurs critères) :")
-    print("-" * 80)
-    for critere, count in criteres_counts.items():
-        pct = count / len(outliers_df) * 100
-        print(f"  {critere:35s} : {count:6,} ({pct:5.2f}%)")
-    
-    # Outliers avec critères multiples
-    outliers_multi = outliers_df[outliers_df["OUTLIER_REASON"].str.contains("|", na=False)]
-    pct_multi = len(outliers_multi) / len(outliers_df) * 100
-    print(f"\nOutliers avec critères multiples : {len(outliers_multi):,} ({pct_multi:.2f}%)")
-    print()
-    
-    return criteres_counts
-
-
-def analyse_geo_par_critere(outliers_df):
-    """Analyse géographique des outliers par critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION GÉOGRAPHIQUE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
+    # =============================================================================
+    # 2. PRÉPARATION DES DONNÉES POUR LA CARTE
+    # =============================================================================
         
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere}")
-        print("-" * 80)
-        
-        # Top 5 départements
-        if "LIBELLE_DEPT" in subset.columns:
-            print(f"\nTop 5 départements ({len(subset):,} outliers) :")
-            top_dept = subset["LIBELLE_DEPT"].value_counts().head(5)
-            for dept, count in top_dept.items():
-                pct = count / len(subset) * 100
-                print(f"  {dept:35s} : {count:5,} ({pct:5.2f}%)")
-        
-        # Top 5 villes
-        if "ville_" in subset.columns:
-            print(f"\nTop 5 villes :")
-            top_ville = subset["ville_"].value_counts().head(5)
-            for ville, count in top_ville.items():
-                pct = count / len(subset) * 100
-                print(f"  {ville:35s} : {count:5,} ({pct:5.2f}%)")
-    print()
+    import importlib.util
+    comparaison_path = os.path.join(current_dir, "comparaison.py")
 
+    
+    top_ville = params.CONFIG['top_cities']
+    
+    
 
-def analyse_temporelle_par_critere(outliers_df):
-    """Analyse temporelle des outliers par critère"""
-    print("\n" + "="*80)
-    print("ÉVOLUTION TEMPORELLE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0 or "YEAR" not in subset.columns:
-            continue
-            
-        print(f"\nCritère : {critere}")
-        print("-" * 80)
-        
-        # Répartition par année
-        year_counts = subset["YEAR"].value_counts().sort_index()
-        print(f"\nÉvolution par année ({len(subset):,} outliers au total) :")
-        for year, count in year_counts.items():
-            pct = count / len(subset) * 100
-            bar_length = int(pct / 2)  # Barre visuelle
-            bar = "█" * bar_length
-            print(f"  {year} : {count:5,} ({pct:5.2f}%) {bar}")
-    print()
-
-
-def analyse_typologie_par_critere(outliers_df):
-    """Analyse typologique des outliers par critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION TYPOLOGIQUE PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere} ({len(subset):,} outliers)")
-        print("-" * 80)
-        
-        # Par type de bien
-        if "TYPE_BIEN" in subset.columns:
-            print("\nPar type de bien :")
-            type_counts = subset["TYPE_BIEN"].value_counts()
-            for type_bien, count in type_counts.items():
-                pct = count / len(subset) * 100
-                print(f"  {type_bien:15s} : {count:5,} ({pct:5.2f}%)")
-        
-        # Par BIEN_NEUF si disponible
-        if "BIEN_NEUF" in subset.columns:
-            print("\nPar état (neuf/ancien) :")
-            neuf_counts = subset["BIEN_NEUF"].value_counts()
-            for etat, count in neuf_counts.items():
-                pct = count / len(subset) * 100
-                print(f"  {etat:15s} : {count:5,} ({pct:5.2f}%)")
-    print()
-
-
-def analyse_source_par_critere(outliers_df):
-    """Analyse des outliers par source et critère"""
-    print("\n" + "="*80)
-    print("RÉPARTITION PAR SOURCE DE DONNÉES ET CRITÈRE")
-    print("="*80)
-    
-    if "SOURCE" not in outliers_df.columns:
-        print("\nColonne SOURCE non disponible.")
-        return
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nCritère : {critere} ({len(subset):,} outliers)")
-        print("-" * 80)
-        
-        source_counts = subset["SOURCE"].value_counts()
-        for source, count in source_counts.items():
-            pct = count / len(subset) * 100
-            print(f"  {source:20s} : {count:5,} ({pct:5.2f}%)")
-    print()
-
-
-def exemples_par_critere(outliers_df):
-    """Affiche des exemples concrets d'outliers pour chaque critère"""
-    print("\n" + "="*80)
-    print("EXEMPLES CONCRETS PAR CRITÈRE D'ÉLIMINATION")
-    print("="*80)
-    
-    # Obtenir les critères uniques
-    all_criteres = set()
-    for reasons in outliers_df["OUTLIER_REASON"].dropna():
-        if str(reasons).strip() != "":
-            for reason in str(reasons).split("|"):
-                all_criteres.add(reason.strip())
-    
-    cols_display = ["ville_", "TYPE_BIEN", "Prix_m2", "NB_SURF_HAB", "NB_PIECES", "YEAR", "OUTLIER_REASON"]
-    cols_available = [col for col in cols_display if col in outliers_df.columns]
-    
-    for critere in sorted(all_criteres):
-        if critere == "Non spécifié":
-            continue
-            
-        # Filtrer les outliers pour ce critère
-        mask = outliers_df["OUTLIER_REASON"].str.contains(critere, na=False, regex=False)
-        subset = outliers_df[mask]
-        
-        if len(subset) == 0:
-            continue
-            
-        print(f"\nExemples pour : {critere}")
-        print("-" * 80)
-        
-        # Prendre 5 exemples aléatoires
-        n_samples = min(5, len(subset))
-        samples = subset[cols_available].sample(n=n_samples, random_state=42)
-        print(samples.to_string(index=False))
-        print()
-
-
-def export_outliers_excel(outliers_df, filename="outliers_analysis.xlsx"):
-    """Exporte les outliers et analyses dans un fichier Excel multi-feuilles"""
-    print("\n" + "="*80)
-    print("EXPORT DES OUTLIERS")
-    print("="*80)
-    
+    # -------------------------------------------------------------------------
+    # B.1 CHARGEMENT DES DONNÉES BRUTES
+    # -------------------------------------------------------------------------
+    print("Chargement V1 (Base complète)...")
     try:
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            # Feuille 1: Tous les outliers
-            outliers_df.to_excel(writer, sheet_name="Tous_les_outliers", index=False)
-            
-            # Feuille 2: Statistiques par critère
-            criteres_list = []
-            for idx, row in outliers_df.iterrows():
-                reason_val = row["OUTLIER_REASON"]
-                if pd.notna(reason_val) and str(reason_val).strip() != "":
-                    reasons = str(reason_val).split("|")
-                else:
-                    reasons = ["Non_specifie"]
-                for reason in reasons:
-                    criteres_list.append(reason.strip())
-            
-            criteres_stats = pd.DataFrame({
-                "Critère": pd.Series(criteres_list).value_counts().index,
-                "Nombre": pd.Series(criteres_list).value_counts().values,
-                "Pourcentage": (pd.Series(criteres_list).value_counts().values / len(outliers_df) * 100).round(2)
-            })
-            criteres_stats.to_excel(writer, sheet_name="Stats_par_critere", index=False)
-            
-            # Feuille 3: Top départements
-            if "LIBELLE_DEPT" in outliers_df.columns:
-                top_dept = outliers_df["LIBELLE_DEPT"].value_counts().head(20).reset_index()
-                top_dept.columns = ["Département", "Nombre_outliers"]
-                top_dept.to_excel(writer, sheet_name="Top_departements", index=False)
-            
-            # Feuille 4: Évolution temporelle
-            if "YEAR" in outliers_df.columns:
-                temp_evolution = outliers_df["YEAR"].value_counts().sort_index().reset_index()
-                temp_evolution.columns = ["Année", "Nombre_outliers"]
-                temp_evolution.to_excel(writer, sheet_name="Evolution_temporelle", index=False)
-        
-        print(f"\nFichier exporté avec succès : {filename}")
-        print(f"   Nombre total d'outliers : {len(outliers_df):,}")
+        raw_v1 = pd.read_parquet(PATH_BASE_V1)
     except Exception as e:
-        print(f"\nErreur lors de l'export : {e}")
-    print()
+        sys.exit(f"Erreur chargement V1: {e}")
+        
+    print("Chargement V2 (Base réduite)...")
+    try:
+        raw_v2 = pd.read_parquet(PATH_BASE_V2)
+    except Exception as e:
+        sys.exit(f"Erreur chargement V2: {e}")
+    raw_v2_full = raw_v2.copy()  # Copie avant filtrage villes – pour analyse nationale du neuf
+
+    raw_v1 = raw_v1[raw_v1["DEMANDE"] == 0] #Pour calculer la structure de marché globale, on retire les transactions "DEMANDE"
+    
+    # Nettoyage des bases AVANT d'extraire les appartements
+    raw_v1 = clean_base(raw_v1, top_ville)
+    raw_v2 = clean_base(raw_v2, top_ville)
+    
+    # Extraction des appartements APRÈS le nettoyage (pour avoir la colonne Ville)
+    raw_v2_apt = raw_v2[raw_v2["TYPE_BIEN"] == "APT"].copy()
+
+    # -------------------------------------------------------------------------
+    # B.2 EXTRACTION STRUCTURE DE MARCHÉ (V1) - 
+    # -------------------------------------------------------------------------
+    df_v1_for_struct = raw_v1.copy()
+    structure_v1, structure_arrondissement = get_structure_reference_city(df_v1_for_struct)
+    
+    
+    # Filtrer la structure pour ne garder que les codes valides
+    # Pour Paris, Marseille, Lyon : garder les codes d'arrondissements
+    # Pour les autres villes : garder les noms de villes
+    codes_paris = [f"{75100 + i}" for i in range(1, 21)]  # 75101-75120
+    codes_marseille = [f"{13200 + i}" for i in range(1, 17)]  # 13201-13216
+    codes_lyon = [f"{69380 + i}" for i in range(1, 10)]  # 69381-69389
+    
+    # Autres villes du top
+    autres_villes = ['BORDEAUX', 'HAVRE', 'LILLE', 'MONTPELLIER', 'NANTES', 
+                     'NICE', 'REIMS', 'RENNES', 'SAINT ETIENNE', 'STRASBOURG', 'TOULOUSE', 'TOURS', 'GRENOBLE', 'BREST']
+    
+    codes_valides = codes_paris + codes_marseille + codes_lyon + autres_villes
+    structure_v1 = structure_v1[structure_v1['Ville'].isin(codes_valides)]
+    
+    print(f"DEBUG - Structure V1 après filtre: {structure_v1['Ville'].unique()[:20]}")    
+    # -------------------------------------------------------------------------
+    # B.3 CALCUL DES PRIX GLISSANTS (V2_STRUCT uniquement)
+    # -------------------------------------------------------------------------
+    print("\n--- Calcul des prix glissants V2_STRUCT (avec structure V1) ---")
+    
+    # DEBUG: Vérifier les données avant traitement
+    print(f"\nDEBUG - Villes uniques dans raw_v2_apt: {sorted(raw_v2_apt['Ville'].unique())[:20]}")
+    print(f"DEBUG - Nombre de lignes Paris: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('751', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Marseille: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('132', na=False)])}")
+    print(f"DEBUG - Nombre de lignes Lyon: {len(raw_v2_apt[raw_v2_apt['Ville'].str.startswith('693', na=False)])}")
+    print(f"DEBUG - Structure arrondissement shape: {structure_arrondissement.shape}")
+    print(f"DEBUG - Villes dans structure_arrondissement: {structure_arrondissement['Ville'].unique()}")
+    
+    res_v2_struct = process_dataset_restreint(raw_v2_apt, "V2_STRUCT", df_structure=structure_v1, df_arr=structure_arrondissement)
+    
+    # DEBUG: Vérifier les résultats après traitement
+    print(f"\nDEBUG - Villes dans res_v2_struct: {sorted(res_v2_struct['Ville'].unique())}")
+    
+    res_v2_struct = res_v2_struct.sort_values(["Ville","Periode"])
+    res_v2_struct["TAUX_INFL_12M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=4, fill_method=None)
+    res_v2_struct["TAUX_INFL_3M"] = res_v2_struct.groupby("Ville")["prix_mm_3m (V2_STRUCT)"].ffill().pct_change(periods=1, fill_method=None)
+    print(f"res_v2_struct calculé : {res_v2_struct.shape[0]} lignes, {res_v2_struct.shape[1]} colonnes")
+    
 
 
-def rapport_complet_outliers(outliers_df, base_clean):
-    """Génère un rapport complet sur les outliers avec toutes les analyses"""
-    print("\n\n")
+
+    
+    # -------------------------------------------------------------------------
+    # B.4 PRÉPARATION POUR LA CARTE (dernière période uniquement)
+    # -------------------------------------------------------------------------
+    if len(res_v2_struct) == 0:
+        print("ERREUR: Aucune donnée calculée")
+        df_v2 = load_cl_results(PATH_RESULTATS_V2, "V2")
+        if df_v2 is None:
+            sys.exit("Erreur: Pas de données V2.")
+        prix_m2_univ_elem_MAJ_CITY = df_v2[df_v2["MAILLE_TYPE"] == "CITY"].copy()
+        df_prix_m2 = prix_m2_univ_elem_MAJ_CITY.copy()
+        df_prix_m2 = df_prix_m2.rename(columns={"Prix_M2_V2": "prix_mm_value", "Periode": "DT_MAJ_PM2"})
+    else:
+        # Garder seulement la dernière période pour la carte
+        derniere_periode = res_v2_struct["Periode"].max()
+        print(f"Dernière période disponible : {derniere_periode}")
+        
+        res_v2_map = res_v2_struct[res_v2_struct["Periode"] == derniere_periode].copy()
+        print(f"Données pour la carte : {len(res_v2_map)} villes")
+        
+
+        df_prix_m2 = res_v2_map.rename(columns={
+            "Ville": "VAL_MAILLE_GEO",
+            "Periode": "DT_MAJ_PM2",
+            "prix_mm_3m (V2_STRUCT)": "prix_mm_value"
+        }).copy()
+        
+
+        df_prix_m2["MAILLE_TYPE"] = "CITY"
+        df_prix_m2["CD_TYPE_BIEN"] = "APT"
+        df_prix_m2["DIC_NAME"] = "prix_m2_3m"
+
+    
+    # -------------------------------------------------------------------------
+    # B.5 NETTOYAGE DES NOMS DE VILLES
+    # -------------------------------------------------------------------------
+    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
+    df_prix_m2["VAL_MAILLE_GEO"] = df_prix_m2["VAL_MAILLE_GEO"].replace({
+        "HAVRE": "LE HAVRE",
+        "SAINT ETIENNE": "ST ETIENNE"
+    })
+    
+    print(f"Villes dans df_prix_m2 : {df_prix_m2['VAL_MAILLE_GEO'].unique().tolist()}")
+    
+    # -------------------------------------------------------------------------
+    # B.6 PRÉPARATION POUR ANALYSE LPI (toutes périodes)
+    # -------------------------------------------------------------------------
+    merge_cl = res_v2_struct.copy()  # On garde seulement V2_STRUCT
+    
+    # C. Chargement GPS
+    df_geo_gps = pd.read_csv(PATH_GPS, sep=';')
+    df_geo_gps['label'] = df_geo_gps['label'].astype(str).str.upper().str.strip()
+
+    # =============================================================================
+    # 3. CODE GRAPHIQUE 
+    # =============================================================================
+    print("\n--- Génération des Cartes ---")
+
+    # --- PALETTE DE COULEURS & POLICE ---
+    CL_TURQUOISE = '#A8DADC' 
+    CL_BLACK = '#1D3557' 
+    CL_LIGHT_GREY = '#F5F5DC' 
+    CL_BLUE_3M = '#000000' 
+    CL_RED_12M = '#CB4735' 
+
+    # Police 
+    try:
+        NOM_POLICE_CL = 'Century Gothic' 
+        plt.rcParams['font.family'] = 'sans-serif' 
+        plt.rcParams['font.sans-serif'] = [NOM_POLICE_CL, 'Arial', 'Verdana', 'sans-serif'] 
+    except:
+        pass
+
+    plt.rcParams['font.weight'] = 'medium' 
+    TITRE_FONT_WEIGHT = 'heavy' 
+
+    TAUX_FONT_SIZE = 11
+    DEFAULT_FONT_SIZE = 20
+    TARGET_CRS = "EPSG:2154"
+
+    # --- PRÉPARATION GEOJSON ---
+    try:
+        france_gdf = gpd.read_file(PATH_GEOJSON)
+        dissolved_france = france_gdf.dissolve(by=None)
+        france_geometry = dissolved_france.to_crs(TARGET_CRS).geometry.iloc[0] 
+    
+        geometries_list = list(france_geometry.geoms) if france_geometry.geom_type == 'MultiPolygon' else [france_geometry]
+        geometries_list.sort(key=lambda x: x.area, reverse=True)
+        france_outline_geometry = geometries_list[0]
+    
+    except Exception as e:
+        print(f"!!! Échec GeoJSON: {e}")
+        sys.exit(1)
+
+    X_OFFSET_DEFAULT = 3000
+    Y_OFFSET_DEFAULT = 3000
+    CUSTOM_LABEL_OFFSETS = {
+        'MONTPELLIER': {'x': 5000, 'y': 90000}, 
+        'MARSEILLE':   {'x': 5000,  'y': -15000},
+        'TOULON':      {'x': 5000,  'y': -10000},
+        'NICE':        {'x': 30000, 'y': 3000}, 
+        'GRENOBLE':    {'x': 5000, 'y': 10000},   
+        'ST ETIENNE':  {'x': -30000, 'y': -0},
+        'LE HAVRE':    {'x': 10000, 'y': -0},
+        'BORDEAUX':    {'x': 5000,  'y': 20000},  
+        'NANTES':      {'x': 5000,  'y': 20000},  
+        'RENNES':      {'x': 5000,  'y': 40000},  
+        'LILLE':       {'x': 0,   'y': -10000}, 
+        'STRASBOURG':  {'x': -5000, 'y': 0},  
+        'PARIS':       {'x': 5000, 'y': 3000},
+        'LYON':        {'x': 0, 'y': 90000},
+        'TOULOUSE':    {'x': -5000, 'y': 20000},
+        'TOURS':       {'x': 5000,  'y': -3000},
+        'BREST':       {'x': -35000, 'y': 0},
+        'REIMS':       {'x': 20000, 'y': 30000},
+    }
+
+    # =========================================================================
+    # CARTE 1 – COÛTS DES OPÉRATIONS (APT Ancien)
+    # =========================================================================
+    print("\n--- Carte 1 : Coûts des opérations (APT Ancien) ---")
+
+    df_apt_ancien = raw_v2_apt[raw_v2_apt["BIEN_NEUF"] == "ANCIEN"].copy() if "BIEN_NEUF" in raw_v2_apt.columns else raw_v2_apt.copy()
+
+    if "VALEUR_FONCIERE" not in df_apt_ancien.columns or df_apt_ancien["VALEUR_FONCIERE"].isna().all():
+        df_apt_ancien["VALEUR_FONCIERE"] = df_apt_ancien["Prix_m2"] * df_apt_ancien["NB_SURF_HAB"]
+
+    # Regrouper Paris/Lyon/Marseille (codes arrondissements → nom de ville)
+    ARRT_TO_CITY = {
+        **{f"{75100+i}": "PARIS"     for i in range(1, 21)},
+        **{f"{13200+i}": "MARSEILLE" for i in range(1, 17)},
+        **{f"{69380+i}": "LYON"      for i in range(1, 10)},
+    }
+    df_apt_ancien["Ville_carte"] = df_apt_ancien["Ville"].astype(str).map(ARRT_TO_CITY).fillna(df_apt_ancien["Ville"])
+
+    df_apt_ancien["DATE"] = pd.to_datetime(df_apt_ancien["DATE"], errors="coerce")
+    annee_max_c1 = df_apt_ancien["DATE"].dt.year.max()
+    df_apt_recent = df_apt_ancien[df_apt_ancien["DATE"].dt.year >= annee_max_c1 - 1]
+
+    # --- Prix, Surface et VF depuis res_v2_struct à la dernière période ---
+    derniere_p_c1 = res_v2_struct["Periode"].max()
+    derniere_date_c1 = pd.Timestamp(derniere_p_c1) if not pd.isna(derniere_p_c1) else df_apt_ancien["DATE"].max()
+
+    cols_c1_src = {
+        "prix_mm_3m (V2_STRUCT)":    "prix_m2",
+        "surface_mm_3m (V2_STRUCT)": "surface",
+        "VF_mm_3m (V2_STRUCT)":      "valeur_fonciere",
+    }
+    cols_disponibles = [c for c in cols_c1_src if c in res_v2_struct.columns]
+    stats_c1 = (
+        res_v2_struct[res_v2_struct["Periode"] == derniere_p_c1][["Ville"] + cols_disponibles]
+        .rename(columns=cols_c1_src)
+        .copy()
+    )
+
+    df_map_c1 = df_geo_gps.merge(stats_c1, left_on="label", right_on="Ville", how="inner")
+    df_map_c1 = df_map_c1.dropna(subset=["latitude", "longitude", "prix_m2"])
+    df_map_c1 = df_map_c1.drop_duplicates(subset="label", keep="first")
+
+    if not df_map_c1.empty:
+        geometry_c1 = [Point(xy) for xy in zip(df_map_c1["longitude"], df_map_c1["latitude"])]
+        gdf_c1 = gpd.GeoDataFrame(df_map_c1, geometry=geometry_c1, crs="EPSG:4326").to_crs(TARGET_CRS)
+
+        fig_c1, ax_c1 = plt.subplots(1, 1, figsize=(14, 14), dpi=300)
+        fig_c1.set_facecolor(CL_TURQUOISE)
+        x_fr, y_fr = france_outline_geometry.exterior.xy
+        ax_c1.fill(x_fr, y_fr, color=CL_LIGHT_GREY, zorder=1)
+        ax_c1.plot(x_fr, y_fr, color=CL_BLACK, linewidth=1.0, zorder=2)
+        xmin_c1, ymin_c1, xmax_c1, ymax_c1 = france_outline_geometry.bounds
+        ax_c1.set_xlim(xmin_c1 - 5000, xmax_c1 + 5000)
+        ax_c1.set_ylim(ymin_c1 - 5000, ymax_c1 + 5000)
+
+        halo_c1 = [pe.withStroke(linewidth=2.5, foreground="white")]
+        LS_C1 = 15000
+
+        for _, row_c1 in gdf_c1.iterrows():
+            cx, cy = row_c1.geometry.x, row_c1.geometry.y
+            city_lbl = str(row_c1["label"]).upper()
+            offsets = CUSTOM_LABEL_OFFSETS.get(city_lbl, {"x": X_OFFSET_DEFAULT, "y": Y_OFFSET_DEFAULT})
+            ax_off, ay_off = offsets["x"], offsets["y"]
+            anc_x, anc_y = cx + ax_off, cy + ay_off
+            ha_c1 = "right" if ax_off < 0 else "left"
+
+            prix_str = f"{int(row_c1['prix_m2']):,} EUR/m2".replace(",", " ")    if pd.notna(row_c1.get("prix_m2")) else "N/A"
+            surf_str = f"{int(row_c1['surface']):,} m2".replace(",", " ")          if pd.notna(row_c1.get("surface")) else "N/A"
+            vf_val   = row_c1.get("valeur_fonciere")
+            vf_str   = f"{int(vf_val):,} EUR".replace(",", " ")                   if pd.notna(vf_val) else "N/A"
+
+            ax_c1.text(anc_x, anc_y,              city_lbl, fontsize=DEFAULT_FONT_SIZE,     ha=ha_c1, va="top", color=CL_BLACK,    weight="normal", zorder=4, path_effects=halo_c1)
+            ax_c1.text(anc_x, anc_y - 1.5*LS_C1, prix_str, fontsize=0.85*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color=CL_BLACK,    weight="bold",   zorder=4, path_effects=halo_c1)
+            ax_c1.text(anc_x, anc_y - 3.0*LS_C1, surf_str, fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color="#4A4A8A",  weight="normal", zorder=4, path_effects=halo_c1)
+            ax_c1.text(anc_x, anc_y - 4.5*LS_C1, vf_str,   fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha_c1, va="top", color="#8B0000",  weight="normal", zorder=4, path_effects=halo_c1)
+            ax_c1.plot(cx, cy, marker="o", color=CL_BLACK, markersize=5, zorder=4, markeredgecolor="white", markeredgewidth=0.5)
+
+        ax_c1.axis("off")
+        ax_c1.set_title("CO\u00dbTS DES OP\u00c9RATIONS \u2013 APPARTEMENTS ANCIENS",
+                        fontsize=28, loc="center", pad=20, color=CL_BLACK, weight=TITRE_FONT_WEIGHT,
+                        bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.4"))
+        fig_c1.text(0.04, 0.07,
+                    "L\u00c9GENDE\nPrix m\u00e9dian au m\u00b2\nSurface m\u00e9diane\nCo\u00fbt m\u00e9dian de l'op\u00e9ration",
+                    ha="left", va="bottom", fontsize=16,
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
+        _MOIS_FR = {1:"JANVIER",2:"FEVRIER",3:"MARS",4:"AVRIL",5:"MAI",6:"JUIN",
+                    7:"JUILLET",8:"AOUT",9:"SEPTEMBRE",10:"OCTOBRE",11:"NOVEMBRE",12:"DECEMBRE"}
+        _date_c1 = f"{_MOIS_FR[derniere_date_c1.month]} {derniere_date_c1.year}" if pd.notna(derniere_date_c1) else str(annee_max_c1)
+        fig_c1.text(0.04, 0.02, f"CREDIT LOGEMENT - {_date_c1}", ha="left", va="bottom", fontsize=12)
+        out_c1 = os.path.join(params.CONFIG["output_dir"], "carte_couts_operations_APT_ANCIEN.png")
+        plt.savefig(out_c1, dpi=300, bbox_inches=None, facecolor=fig_c1.get_facecolor())
+        plt.close()
+        print(f"   -> Sauvegard\u00e9 : {out_c1}")
+    else:
+        print("   \u26a0\ufe0f Aucune donn\u00e9e pour la Carte 1.")
+
+    # =========================================================================
+    # CARTE 2 – PRIX AU M² + ÉVOLUTIONS (APT Ancien)
+    # =========================================================================
+    print("\n--- Carte 2 : Prix au m\u00b2 + \u00c9volutions (APT Ancien) ---")
+
+    types_bien = ['APT']
+    type_bien_labels = {"APT": "APPARTEMENTS", "MAI": "MAISONS"}
+
+
+    for type_bien in types_bien:
+        print(f"   -> Carte : {type_bien}")
+    
+
+        df_prix_filtre = df_prix_m2[
+            (df_prix_m2["CD_TYPE_BIEN"] == type_bien) & 
+            (df_prix_m2["DIC_NAME"] == "prix_m2_3m")
+        ].copy()
+    
+
+        df_map = df_geo_gps.merge(df_prix_filtre, left_on='label', right_on='VAL_MAILLE_GEO', how='inner')
+    
+
+        cols_needed = ['label', 'latitude', 'longitude', 'prix_mm_value', "TAUX_INFL_3M", 'TAUX_INFL_12M']
+        # On ajoute les colonnes manquantes en NaN si besoin
+        for c in ["TAUX_INFL_3M", 'TAUX_INFL_12M']:
+            if c not in df_map.columns: df_map[c] = np.nan
+            
+        df_map = df_map[cols_needed].copy()
+        df_map = df_map.dropna(subset=['latitude', 'longitude'])
+        df_map = df_map.drop_duplicates(subset='label', keep='first')
+    
+        if df_map.empty: continue
+        
+        geometry = [Point(xy) for xy in zip(df_map['longitude'], df_map['latitude'])]
+        gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS) 
+    
+        # --- DESSIN ---
+        fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300) 
+        fig.set_facecolor(CL_TURQUOISE) 
+    
+        # Fond
+        x, y = france_outline_geometry.exterior.xy
+        ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1) 
+        ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
+    
+        xmin, ymin, xmax, ymax = france_outline_geometry.bounds
+        ax.set_xlim(xmin - 5000, xmax + 5000) 
+        ax.set_ylim(ymin - 5000, ymax + 5000)
+
+        # --- ÉTIQUETTES ---
+        LINE_SPACING = 15000 
+        halo_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
+
+        for idx, row in gdf.iterrows():
+            x_coord, y_coord = row.geometry.x, row.geometry.y
+            city_label = row['label'] 
+        
+            if city_label in CUSTOM_LABEL_OFFSETS:
+                x_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['x']
+                y_offset_city = CUSTOM_LABEL_OFFSETS[city_label]['y']
+            else:
+                x_offset_city = X_OFFSET_DEFAULT
+                y_offset_city = Y_OFFSET_DEFAULT
+
+            ville = str(city_label).upper()
+            prix_val = row['prix_mm_value']
+            prix = f"{round(prix_val):,} €".replace(',', ' ') if pd.notna(prix_val) else "N/A"
+            ti_3m = row['TAUX_INFL_3M']
+            ti_12m = row['TAUX_INFL_12M']
+        
+            # Ancrage
+            anchor_x = x_coord + x_offset_city
+            anchor_y = y_coord + y_offset_city
+            ha_box_align = 'right' if x_offset_city < 0 else 'left'
+            va_align = 'top' 
+        
+            # 1. Nom
+            ax.text(anchor_x, anchor_y, ville, fontsize=DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='normal', zorder=4, path_effects=halo_effect) 
+        
+            # 2. Prix
+            prix_y = anchor_y - 1.5 * LINE_SPACING 
+            ax.text(anchor_x, prix_y, prix, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha_box_align, va=va_align,
+                color=CL_BLACK, weight='bold', zorder=4, path_effects=halo_effect) 
+        
+            # 3. Evolutions (Packer)
+            ti_3m_y = prix_y - LINE_SPACING 
+            ti_12m_y = ti_3m_y - LINE_SPACING 
+        
+            text_3m = f"{ti_3m:+.1%}".replace('.', ',') if pd.notna(ti_3m) else "N/A"
+            text_12m = f"{ti_12m:+.1%}".replace('.', ',') if pd.notna(ti_12m) else "N/A"
+
+            ta_3m = TextArea(text_3m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight='normal'))
+            ta_12m = TextArea(text_12m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight='normal'))
+
+            hpack = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)
+        
+            box_x_align = 1.0 if ha_box_align == "right" else 0.0
+            # On place le packer sur la ligne du 12m pour l'alignement vertical (ajusté via box_alignment)
+            ab = AnnotationBbox(hpack, (anchor_x, ti_12m_y), xybox=(0, 0), xycoords='data', 
+                            boxcoords='offset points', frameon=False, 
+                            box_alignment=(box_x_align, 0.5))
+            ax.add_artist(ab)
+
+            # 5. Point
+            ax.plot(x_coord, y_coord, marker='o', color=CL_BLACK, markersize=5, zorder=4, 
+                    markeredgecolor='white', markeredgewidth=0.5) 
+
+        # --- FINALISATION ---
+        ax.axis('off')
+        title_text = f"LES PRIX DES {type_bien_labels[type_bien]} DANS LES 16 PLUS GRANDES VILLES"
+        ax.set_title(title_text, fontsize=30, loc='center', pad=20, color=CL_BLACK, ha='center', 
+                    weight=TITRE_FONT_WEIGHT, bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.4')) 
+
+        # Légende & Date
+        fig.text(0.04, 0.05, "LEGENDE\nPrix/m² moyen sur 12 mois\nNoir: Evolution sur 3 mois\nRouge: Evolution sur 12 mois",
+                ha='left', va='bottom', fontsize=20,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
+    
+        try:
+            locale.setlocale(locale.LC_TIME, 'fr_FR.UTF-8') 
+        except:
+            try:
+                locale.setlocale(locale.LC_TIME, 'French_France') 
+            except:
+                pass 
+
+        if not df_prix_m2.empty:
+
+            df_prix_m2 = df_prix_m2.loc[:, ~df_prix_m2.columns.duplicated()]
+
+            df_prix_m2["DT_MAJ_PM2"] = pd.to_datetime(df_prix_m2["DT_MAJ_PM2"], errors='coerce')
+
+            last_dt = df_prix_m2["DT_MAJ_PM2"].max()
+        
+
+            if pd.notna(last_dt):
+                date_texte = last_dt.strftime("%B %Y").upper()
+            else:
+                date_texte = "DATE INCONNUE"
+        else:
+            date_texte = "DATE INCONNUE"
+
+        fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_texte}", ha='left', va='bottom', fontsize=12)
+    
+        # Sauvegarde
+        output_file_png = os.path.join(params.CONFIG["output_dir"], f"carte_prix_m2_CITY_{type_bien}_V2_RESTREINT.png")
+        plt.savefig(output_file_png, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor()) 
+        plt.close()
+        print(f"   -> Sauvegardé : {output_file_png}")
+    # =========================================================================
+    # GRAPHIQUES NEUF – NATIONAL + 3 R\u00c9GIONS
+    # =========================================================================
+    print("\n--- Graphiques Neuf (National + R\u00e9gions) ---")
+
+    DEPT_REGION = {
+        **{d: "\u00cele-de-France" for d in ["75","77","78","91","92","93","94","95"]},
+        **{d: "Nouvelle-Aquitaine" for d in ["16","17","19","23","24","33","40","47","64","79","86","87"]},
+        **{d: "Auvergne-Rh\u00f4ne-Alpes" for d in ["01","03","07","15","26","38","42","43","63","69","73","74"]},
+    }
+    COLORS_NEUF = {
+        "France enti\u00e8re":      "#1D3557",
+        "\u00cele-de-France":       "#E63946",
+        "Nouvelle-Aquitaine":   "#2A9D8F",
+        "Auvergne-Rh\u00f4ne-Alpes": "#F4A261",
+    }
+
+    # Save raw_v2_full before any potential city filter
+    raw_v2_full_unfiltered = raw_v2_full.copy()
+
+    if "BIEN_NEUF" in raw_v2_full_unfiltered.columns:
+        raw_neuf = raw_v2_full_unfiltered[raw_v2_full_unfiltered["BIEN_NEUF"] == "NEUF"].copy()
+    else:
+        raw_neuf = pd.DataFrame()
+
+    if not raw_neuf.empty:
+        raw_neuf["DATE"] = pd.to_datetime(raw_neuf["DATE"], errors="coerce")
+        dept_col = "DEPT" if "DEPT" in raw_neuf.columns else ("DEPT_Corse_2A_2B" if "DEPT_Corse_2A_2B" in raw_neuf.columns else None)
+        if dept_col:
+            raw_neuf["DEPT_str"] = raw_neuf[dept_col].astype(str).str.zfill(2)
+            raw_neuf["REGION"] = raw_neuf["DEPT_str"].map(DEPT_REGION).fillna("AUTRES")
+        else:
+            raw_neuf["REGION"] = "AUTRES"
+
+        raw_neuf["YM"] = raw_neuf["DATE"].dt.to_period("M")
+        nat_monthly = raw_neuf.groupby("YM")["Prix_m2"].median().reset_index()
+        nat_monthly["DATE"] = nat_monthly["YM"].dt.to_timestamp()
+        nat_monthly["Prix_12M"] = nat_monthly["Prix_m2"].rolling(12, min_periods=6).mean()
+        nat_monthly["LABEL"] = "France enti\u00e8re"
+
+        reg_data = []
+        for region in ["\u00cele-de-France", "Nouvelle-Aquitaine", "Auvergne-Rh\u00f4ne-Alpes"]:
+            df_reg = raw_neuf[raw_neuf["REGION"] == region]
+            if df_reg.empty:
+                continue
+            m = df_reg.groupby("YM")["Prix_m2"].median().reset_index()
+            m["DATE"] = m["YM"].dt.to_timestamp()
+            m["Prix_12M"] = m["Prix_m2"].rolling(12, min_periods=6).mean()
+            m["LABEL"] = region
+            reg_data.append(m)
+
+        df_neuf_all = pd.concat(
+            [nat_monthly[["DATE", "Prix_12M", "LABEL"]]] + [d[["DATE", "Prix_12M", "LABEL"]] for d in reg_data],
+            ignore_index=True
+        )
+
+        # Graphique 1 – Prix au m² Neuf
+        fig_n1 = go.Figure()
+        for label, grp in df_neuf_all.groupby("LABEL"):
+            fig_n1.add_trace(go.Scatter(
+                x=grp["DATE"], y=grp["Prix_12M"],
+                mode="lines", name=label,
+                line=dict(color=COLORS_NEUF.get(label, "grey"), width=2.5)
+            ))
+        fig_n1.update_layout(
+            title="Prix au m\u00b2 \u2013 Logements Neufs (moyenne 12 mois glissants)",
+            xaxis_title="Date", yaxis_title="Prix m\u00e9dian au m\u00b2 (\u20ac)",
+            template="plotly_white", height=550, hovermode="x unified"
+        )
+        out_n1 = os.path.join(params.CONFIG["output_dir"], "graphique_neuf_prix_national_regions.html")
+        fig_n1.write_html(out_n1)
+        print(f"   -> Sauvegard\u00e9 : {out_n1}")
+
+        # Graphique 2 – Évolution 12M Neuf
+        fig_n2 = go.Figure()
+        for label, grp in df_neuf_all.groupby("LABEL"):
+            grp = grp.sort_values("DATE").copy()
+            grp["EVOL_12M"] = grp["Prix_12M"].pct_change(periods=12) * 100
+            fig_n2.add_trace(go.Scatter(
+                x=grp["DATE"], y=grp["EVOL_12M"],
+                mode="lines", name=label,
+                line=dict(color=COLORS_NEUF.get(label, "grey"), width=2.5)
+            ))
+        fig_n2.add_hline(y=0, line_dash="dot", line_color="black")
+        fig_n2.update_layout(
+            title="\u00c9volution sur 12 mois \u2013 Logements Neufs (%)",
+            xaxis_title="Date", yaxis_title="\u00c9volution sur 12 mois (%)",
+            template="plotly_white", height=550, hovermode="x unified"
+        )
+        out_n2 = os.path.join(params.CONFIG["output_dir"], "graphique_neuf_evol_national_regions.html")
+        fig_n2.write_html(out_n2)
+        print(f"   -> Sauvegard\u00e9 : {out_n2}")
+    else:
+        print("   \u26a0\ufe0f Pas de donn\u00e9es NEUF disponibles (colonne BIEN_NEUF introuvable).")
+
+    # =========================================================================
+    # GRAPHIQUES \u00c9VOLUTIONS 12M \u2013 TOP 12 VILLES (APT Ancien)
+    # =========================================================================
+    print("\n--- Graphiques \u00c9volutions 12M \u2013 Top 12 villes ---")
+
+    PALETTE_12 = [
+        "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+        "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
+        "#aec7e8","#ffbb78"
+    ]
+    top12 = top_ville[:12] if len(top_ville) >= 12 else top_ville
+    df_evol = res_v2_struct[res_v2_struct["Ville"].isin(top12)].sort_values(["Ville", "Periode"]).copy()
+
+    if not df_evol.empty and "TAUX_INFL_12M" in df_evol.columns:
+        # Graphique 1 – Barres : dernière période
+        derniere_p = df_evol["Periode"].max()
+        df_last = df_evol[df_evol["Periode"] == derniere_p].dropna(subset=["TAUX_INFL_12M"])
+        df_last = df_last.sort_values("TAUX_INFL_12M", ascending=True)
+        bar_colors = ["#CB4735" if v >= 0 else "#1D3557" for v in df_last["TAUX_INFL_12M"]]
+        date_lbl = derniere_p.strftime("%B %Y") if hasattr(derniere_p, "strftime") else str(derniere_p)
+
+        fig_e1 = go.Figure(go.Bar(
+            x=df_last["TAUX_INFL_12M"] * 100,
+            y=df_last["Ville"],
+            orientation="h",
+            marker_color=bar_colors,
+            text=[f"{v:+.1f}%" for v in df_last["TAUX_INFL_12M"] * 100],
+            textposition="outside"
+        ))
+        fig_e1.add_vline(x=0, line_color="black", line_width=1)
+        fig_e1.update_layout(
+            title=f"\u00c9volution sur 12 mois \u2013 APT Ancien \u2013 {date_lbl}",
+            xaxis_title="\u00c9volution 12 mois (%)",
+            template="plotly_white", height=600
+        )
+        out_e1 = os.path.join(params.CONFIG["output_dir"], "graphique_evol_12m_barres_villes.html")
+        fig_e1.write_html(out_e1)
+        print(f"   -> Sauvegard\u00e9 : {out_e1}")
+
+        # Graphique 2 – Multi-lignes historique
+        fig_e2 = go.Figure()
+        for i, ville in enumerate(top12):
+            df_v = df_evol[df_evol["Ville"] == ville].dropna(subset=["TAUX_INFL_12M"])
+            if df_v.empty:
+                continue
+            fig_e2.add_trace(go.Scatter(
+                x=df_v["Periode"], y=df_v["TAUX_INFL_12M"] * 100,
+                mode="lines", name=ville,
+                line=dict(color=PALETTE_12[i % len(PALETTE_12)], width=1.8)
+            ))
+        fig_e2.add_hline(y=0, line_dash="dot", line_color="black")
+        fig_e2.update_layout(
+            title="\u00c9volution historique 12M \u2013 APT Ancien \u2013 Top 12 villes",
+            xaxis_title="Date", yaxis_title="\u00c9volution 12 mois (%)",
+            template="plotly_white", height=600, hovermode="x unified"
+        )
+        out_e2 = os.path.join(params.CONFIG["output_dir"], "graphique_evol_12m_historique_villes.html")
+        fig_e2.write_html(out_e2)
+        print(f"   -> Sauvegard\u00e9 : {out_e2}")
+    else:
+        print("   \u26a0\ufe0f Donn\u00e9es d'\u00e9volution insuffisantes pour les graphiques.")
+
+    # =============================================================================
+    # B. COMPARAISON V1 vs V2_STRUCT vs LPI (Structure de march\u00e9)
+    # =============================================================================
+    print("\n=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===")
+    
+
+
+    # -------------------------------------------------------------------------
+    # B.4 CHARGEMENT ET FUSION LPI
+    # -------------------------------------------------------------------------
+    print("\n--- Chargement LPI/IAD ---")
+    try:
+        lpi = pd.read_excel(PATH_LPI, sheet_name="V2", skiprows=2)
+        lpi = lpi.iloc[:, :3]
+        lpi.columns = ["DATE", "Ville", "Prix_LPI"]
+        lpi["DATE"] = pd.to_datetime(lpi["DATE"], errors='coerce')
+        lpi["Ville"] = lpi["Ville"].astype(str).str.strip().str.upper()
+        lpi["Prix_LPI"] = pd.to_numeric(lpi["Prix_LPI"], errors='coerce')
+        lpi = lpi[lpi["Ville"].isin(top_ville)]
+        date_max = lpi["DATE"].max()
+    except Exception as e:
+        print(f"Erreur LPI: {e}. Continuation sans.")
+        lpi = pd.DataFrame(columns=["DATE", "Ville", "Prix_LPI"])
+
+    # Fusion finale
+    merge_cl = merge_cl.rename(columns={"Periode": "DATE"})
+    merge_cl["DATE"] = pd.to_datetime(merge_cl["DATE"])
+    
+    final_fusion = pd.merge(lpi, merge_cl, on=["Ville", "DATE"], how="right")
+    
+    # Renommage pour clarté
+    final_fusion = final_fusion.rename(columns={
+        "prix_mm_3m (V2_STRUCT)": "Prix V2 (3 mois glissants)",
+        "prix_mm_12m (V2_STRUCT)": "Prix V2 (12 mois glissants)",
+        "Prix_LPI": "Prix LPI/IAD (12 mois)"
+    })
+    
+    # Filtre date
+    final_fusion = final_fusion[final_fusion["DATE"] <= date_max]
+
+    # -------------------------------------------------------------------------
+    # B.5 GÉNÉRATION DES GRAPHIQUES ET STATS
+    # -------------------------------------------------------------------------
+    print("\n--- Génération des graphiques ---")
+    
+    # Deux comparaisons séparées : 3m et 12m vs LPI
+    comparisons = [
+        {
+            "name": "3m",
+            "col_v2": "Prix V2 (3 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#28A745",  # Green
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (3 mois) vs LPI"
+        },
+        {
+            "name": "12m",
+            "col_v2": "Prix V2 (12 mois glissants)",
+            "col_lpi": "Prix LPI/IAD (12 mois)",
+            "color_v2": "#4C72B0",  # Blue
+            "color_lpi": "#DD8452",  # Orange
+            "title": "Comparaison Prix V2 (12 mois) vs LPI"
+        }
+    ]
+    
+    nb_villes = len(final_fusion["Ville"].dropna().unique())
+
+ 
+    # Initialisation des scores de correspondance
+    score_3m_total = 0
+    score_12m_total = 0
+    nb_villes_valides = 0
+
+    for ville in final_fusion["Ville"].dropna().unique():
+        df_ville = final_fusion[final_fusion["Ville"] == ville].sort_values("DATE").copy()
+        if df_ville.empty: continue
+
+        # --- Graphique unique avec toutes les courbes ---
+        fig = go.Figure()
+        
+        # Interpolation
+        cols = ["Prix V2 (3 mois glissants)", "Prix V2 (12 mois glissants)", "Prix LPI/IAD (12 mois)"]
+        df_interp = df_ville.set_index("DATE")[cols].resample("MS").interpolate(method="linear").reset_index()
+
+        # Calcul IC pour 3M
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            std_3m = df_interp["Prix V2 (3 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_3m"] = df_interp["Prix V2 (3 mois glissants)"] - 1.96 * std_3m
+            df_interp["IC_sup_3m"] = df_interp["Prix V2 (3 mois glissants)"] + 1.96 * std_3m
+            
+            # Zone IC 3M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_3m"], df_interp["IC_inf_3m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(40,167,69,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (3M)",
+                showlegend=True
+            ))
+
+        # Calcul IC pour 12M
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            std_12m = df_interp["Prix V2 (12 mois glissants)"].rolling(12, min_periods=3).std()
+            df_interp["IC_inf_12m"] = df_interp["Prix V2 (12 mois glissants)"] - 1.96 * std_12m
+            df_interp["IC_sup_12m"] = df_interp["Prix V2 (12 mois glissants)"] + 1.96 * std_12m
+            
+            # Zone IC 12M
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_interp["DATE"], df_interp["DATE"][::-1]]),
+                y=pd.concat([df_interp["IC_sup_12m"], df_interp["IC_inf_12m"][::-1]]),
+                fill="toself",
+                fillcolor="rgba(76,114,176,0.1)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="IC 95% (12M)",
+                showlegend=True
+            ))
+
+        # Courbe Prix V2 (3 mois)
+        if "Prix V2 (3 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (3 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (3 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (3M)",
+                line=dict(color="#28A745", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe Prix V2 (12 mois)
+        if "Prix V2 (12 mois glissants)" in df_interp.columns and not df_interp["Prix V2 (12 mois glissants)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix V2 (12 mois glissants)"],
+                mode="lines+markers",
+                name="Prix V2 (12M)",
+                line=dict(color="#4C72B0", width=2),
+                marker=dict(size=4)
+            ))
+
+        # Courbe LPI
+        if "Prix LPI/IAD (12 mois)" in df_interp.columns and not df_interp["Prix LPI/IAD (12 mois)"].isna().all():
+            fig.add_trace(go.Scatter(
+                x=df_interp["DATE"],
+                y=df_interp["Prix LPI/IAD (12 mois)"],
+                mode="lines+markers",
+                name="Prix LPI/IAD",
+                line=dict(color="#DD8452", width=2, dash="dot"),
+                marker=dict(size=6, symbol="diamond")
+            ))
+
+        # Calcul des taux de couverture (% LPI dans IC)
+        annotations_text = []
+        match_3m = match_12m = np.nan
+        
+        if "IC_inf_3m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_3m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_3m"]) & 
+                        (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_3m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
+            score_3m_total += match_3m if pd.notna(match_3m) else 0
+        
+        if "IC_inf_12m" in df_interp.columns and "Prix LPI/IAD (12 mois)" in df_interp.columns:
+            match_12m = ((df_interp["Prix LPI/IAD (12 mois)"] >= df_interp["IC_inf_12m"]) & 
+                         (df_interp["Prix LPI/IAD (12 mois)"] <= df_interp["IC_sup_12m"])).mean()
+            annotations_text.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
+            score_12m_total += match_12m if pd.notna(match_12m) else 0
+        
+        if pd.notna(match_3m) or pd.notna(match_12m):
+            nb_villes_valides += 1
+
+        # Annotation
+        if annotations_text:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=0.01, y=0.99,
+                text="<br>".join(annotations_text),
+                showarrow=False,
+                bgcolor="white",
+                bordercolor="black",
+                borderwidth=1,
+                align="left"
+            )
+
+        # Mise en forme
+        fig.update_layout(
+            title=f"Comparaison Prix V2 (3M & 12M) vs LPI - {ville}",
+            xaxis_title="Date",
+            yaxis_title="Prix au m² (€)",
+            height=600,
+            template="plotly_white",
+            hovermode="x unified"
+        )
+        
+        # Sauvegarde
+        filename = f"Comparaison_V2_LPI_{ville}.html"
+        fig.write_html(os.path.join(params.CONFIG['output_dir'], filename))
+
+    # -------------------------------------------------------------------------
+    # B.6 SYNTHÈSE STATS
+    # -------------------------------------------------------------------------
+    print("\n" + "="*80)
+    print(" RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)")
     print("="*80)
-    print("=" * 30 + " RAPPORT COMPLET " + "=" * 34)
-    print("=" * 25 + " ANALYSE DES OUTLIERS " + "=" * 34)
-    print("="*80)
     
-    # Vue d'ensemble
-    total = len(outliers_df) + len(base_clean)
-    print(f"\nVUE D'ENSEMBLE")
-    print("-" * 80)
-    print(f"  Nombre total de biens traités    : {total:,}")
-    print(f"  Biens valides conservés           : {len(base_clean):,} ({len(base_clean)/total*100:.2f}%)")
-    print(f"  Outliers détectés et retirés      : {len(outliers_df):,} ({len(outliers_df)/total*100:.2f}%)")
+    # Fonctions de calcul des métriques
+    def calc_rmse(g, col):
+        """RMSE absolu en €/m²"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                return np.sqrt(((valid[col] - valid[lpi])**2).mean())
+        return np.nan
     
-    # Analyses détaillées
-    analyser_par_critere(outliers_df)
-    analyse_geo_par_critere(outliers_df)
-    analyse_temporelle_par_critere(outliers_df)
-    analyse_typologie_par_critere(outliers_df)
-    analyse_source_par_critere(outliers_df)
-    exemples_par_critere(outliers_df)
+    def calc_rmse_relative(g, col):
+        """RMSE relatif en % du prix moyen"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 0:
+                rmse = np.sqrt(((valid[col] - valid[lpi])**2).mean())
+                mean_price = valid[lpi].mean()
+                if mean_price > 0:
+                    return (rmse / mean_price) * 100  
+        return np.nan
     
-    # Export Excel
+    def calc_correlation(g, col):
+        """Corrélation avec LPI"""
+        lpi = "Prix LPI/IAD (12 mois)"
+        if col in g.columns and lpi in g.columns:
+            valid = g[[col, lpi]].dropna()
+            if len(valid) > 5:
+                return valid[col].corr(valid[lpi])
+        return np.nan
+
+    # Calcul des statistiques par ville
+    stats = final_fusion.groupby("Ville").apply(lambda x: pd.Series({
+        "RMSE_3M": calc_rmse(x, "Prix V2 (3 mois glissants)"),
+        "RMSE_12M": calc_rmse(x, "Prix V2 (12 mois glissants)"),
+        "RMSE_REL_3M": calc_rmse_relative(x, "Prix V2 (3 mois glissants)"),
+        "RMSE_REL_12M": calc_rmse_relative(x, "Prix V2 (12 mois glissants)"),
+        "CORR_3M": calc_correlation(x, "Prix V2 (3 mois glissants)"),
+        "CORR_12M": calc_correlation(x, "Prix V2 (12 mois glissants)"),
+        "Prix_Moyen_LPI": x["Prix LPI/IAD (12 mois)"].mean()
+    }), include_groups=False).reset_index()
     
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    filename = f"outliers_analysis_{timestamp}.xlsx"
-    export_outliers_excel(outliers_df, os.path.join(OUTPUT_DIR, filename))
-
+    stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
+    stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
     
-    print("="*80)
-    print("FIN DU RAPPORT")
-    print("="*80)
-    print("\n")
+    # Affichage
+    print("\nCORRESPONDANCE LPI dans IC (Couverture moyenne) :")
+    if nb_villes_valides > 0:
+        print(f"   IC 3M  : {score_3m_total/nb_villes_valides:.1%}")
+        print(f"   IC 12M : {score_12m_total/nb_villes_valides:.1%}")
     
-    return outliers_df
+    print("\nRMSE ABSOLU (€/m²) :")
+    print(f"   3M  : {stats['RMSE_3M'].mean():.2f} €/m²")
+    print(f"   12M : {stats['RMSE_12M'].mean():.2f} €/m²")
+    print(f"   Δ   : {stats['Delta_RMSE'].mean():+.2f} €/m² {'(12M meilleur)' if stats['Delta_RMSE'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\nRMSE RELATIF (%) :")
+    print(f"   3M  : {stats['RMSE_REL_3M'].mean():.2f} %")
+    print(f"   12M : {stats['RMSE_REL_12M'].mean():.2f} %")
+    
+    print("\nCORRÉLATION avec LPI :")
+    print(f"   3M  : {stats['CORR_3M'].mean():.4f}")
+    print(f"   12M : {stats['CORR_12M'].mean():.4f}")
+    print(f"   Δ   : {stats['Delta_CORR'].mean():+.4f} {'(12M meilleur)' if stats['Delta_CORR'].mean() > 0 else '(3M meilleur)'}")
+    
+    print("\n" + "-" * 80)
+    print("\nDétail par ville :")
+    cols_display = ["Ville", "Prix_Moyen_LPI", "RMSE_3M", "RMSE_12M", "Delta_RMSE", 
+                    "RMSE_REL_3M", "RMSE_REL_12M", "CORR_3M", "CORR_12M"]
+    print(stats[cols_display].sort_values("Delta_RMSE", ascending=False).to_string(index=False))
+    
+    # Sauvegarde
+    output_path = os.path.join(params.CONFIG['output_dir'], "stats_comparaison_V2_LPI.csv")
+    stats.to_csv(output_path, index=False)
+    print(f"\n Statistiques sauvegardées : {output_path}")
 
-
-# Lancer l'analyse complète
-
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].fillna("Non_specifie")
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].replace("","Non_specifie")
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].str.strip()
-outliers["OUTLIER_REASON"] = outliers["OUTLIER_REASON"].replace("","Non_specifie")
-
-rapport_complet_outliers(outliers, base_ml_full)
-
-by_year = base_ml.groupby("YEAR")["ID"].count().reset_index(name="Nombre de transactions")
-
-# Évolution annuelle du nombre de transactions
-total_tx = by_year["Nombre de transactions"].sum()
-
-fig = px.bar(
-    by_year.sort_values("YEAR"),
-    x="YEAR",
-    y="Nombre de transactions",
-    text="Nombre de transactions",
-    color="Nombre de transactions",
-    color_continuous_scale="Viridis",
-    title=f"Évolution annuelle du nombre de transactions (Total 2015–2025 : {total_tx:,})"
-)
-
-fig.update_traces(textposition="outside")
-fig.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Nombre de transactions",
-    title_x=0.5,
-    plot_bgcolor="white",
-    xaxis_tickmode="linear",  
-    coloraxis_showscale=False
-)
-
-
-
-# Évolution annuelle du pourcentage du nombre de transactions par source
-j = base_ml.groupby('YEAR')['ID'].count().reset_index(name='Nombre de transactions')
-
-fig1 = px.bar(
-    j.sort_values('YEAR'),
-    x='YEAR', y='Nombre de transactions',
-    text='Nombre de transactions',
-    title="Évolution annuelle du nombre de transactions"
-)
-fig1.update_traces(textposition='outside')
-fig1.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Nombre de transactions",
-    title_x=0.5,
-    plot_bgcolor="white"
-)
-
-df_grouped = (
-    base_ml.groupby(['YEAR', 'SOURCE'])['ID']
-           .count()
-           .reset_index(name='Nombre_transactions')
-)
-
-df_grouped['Total_year'] = df_grouped.groupby('YEAR')['Nombre_transactions'].transform('sum')
-df_grouped['Pourcentage'] = df_grouped['Nombre_transactions'] / df_grouped['Total_year'] * 100
-
-fig2 = px.bar(
-    df_grouped.sort_values('YEAR'),
-    x='YEAR', y='Pourcentage', color='SOURCE',
-    barmode='group', text='Pourcentage',
-    title="Évolution annuelle du pourcentage du nombre de transactions par source"
-)
-fig2.update_traces(texttemplate="%{text:.1f}%", textposition='outside')
-fig2.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Pourcentage de transactions",
-    title_x=0.5,
-    plot_bgcolor="white",
-    legend_title="Source"
-)
-
-# Évolution annuelle du pourcentage de valeurs manquantes (Prix_m2)
-df_prix_na = base_ml["Prix_m2"].isna().sum()
-pourcent_global = round(df_prix_na / len(base_ml) * 100, 2)
-print(f"{df_prix_na:,} données manquantes, soit {pourcent_global} % du total.")
-
-base_ml["Prix_m2_na"] = base_ml["Prix_m2"].isna()
-total = base_ml.groupby("YEAR")["ID"].count()
-na = base_ml[base_ml["Prix_m2_na"]].groupby("YEAR")["ID"].count()
-
-pourcentage = (na / total * 100).reset_index(name="Pourcentage_NA")
-
-fig3 = px.bar(
-    pourcentage,
-    x="YEAR",
-    y="Pourcentage_NA",
-    text="Pourcentage_NA",
-    color="Pourcentage_NA",
-    color_continuous_scale="Reds",
-    title=f"Évolution annuelle du pourcentage de valeurs manquantes (Prix_m2) — {pourcent_global}% global"
-)
-fig3.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-fig3.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Pourcentage de valeurs manquantes",
-    title_x=0.5,
-    plot_bgcolor="white",
-    coloraxis_showscale=False
-)
-
-# Évolution annuelle du pourcentage de valeurs manquantes (Prix_m2) par source
-df_miss = base_ml[base_ml["Prix_m2_na"]]
-df_grouped = df_miss.groupby(["YEAR", "SOURCE"])["ID"].count().reset_index(name="Nombre_transactions_na")
-
-total_na = df_miss.groupby("YEAR")["Prix_m2_na"].count().reset_index(name="Total_na")
-df_grouped = df_grouped.merge(total_na, on="YEAR", how="left")
-df_grouped["Pourcentage"] = df_grouped["Nombre_transactions_na"] / df_grouped["Total_na"] * 100
-
-fig4 = px.bar(
-    df_grouped.sort_values("YEAR"),
-    x="YEAR",
-    y="Pourcentage",
-    color="SOURCE",
-    barmode="group",
-    text="Pourcentage",
-    title="Évolution annuelle du pourcentage de valeurs manquantes (Prix_m2) par source"
-)
-fig4.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-fig4.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Pourcentage de valeurs manquantes",
-    title_x=0.5,
-    plot_bgcolor="white",
-    legend_title="Source"
-)
-
-
-
-# Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB)
-df_surf_na = base_ml["NB_SURF_HAB"].isna().sum()
-pourcent_global = round(df_surf_na / len(base_ml) * 100, 2)
-
-
-
-base_ml["NB_SURF_HAB_NA"] = base_ml["NB_SURF_HAB"].isna()
-
-total = base_ml.groupby("YEAR")["ID"].count()
-na = base_ml[base_ml["NB_SURF_HAB_NA"]].groupby("YEAR")["ID"].count()
-
-pourcentage = (na / total * 100).reset_index(name="Pourcentage_NA")
-
-
-fig5 = px.bar(
-    pourcentage,
-    x="YEAR",
-    y="Pourcentage_NA",
-    text="Pourcentage_NA",
-    color="Pourcentage_NA",
-    color_continuous_scale="Reds",
-    title=f"Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) — {pourcent_global}% global"
-)
-fig5.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-fig5.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Pourcentage de valeurs manquantes",
-    title_x=0.5,
-    plot_bgcolor="white",
-    coloraxis_showscale=False
-)
-
-
-# Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) par source
-df_miss = base_ml[base_ml["NB_SURF_HAB_NA"]]
-df_grouped = df_miss.groupby(["YEAR", "SOURCE"])["ID"].count().reset_index(name="Nombre_transactions_na")
-
-total_na = df_miss.groupby("YEAR")["NB_SURF_HAB_NA"].count().reset_index(name="Total_na")
-df_grouped = df_grouped.merge(total_na, on="YEAR", how="left")
-df_grouped["Pourcentage"] = df_grouped["Nombre_transactions_na"] / df_grouped["Total_na"] * 100
-
-fig6 = px.bar(
-    df_grouped.sort_values("YEAR"),
-    x="YEAR",
-    y="Pourcentage",
-    color="SOURCE",
-    barmode="group",
-    text="Pourcentage",
-    title="Évolution annuelle du pourcentage de valeurs manquantes (NB_SURF_HAB) par source"
-)
-fig6.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-fig6.update_layout(
-    xaxis_title="Année",
-    yaxis_title="Pourcentage de valeurs manquantes",
-    title_x=0.5,
-    plot_bgcolor="white",
-    legend_title="Source"
-)
-
-# Enregistrement des graphiques
-fig.write_html(os.path.join(OUTPUT_DIR, "transac_annuelle.html"))
-fig2.write_html(os.path.join(OUTPUT_DIR, "taux_couverture_annuelle.html"))
-fig3.write_html(os.path.join(OUTPUT_DIR, "na_prix_m2.html"))
-fig4.write_html(os.path.join(OUTPUT_DIR, "na_prix_m2_source.html"))
-fig5.write_html(os.path.join(OUTPUT_DIR, "na_surface_m2.html"))
-fig6.write_html(os.path.join(OUTPUT_DIR, "na_surface_m2_source.html"))
+    print("\n=== ANALYSE TERMINÉE ===")
