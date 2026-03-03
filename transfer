@@ -1,275 +1,69 @@
-"""
-Comparaison CL vs baromètre LPI-IAD.
+======================================================================
+  RÉSULTATS — V1_COMPLET vs LPI (APT ANCIEN)
+======================================================================
+  Couverture LPI par IC 3M  : 17.3%
+  Couverture LPI par IC 12M : 7.5%
+  RMSE absolu — 3M : 294.24 €/m² | 12M : 330.51 €/m²
+  Corrélation  — 3M : 0.9508  | 12M : 0.9516
 
-Lit le CSV produit par calc_prix.py (maille CITY, segment paramétrable)
-et compare avec le fichier LPI-IAD.
+=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===
 
-Sorties (dans output_dir) :
-    Comparaison_{VARIANTE}_LPI_{VILLE}.html  — graphique par ville
-    stats_comparaison_{VARIANTE}_LPI.csv     — tableau synthèse RMSE / corrélation
-    graphique_evol_12m_barres_villes.html    — évolutions 12M dernière période
-    graphique_evol_12m_historique_villes.html— évolutions 12M historique
-"""
-import sys
-import os
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+--- Chargement LPI/IAD ---
 
-import param_generaux as params
+--- Génération des graphiques ---
+
+================================================================================
+ RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)
+================================================================================
+
+CORRESPONDANCE LPI dans IC (Couverture moyenne) :
+   IC 3M  : 44.9%
+   IC 12M : 28.1%
+
+RMSE ABSOLU (€/m²) :
+   3M  : 200.78 €/m²
+   12M : 208.80 €/m²
+   Δ   : -8.02 €/m² (3M meilleur)
+
+RMSE RELATIF (%) :
+   3M  : 5.94 %
+   12M : 6.05 %
+
+CORRÉLATION avec LPI :
+   3M  : 0.9412
+   12M : 0.9513
+   Δ   : +0.0101 (12M meilleur)
+
+--------------------------------------------------------------------------------
+
+Détail par ville :
+        Ville  Prix_Moyen_LPI    RMSE_3M   RMSE_12M  Delta_RMSE  RMSE_REL_3M  RMSE_REL_12M  CORR_3M  CORR_12M
+        LILLE     3405.891892 137.292835  74.148969   63.143866     4.031039      2.177079 0.965672  0.989427
+  MONTPELLIER     3188.054054 219.265118 183.430754   35.834365     6.877710      5.753690 0.959239  0.947815
+     TOULOUSE     3379.072072 141.585982 110.858471   30.727512     4.190085      3.280737 0.975076  0.974414
+     LE HAVRE     2179.504505 121.915530 105.802021   16.113509     5.593727      4.854407 0.908323  0.939628
+   STRASBOURG     3620.873874 134.768523 120.481983   14.286540     3.721989      3.327428 0.949770  0.970474
+        REIMS     2609.828829 144.710155 136.191472    8.518682     5.544814      5.218406 0.897598  0.906151
+     GRENOBLE     2714.486486 110.699827 106.969041    3.730786     4.078113      3.940673 0.853121  0.896805
+SAINT-ETIENNE     1449.684685 263.929832 272.433551   -8.503719    18.206016     18.792607 0.898820  0.938657
+    MARSEILLE     3168.252252 213.236502 236.429107  -23.192605     6.730414      7.462446 0.915845  0.916227
+        PARIS    10071.018018 439.107836 463.716977  -24.609141     4.360114      4.604470 0.944695  0.966306
+       RENNES     3517.873874 188.261672 215.127773  -26.866101     5.351575      6.115278 0.970525  0.964987
+         NICE     4491.612613 208.308551 244.354610  -36.046059     4.637723      5.440242 0.956990  0.965273
+       NANTES     3642.216216 168.049295 207.499831  -39.450536     4.613930      5.697076 0.977851  0.973812
+     BORDEAUX     4440.846847 189.972528 253.398748  -63.426220     4.277845      5.706091 0.969573  0.959193
+         LYON     4770.792793 330.548093 401.098954  -70.550861     6.928578      8.407386 0.975372  0.960655
+        BREST             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
+        TOURS             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
+
+ Statistiques sauvegardées : z:\uflumth\gits\univers_elementaire\TI\resultats\stats_comparaison_V2_LPI.csv
 
 
-def _load_prix(cfg: dict) -> pd.DataFrame:
-    """Charge le CSV complet filtré sur CITY + segment demandé."""
-    path = os.path.join(cfg["output_dir"], "prix_m2_univ_elem_ALL.csv")
-    if not os.path.exists(path):
-        print(f"   Fichier introuvable : {path} → relancer l'étape prix d'abord.")
-        return pd.DataFrame()
-    df = pd.read_csv(path, parse_dates=["Periode"])
-    df = df[(df["TYPE_MAILLE"] == "CITY") & (df["TYPE_BIEN"] == "APT") & (df["ANCIENNETE"] == "ANCIEN")].copy()
-    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    return df
-
-
-def _load_lpi(path_lpi: str, top_villes: list) -> pd.DataFrame:
-    """Charge et nettoie le fichier LPI-IAD."""
-    try:
-        lpi = pd.read_excel(path_lpi, sheet_name="V2", skiprows=2)
-        lpi = lpi.iloc[:, :3]
-        lpi.columns = ["DATE", "Ville", "Prix_LPI"]
-        lpi["DATE"]     = pd.to_datetime(lpi["DATE"], errors="coerce")
-        lpi["Ville"]    = lpi["Ville"].astype(str).str.strip().str.upper()
-        lpi["Prix_LPI"] = pd.to_numeric(lpi["Prix_LPI"], errors="coerce")
-        lpi = lpi[lpi["Ville"].isin([v.upper() for v in top_villes])]
-        return lpi
-    except Exception as e:
-        print(f"  Erreur chargement LPI : {e}. Continuation sans.")
-        return pd.DataFrame(columns=["DATE", "Ville", "Prix_LPI"])
-
-
-def run(cfg: dict):
-    """
-    Génère les graphiques de comparaison CL vs LPI-IAD.
-
-    Parameters
-    ----------
-    cfg : dict retourné par config.get_config()
-    """
-    tb  = cfg["segment_carte"]["TYPE_BIEN"]
-    anc = cfg["segment_carte"]["ANCIENNETE"]
-    output_dir  = cfg["output_dir"]
-    variante    = cfg["variante"]
-    top_villes  = params.CONFIG.get("top_cities", [])
-
-    print(f"\nComparaison LPI — segment : 'APT'x'ANCIEN'")
-
-    # ------------------------------------------------------------------
-    # Chargement données
-    # ------------------------------------------------------------------
-    df_prix = _load_prix(cfg)
-    if df_prix.empty:
-        print("  ↳ Pas de données de prix — abandon.")
-        return
-
-    lpi = _load_lpi(cfg["path_lpi"], top_villes)
-    date_max_lpi = lpi["DATE"].max() if not lpi.empty else df_prix["Periode"].max()
-
-    # Préparer la fusion
-    df_cl = df_prix.rename(columns={"VAL_MAILLE_GEO": "Ville", "Periode": "DATE"})
-    df_cl["DATE"] = pd.to_datetime(df_cl["DATE"])
-
-    fusion = pd.merge(lpi, df_cl, on=["Ville", "DATE"], how="right")
-    fusion = fusion.rename(columns={
-        "prix_mm_3m":  "Prix CL (3M glissants)",
-        "prix_mm_12m": "Prix CL (12M glissants)",
-        "Prix_LPI":    "Prix LPI/IAD (12M)",
-    })
-    if date_max_lpi is not None and pd.notna(date_max_lpi):
-        fusion = fusion[fusion["DATE"] <= date_max_lpi]
-
-    # ------------------------------------------------------------------
-    # Graphiques par ville
-    # ------------------------------------------------------------------
-    score_3m = score_12m = nb_valid = 0
-
-    for ville in fusion["Ville"].dropna().unique():
-        df_v = fusion[fusion["Ville"] == ville].sort_values("DATE").copy()
-        if df_v.empty:
-            continue
-
-        fig = go.Figure()
-        cols_interp = ["Prix CL (3M glissants)", "Prix CL (12M glissants)", "Prix LPI/IAD (12M)"]
-        cols_present = [c for c in cols_interp if c in df_v.columns]
-        df_i = df_v.set_index("DATE")[cols_present].resample("MS").interpolate("linear").reset_index()
-
-        # IC 3M
-        ic_ok = False
-        if "Prix CL (3M glissants)" in df_i:
-            std3 = df_i["Prix CL (3M glissants)"].rolling(12, min_periods=3).std()
-            df_i["IC_inf_3m"] = df_i["Prix CL (3M glissants)"] - 1.96 * std3
-            df_i["IC_sup_3m"] = df_i["Prix CL (3M glissants)"] + 1.96 * std3
-            ic_ok = True
-            fig.add_trace(go.Scatter(
-                x=pd.concat([df_i["DATE"], df_i["DATE"][::-1]]),
-                y=pd.concat([df_i["IC_sup_3m"], df_i["IC_inf_3m"][::-1]]),
-                fill="toself", fillcolor="rgba(40,167,69,0.1)",
-                line=dict(color="rgba(0,0,0,0)"), name="IC 95% (3M)", showlegend=True
-            ))
-
-        # IC 12M
-        if "Prix CL (12M glissants)" in df_i:
-            std12 = df_i["Prix CL (12M glissants)"].rolling(12, min_periods=3).std()
-            df_i["IC_inf_12m"] = df_i["Prix CL (12M glissants)"] - 1.96 * std12
-            df_i["IC_sup_12m"] = df_i["Prix CL (12M glissants)"] + 1.96 * std12
-            fig.add_trace(go.Scatter(
-                x=pd.concat([df_i["DATE"], df_i["DATE"][::-1]]),
-                y=pd.concat([df_i["IC_sup_12m"], df_i["IC_inf_12m"][::-1]]),
-                fill="toself", fillcolor="rgba(76,114,176,0.1)",
-                line=dict(color="rgba(0,0,0,0)"), name="IC 95% (12M)", showlegend=True
-            ))
-
-        for col, color, dash, name in [
-            ("Prix CL (3M glissants)",  "#28A745", "solid", "Prix CL (3M)"),
-            ("Prix CL (12M glissants)", "#4C72B0", "solid", "Prix CL (12M)"),
-            ("Prix LPI/IAD (12M)",      "#DD8452", "dot",   "Prix LPI/IAD"),
-        ]:
-            if col in df_i and not df_i[col].isna().all():
-                fig.add_trace(go.Scatter(
-                    x=df_i["DATE"], y=df_i[col], mode="lines+markers",
-                    name=name, line=dict(color=color, width=2, dash=dash), marker=dict(size=4)
-                ))
-
-        # Taux de couverture LPI dans IC
-        annotations = []
-        match_3m = match_12m = np.nan
-        if ic_ok and "Prix LPI/IAD (12M)" in df_i:
-            match_3m = (
-                (df_i["Prix LPI/IAD (12M)"] >= df_i["IC_inf_3m"]) &
-                (df_i["Prix LPI/IAD (12M)"] <= df_i["IC_sup_3m"])
-            ).mean()
-            annotations.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
-            score_3m += match_3m if pd.notna(match_3m) else 0
-        if "IC_inf_12m" in df_i and "Prix LPI/IAD (12M)" in df_i:
-            match_12m = (
-                (df_i["Prix LPI/IAD (12M)"] >= df_i["IC_inf_12m"]) &
-                (df_i["Prix LPI/IAD (12M)"] <= df_i["IC_sup_12m"])
-            ).mean()
-            annotations.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
-            score_12m += match_12m if pd.notna(match_12m) else 0
-        if pd.notna(match_3m) or pd.notna(match_12m):
-            nb_valid += 1
-        if annotations:
-            fig.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99,
-                               text="<br>".join(annotations), showarrow=False,
-                               bgcolor="white", bordercolor="black", borderwidth=1, align="left")
-
-        fig.update_layout(
-            title=f"Comparaison {tb} {anc} — {variante.upper()} vs LPI — {ville}",
-            xaxis_title="Date", yaxis_title="Prix au m² (€)",
-            height=600, template="plotly_white", hovermode="x unified"
-        )
-        out = os.path.join(output_dir, f"Comparaison_{variante}_LPI_{ville}_{tb}_{anc}.html")
-        fig.write_html(out)
-
-    print(f"  → {fusion['Ville'].nunique()} graphiques générés")
-
-    # ------------------------------------------------------------------
-    # Évolutions 12M — barres + historique
-    # ------------------------------------------------------------------
-    top12 = top_villes[:12] if len(top_villes) >= 12 else top_villes
-    df_evol = df_cl[df_cl["Ville"].isin([v.upper() for v in top12])].copy()
-    df_evol = df_evol.sort_values(["Ville", "DATE"])
-
-    if not df_evol.empty and "TAUX_INFL_12M" in df_evol.columns:
-        derniere_p = df_evol["DATE"].max()
-        df_last    = df_evol[df_evol["DATE"] == derniere_p].dropna(subset=["TAUX_INFL_12M"])
-        df_last    = df_last.sort_values("TAUX_INFL_12M")
-
-        fig_bar = go.Figure(go.Bar(
-            x=df_last["TAUX_INFL_12M"] * 100, y=df_last["Ville"], orientation="h",
-            marker_color=["#CB4735" if v >= 0 else "#1D3557" for v in df_last["TAUX_INFL_12M"]],
-            text=[f"{v:+.1f}%" for v in df_last["TAUX_INFL_12M"] * 100], textposition="outside"
-        ))
-        fig_bar.add_vline(x=0, line_color="black", line_width=1)
-        fig_bar.update_layout(
-            title=f"Évolution 12M — {tb} {anc} — {derniere_p.strftime('%B %Y') if hasattr(derniere_p, 'strftime') else derniere_p}",
-            xaxis_title="Évolution 12 mois (%)", template="plotly_white", height=600
-        )
-        fig_bar.write_html(os.path.join(output_dir, f"graphique_evol_12m_barres_{tb}_{anc}.html"))
-
-        PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
-                   "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf","#aec7e8","#ffbb78"]
-        fig_hist = go.Figure()
-        for i, ville in enumerate([v.upper() for v in top12]):
-            dv = df_evol[df_evol["Ville"] == ville].dropna(subset=["TAUX_INFL_12M"])
-            if dv.empty:
-                continue
-            fig_hist.add_trace(go.Scatter(
-                x=dv["DATE"], y=dv["TAUX_INFL_12M"] * 100,
-                mode="lines", name=ville,
-                line=dict(color=PALETTE[i % len(PALETTE)], width=1.8)
-            ))
-        fig_hist.add_hline(y=0, line_dash="dot", line_color="black")
-        fig_hist.update_layout(
-            title=f"Évolution historique 12M — {tb} {anc} — Top {len(top12)} villes",
-            xaxis_title="Date", yaxis_title="Évolution 12 mois (%)",
-            template="plotly_white", height=600, hovermode="x unified"
-        )
-        fig_hist.write_html(os.path.join(output_dir, f"graphique_evol_12m_historique_{tb}_{anc}.html"))
-
-    # ------------------------------------------------------------------
-    # Statistiques synthèse
-    # ------------------------------------------------------------------
-    def _rmse(g, col):
-        lpi_col = "Prix LPI/IAD (12M)"
-        if col in g and lpi_col in g:
-            v = g[[col, lpi_col]].dropna()
-            if len(v) > 0:
-                return np.sqrt(((v[col] - v[lpi_col])**2).mean())
-        return np.nan
-
-    def _rmse_rel(g, col):
-        lpi_col = "Prix LPI/IAD (12M)"
-        if col in g and lpi_col in g:
-            v = g[[col, lpi_col]].dropna()
-            if len(v) > 0:
-                rmse = np.sqrt(((v[col] - v[lpi_col])**2).mean())
-                mean = v[lpi_col].mean()
-                return (rmse / mean * 100) if mean > 0 else np.nan
-        return np.nan
-
-    def _corr(g, col):
-        lpi_col = "Prix LPI/IAD (12M)"
-        if col in g and lpi_col in g:
-            v = g[[col, lpi_col]].dropna()
-            if len(v) > 5:
-                return v[col].corr(v[lpi_col])
-        return np.nan
-
-    stats = fusion.groupby("Ville").apply(lambda x: pd.Series({
-        "RMSE_3M":       _rmse(x, "Prix CL (3M glissants)"),
-        "RMSE_12M":      _rmse(x, "Prix CL (12M glissants)"),
-        "RMSE_REL_3M":   _rmse_rel(x, "Prix CL (3M glissants)"),
-        "RMSE_REL_12M":  _rmse_rel(x, "Prix CL (12M glissants)"),
-        "CORR_3M":       _corr(x, "Prix CL (3M glissants)"),
-        "CORR_12M":      _corr(x, "Prix CL (12M glissants)"),
-        "Prix_Moyen_LPI": x["Prix LPI/IAD (12M)"].mean(),
-    }), include_groups=False).reset_index()
-
-    if not stats.empty:
-        stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
-        stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
-
-    print("\n" + "="*70)
-    print(f"  RÉSULTATS — {variante.upper()} vs LPI ({tb} {anc})")
-    print("="*70)
-    if nb_valid > 0:
-        print(f"  Couverture LPI par IC 3M  : {score_3m/nb_valid:.1%}")
-        print(f"  Couverture LPI par IC 12M : {score_12m/nb_valid:.1%}")
-    if not stats.empty:
-        print(f"  RMSE absolu — 3M : {stats['RMSE_3M'].mean():.2f} €/m² | 12M : {stats['RMSE_12M'].mean():.2f} €/m²")
-        print(f"  Corrélation  — 3M : {stats['CORR_3M'].mean():.4f}  | 12M : {stats['CORR_12M'].mean():.4f}")
-
-    out_stats = os.path.join(output_dir, f"stats_comparaison_{variante}_LPI_{tb}_{anc}.csv")
-    stats.to_csv(out_stats, index=False)
-    print(f"  → Statistiques : {out_stats}")
+======================================================================
+  RÉSULTATS — V2_RESTREINT vs LPI (APT ANCIEN)
+======================================================================
+  Couverture LPI par IC 3M  : 34.8%
+  Couverture LPI par IC 12M : 17.4%
+  RMSE absolu — 3M : 242.60 €/m² | 12M : 271.65 €/m²
+  Corrélation  — 3M : 0.9496  | 12M : 0.9579
+  → Statistiques : z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint\stats_comparaison_v2_restreint_LPI_APT_ANCIEN.csv
