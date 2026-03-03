@@ -1,271 +1,55 @@
 """
-Génération des 2 cartes PNG des prix au m².
+Comparaison CL vs baromètre LPI-IAD.
 
-Paramétrable via cfg['segment_carte'] :
-    TYPE_BIEN  : "APT" | "MAI" | "ENSEMBLE"
-    ANCIENNETE : "NEUF" | "ANCIEN" | "ENSEMBLE"
+Lit le CSV produit par calc_prix.py (maille CITY, segment paramétrable)
+et compare avec le fichier LPI-IAD.
 
-Cartes produites (dans output_dir) :
-    carte_couts_operations_{TYPE_BIEN}_{ANCIENNETE}.png   — Prix, Surface, Coût
-    carte_prix_m2_evolution_{TYPE_BIEN}_{ANCIENNETE}.png  — Prix + Évolutions 3M/12M
+Sorties (dans output_dir) :
+    Comparaison_{VARIANTE}_LPI_{VILLE}.html  — graphique par ville
+    stats_comparaison_{VARIANTE}_LPI.csv     — tableau synthèse RMSE / corrélation
+    graphique_evol_12m_barres_villes.html    — évolutions 12M dernière période
+    graphique_evol_12m_historique_villes.html— évolutions 12M historique
 """
 import sys
 import os
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
-import geopandas as gpd
-from shapely.geometry import Point
-from matplotlib.offsetbox import AnnotationBbox, TextArea, HPacker
+import plotly.graph_objects as go
 
 import param_generaux as params
 
-# ---------------------------------------------------------------------------
-# Constantes graphiques
-# ---------------------------------------------------------------------------
-CL_TURQUOISE   = "#A8DADC"
-CL_BLACK       = "#1D3557"
-CL_LIGHT_GREY  = "#F5F5DC"
-CL_BLUE_3M     = "#000000"
-CL_RED_12M     = "#CB4735"
-TARGET_CRS     = "EPSG:2154"
-DEFAULT_FONT_SIZE = 20
-TAUX_FONT_SIZE    = 11
-TITRE_FONT_WEIGHT = "heavy"
 
-X_OFFSET_DEFAULT = 3000
-Y_OFFSET_DEFAULT = 3000
-CUSTOM_LABEL_OFFSETS = {
-    "MONTPELLIER": {"x": 5000,   "y": 90000},
-    "MARSEILLE":   {"x": 5000,   "y": -15000},
-    "NICE":        {"x": 30000,  "y": 3000},
-    "GRENOBLE":    {"x": 5000,   "y": 10000},
-    "ST ETIENNE":  {"x": -30000, "y": 0},
-    "SAINT-ETIENNE": {"x": -30000, "y": 0},
-    "LE HAVRE":    {"x": 10000,  "y": 0},
-    "BORDEAUX":    {"x": 5000,   "y": 20000},
-    "NANTES":      {"x": 5000,   "y": 20000},
-    "RENNES":      {"x": 5000,   "y": 40000},
-    "LILLE":       {"x": 0,      "y": -10000},
-    "STRASBOURG":  {"x": -5000,  "y": 0},
-    "PARIS":       {"x": 5000,   "y": 3000},
-    "LYON":        {"x": 0,      "y": 90000},
-    "TOULOUSE":    {"x": -5000,  "y": 20000},
-    "TOURS":       {"x": 5000,   "y": -3000},
-    "BREST":       {"x": -35000, "y": 0},
-    "REIMS":       {"x": 20000,  "y": 30000},
-}
-_MOIS_FR = {1:"JANVIER",2:"FEVRIER",3:"MARS",4:"AVRIL",5:"MAI",6:"JUIN",
-            7:"JUILLET",8:"AOUT",9:"SEPTEMBRE",10:"OCTOBRE",11:"NOVEMBRE",12:"DECEMBRE"}
-
-
-def _init_matplotlib():
-    try:
-        plt.rcParams["font.family"]     = "sans-serif"
-        plt.rcParams["font.sans-serif"] = ["Century Gothic", "Arial", "Verdana"]
-    except Exception:
-        pass
-    plt.rcParams["font.weight"] = "medium"
-
-
-def _load_france_geometry(path_geojson: str):
-    france_gdf = gpd.read_file(path_geojson)
-    dissolved  = france_gdf.dissolve(by=None).to_crs(TARGET_CRS)
-    geom       = dissolved.geometry.iloc[0]
-    geoms      = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
-    geoms.sort(key=lambda x: x.area, reverse=True)
-    return geoms[0]
-
-
-def _draw_france_base(ax, outline_geom):
-    """Dessine le fond de carte France."""
-    x, y = outline_geom.exterior.xy
-    ax.fill(x, y, color=CL_LIGHT_GREY, zorder=1)
-    ax.plot(x, y, color=CL_BLACK, linewidth=1.0, zorder=2)
-    xmin, ymin, xmax, ymax = outline_geom.bounds
-    ax.set_xlim(xmin - 5000, xmax + 5000)
-    ax.set_ylim(ymin - 5000, ymax + 5000)
-    ax.axis("off")
-
-
-def _load_prix_csv(cfg: dict, tb: str, anc: str) -> pd.DataFrame:
-    """Charge le CSV MAJ et filtre sur le segment + maille CITY."""
-    path = os.path.join(cfg["output_dir"], "prix_m2_univ_elem_MAJ_ALL.csv")
+def _load_prix(cfg: dict) -> pd.DataFrame:
+    """Charge le CSV complet filtré sur CITY + segment demandé."""
+    path = os.path.join(cfg["output_dir"], "prix_m2_univ_elem_ALL.csv")
     if not os.path.exists(path):
-        print(f"Fichier introuvable : {path}  → relancer l'étape prix d'abord.")
+        print(f"   Fichier introuvable : {path} → relancer l'étape prix d'abord.")
         return pd.DataFrame()
     df = pd.read_csv(path, parse_dates=["Periode"])
-    df = df[
-        (df["TYPE_MAILLE"] == "CITY") &
-        (df["TYPE_BIEN"]   == tb) &
-        (df["ANCIENNETE"]  == anc)
-    ].copy()
+    df = df[(df["TYPE_MAILLE"] == "CITY") & (df["TYPE_BIEN"] == "APT") & (df["ANCIENNETE"] == "ANCIEN")].copy()
     df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-    df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].replace({
-        "HAVRE":         "LE HAVRE",
-        "SAINT-ETIENNE": "ST ETIENNE",
-        "SAINT ETIENNE": "ST ETIENNE",
-    })
     return df
 
 
-# ===========================================================================
-# CARTE 1 : Coûts des opérations (prix m², surface, valeur foncière)
-# ===========================================================================
+def _load_lpi(path_lpi: str, top_villes: list) -> pd.DataFrame:
+    """Charge et nettoie le fichier LPI-IAD."""
+    try:
+        lpi = pd.read_excel(path_lpi, sheet_name="V2", skiprows=2)
+        lpi = lpi.iloc[:, :3]
+        lpi.columns = ["DATE", "Ville", "Prix_LPI"]
+        lpi["DATE"]     = pd.to_datetime(lpi["DATE"], errors="coerce")
+        lpi["Ville"]    = lpi["Ville"].astype(str).str.strip().str.upper()
+        lpi["Prix_LPI"] = pd.to_numeric(lpi["Prix_LPI"], errors="coerce")
+        lpi = lpi[lpi["Ville"].isin([v.upper() for v in top_villes])]
+        return lpi
+    except Exception as e:
+        print(f"  Erreur chargement LPI : {e}. Continuation sans.")
+        return pd.DataFrame(columns=["DATE", "Ville", "Prix_LPI"])
 
-def carte_couts(cfg: dict, df_prix: pd.DataFrame, df_gps: pd.DataFrame,
-                outline_geom, tb: str, anc: str):
-    if df_prix.empty:
-        print("Aucune donnée pour la Carte 1.")
-        return
-
-    df_map = df_gps.merge(df_prix, left_on="label", right_on="VAL_MAILLE_GEO", how="inner")
-    df_map = df_map.dropna(subset=["latitude", "longitude", "prix_mm_3m"])
-    df_map = df_map.drop_duplicates(subset="label", keep="first")
-    if df_map.empty:
-        print("Aucune jointure GPS pour la Carte 1.")
-        return
-
-    geometry = [Point(xy) for xy in zip(df_map["longitude"], df_map["latitude"])]
-    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS)
-
-    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300)
-    fig.set_facecolor(CL_TURQUOISE)
-    _draw_france_base(ax, outline_geom)
-
-    halo  = [pe.withStroke(linewidth=2.5, foreground="white")]
-    LS    = 15000  # interligne
-
-    for _, row in gdf.iterrows():
-        cx, cy    = row.geometry.x, row.geometry.y
-        city_lbl  = str(row["label"]).upper()
-        off       = CUSTOM_LABEL_OFFSETS.get(city_lbl, {"x": X_OFFSET_DEFAULT, "y": Y_OFFSET_DEFAULT})
-        ax_x, ax_y = cx + off["x"], cy + off["y"]
-        ha        = "right" if off["x"] < 0 else "left"
-
-        prix_str = f"{int(row['prix_mm_3m']):,} EUR/m2".replace(",", " ")         if pd.notna(row.get("prix_mm_3m"))   else "N/A"
-        surf_str = f"{int(row['surface_mm_3m']):,} m2".replace(",", " ")          if pd.notna(row.get("surface_mm_3m")) else "N/A"
-        vf_val   = row.get("VF_mm_3m")
-        vf_str   = f"{int(vf_val):,} EUR".replace(",", " ")                       if pd.notna(vf_val)                  else "N/A"
-
-        ax.text(ax_x, ax_y,           city_lbl, fontsize=DEFAULT_FONT_SIZE,      ha=ha, va="top", color=CL_BLACK,   weight="normal", zorder=4, path_effects=halo)
-        ax.text(ax_x, ax_y - 1.5*LS, prix_str, fontsize=0.85*DEFAULT_FONT_SIZE, ha=ha, va="top", color=CL_BLACK,   weight="bold",   zorder=4, path_effects=halo)
-        ax.text(ax_x, ax_y - 3.0*LS, surf_str, fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha, va="top", color="#4A4A8A",  weight="normal", zorder=4, path_effects=halo)
-        ax.text(ax_x, ax_y - 4.5*LS, vf_str,   fontsize=0.75*DEFAULT_FONT_SIZE, ha=ha, va="top", color="#8B0000",  weight="normal", zorder=4, path_effects=halo)
-        ax.plot(cx, cy, marker="o", color=CL_BLACK, markersize=5, zorder=4, markeredgecolor="white", markeredgewidth=0.5)
-
-    titre_tb  = {"APT": "APPARTEMENTS", "MAI": "MAISONS", "ENSEMBLE": "LOGEMENTS"}
-    titre_anc = {"ANCIEN": "ANCIENS", "NEUF": "NEUFS", "ENSEMBLE": ""}
-    ax.set_title(f"COÛTS DES OPÉRATIONS – {titre_tb.get(tb, tb)} {titre_anc.get(anc, anc)}",
-                 fontsize=28, loc="center", pad=20, color=CL_BLACK, weight=TITRE_FONT_WEIGHT,
-                 bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.4"))
-    fig.text(0.04, 0.07, "LÉGENDE\nPrix pondéré au m²\nSurface pondérée\nCoût pondéré de l'opération",
-             ha="left", va="bottom", fontsize=16,
-             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-
-    derniere = df_prix["Periode"].max()
-    if pd.notna(derniere):
-        date_str = f"{_MOIS_FR[derniere.month]} {derniere.year}"
-    else:
-        date_str = "DATE INCONNUE"
-    fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_str}", ha="left", va="bottom", fontsize=12)
-
-    out = os.path.join(cfg["output_dir"], f"carte_couts_operations_{tb}_{anc}.png")
-    plt.savefig(out, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor())
-    plt.close()
-    print(f"   -> Sauvegardé : {out}")
-
-
-# ===========================================================================
-# CARTE 2 : Prix au m² + Évolutions 3M / 12M
-# ===========================================================================
-
-def carte_prix_evolution(cfg: dict, df_prix: pd.DataFrame, df_gps: pd.DataFrame,
-                         outline_geom, tb: str, anc: str):
-    if df_prix.empty:
-        print("Aucune donnée pour la Carte 2.")
-        return
-
-    df_map = df_gps.merge(df_prix, left_on="label", right_on="VAL_MAILLE_GEO", how="inner")
-    cols_needed = ["label", "latitude", "longitude", "prix_mm_3m", "TAUX_INFL_3M", "TAUX_INFL_12M"]
-    for c in ["TAUX_INFL_3M", "TAUX_INFL_12M"]:
-        if c not in df_map.columns:
-            df_map[c] = np.nan
-    df_map = df_map[cols_needed].dropna(subset=["latitude", "longitude"]).drop_duplicates(subset="label", keep="first")
-    if df_map.empty:
-        print("Aucune jointure GPS pour la Carte 2.")
-        return
-
-    geometry = [Point(xy) for xy in zip(df_map["longitude"], df_map["latitude"])]
-    gdf = gpd.GeoDataFrame(df_map, geometry=geometry, crs="EPSG:4326").to_crs(TARGET_CRS)
-
-    fig, ax = plt.subplots(1, 1, figsize=(14, 14), dpi=300)
-    fig.set_facecolor(CL_TURQUOISE)
-    _draw_france_base(ax, outline_geom)
-
-    halo = [pe.withStroke(linewidth=2.5, foreground="white")]
-    LINE_SPACING = 15000
-
-    for _, row in gdf.iterrows():
-        cx, cy   = row.geometry.x, row.geometry.y
-        city_lbl = str(row["label"]).upper()
-        off      = CUSTOM_LABEL_OFFSETS.get(city_lbl, {"x": X_OFFSET_DEFAULT, "y": Y_OFFSET_DEFAULT})
-        anc_x    = cx + off["x"]
-        anc_y    = cy + off["y"]
-        ha       = "right" if off["x"] < 0 else "left"
-
-        prix_val = row["prix_mm_3m"]
-        prix_str = f"{round(prix_val):,} €".replace(",", " ") if pd.notna(prix_val) else "N/A"
-        ti_3m    = row["TAUX_INFL_3M"]
-        ti_12m   = row["TAUX_INFL_12M"]
-
-        ax.text(anc_x, anc_y,                  city_lbl, fontsize=DEFAULT_FONT_SIZE,      ha=ha, va="top", color=CL_BLACK, weight="normal", zorder=4, path_effects=halo)
-        ax.text(anc_x, anc_y - 1.5*LINE_SPACING, prix_str, fontsize=0.9*DEFAULT_FONT_SIZE, ha=ha, va="top", color=CL_BLACK, weight="bold",   zorder=4, path_effects=halo)
-
-        ti_3m_y  = anc_y - 2.5*LINE_SPACING
-        ti_12m_y = ti_3m_y - LINE_SPACING
-        text_3m  = f"{ti_3m:+.1%}".replace(".", ",") if pd.notna(ti_3m)  else "N/A"
-        text_12m = f"{ti_12m:+.1%}".replace(".", ",")if pd.notna(ti_12m) else "N/A"
-
-        ta_3m  = TextArea(text_3m,  textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_BLUE_3M, weight="normal"))
-        ta_12m = TextArea(text_12m, textprops=dict(fontsize=TAUX_FONT_SIZE, color=CL_RED_12M, weight="normal"))
-        hpack  = HPacker(children=[ta_3m, ta_12m], align="center", pad=0, sep=8)
-        box_x_align = 1.0 if ha == "right" else 0.0
-        ab = AnnotationBbox(hpack, (anc_x, ti_12m_y), xybox=(0, 0), xycoords="data",
-                            boxcoords="offset points", frameon=False,
-                            box_alignment=(box_x_align, 0.5))
-        ax.add_artist(ab)
-        ax.plot(cx, cy, marker="o", color=CL_BLACK, markersize=5, zorder=4,
-                markeredgecolor="white", markeredgewidth=0.5)
-
-    titre_tb  = {"APT": "APPARTEMENTS", "MAI": "MAISONS", "ENSEMBLE": "LOGEMENTS"}
-    titre_anc = {"ANCIEN": "ANCIENS", "NEUF": "NEUFS", "ENSEMBLE": ""}
-    nb_villes = len(params.CONFIG.get("top_cities", []))
-    ax.set_title(f"LES PRIX DES {titre_tb.get(tb, tb)} {titre_anc.get(anc, anc)} DANS LES {nb_villes} PLUS GRANDES VILLES",
-                 fontsize=26, loc="center", pad=20, color=CL_BLACK, weight=TITRE_FONT_WEIGHT,
-                 bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.4"))
-    fig.text(0.04, 0.05, "LÉGENDE\nPrix/m² moyen sur 3 mois glissants\nNoir : Évolution 3 mois\nRouge : Évolution 12 mois",
-             ha="left", va="bottom", fontsize=16,
-             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.8))
-
-    derniere = df_prix["Periode"].max()
-    date_str = f"{_MOIS_FR[derniere.month]} {derniere.year}" if pd.notna(derniere) else "DATE INCONNUE"
-    fig.text(0.04, 0.02, f"CREDIT LOGEMENT - {date_str}", ha="left", va="bottom", fontsize=12)
-
-    out = os.path.join(cfg["output_dir"], f"carte_prix_m2_evolution_{tb}_{anc}.png")
-    plt.savefig(out, dpi=300, bbox_inches=None, facecolor=fig.get_facecolor())
-    plt.close()
-    print(f"   -> Sauvegardé : {out}")
-
-
-# ===========================================================================
-# POINT D'ENTRÉE : run(cfg)
-# ===========================================================================
 
 def run(cfg: dict):
     """
-    Génère les 2 cartes PNG pour le segment défini dans cfg['segment_carte'].
+    Génère les graphiques de comparaison CL vs LPI-IAD.
 
     Parameters
     ----------
@@ -273,24 +57,219 @@ def run(cfg: dict):
     """
     tb  = cfg["segment_carte"]["TYPE_BIEN"]
     anc = cfg["segment_carte"]["ANCIENNETE"]
-    print(f"\nGénération des cartes — segment : {tb} × {anc}")
+    output_dir  = cfg["output_dir"]
+    variante    = cfg["variante"]
+    top_villes  = params.CONFIG.get("top_cities", [])
 
-    _init_matplotlib()
+    print(f"\nComparaison LPI — segment : 'APT'x'ANCIEN'")
 
-    # Chargement données GPS
-    df_gps = pd.read_csv(cfg["path_gps"], sep=";")
-    df_gps["label"] = df_gps["label"].astype(str).str.upper().str.strip()
+    # ------------------------------------------------------------------
+    # Chargement données
+    # ------------------------------------------------------------------
+    df_prix = _load_prix(cfg)
+    if df_prix.empty:
+        print("  ↳ Pas de données de prix — abandon.")
+        return
 
-    # Fond de carte
-    outline_geom = _load_france_geometry(cfg["path_geojson"])
+    lpi = _load_lpi(cfg["path_lpi"], top_villes)
+    date_max_lpi = lpi["DATE"].max() if not lpi.empty else df_prix["Periode"].max()
 
-    # Données de prix (filtrées sur segment + CITY)
-    df_prix = _load_prix_csv(cfg, tb, anc)
+    # Préparer la fusion
+    df_cl = df_prix.rename(columns={"VAL_MAILLE_GEO": "Ville", "Periode": "DATE"})
+    df_cl["DATE"] = pd.to_datetime(df_cl["DATE"])
 
-    # Carte 1 : coûts d'opérations
-    print("\n--- Carte 1 : Coûts des opérations ---")
-    carte_couts(cfg, df_prix, df_gps, outline_geom, tb, anc)
+    fusion = pd.merge(lpi, df_cl, on=["Ville", "DATE"], how="right")
+    fusion = fusion.rename(columns={
+        "prix_mm_3m":  "Prix CL (3M glissants)",
+        "prix_mm_12m": "Prix CL (12M glissants)",
+        "Prix_LPI":    "Prix LPI/IAD (12M)",
+    })
+    if date_max_lpi is not None and pd.notna(date_max_lpi):
+        fusion = fusion[fusion["DATE"] <= date_max_lpi]
 
-    # Carte 2 : prix + évolutions
-    print("\n--- Carte 2 : Prix au m² + Évolutions ---")
-    carte_prix_evolution(cfg, df_prix, df_gps, outline_geom, tb, anc)
+    # ------------------------------------------------------------------
+    # Graphiques par ville
+    # ------------------------------------------------------------------
+    score_3m = score_12m = nb_valid = 0
+
+    for ville in fusion["Ville"].dropna().unique():
+        df_v = fusion[fusion["Ville"] == ville].sort_values("DATE").copy()
+        if df_v.empty:
+            continue
+
+        fig = go.Figure()
+        cols_interp = ["Prix CL (3M glissants)", "Prix CL (12M glissants)", "Prix LPI/IAD (12M)"]
+        cols_present = [c for c in cols_interp if c in df_v.columns]
+        df_i = df_v.set_index("DATE")[cols_present].resample("MS").interpolate("linear").reset_index()
+
+        # IC 3M
+        ic_ok = False
+        if "Prix CL (3M glissants)" in df_i:
+            std3 = df_i["Prix CL (3M glissants)"].rolling(12, min_periods=3).std()
+            df_i["IC_inf_3m"] = df_i["Prix CL (3M glissants)"] - 1.96 * std3
+            df_i["IC_sup_3m"] = df_i["Prix CL (3M glissants)"] + 1.96 * std3
+            ic_ok = True
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_i["DATE"], df_i["DATE"][::-1]]),
+                y=pd.concat([df_i["IC_sup_3m"], df_i["IC_inf_3m"][::-1]]),
+                fill="toself", fillcolor="rgba(40,167,69,0.1)",
+                line=dict(color="rgba(0,0,0,0)"), name="IC 95% (3M)", showlegend=True
+            ))
+
+        # IC 12M
+        if "Prix CL (12M glissants)" in df_i:
+            std12 = df_i["Prix CL (12M glissants)"].rolling(12, min_periods=3).std()
+            df_i["IC_inf_12m"] = df_i["Prix CL (12M glissants)"] - 1.96 * std12
+            df_i["IC_sup_12m"] = df_i["Prix CL (12M glissants)"] + 1.96 * std12
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df_i["DATE"], df_i["DATE"][::-1]]),
+                y=pd.concat([df_i["IC_sup_12m"], df_i["IC_inf_12m"][::-1]]),
+                fill="toself", fillcolor="rgba(76,114,176,0.1)",
+                line=dict(color="rgba(0,0,0,0)"), name="IC 95% (12M)", showlegend=True
+            ))
+
+        for col, color, dash, name in [
+            ("Prix CL (3M glissants)",  "#28A745", "solid", "Prix CL (3M)"),
+            ("Prix CL (12M glissants)", "#4C72B0", "solid", "Prix CL (12M)"),
+            ("Prix LPI/IAD (12M)",      "#DD8452", "dot",   "Prix LPI/IAD"),
+        ]:
+            if col in df_i and not df_i[col].isna().all():
+                fig.add_trace(go.Scatter(
+                    x=df_i["DATE"], y=df_i[col], mode="lines+markers",
+                    name=name, line=dict(color=color, width=2, dash=dash), marker=dict(size=4)
+                ))
+
+        # Taux de couverture LPI dans IC
+        annotations = []
+        match_3m = match_12m = np.nan
+        if ic_ok and "Prix LPI/IAD (12M)" in df_i:
+            match_3m = (
+                (df_i["Prix LPI/IAD (12M)"] >= df_i["IC_inf_3m"]) &
+                (df_i["Prix LPI/IAD (12M)"] <= df_i["IC_sup_3m"])
+            ).mean()
+            annotations.append(f"Couverture LPI par IC 3M: {match_3m:.1%}")
+            score_3m += match_3m if pd.notna(match_3m) else 0
+        if "IC_inf_12m" in df_i and "Prix LPI/IAD (12M)" in df_i:
+            match_12m = (
+                (df_i["Prix LPI/IAD (12M)"] >= df_i["IC_inf_12m"]) &
+                (df_i["Prix LPI/IAD (12M)"] <= df_i["IC_sup_12m"])
+            ).mean()
+            annotations.append(f"Couverture LPI par IC 12M: {match_12m:.1%}")
+            score_12m += match_12m if pd.notna(match_12m) else 0
+        if pd.notna(match_3m) or pd.notna(match_12m):
+            nb_valid += 1
+        if annotations:
+            fig.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99,
+                               text="<br>".join(annotations), showarrow=False,
+                               bgcolor="white", bordercolor="black", borderwidth=1, align="left")
+
+        fig.update_layout(
+            title=f"Comparaison {tb} {anc} — {variante.upper()} vs LPI — {ville}",
+            xaxis_title="Date", yaxis_title="Prix au m² (€)",
+            height=600, template="plotly_white", hovermode="x unified"
+        )
+        out = os.path.join(output_dir, f"Comparaison_{variante}_LPI_{ville}_{tb}_{anc}.html")
+        fig.write_html(out)
+
+    print(f"  → {fusion['Ville'].nunique()} graphiques générés")
+
+    # ------------------------------------------------------------------
+    # Évolutions 12M — barres + historique
+    # ------------------------------------------------------------------
+    top12 = top_villes[:12] if len(top_villes) >= 12 else top_villes
+    df_evol = df_cl[df_cl["Ville"].isin([v.upper() for v in top12])].copy()
+    df_evol = df_evol.sort_values(["Ville", "DATE"])
+
+    if not df_evol.empty and "TAUX_INFL_12M" in df_evol.columns:
+        derniere_p = df_evol["DATE"].max()
+        df_last    = df_evol[df_evol["DATE"] == derniere_p].dropna(subset=["TAUX_INFL_12M"])
+        df_last    = df_last.sort_values("TAUX_INFL_12M")
+
+        fig_bar = go.Figure(go.Bar(
+            x=df_last["TAUX_INFL_12M"] * 100, y=df_last["Ville"], orientation="h",
+            marker_color=["#CB4735" if v >= 0 else "#1D3557" for v in df_last["TAUX_INFL_12M"]],
+            text=[f"{v:+.1f}%" for v in df_last["TAUX_INFL_12M"] * 100], textposition="outside"
+        ))
+        fig_bar.add_vline(x=0, line_color="black", line_width=1)
+        fig_bar.update_layout(
+            title=f"Évolution 12M — {tb} {anc} — {derniere_p.strftime('%B %Y') if hasattr(derniere_p, 'strftime') else derniere_p}",
+            xaxis_title="Évolution 12 mois (%)", template="plotly_white", height=600
+        )
+        fig_bar.write_html(os.path.join(output_dir, f"graphique_evol_12m_barres_{tb}_{anc}.html"))
+
+        PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+                   "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf","#aec7e8","#ffbb78"]
+        fig_hist = go.Figure()
+        for i, ville in enumerate([v.upper() for v in top12]):
+            dv = df_evol[df_evol["Ville"] == ville].dropna(subset=["TAUX_INFL_12M"])
+            if dv.empty:
+                continue
+            fig_hist.add_trace(go.Scatter(
+                x=dv["DATE"], y=dv["TAUX_INFL_12M"] * 100,
+                mode="lines", name=ville,
+                line=dict(color=PALETTE[i % len(PALETTE)], width=1.8)
+            ))
+        fig_hist.add_hline(y=0, line_dash="dot", line_color="black")
+        fig_hist.update_layout(
+            title=f"Évolution historique 12M — {tb} {anc} — Top {len(top12)} villes",
+            xaxis_title="Date", yaxis_title="Évolution 12 mois (%)",
+            template="plotly_white", height=600, hovermode="x unified"
+        )
+        fig_hist.write_html(os.path.join(output_dir, f"graphique_evol_12m_historique_{tb}_{anc}.html"))
+
+    # ------------------------------------------------------------------
+    # Statistiques synthèse
+    # ------------------------------------------------------------------
+    def _rmse(g, col):
+        lpi_col = "Prix LPI/IAD (12M)"
+        if col in g and lpi_col in g:
+            v = g[[col, lpi_col]].dropna()
+            if len(v) > 0:
+                return np.sqrt(((v[col] - v[lpi_col])**2).mean())
+        return np.nan
+
+    def _rmse_rel(g, col):
+        lpi_col = "Prix LPI/IAD (12M)"
+        if col in g and lpi_col in g:
+            v = g[[col, lpi_col]].dropna()
+            if len(v) > 0:
+                rmse = np.sqrt(((v[col] - v[lpi_col])**2).mean())
+                mean = v[lpi_col].mean()
+                return (rmse / mean * 100) if mean > 0 else np.nan
+        return np.nan
+
+    def _corr(g, col):
+        lpi_col = "Prix LPI/IAD (12M)"
+        if col in g and lpi_col in g:
+            v = g[[col, lpi_col]].dropna()
+            if len(v) > 5:
+                return v[col].corr(v[lpi_col])
+        return np.nan
+
+    stats = fusion.groupby("Ville").apply(lambda x: pd.Series({
+        "RMSE_3M":       _rmse(x, "Prix CL (3M glissants)"),
+        "RMSE_12M":      _rmse(x, "Prix CL (12M glissants)"),
+        "RMSE_REL_3M":   _rmse_rel(x, "Prix CL (3M glissants)"),
+        "RMSE_REL_12M":  _rmse_rel(x, "Prix CL (12M glissants)"),
+        "CORR_3M":       _corr(x, "Prix CL (3M glissants)"),
+        "CORR_12M":      _corr(x, "Prix CL (12M glissants)"),
+        "Prix_Moyen_LPI": x["Prix LPI/IAD (12M)"].mean(),
+    }), include_groups=False).reset_index()
+
+    if not stats.empty:
+        stats["Delta_RMSE"] = stats["RMSE_3M"] - stats["RMSE_12M"]
+        stats["Delta_CORR"] = stats["CORR_12M"] - stats["CORR_3M"]
+
+    print("\n" + "="*70)
+    print(f"  RÉSULTATS — {variante.upper()} vs LPI ({tb} {anc})")
+    print("="*70)
+    if nb_valid > 0:
+        print(f"  Couverture LPI par IC 3M  : {score_3m/nb_valid:.1%}")
+        print(f"  Couverture LPI par IC 12M : {score_12m/nb_valid:.1%}")
+    if not stats.empty:
+        print(f"  RMSE absolu — 3M : {stats['RMSE_3M'].mean():.2f} €/m² | 12M : {stats['RMSE_12M'].mean():.2f} €/m²")
+        print(f"  Corrélation  — 3M : {stats['CORR_3M'].mean():.4f}  | 12M : {stats['CORR_12M'].mean():.4f}")
+
+    out_stats = os.path.join(output_dir, f"stats_comparaison_{variante}_LPI_{tb}_{anc}.csv")
+    stats.to_csv(out_stats, index=False)
+    print(f"  → Statistiques : {out_stats}")
