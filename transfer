@@ -1,21 +1,42 @@
 ================================================================================
-CONSOLIDATION DES RÉSULTATS
+  PIPELINE INDICATEUR PRIX — BASE RESTREINTE CL UNIQUEMENT
+  Variante    : v2_restreint
+  Étapes      : prix, cartes, lpi
+  Segment     : APT × ANCIEN
+  Sorties     : z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint
 ================================================================================
+
+
+────────────────────────────────────────────────────────────
+  ÉTAPE : calc_prix
+────────────────────────────────────────────────────────────
+
+Chargement des données...
+Chargement des données...
+  Base prix : 2303078 lignes (Base restreinte CL uniquement)
+Chargement des données...
+  Base structure : 11060733 lignes
+
+================================================================================
+EXTRACTION DES STRUCTURES DE MARCHÉ
+================================================================================
+
+   Extraction structure PROVINCE...
+      -> structure_poids_PROVINCE.csv (12 univers, 1 PROVINCE)
+
+--- Traitement de la maille : PROVINCE ---
+  → Construction univers_complet (1× pour toute la maille)...
 Traceback (most recent call last):
-  File "z:\uflumth\gits\univers_elementaire\TI\calc_prix_m2_univ_elem.py", line 403, in <module>
-    df_all.to_csv(path_all, index=False, encoding='utf-8-sig')
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\util\_decorators.py", line 333, in wrapper
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\core\generic.py", line 3989, in to_csv
-    return DataFrameRenderer(formatter).to_csv(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\io\formats\format.py", line 1014, in to_csv
-    csv_formatter.save()
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\io\formats\csvs.py", line 251, in save
-    with get_handle(
-         ^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\.venv\Lib\site-packages\pandas\io\common.py", line 873, in get_handle
-    handle = open(
-             ^^^^^
-PermissionError: [Errno 13] Permission denied: 'z:\\uflumth\\gits\\univers_elementaire\\TI\\resultats\\prix_m2_univ_elem_ALL.csv'
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\main.py", line 155, in <module>
+    main()
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\main.py", line 127, in main
+    run_prix(cfg)
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 374, in run
+    res = _process_maille(df_prov, struct_province, "Ville", "PROVINCE", output_dir, label)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 281, in _process_maille
+    univers_complet = build_univers_complet(df_work)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 90, in build_univers_complet
+    univers_mensuel.groupby(TYPOKEYS, group_keys=False, include_groups=False)
+TypeError: DataFrame.groupby() got an unexpected keyword argument 'include_groups'
