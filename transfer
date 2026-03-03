@@ -1,69 +1,672 @@
-======================================================================
-  RÉSULTATS — V1_COMPLET vs LPI (APT ANCIEN)
-======================================================================
-  Couverture LPI par IC 3M  : 17.3%
-  Couverture LPI par IC 12M : 7.5%
-  RMSE absolu — 3M : 294.24 €/m² | 12M : 330.51 €/m²
-  Corrélation  — 3M : 0.9508  | 12M : 0.9516
+"""
+pipeline/calc_prix.py — Calcul des indices de prix au m² (toutes mailles × tous segments).
 
-=== LANCEMENT DU CALCUL ET ANALYSE V1 vs V2_STRUCT ===
+Amélioration de performances par rapport à calc_prix_m2_univ_elem.py :
+- `build_univers_complet()` (agrégation mensuelle + complete_months) est exécuté
+  UNE SEULE FOIS par maille, puis les 9 combinaisons TYPE_BIEN × ANCIENNETE
+  sont calculées sur le cache, sans refaire l'étape lourde.
 
---- Chargement LPI/IAD ---
+Paramètres reçus desde cfg (config.py) :
+    path_base      : parquet sur lequel calculer les prix
+    path_structure : parquet pour les poids structurels (peut être différent)
+    source_filter  : filtre SOURCE ("CL" | None)
+    label          : "V1" | "V2"
+    output_dir     : dossier de sortie
 
---- Génération des graphiques ---
+Sorties :
+    prix_m2_univ_elem_ALL.csv     — toutes périodes, toutes mailles, tous segments
+    prix_m2_univ_elem_MAJ_ALL.csv — dernière période par zone × segment
+    structure_poids_<MAILLE>.csv  — poids structurels
+"""
+import sys
+import os
+from datetime import datetime
+import pandas as pd
+import numpy as np
 
-================================================================================
- RÉSULTATS COMPARATIFS : V2 vs LPI (3M et 12M)
-================================================================================
+# Imports locaux (fonctions.py et param_generaux.py sont copiés dans indicateur_prix/)
+import param_generaux as params
+from fonctions import (
+    load_and_preprocess_data,
+    apply_nice_correction,
+    get_structure_reference_city,
+    extract_arrondissement,
+    clean_base,
+)
 
-CORRESPONDANCE LPI dans IC (Couverture moyenne) :
-   IC 3M  : 44.9%
-   IC 12M : 28.1%
-
-RMSE ABSOLU (€/m²) :
-   3M  : 200.78 €/m²
-   12M : 208.80 €/m²
-   Δ   : -8.02 €/m² (3M meilleur)
-
-RMSE RELATIF (%) :
-   3M  : 5.94 %
-   12M : 6.05 %
-
-CORRÉLATION avec LPI :
-   3M  : 0.9412
-   12M : 0.9513
-   Δ   : +0.0101 (12M meilleur)
-
---------------------------------------------------------------------------------
-
-Détail par ville :
-        Ville  Prix_Moyen_LPI    RMSE_3M   RMSE_12M  Delta_RMSE  RMSE_REL_3M  RMSE_REL_12M  CORR_3M  CORR_12M
-        LILLE     3405.891892 137.292835  74.148969   63.143866     4.031039      2.177079 0.965672  0.989427
-  MONTPELLIER     3188.054054 219.265118 183.430754   35.834365     6.877710      5.753690 0.959239  0.947815
-     TOULOUSE     3379.072072 141.585982 110.858471   30.727512     4.190085      3.280737 0.975076  0.974414
-     LE HAVRE     2179.504505 121.915530 105.802021   16.113509     5.593727      4.854407 0.908323  0.939628
-   STRASBOURG     3620.873874 134.768523 120.481983   14.286540     3.721989      3.327428 0.949770  0.970474
-        REIMS     2609.828829 144.710155 136.191472    8.518682     5.544814      5.218406 0.897598  0.906151
-     GRENOBLE     2714.486486 110.699827 106.969041    3.730786     4.078113      3.940673 0.853121  0.896805
-SAINT-ETIENNE     1449.684685 263.929832 272.433551   -8.503719    18.206016     18.792607 0.898820  0.938657
-    MARSEILLE     3168.252252 213.236502 236.429107  -23.192605     6.730414      7.462446 0.915845  0.916227
-        PARIS    10071.018018 439.107836 463.716977  -24.609141     4.360114      4.604470 0.944695  0.966306
-       RENNES     3517.873874 188.261672 215.127773  -26.866101     5.351575      6.115278 0.970525  0.964987
-         NICE     4491.612613 208.308551 244.354610  -36.046059     4.637723      5.440242 0.956990  0.965273
-       NANTES     3642.216216 168.049295 207.499831  -39.450536     4.613930      5.697076 0.977851  0.973812
-     BORDEAUX     4440.846847 189.972528 253.398748  -63.426220     4.277845      5.706091 0.969573  0.959193
-         LYON     4770.792793 330.548093 401.098954  -70.550861     6.928578      8.407386 0.975372  0.960655
-        BREST             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
-        TOURS             NaN        NaN        NaN         NaN          NaN           NaN      NaN       NaN
-
- Statistiques sauvegardées : z:\uflumth\gits\univers_elementaire\TI\resultats\stats_comparaison_V2_LPI.csv
+# ---------------------------------------------------------------------------
+# Constantes
+# ---------------------------------------------------------------------------
+TYPES_BIEN   = ["APT", "MAI"]
+ANCIENNETES  = ["NEUF", "ANCIEN"]
+TYPOKEYS     = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
 
 
-======================================================================
-  RÉSULTATS — V2_RESTREINT vs LPI (APT ANCIEN)
-======================================================================
-  Couverture LPI par IC 3M  : 34.8%
-  Couverture LPI par IC 12M : 17.4%
-  RMSE absolu — 3M : 242.60 €/m² | 12M : 271.65 €/m²
-  Corrélation  — 3M : 0.9496  | 12M : 0.9579
-  → Statistiques : z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint\stats_comparaison_v2_restreint_LPI_APT_ANCIEN.csv
+# ===========================================================================
+# ÉTAPE LOURDE (1× par maille) : agrégation mensuelle + complete_months
+# ===========================================================================
+
+def build_univers_complet(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construit l'univers mensuel complet (agrégation + complétion des mois).
+
+    Cette fonction est la partie lente du pipeline — elle doit être appelée
+    UNE SEULE FOIS par maille, puis filtrée pour chaque segment.
+
+    Parameters
+    ----------
+    df : pd.DataFrame avec colonnes Ville, BIEN_NEUF, TYPE_BIEN,
+         NB_PIECES_RANGE, Periode, ID, Prix_m2, NB_SURF_HAB, VALEUR_FONCIERE
+
+    Returns
+    -------
+    pd.DataFrame : univers_complet avec tous les mois remplis
+    """
+    keys = ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE", "Periode"]
+    univers_mensuel = (
+        df.groupby(keys, dropna=False)
+        .agg(
+            nb_transac=("ID", "size"),
+            prix_moyen=("Prix_m2", "mean"),
+            surface_moyen=("NB_SURF_HAB", "mean"),
+            valeur_fonc_moyen=("VALEUR_FONCIERE", "mean")
+        )
+        .reset_index()
+    )
+
+    # Cohérence TYPE_BIEN / NB_PIECES_RANGE
+    univers_mensuel["PB"] = univers_mensuel["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    univers_mensuel["TYPE_BIEN"] = univers_mensuel["TYPE_BIEN"].astype(str).str.strip().str.upper()
+    univers_mensuel = univers_mensuel[univers_mensuel["TYPE_BIEN"] == univers_mensuel["PB"]].drop(columns=["PB"])
+
+    def complete_months(g):
+        g = g.sort_values("Periode").set_index("Periode")
+        idx = pd.date_range(g.index.min(), g.index.max(), freq="MS")
+        g = g.reindex(idx)
+        for col in ["Ville", "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]:
+            g[col] = g[col].ffill().bfill()
+        g["nb_transac"] = g["nb_transac"].fillna(0)
+        return g.reset_index().rename(columns={"index": "Periode"})
+
+    univers_complet = (
+        univers_mensuel.groupby(TYPOKEYS, group_keys=False)
+        .apply(complete_months)
+    )
+    return univers_complet
+
+
+# ===========================================================================
+# ÉTAPES LÉGÈRES (9× par maille) : filtre + poids + calc_mm
+# ===========================================================================
+
+def _calc_mm_on_cache(
+    univers_complet: pd.DataFrame,
+    label: str,
+    structure: pd.DataFrame,
+    type_bien: str,
+    anciennete: str
+) -> pd.DataFrame | None:
+    """
+    Calcule les moyennes mobiles sur un sous-ensemble du cache univers_complet.
+
+    Parameters
+    ----------
+    univers_complet : cache déjà construit par build_univers_complet()
+    label           : label court ("V1" | "V2")
+    structure       : DataFrame avec [Ville, BIEN_NEUF, TYPE_BIEN, NB_PIECES_RANGE, poids_ref]
+    type_bien       : "APT" | "MAI" | "ENSEMBLE"
+    anciennete      : "NEUF" | "ANCIEN" | "ENSEMBLE"
+
+    Returns
+    -------
+    pd.DataFrame avec Ville, Periode, prix_mm_3m, prix_mm_12m, surface_*, VF_*,
+    nb_observations_*, nb_univers_*, TYPE_BIEN, ANCIENNETE — ou None si vide.
+    """
+    seg_label = f"{label}_{type_bien}_{anciennete}"
+
+    # --- Filtre segment ---
+    uc = univers_complet.copy()
+    if type_bien != "ENSEMBLE":
+        uc = uc[uc["TYPE_BIEN"] == type_bien]
+    if anciennete != "ENSEMBLE":
+        uc = uc[uc["BIEN_NEUF"] == anciennete]
+    if uc.empty:
+        return None
+
+    # --- Application des poids ---
+    if structure is not None:
+        struct_seg = structure.copy()
+        if "Ville" in struct_seg.columns:
+            struct_seg["Ville"] = struct_seg["Ville"].astype(str).str.strip().str.upper()
+        if type_bien != "ENSEMBLE":
+            struct_seg = struct_seg[struct_seg["TYPE_BIEN"] == type_bien]
+        if anciennete != "ENSEMBLE":
+            struct_seg = struct_seg[struct_seg["BIEN_NEUF"] == anciennete]
+
+        uc = uc.merge(
+            struct_seg[TYPOKEYS + ["poids_ref"]],
+            on=TYPOKEYS, how="left"
+        )
+        uc = uc.rename(columns={"poids_ref": "poids_relatif"})
+        uc = uc.dropna(subset=["poids_relatif"])
+    else:
+        # Poids internes
+        poids = (
+            uc.groupby(TYPOKEYS, as_index=False)["nb_transac"]
+            .sum().rename(columns={"nb_transac": "poids_total"})
+        )
+        poids["poids_relatif"] = poids.groupby("Ville")["poids_total"].transform(
+            lambda x: x / x.sum()
+        )
+        uc = uc.merge(poids, on=TYPOKEYS, how="left")
+
+    if uc.empty:
+        return None
+
+    # Renormaliser les poids par Ville (important quand on a filtré des univers)
+    uc["poids_relatif"] = uc.groupby(["Ville", "Periode"])["poids_relatif"].transform(
+        lambda x: x / x.sum() if x.sum() > 0 else x
+    )
+
+    # --- Indicatrices ---
+    uc = uc.sort_values(TYPOKEYS + ["Periode"])
+    uc["I_3m"]  = uc.groupby(TYPOKEYS)["nb_transac"].transform(
+        lambda s: (s.rolling(3, min_periods=3).sum() > 0).astype(int)
+    )
+    uc["I_12m"] = uc.groupby(TYPOKEYS)["nb_transac"].transform(
+        lambda s: (s.rolling(12, min_periods=12).sum() > 0).astype(int)
+    )
+
+    # --- calc_mm ---
+    def calc_mm(g, window, col_indic, variable_col):
+        result = []
+        g = g.sort_values("Periode")
+        periodes = g["Periode"].unique()
+        for i, periode in enumerate(periodes):
+            start   = max(0, i - window + 1)
+            fenetre = g[g["Periode"].isin(periodes[start:i+1])]
+            actifs  = fenetre[(fenetre[variable_col].notna()) & (fenetre[col_indic] == 1)]
+            if actifs.empty:
+                result.append({"Periode": periode, "val": np.nan, "nb_obs": 0, "nb_univ": 0})
+                continue
+            nb_obs  = int(actifs["nb_transac"].sum())
+            nb_univ = actifs[["BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]].drop_duplicates().shape[0]
+            pw      = actifs["poids_relatif"].sum()
+            val     = np.average(actifs[variable_col], weights=actifs["poids_relatif"]) if pw > 0 else np.nan
+            result.append({"Periode": periode, "val": val, "nb_obs": nb_obs, "nb_univ": nb_univ})
+        return pd.DataFrame(result)
+
+    res_final = []
+    for ville, df_ville in uc.groupby("Ville"):
+        mm12 = calc_mm(df_ville, 12, "I_12m", "prix_moyen").rename(columns={"val": "prix_mm_12m", "nb_obs": "nb_observations_12m", "nb_univ": "nb_univers_12m"})
+        mm3  = calc_mm(df_ville, 3,  "I_3m",  "prix_moyen").rename(columns={"val": "prix_mm_3m",  "nb_obs": "nb_observations_3m",  "nb_univ": "nb_univers_3m"})
+        s12  = calc_mm(df_ville, 12, "I_12m", "surface_moyen")[["Periode", "val"]].rename(columns={"val": "surface_mm_12m"})
+        s3   = calc_mm(df_ville, 3,  "I_3m",  "surface_moyen")[["Periode", "val"]].rename(columns={"val": "surface_mm_3m"})
+        v12  = calc_mm(df_ville, 12, "I_12m", "valeur_fonc_moyen")[["Periode", "val"]].rename(columns={"val": "VF_mm_12m"})
+        v3   = calc_mm(df_ville, 3,  "I_3m",  "valeur_fonc_moyen")[["Periode", "val"]].rename(columns={"val": "VF_mm_3m"})
+
+        merged = mm12
+        for df_m in [mm3, s12, s3, v12, v3]:
+            merged = merged.merge(df_m, on="Periode", how="outer")
+        merged["Ville"] = ville
+        res_final.append(merged)
+
+    if not res_final:
+        return None
+
+    result = pd.concat(res_final, ignore_index=True)
+    result["TYPE_BIEN"]  = type_bien
+    result["ANCIENNETE"] = anciennete
+    print(f"  ✓ {type_bien} × {anciennete} : {len(result)} lignes")
+    return result
+
+
+# ===========================================================================
+# FONCTIONS UTILITAIRES : structure de marché
+# ===========================================================================
+
+def extract_structure(df: pd.DataFrame, maille_col: str, maille_name: str, output_dir: str) -> pd.DataFrame:
+    """Calcule et sauvegarde la structure de marché (poids par univers élémentaire)."""
+    print(f"\n   Extraction structure {maille_name}...")
+    dims = [maille_col, "BIEN_NEUF", "TYPE_BIEN", "NB_PIECES_RANGE"]
+    structure = df.groupby(dims, dropna=False).size().reset_index(name="volume_ref")
+    structure["TYPE_BIEN"] = structure["TYPE_BIEN"].astype(str).str.upper().str.strip()
+    structure["PB"] = structure["NB_PIECES_RANGE"].astype(str).str.strip().str[:3].str.upper()
+    structure = structure[structure["TYPE_BIEN"] == structure["PB"]].drop(columns=["PB"])
+    structure["poids_ref"] = structure.groupby(maille_col)["volume_ref"].transform(lambda x: x / x.sum())
+
+    path = os.path.join(output_dir, f"structure_poids_{maille_name}.csv")
+    structure.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"      -> structure_poids_{maille_name}.csv ({len(structure)} univers, {structure[maille_col].nunique()} {maille_name})")
+    return structure
+
+
+def _process_maille(
+    df_data: pd.DataFrame,
+    df_struct_src: pd.DataFrame,
+    maille_col: str,
+    maille_name: str,
+    output_dir: str,
+    label: str,
+    df_arr=None
+) -> pd.DataFrame | None:
+    """
+    Calcule toutes les combinaisons TYPE_BIEN × ANCIENNETE pour une maille.
+    build_univers_complet() est appelé UNE SEULE FOIS, le résultat est filtré 9 fois.
+    """
+    print(f"\n--- Traitement de la maille : {maille_name} ---")
+    start = datetime.now()
+
+    # Préparer df_work (renommer maille_col → Ville)
+    df_work = df_data.copy()
+    if maille_col != "Ville":
+        if "Ville" in df_work.columns:
+            df_work = df_work.drop(columns=["Ville"])
+        df_work = df_work.rename(columns={maille_col: "Ville"})
+    df_work["Ville"] = df_work["Ville"].astype(str).str.strip().str.upper()
+    df_work = df_work.dropna(subset=["Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
+
+    # Préparer structure (renommer maille_col → Ville + upper)
+    structure_base = None
+    if df_struct_src is not None:
+        structure_base = df_struct_src.copy()
+        if maille_col in structure_base.columns and maille_col != "Ville":
+            structure_base = structure_base.rename(columns={maille_col: "Ville"})
+        if "Ville" in structure_base.columns:
+            structure_base["Ville"] = structure_base["Ville"].astype(str).str.strip().str.upper()
+
+    # ---------------------------------------------------------------
+    # ÉTAPE LOURDE : une seule fois pour cette maille
+    # ---------------------------------------------------------------
+    print(f"  → Construction univers_complet (1× pour toute la maille)...")
+    t0 = datetime.now()
+    univers_complet = build_univers_complet(df_work)
+    print(f"     terminé en {datetime.now() - t0} — {len(univers_complet)} lignes")
+
+    # Pour CITY, gérer les arrondissements Paris/Lyon/Marseille
+    # (df_arr est passé uniquement pour CITY)
+    # TODO: intégrer moy_pond_cities pour ENSEMBLE si df_arr fourni
+
+    # ---------------------------------------------------------------
+    # BOUCLE LÉGÈRE : 9 combinaisons TYPE_BIEN × ANCIENNETE
+    # ---------------------------------------------------------------
+    all_segments = []
+    for tb in TYPES_BIEN + ["ENSEMBLE"]:
+        for anc in ANCIENNETES + ["ENSEMBLE"]:
+            seg = _calc_mm_on_cache(univers_complet, label, structure_base, tb, anc)
+            if seg is not None:
+                seg["VAL_MAILLE_GEO"] = seg["Ville"]
+                seg["TYPE_MAILLE"]    = maille_name
+                seg = seg.drop(columns=["Ville"])
+                all_segments.append(seg)
+
+    if not all_segments:
+        print(f"  ✗ Aucune donnée pour la maille {maille_name}")
+        return None
+
+    final = pd.concat(all_segments, ignore_index=True)
+
+    # Taux d'inflation
+    gc = ["VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE"]
+    final = final.sort_values(gc + ["Periode"])
+    final["TAUX_INFL_12M"] = final.groupby(gc)["prix_mm_3m"].pct_change(periods=4,  fill_method=None)
+    final["TAUX_INFL_3M"]  = final.groupby(gc)["prix_mm_3m"].pct_change(periods=1,  fill_method=None)
+
+    print(f"Traitement {maille_name} terminé en {datetime.now() - start} — {len(final)} lignes")
+    return final
+
+
+# ===========================================================================
+# AIDE CITY : agrégation arrondissements → villes (réimplémentation de moy_pond_cities)
+# ===========================================================================
+
+def _aggregate_arrondissements(df_city: pd.DataFrame, struct_arr: pd.DataFrame, label: str) -> pd.DataFrame:
+    """
+    Agrège les résultats calculés à l'arrondissement (75101, 75102…) vers la ville (PARIS).
+
+    Parameters
+    ----------
+    df_city   : sortie de _process_maille pour la maille CITY (VAL_MAILLE_GEO = codes arr. ou villes)
+    struct_arr: structure_poids_arrondissements.csv — colonnes : Ville, Ville_source, poids_relatif
+    label     : label du run (pour les messages)
+    """
+    if struct_arr is None or struct_arr.empty:
+        return df_city
+
+    struct_arr = struct_arr.copy()
+    struct_arr["Ville"] = struct_arr["Ville"].astype(str).str.strip().str.upper()
+    if "Ville_source" in struct_arr.columns:
+        struct_arr["Ville_source"] = struct_arr["Ville_source"].astype(str).str.strip().str.upper()
+
+    arr_codes = set(struct_arr["Ville"].unique())
+
+    # Séparer arrondissements et autres villes
+    df_arr   = df_city[df_city["VAL_MAILLE_GEO"].isin(arr_codes)].copy()
+    df_autres = df_city[~df_city["VAL_MAILLE_GEO"].isin(arr_codes)].copy()
+
+    if df_arr.empty:
+        return df_city
+
+    # Fusionner avec les poids
+    df_arr = df_arr.merge(struct_arr, left_on="VAL_MAILLE_GEO", right_on="Ville", how="inner")
+
+    cols_moyennes = ["prix_mm_3m", "prix_mm_12m", "surface_mm_3m", "surface_mm_12m", "VF_mm_3m", "VF_mm_12m"]
+    cols_sommes   = ["nb_observations_3m", "nb_observations_12m", "nb_univers_3m", "nb_univers_12m"]
+    group_cols    = ["Ville_source", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE", "Periode"]
+
+    def _wavg(group, col):
+        m, w = group[col], group["poids_relatif"]
+        mask = m.notna() & w.notna() & (w > 0)
+        return np.average(m[mask], weights=w[mask]) if mask.any() else np.nan
+
+    agg_parts = []
+
+    for col in cols_moyennes:
+        if col in df_arr.columns:
+            agg = (
+                df_arr.groupby(group_cols, group_keys=False)
+                .apply(lambda x: _wavg(x, col))
+                .reset_index(name=col)
+            )
+            agg_parts.append(agg)
+
+    for col in cols_sommes:
+        if col in df_arr.columns:
+            agg = df_arr.groupby(group_cols)[col].sum().reset_index()
+            agg_parts.append(agg)
+
+    if not agg_parts:
+        return df_city
+
+    agg_city = agg_parts[0]
+    for part in agg_parts[1:]:
+        agg_city = agg_city.merge(part, on=group_cols, how="outer")
+
+    # Recalcul TAUX_INFL après agrégation
+    agg_city = agg_city.rename(columns={"Ville_source": "VAL_MAILLE_GEO"})
+    gc = ["VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE"]
+    agg_city = agg_city.sort_values(gc + ["Periode"])
+    agg_city["TAUX_INFL_12M"] = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=4,  fill_method=None)
+    agg_city["TAUX_INFL_3M"]  = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=1,  fill_method=None)
+
+    # Retirer les arrondissements, ajouter les villes agrégées
+    villes_agreges = agg_city["VAL_MAILLE_GEO"].unique()
+    codes_a_retirer = struct_arr[struct_arr["Ville_source"].isin(villes_agreges)]["Ville"].astype(str).tolist()
+    df_autres_clean = df_autres[~df_autres["VAL_MAILLE_GEO"].isin(codes_a_retirer)].copy()
+
+    result = pd.concat([df_autres_clean, agg_city], ignore_index=True)
+    print(f"  ✓ Arrondissements agrégés : {list(villes_agreges)}")
+    return result
+
+
+
+def run_structure(cfg: dict):
+    """
+    Calcule et sauvegarde les fichiers structure_poids_*.csv pour toutes les mailles.
+
+    Utilise TOUJOURS cfg['path_structure'] (= base_complete_filtree DVF+CL),
+    indépendamment de la variante choisie pour les prix.
+
+    Sorties dans cfg['output_dir'] :
+        structure_poids_PROVINCE.csv
+        structure_poids_CITY.csv
+        structure_poids_arrondissements.csv
+        structure_poids_DEPT.csv
+        structure_poids_REGION.csv
+        structure_poids_NATIONAL.csv
+    """
+    output_dir = cfg["output_dir"]
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("\nChargement base structurelle (DVF+CL)...")
+    base_struct = load_and_preprocess_data(specific_path=cfg["path_structure"])
+    if "CITY" in base_struct.columns:
+        base_struct = base_struct.rename(columns={"CITY": "Ville"})
+    if "Ville" not in base_struct.columns and "ville_" in base_struct.columns:
+        base_struct = base_struct.rename(columns={"ville_": "Ville"})
+    base_struct["Ville"] = base_struct["Ville"].astype(str).str.strip().str.upper()
+    print(f"  {len(base_struct):,} lignes")
+
+    print("\n" + "="*80)
+    print("CALCUL DES POIDS STRUCTURELS (base DVF+CL)")
+    print("="*80)
+
+    # PROVINCE
+    df_prov_struct = base_struct.copy()
+    mask_s = ~df_prov_struct["DEPT"].isin(params.CONFIG["idf_depts"])
+    df_prov_struct.loc[mask_s, "Ville"] = "PROVINCE"
+    df_prov_struct = df_prov_struct[df_prov_struct["Ville"] == "PROVINCE"]
+    extract_structure(df_prov_struct, "Ville", "PROVINCE", output_dir)
+
+    # CITY (avec arrondissements Paris/Lyon/Marseille)
+    print("\n   Extraction structure CITY...")
+    struct_villes, struct_arr = get_structure_reference_city(base_struct)
+    struct_villes.to_csv(os.path.join(output_dir, "structure_poids_CITY.csv"), index=False, encoding="utf-8-sig")
+    struct_arr.to_csv(os.path.join(output_dir, "structure_poids_arrondissements.csv"), index=False, encoding="utf-8-sig")
+    print(f"      -> structure_poids_CITY.csv ({len(struct_villes)} univers)")
+    print(f"      -> structure_poids_arrondissements.csv ({len(struct_arr)} arrondissements)")
+
+    # DEPT
+    extract_structure(base_struct, "DEPT", "DEPT", output_dir)
+
+    # REGION
+    extract_structure(base_struct, "REGION", "REGION", output_dir)
+
+    # NATIONAL
+    df_nat_struct = base_struct.copy()
+    df_nat_struct["PAYS"] = "FRANCE"
+    extract_structure(df_nat_struct, "PAYS", "NATIONAL", output_dir)
+
+    print("\n✓ Poids structurels calculés et sauvegardés")
+
+
+# ===========================================================================
+# POINT D'ENTRÉE 2 : run_prix(cfg)  —  calcul des tables de prix
+# ===========================================================================
+
+def run_prix(cfg: dict):
+    """
+    Calcule les indices de prix pour toutes les mailles et tous les segments.
+
+    Charge les poids structurels depuis les CSV déjà produits par run_structure().
+    Si les CSV n'existent pas, les recalcule à la volée.
+
+    Sorties dans cfg['output_dir'] :
+        prix_m2_univ_elem_ALL.csv     — toutes périodes
+        prix_m2_univ_elem_MAJ_ALL.csv — dernière période par zone × segment
+    """
+    start_global = datetime.now()
+    output_dir   = cfg["output_dir"]
+    label        = cfg["label"]
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Chargement de la base prix
+    # ------------------------------------------------------------------
+    print("\nChargement base prix...")
+    base_prix = load_and_preprocess_data(specific_path=cfg["path_base"])
+    if "CITY" in base_prix.columns:
+        base_prix = base_prix.rename(columns={"CITY": "Ville"})
+    if "Ville" not in base_prix.columns and "ville_" in base_prix.columns:
+        base_prix = base_prix.rename(columns={"ville_": "Ville"})
+    if cfg.get("source_filter"):
+        base_prix = base_prix[base_prix["SOURCE"] == cfg["source_filter"]]
+    base_prix["Ville"] = base_prix["Ville"].astype(str).str.strip().str.upper()
+    print(f"  {len(base_prix):,} lignes ({cfg['description']})")
+
+    # ------------------------------------------------------------------
+    # Chargement des poids structurels (CSV produits par run_structure)
+    # ------------------------------------------------------------------
+    def _load_struct(name: str) -> pd.DataFrame | None:
+        path = os.path.join(output_dir, f"structure_poids_{name}.csv")
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            if "Ville" in df.columns:
+                df["Ville"] = df["Ville"].astype(str).str.strip().str.upper()
+            return df
+        return None
+
+    print("\n" + "="*80)
+    print("CALCUL DES PRIX")
+    print("="*80)
+
+    all_results = []
+
+    # ------------------------------------------------------------------
+    # PROVINCE
+    # ------------------------------------------------------------------
+    df_prov = base_prix.copy()
+    mask_prov = ~df_prov["DEPT"].isin(params.CONFIG["idf_depts"])
+    df_prov.loc[mask_prov, "Ville"] = "PROVINCE"
+    df_prov = df_prov[df_prov["Ville"] == "PROVINCE"]
+
+    struct_province = _load_struct("PROVINCE")
+    if struct_province is None:
+        print("  ⚠ structure_poids_PROVINCE.csv introuvable — recalcul à la volée")
+        # fallback : on utilise base_prix comme structure
+        df_ps = df_prov.copy()
+        df_ps["Ville"] = "PROVINCE"
+        struct_province = extract_structure(df_ps, "Ville", "PROVINCE", output_dir)
+
+    res = _process_maille(df_prov, struct_province, "Ville", "PROVINCE", output_dir, label)
+    if res is not None:
+        all_results.append(res)
+
+    # ------------------------------------------------------------------
+    # CITY (avec gestion des arrondissements Paris / Lyon / Marseille)
+    # ------------------------------------------------------------------
+    # 1. On garde les codes arrondissements (extract_arrondissement) au lieu
+    #    de regrouper directement sous "PARIS" / "LYON" / "MARSEILLE".
+    # 2. Après le calcul, moy_pond_cities agrège via les poids de struct_arr.
+    top_cities = params.CONFIG.get("top_cities", [])
+
+    # Préparer les données CITY avec codes arrondissements
+    df_villes_raw = base_prix.copy()
+    if "Ville" not in df_villes_raw.columns and "CITY" in df_villes_raw.columns:
+        df_villes_raw = df_villes_raw.rename(columns={"CITY": "Ville"})
+    df_villes_raw["Ville"] = df_villes_raw["Ville"].astype(str).str.strip().str.upper()
+    df_villes_raw["Ville"] = df_villes_raw["Ville"].replace({
+        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE", "ST ETIENNE": "SAINT-ETIENNE"
+    })
+    # Correction Nice via IRIS
+    df_villes_raw = apply_nice_correction(df_villes_raw)
+    if "CITY" in df_villes_raw.columns:
+        df_villes_raw.rename(columns={"CITY": "Ville"}, inplace=True)
+    # Filtrer sur top_cities (villes principales, sans les codes arrondissements pour l'instant)
+    df_villes_raw = df_villes_raw[df_villes_raw["Ville"].isin(top_cities)]
+    # Appliquer extract_arrondissement : remplace Ville=PARIS par code IRIS 5 chiffres
+    df_villes_raw = df_villes_raw.dropna(subset=["DATE", "Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
+    if "IRIS" in df_villes_raw.columns or "code_iris" in df_villes_raw.columns:
+        if "code_iris" in df_villes_raw.columns:
+            df_villes_raw = df_villes_raw.rename(columns={"code_iris": "IRIS"})
+        df_villes_raw["Ville"] = df_villes_raw.apply(extract_arrondissement, axis=1)
+    df_villes_raw["Ville"] = df_villes_raw["Ville"].astype(str).str.strip().str.upper()
+
+    # Structure CITY (arrondissement-level pour Paris/Lyon/Marseille)
+    struct_villes = _load_struct("CITY")
+    if struct_villes is None:
+        print("  ⚠ structure_poids_CITY.csv introuvable — recalcul à la volée")
+        struct_villes, _ = get_structure_reference_city(base_prix)
+
+    # Structure arrondissements (pour l'agrégation finale)
+    path_arr = os.path.join(output_dir, "structure_poids_arrondissements.csv")
+    struct_arr = pd.read_csv(path_arr) if os.path.exists(path_arr) else None
+
+    res_city_raw = _process_maille(df_villes_raw, struct_villes, "Ville", "CITY", output_dir, label)
+
+    if res_city_raw is not None and struct_arr is not None:
+        # Agréger les arrondissements via moy_pond_cities
+        res_city = _aggregate_arrondissements(res_city_raw, struct_arr, label)
+    else:
+        res_city = res_city_raw
+
+    if res_city is not None:
+        all_results.append(res_city)
+
+    # ------------------------------------------------------------------
+    # DEPT
+    # ------------------------------------------------------------------
+    struct_dept = _load_struct("DEPT")
+    if struct_dept is None:
+        print("  ⚠ structure_poids_DEPT.csv introuvable — recalcul à la volée")
+        struct_dept = extract_structure(base_prix, "DEPT", "DEPT", output_dir)
+
+    res = _process_maille(base_prix, struct_dept, "DEPT", "DEPT", output_dir, label)
+    if res is not None:
+        all_results.append(res)
+
+    # ------------------------------------------------------------------
+    # REGION
+    # ------------------------------------------------------------------
+    struct_region = _load_struct("REGION")
+    if struct_region is None:
+        print("  ⚠ structure_poids_REGION.csv introuvable — recalcul à la volée")
+        struct_region = extract_structure(base_prix, "REGION", "REGION", output_dir)
+
+    res = _process_maille(base_prix, struct_region, "REGION", "REGION", output_dir, label)
+    if res is not None:
+        all_results.append(res)
+
+    # ------------------------------------------------------------------
+    # NATIONAL
+    # ------------------------------------------------------------------
+    df_nat = base_prix.copy()
+    df_nat["PAYS"] = "FRANCE"
+
+    struct_nat = _load_struct("NATIONAL")
+    if struct_nat is None:
+        print("  ⚠ structure_poids_NATIONAL.csv introuvable — recalcul à la volée")
+        struct_nat = extract_structure(df_nat, "PAYS", "NATIONAL", output_dir)
+
+    res = _process_maille(df_nat, struct_nat, "PAYS", "NATIONAL", output_dir, label)
+    if res is not None:
+        all_results.append(res)
+
+    # ------------------------------------------------------------------
+    # Consolidation et sauvegarde
+    # ------------------------------------------------------------------
+    print("\n" + "="*80)
+    print("CONSOLIDATION")
+    print("="*80)
+
+    if not all_results:
+        print("ERREUR : aucun résultat.")
+        return
+
+    df_all = pd.concat(all_results, ignore_index=True)
+
+    col_order = [
+        "VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE", "Periode",
+        "prix_mm_3m", "prix_mm_12m", "surface_mm_3m", "surface_mm_12m",
+        "VF_mm_3m", "VF_mm_12m",
+        "nb_observations_3m", "nb_observations_12m",
+        "nb_univers_3m", "nb_univers_12m",
+        "TAUX_INFL_3M", "TAUX_INFL_12M"
+    ]
+    col_order = [c for c in col_order if c in df_all.columns]
+    df_all = df_all[col_order].sort_values(
+        ["TYPE_MAILLE", "VAL_MAILLE_GEO", "TYPE_BIEN", "ANCIENNETE", "Periode"]
+    )
+
+    path_all = os.path.join(output_dir, "prix_m2_univ_elem_ALL.csv")
+    df_all.to_csv(path_all, index=False, encoding="utf-8-sig")
+    print(f"\n-> prix_m2_univ_elem_ALL.csv : {len(df_all)} lignes")
+
+    key_cols = ["VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE"]
+    df_maj = df_all.loc[df_all.groupby(key_cols)["Periode"].idxmax()].reset_index(drop=True)
+    path_maj = os.path.join(output_dir, "prix_m2_univ_elem_MAJ_ALL.csv")
+    df_maj.to_csv(path_maj, index=False, encoding="utf-8-sig")
+    print(f"-> prix_m2_univ_elem_MAJ_ALL.csv : {len(df_maj)} lignes")
+
+    print(f"\nCalc prix terminé en {datetime.now() - start_global}")
+
+
+# ===========================================================================
+# POINT D'ENTRÉE COMBINÉ : run(cfg)  —  structure + prix en une fois
+# ===========================================================================
+
+def run(cfg: dict):
+    """Lance run_structure() puis run_prix() en séquence."""
+    run_structure(cfg)
+    run_prix(cfg)
+
