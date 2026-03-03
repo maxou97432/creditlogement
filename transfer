@@ -1,42 +1,139 @@
-================================================================================
-  PIPELINE INDICATEUR PRIX — BASE RESTREINTE CL UNIQUEMENT
-  Variante    : v2_restreint
-  Étapes      : prix, cartes, lpi
-  Segment     : APT × ANCIEN
-  Sorties     : z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint
-================================================================================
+"""
+pipeline/base_work.py
+======================
+Crée base_complete_filtree.parquet (base DVF + CL) avec :
+    - Importation des transactions et demandes
+    - Fusion BAN_ENRICHIE (codes IRIS)
+    - Détection d'anomalies ML
+    - Fusion BAT_ENRICHIE (années de construction → BIEN_NEUF)
+    - Feature engineering : BIEN_NEUF, NB_PIECES_RANGE
+    - Export parquet
+
+Sortie : output_dir/base_complete_filtree.parquet
+"""
+import os
+import time
+import numpy as np
+import pandas as pd
 
 
-────────────────────────────────────────────────────────────
-  ÉTAPE : calc_prix
-────────────────────────────────────────────────────────────
+def run(cfg: dict):
+    """
+    Crée base_complete_filtree.parquet (base complète DVF + CL).
 
-Chargement des données...
-Chargement des données...
-  Base prix : 2303078 lignes (Base restreinte CL uniquement)
-Chargement des données...
-  Base structure : 11060733 lignes
+    Parameters
+    ----------
+    cfg : dict retourné par config.get_config()
+        Sortie dans cfg['output_dir'].
+        Chemins SQL définis dans param_generaux (BAN_ENRICHIE, BAT_ENRICHIE).
+    """
+    from fonctions import (
+        Connector,
+        detect_ano_ml as detect_ano_ml_fct,
+    )
+    import param_generaux as params
 
-================================================================================
-EXTRACTION DES STRUCTURES DE MARCHÉ
-================================================================================
+    output_dir = cfg["output_dir"]
+    os.makedirs(output_dir, exist_ok=True)
 
-   Extraction structure PROVINCE...
-      -> structure_poids_PROVINCE.csv (12 univers, 1 PROVINCE)
+    DATA_PATH = r"Z:\data\cl_estim\cleaned_data"
+    co = Connector()
 
---- Traitement de la maille : PROVINCE ---
-  → Construction univers_complet (1× pour toute la maille)...
-Traceback (most recent call last):
-  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\main.py", line 155, in <module>
-    main()
-  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\main.py", line 127, in main
-    run_prix(cfg)
-  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 374, in run
-    res = _process_maille(df_prov, struct_province, "Ville", "PROVINCE", output_dir, label)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 281, in _process_maille
-    univers_complet = build_univers_complet(df_work)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_prix.py", line 90, in build_univers_complet
-    univers_mensuel.groupby(TYPOKEYS, group_keys=False, include_groups=False)
-TypeError: DataFrame.groupby() got an unexpected keyword argument 'include_groups'
+    # ==========================================================================
+    # 1. IMPORTATION des transactions et demandes
+    # ==========================================================================
+    print("  → Chargement df_transac_clean.parquet ...")
+    t0 = time.time()
+    base_clean = pd.read_parquet(os.path.join(DATA_PATH, "df_transac_clean.parquet"))
+    base_clean["DEMANDE"] = 0
+    date_max_transac = base_clean["DATE"].max()
+
+    print("  → Chargement df_demandes_clean.parquet ...")
+    demandes = pd.read_parquet(os.path.join(DATA_PATH, "df_demandes_clean.parquet"))
+    demandes["DEMANDE"] = 1
+    demandes = demandes[demandes["DATE"] <= date_max_transac]
+
+    df = pd.concat([base_clean, demandes], axis=0, ignore_index=True)
+    print(f"     {len(df):,} lignes totales ({time.time()-t0:.1f}s)")
+
+    # ==========================================================================
+    # 2. JOINTURE BAN_ENRICHIE (codes IRIS)
+    # ==========================================================================
+    print("  → Jointure BAN_ENRICHIE ...")
+    df_ban = co.read_sql(f"SELECT CLE_INTEROP_ADR, code_iris FROM {params.BAN_ENRICHIE}")
+    cl_data = pd.merge(df, df_ban, how="left", on="CLE_INTEROP_ADR")
+
+    # ==========================================================================
+    # 3. DÉTECTION D'ANOMALIES ML
+    # ==========================================================================
+    print("  → Détection d'anomalies ML (12 ans) ...")
+    t0 = time.time()
+    base_ml_full, outliers = detect_ano_ml_fct(input_df=cl_data, n_years=12)
+    print(f"     terminé en {time.time()-t0:.1f}s")
+
+    # Filtre temporel
+    base_ml_full["DATE"] = pd.to_datetime(base_ml_full["DATE"], errors="coerce")
+    date_min = pd.Timestamp("2014-01-01")
+    date_max = base_ml_full["DATE"].max()
+    base_ml = base_ml_full[(base_ml_full["DATE"] >= date_min) & (base_ml_full["DATE"] < date_max)].copy()
+    print(f"     {len(base_ml):,} lignes après filtre temporel (>= 2014-01-01)")
+
+    # ==========================================================================
+    # 4. JOINTURE BAT_ENRICHIE (années de construction)
+    # ==========================================================================
+    print("  → Jointure BAT_ENRICHIE ...")
+    df_bat = co.read_sql(f"SELECT CLE_INTEROP_ADR, annee_construction FROM {params.BAT_ENRICHIE}")
+    base_ml = pd.merge(base_ml, df_bat, how="left", on="CLE_INTEROP_ADR", suffixes=("", "_bat"))
+
+    # ==========================================================================
+    # 5. FEATURE ENGINEERING
+    # ==========================================================================
+
+    # BIEN_NEUF
+    base_ml.loc[
+        base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement",
+        "annee_construction"
+    ] = base_ml["DATE"].dt.year
+
+    base_ml["BIEN_NEUF"] = np.where(
+        (base_ml["NATURE_MUTATION"] == "Vente en l'état futur d'achèvement")
+        | (base_ml["CD_NATUR_OP"] == "AQN")
+        | (abs(base_ml["YEAR"].astype("float") - base_ml["annee_construction"]) <= 2),
+        "NEUF", "ANCIEN"
+    )
+    if "NATURE_MUTATION" in base_ml.columns:
+        base_ml = base_ml.drop(columns=["NATURE_MUTATION"])
+
+    # NB_PIECES_RANGE
+    base_ml["NB_PIECES"] = pd.to_numeric(base_ml["NB_PIECES"], errors="coerce")
+
+    bins_apt   = [0, 1, 3, np.inf]
+    labels_apt = ["APT: 1 pièce", "APT: 2-3 pièces", "APT: 4 pièces et plus"]
+    bins_mai   = [0, 3, 5, np.inf]
+    labels_mai = ["MAI: 3 pièces et moins", "MAI: 4-5 pièces", "MAI: 6 pièces et plus"]
+
+    mask_apt = base_ml["TYPE_BIEN"].eq("APT")
+    mask_mai = base_ml["TYPE_BIEN"].eq("MAI")
+
+    base_ml.loc[mask_apt, "NB_PIECES_RANGE"] = pd.cut(
+        base_ml.loc[mask_apt, "NB_PIECES"],
+        bins=bins_apt, labels=labels_apt, right=True, include_lowest=True
+    ).astype(str)
+    base_ml.loc[mask_mai, "NB_PIECES_RANGE"] = pd.cut(
+        base_ml.loc[mask_mai, "NB_PIECES"],
+        bins=bins_mai, labels=labels_mai, right=True, include_lowest=True
+    ).astype(str)
+
+    base_ml["NB_PIECES_RANGE"] = base_ml["NB_PIECES_RANGE"].astype("object")
+    base_ml.loc[mask_apt & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "APT: Non renseigné"
+    base_ml.loc[mask_mai & base_ml["NB_PIECES_RANGE"].isna(), "NB_PIECES_RANGE"] = "MAI: Non renseigné"
+
+    # ==========================================================================
+    # 6. EXPORT
+    # ==========================================================================
+    output_path = os.path.join(output_dir, "base_complete_filtree.parquet")
+    base_ml.to_parquet(output_path, index=False)
+    print(f"\n  ✓ base_complete_filtree.parquet sauvegardé : {output_path}")
+    print(f"    {len(base_ml):,} lignes")
+    if outliers is not None:
+        print(f"    {len(outliers):,} outliers détectés et exclus")
