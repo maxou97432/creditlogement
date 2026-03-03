@@ -1,124 +1,91 @@
 """
-pipeline/base_restreinte.py
-============================
-Crée base_restreinte.parquet à partir de base_complete_filtree.parquet
-en appliquant les filtres du périmètre d'étude V2 (CL uniquement).
+main.py — Orchestrateur de la pipeline indicateur prix immobilier.
 
-Filtres appliqués :
-    1. SOURCE == 'CL'
-    2. Géographie : France hexagonale (DEPT 01-95, 2A, 2B)
-    3. Nature d'opération : exclusion TVX et RAC
-    4. Plage temporelle : >= 2014-01-01
+Usage
+-----
+Modifier les variables ci-dessous puis lancer :
+    python main.py
 
-Sortie : output_dir/base_restreinte.parquet
+Étapes disponibles : "base", "base_restreinte", "prix", "cartes", "lpi"
 """
+import sys
 import os
-import time
-import pandas as pd
+from datetime import datetime
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+
+from config import get_config
+
+# =============================================================================
+# PARAMÈTRES DE RUN — modifier ici avant de lancer
+# =============================================================================
+
+VARIANTE = "v2_restreint"       # "v1_complet" | "v2_restreint"
+
+ETAPES = ["prix", "cartes", "lpi"]   # parmi : "base", "base_restreinte", "prix", "cartes", "lpi"
+
+SEGMENT = {
+    "TYPE_BIEN":  "APT",        # "APT" | "MAI" | "ENSEMBLE"
+    "ANCIENNETE": "ANCIEN",     # "NEUF" | "ANCIEN" | "ENSEMBLE"
+}
+
+# =============================================================================
 
 
-def add_metric(metrics, step, before, after, note=""):
-    """Trace chaque étape de filtrage dans la liste de métriques."""
-    metrics.append({
-        "étape":        step,
-        "lignes_avant": int(before),
-        "lignes_après": int(after),
-        "retirées":     int(before - after),
-        "note":         note
-    })
+def main():
+    cfg = get_config(variante=VARIANTE, segment=SEGMENT)
+
+    print("\n" + "="*80)
+    print(f"  PIPELINE INDICATEUR PRIX — {cfg['description'].upper()}")
+    print(f"  Variante    : {cfg['variante']}")
+    print(f"  Étapes      : {', '.join(ETAPES)}")
+    print(f"  Segment     : {cfg['segment_carte']['TYPE_BIEN']} × {cfg['segment_carte']['ANCIENNETE']}")
+    print(f"  Sorties     : {cfg['output_dir']}")
+    print("="*80 + "\n")
+
+    start_global = datetime.now()
+
+    if "base" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : base_work")
+        print("─"*60)
+        from pipeline.base_work import run as run_base
+        run_base(cfg)
+
+    if "base_restreinte" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : base_restreinte")
+        print("─"*60)
+        from pipeline.base_restreinte import run as run_restreinte
+        run_restreinte(cfg)
+
+    if "prix" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : calc_prix")
+        print("─"*60)
+        from pipeline.calc_prix import run as run_prix
+        run_prix(cfg)
+
+    if "cartes" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : cartes")
+        print("─"*60)
+        from pipeline.cartes import run as run_cartes
+        run_cartes(cfg)
+
+    if "lpi" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : comparaison_lpi")
+        print("─"*60)
+        from pipeline.comparaison_lpi import run as run_lpi
+        run_lpi(cfg)
+
+    print("\n" + "="*80)
+    print(f"  Pipeline terminée en {datetime.now() - start_global}")
+    print("="*80 + "\n")
 
 
-def run(cfg: dict):
-    """
-    Crée base_restreinte.parquet (périmètre CL uniquement).
-
-    Parameters
-    ----------
-    cfg : dict retourné par config.get_config()
-        Clé utilisée : cfg['path_structure'] comme source de base complète
-        (base_complete_filtree.parquet = DVF+CL).
-        Sortie dans cfg['output_dir'].
-    """
-    t0         = time.time()
-    output_dir = cfg["output_dir"]
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Chemin source : base_complete_filtree = DVF+CL
-    path_base_complete = cfg["path_structure"]
-    print(f"  → Chargement : {path_base_complete}")
-
-    # ==========================================================================
-    # 1. IMPORTATION
-    # ==========================================================================
-    base_clean = pd.read_parquet(path_base_complete)
-    print(f"     {len(base_clean):,} lignes chargées")
-
-    metrics = []
-
-    # ==========================================================================
-    # 2. RESTRICTIONS DU PÉRIMÈTRE D'ÉTUDE
-    # ==========================================================================
-
-    # A. Source = CL uniquement
-    before = len(base_clean)
-    cl_data = base_clean[base_clean["SOURCE"].eq("CL")].copy()
-    add_metric(metrics, "Filtre SOURCE = CL", before, len(cl_data))
-
-    # B. France métropolitaine (01-95 + 2A/2B)
-    before = len(cl_data)
-    dept_col = "DEPT_Corse_2A_2B" if "DEPT_Corse_2A_2B" in cl_data.columns else "DEPT"
-    dept = cl_data[dept_col].astype(str).str.upper().str.strip()
-    metropole_set = {f"{i:02d}" for i in range(1, 96)} | {"2A", "2B"}
-    cl_data = cl_data[dept.isin(metropole_set)].copy()
-    if dept_col == "DEPT_Corse_2A_2B":
-        cl_data = cl_data.rename(columns={"DEPT_Corse_2A_2B": "DEPT"})
-    add_metric(metrics, "Filtre Géographie (métropole)", before, len(cl_data))
-
-    # C. Nature d'opération : exclure TVX et RAC
-    before = len(cl_data)
-    if "CD_NATUR_OP" in cl_data.columns:
-        cl_data["CD_NATUR_OP"] = cl_data["CD_NATUR_OP"].fillna("Non renseigné")
-        cl_data = cl_data[~cl_data["CD_NATUR_OP"].isin(["TVX", "RAC"])].copy()
-    add_metric(metrics, "Filtre Nature opération (excl. TVX/RAC)", before, len(cl_data))
-
-    # ==========================================================================
-    # 3. FILTRE TEMPOREL
-    # ==========================================================================
-    before = len(cl_data)
-    cl_data["DATE"] = cl_data["DATE"].apply(lambda x: x.replace(day=1))
-    cl_data["DATE"] = pd.to_datetime(cl_data["DATE"], errors="coerce")
-    DATE_MIN = pd.Timestamp("2014-01-01")
-    DATE_MAX = cl_data["DATE"].max()
-    cl_data = cl_data[(cl_data["DATE"] >= DATE_MIN) & (cl_data["DATE"] <= DATE_MAX)].copy()
-    add_metric(metrics, f"Filtre Date >= {DATE_MIN.date()}", before, len(cl_data))
-
-    base_ml = cl_data
-
-    # Rapport de filtrage
-    resume = pd.DataFrame(metrics)
-    print("\n  Traçabilité du filtrage :")
-    print(resume.to_string(index=False))
-
-    # ==========================================================================
-    # 4. EXPORT
-    # ==========================================================================
-    colonnes_finales = [
-        "ID", "ville_", "code_iris", "LIBELLE_DEPT", "DEPT",
-        "TYPE_BIEN", "DATE", "YEAR", "Prix_m2", "SOURCE", "VALEUR_FONCIERE",
-        "CD_NATUR_OP", "NB_SURF_HAB", "NB_PIECES_RANGE",
-        "CODE_POSTAL", "BIEN_NEUF", "DEMANDE"
-    ]
-    colonnes_presentes = [c for c in colonnes_finales if c in base_ml.columns]
-    base_ml = base_ml[colonnes_presentes]
-
-    output_path = os.path.join(output_dir, "base_restreinte.parquet")
-    base_ml.to_parquet(output_path, index=False)
-
-    print(f"\n  ✓ base_restreinte.parquet sauvegardé : {output_path}")
-    print(f"    {len(base_ml):,} lignes | {len(colonnes_presentes)} colonnes")
-    print(f"    Durée : {time.time() - t0:.1f}s")
-
-    # Statistiques rapides
-    for col in ["Prix_m2", "NB_SURF_HAB", "VALEUR_FONCIERE"]:
-        if col in base_ml.columns:
-            print(f"    {col} — médiane : {base_ml[col].median():,.0f} | Q1 : {base_ml[col].quantile(0.25):,.0f} | Q3 : {base_ml[col].quantile(0.75):,.0f}")
+if __name__ == "__main__":
+    main()
