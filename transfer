@@ -24,12 +24,15 @@ from config import get_config
 
 VARIANTE = "v2_restreint"       # Choisir: "v1_complet" | "v2_restreint"
 
-ETAPES = ["prix", "cartes", "lpi"]   # Chosir parmi : "base" pour lancer la création de la base_complete_filtree, 
-                                     # "base_restreinte" pour la création de la base_restreinte, 
-                                     # "prix" pour la création des poids structurels et la création des tables de prix, 
-                                     # "cartes" pour la création des cartes dees prix dans les grandes villes, 
-                                     # "lpi" pour la comparaison avec le baromètre LPI/IAD
-                                     # Tout mettre dans l'ordre pour avoir l'ensemble de la pipeline
+ETAPES = ["structure", "prix", "cartes", "lpi"]
+                                     # Choisir parmi :
+                                     # "base"            → crée base_complete_filtree.parquet (DVF+CL)
+                                     # "base_restreinte" → crée base_restreinte.parquet (CL uniquement)
+                                     # "structure"       → calcule les poids structurels (depuis DVF+CL)
+                                     # "prix"            → calcule les tables de prix (charge les poids)
+                                     # "cartes"          → génère les cartes des grandes villes
+                                     # "lpi"             → comparaison avec le baromètre LPI-IAD
+
 
 SEGMENT = {
     "TYPE_BIEN":  "APT",        # Choisir: "APT" | "MAI" | "ENSEMBLE"
@@ -66,12 +69,20 @@ def main():
         from pipeline.base_restreinte import run as run_restreinte
         run_restreinte(cfg)
 
+    if "structure" in ETAPES:
+        print("\n" + "─"*60)
+        print("  ÉTAPE : structure (poids structurels)")
+        print("─"*60)
+        from pipeline.calc_prix import run_structure
+        run_structure(cfg)
+
     if "prix" in ETAPES:
         print("\n" + "─"*60)
-        print("  ÉTAPE : calc_prix")
+        print("  ÉTAPE : calc_prix (tables de prix)")
         print("─"*60)
-        from pipeline.calc_prix import run as run_prix
+        from pipeline.calc_prix import run_prix
         run_prix(cfg)
+
 
     if "cartes" in ETAPES:
         print("\n" + "─"*60)
