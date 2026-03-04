@@ -439,12 +439,22 @@ def run_structure(cfg: dict):
     extract_structure(df_prov_struct, "Ville", "PROVINCE", output_dir)
 
     # CITY (avec arrondissements Paris/Lyon/Marseille)
+    # Appliquer extract_arrondissement sur les villes top_cities avant get_structure_reference_city.
+    # Sans ça, Paris = "PARIS" → poids_arr ne trouve aucun code → struct_arr vide.
     print("\n   Extraction structure CITY...")
-    struct_villes, struct_arr = get_structure_reference_city(base_struct)
+    top_cities = params.CONFIG.get("top_cities", [])
+    base_struct_city = base_struct.copy()
+    base_struct_city["Ville"] = base_struct_city["Ville"].astype(str).str.strip().str.upper()
+    base_struct_city = base_struct_city[base_struct_city["Ville"].isin(top_cities)]
+    if "IRIS" in base_struct_city.columns:
+        base_struct_city["Ville"] = base_struct_city.apply(extract_arrondissement, axis=1)
+        base_struct_city["Ville"] = base_struct_city["Ville"].astype(str).str.strip().str.upper()
+    struct_villes, struct_arr = get_structure_reference_city(base_struct_city)
     struct_villes.to_csv(os.path.join(output_dir, "structure_poids_CITY.csv"), index=False, encoding="utf-8-sig")
     struct_arr.to_csv(os.path.join(output_dir, "structure_poids_arrondissements.csv"), index=False, encoding="utf-8-sig")
     print(f"      -> structure_poids_CITY.csv ({len(struct_villes)} univers)")
     print(f"      -> structure_poids_arrondissements.csv ({len(struct_arr)} arrondissements)")
+
 
     # DEPT
     extract_structure(base_struct, "DEPT", "DEPT", output_dir)
