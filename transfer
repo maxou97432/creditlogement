@@ -309,8 +309,8 @@ def _process_maille(
     # Taux d'inflation
     gc = ["VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE"]
     final = final.sort_values(gc + ["Periode"])
-    final["TAUX_INFL_12M"] = final.groupby(gc)["prix_mm_3m"].pct_change(periods=4,  fill_method=None)
-    final["TAUX_INFL_3M"]  = final.groupby(gc)["prix_mm_3m"].pct_change(periods=1,  fill_method=None)
+    final["TAUX_INFL_12M"] = final.groupby(gc)["prix_mm_3m"].pct_change(periods=12, fill_method=None)
+    final["TAUX_INFL_3M"]  = final.groupby(gc)["prix_mm_3m"].pct_change(periods=3,  fill_method=None)
 
     print(f"Traitement {maille_name} terminé en {datetime.now() - start} — {len(final)} lignes")
     return final
@@ -386,8 +386,8 @@ def _aggregate_arrondissements(df_city: pd.DataFrame, struct_arr: pd.DataFrame, 
     agg_city = agg_city.rename(columns={"Ville_source": "VAL_MAILLE_GEO"})
     gc = ["VAL_MAILLE_GEO", "TYPE_MAILLE", "TYPE_BIEN", "ANCIENNETE"]
     agg_city = agg_city.sort_values(gc + ["Periode"])
-    agg_city["TAUX_INFL_12M"] = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=4,  fill_method=None)
-    agg_city["TAUX_INFL_3M"]  = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=1,  fill_method=None)
+    agg_city["TAUX_INFL_12M"] = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=12, fill_method=None)
+    agg_city["TAUX_INFL_3M"]  = agg_city.groupby(gc)["prix_mm_3m"].pct_change(periods=3,  fill_method=None)
 
     # Retirer les arrondissements, ajouter les villes agrégées
     villes_agreges = agg_city["VAL_MAILLE_GEO"].unique()
@@ -439,17 +439,10 @@ def run_structure(cfg: dict):
     extract_structure(df_prov_struct, "Ville", "PROVINCE", output_dir)
 
     # CITY (avec arrondissements Paris/Lyon/Marseille)
-    # Appliquer extract_arrondissement sur les villes top_cities avant get_structure_reference_city.
-    # Sans ça, Paris = "PARIS" → poids_arr ne trouve aucun code → struct_arr vide.
+    # L'original passe base_struct complet (sans filtre) à get_structure_reference_city ;
+    # poids_arr() cherche les codes IRIS dans les données brutes (pas besoin d'extract_arrondissement préalable).
     print("\n   Extraction structure CITY...")
-    top_cities = params.CONFIG.get("top_cities", [])
-    base_struct_city = base_struct.copy()
-    base_struct_city["Ville"] = base_struct_city["Ville"].astype(str).str.strip().str.upper()
-    base_struct_city = base_struct_city[base_struct_city["Ville"].isin(top_cities)]
-    if "IRIS" in base_struct_city.columns:
-        base_struct_city["Ville"] = base_struct_city.apply(extract_arrondissement, axis=1)
-        base_struct_city["Ville"] = base_struct_city["Ville"].astype(str).str.strip().str.upper()
-    struct_villes, struct_arr = get_structure_reference_city(base_struct_city)
+    struct_villes, struct_arr = get_structure_reference_city(base_struct)
     struct_villes.to_csv(os.path.join(output_dir, "structure_poids_CITY.csv"), index=False, encoding="utf-8-sig")
     struct_arr.to_csv(os.path.join(output_dir, "structure_poids_arrondissements.csv"), index=False, encoding="utf-8-sig")
     print(f"      -> structure_poids_CITY.csv ({len(struct_villes)} univers)")
@@ -545,56 +538,26 @@ def run_prix(cfg: dict):
     # ------------------------------------------------------------------
     # CITY (avec gestion des arrondissements Paris / Lyon / Marseille)
     # ------------------------------------------------------------------
-    # 1. On garde les codes arrondissements (extract_arrondissement) au lieu
-    #    de regrouper directement sous "PARIS" / "LYON" / "MARSEILLE".
-    # 2. Après le calcul, moy_pond_cities agrège via les poids de struct_arr.
-    top_cities = params.CONFIG.get("top_cities", [])
-
-    # Préparer les données CITY avec codes arrondissements
-    df_villes_raw = base_prix.copy()
-    if "Ville" not in df_villes_raw.columns and "CITY" in df_villes_raw.columns:
-        df_villes_raw = df_villes_raw.rename(columns={"CITY": "Ville"})
-    df_villes_raw["Ville"] = df_villes_raw["Ville"].astype(str).str.strip().str.upper()
-    df_villes_raw["Ville"] = df_villes_raw["Ville"].replace({
-        "HAVRE": "LE HAVRE", "SAINT ETIENNE": "SAINT-ETIENNE", "ST ETIENNE": "SAINT-ETIENNE"
-    })
-    # Correction Nice via IRIS (apply_nice_correction opère sur "CITY" mais ici la colonne
-    # est déjà "Ville" → on applique la correction directement pour éviter les doublons de colonnes)
-    if "IRIS" in df_villes_raw.columns:
-        mask_nice = df_villes_raw["IRIS"].astype(str).str[:5].isin(params.CONFIG.get("codes_insee_nice", []))
-        df_villes_raw.loc[mask_nice, "Ville"] = "NICE"
+    # CITY (Top villes — Paris traité comme une seule ville, comme dans l'original)
+    # Note : get_structure_reference_city() est appelé sur base_struct où Ville="PARIS"
+    # → struct_arr vide → pas d'agrégation arrondissements (conforme à calc_prix_m2_univ_elem.py).
+    # ------------------------------------------------------------------
+    df_villes = base_prix.copy()
+    if "IRIS" in df_villes.columns:
+        mask_nice = df_villes["IRIS"].astype(str).str[:5].isin(params.CONFIG.get("codes_insee_nice", []))
+        df_villes.loc[mask_nice, "Ville"] = "NICE"
         print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
+    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG["top_cities"])]
 
-    # Filtrer sur top_cities (villes principales, sans les codes arrondissements pour l'instant)
-    df_villes_raw = df_villes_raw[df_villes_raw["Ville"].isin(top_cities)]
-    # Appliquer extract_arrondissement : remplace Ville=PARIS par code IRIS 5 chiffres
-    df_villes_raw = df_villes_raw.dropna(subset=["DATE", "Ville", "TYPE_BIEN", "NB_PIECES_RANGE"])
-    if "IRIS" in df_villes_raw.columns or "code_iris" in df_villes_raw.columns:
-        if "code_iris" in df_villes_raw.columns:
-            df_villes_raw = df_villes_raw.rename(columns={"code_iris": "IRIS"})
-        df_villes_raw["Ville"] = df_villes_raw.apply(extract_arrondissement, axis=1)
-    df_villes_raw["Ville"] = df_villes_raw["Ville"].astype(str).str.strip().str.upper()
-
-    # Structure CITY (arrondissement-level pour Paris/Lyon/Marseille)
     struct_villes = _load_struct("CITY")
     if struct_villes is None:
         print("  ⚠ structure_poids_CITY.csv introuvable — recalcul à la volée")
         struct_villes, _ = get_structure_reference_city(base_prix)
 
-    # Structure arrondissements (pour l'agrégation finale)
-    path_arr = os.path.join(output_dir, "structure_poids_arrondissements.csv")
-    struct_arr = pd.read_csv(path_arr) if os.path.exists(path_arr) else None
+    res = _process_maille(df_villes, struct_villes, "Ville", "CITY", output_dir, label)
+    if res is not None:
+        all_results.append(res)
 
-    res_city_raw = _process_maille(df_villes_raw, struct_villes, "Ville", "CITY", output_dir, label)
-
-    if res_city_raw is not None and struct_arr is not None:
-        # Agréger les arrondissements via moy_pond_cities
-        res_city = _aggregate_arrondissements(res_city_raw, struct_arr, label)
-    else:
-        res_city = res_city_raw
-
-    if res_city is not None:
-        all_results.append(res_city)
 
     # ------------------------------------------------------------------
     # DEPT
