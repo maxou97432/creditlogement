@@ -433,14 +433,22 @@ def run_structure(cfg: dict, statut_region = None):
     df_prov_struct = df_prov_struct[df_prov_struct["Ville"] == "PROVINCE"]
     extract_structure(df_prov_struct, "Ville", "PROVINCE", output_dir)
 
-    # CITY (avec arrondissements Paris/Lyon/Marseille)
-
+    # CITY : poids arrondissements Paris/Lyon/Marseille + poids univers élémentaires.
+    # apply extract_arrondissement AVANT get_structure_reference_city pour que
+    # poids_arr() trouve les codes (75101, 13201…) → struct_arr non vide.
     print("\n   Extraction structure CITY...")
-    struct_villes, struct_arr = get_structure_reference_city(base_struct)
+    top_cities_s = params.CONFIG.get("top_cities", [])
+    base_struct_city = base_struct[base_struct["Ville"].isin(top_cities_s)].copy()
+    if "IRIS" in base_struct_city.columns:
+        base_struct_city["Ville"] = base_struct_city.apply(extract_arrondissement, axis=1)
+        base_struct_city["Ville"] = base_struct_city["Ville"].astype(str).str.strip().str.upper()
+    struct_villes, struct_arr = get_structure_reference_city(base_struct_city)
     struct_villes.to_csv(os.path.join(output_dir, "structure_poids_CITY.csv"), index=False, encoding="utf-8-sig")
     struct_arr.to_csv(os.path.join(output_dir, "structure_poids_arrondissements.csv"), index=False, encoding="utf-8-sig")
     print(f"      -> structure_poids_CITY.csv ({len(struct_villes)} univers)")
     print(f"      -> structure_poids_arrondissements.csv ({len(struct_arr)} arrondissements)")
+    if not struct_arr.empty and "Ville_source" in struct_arr.columns:
+        print(f"         Villes : {', '.join(struct_arr['Ville_source'].unique())}")
 
 
     # DEPT
@@ -461,7 +469,7 @@ def run_structure(cfg: dict, statut_region = None):
 # POINT D'ENTRÉE 2 : run_prix(cfg)  —  calcul des tables de prix
 # ===========================================================================
 
-def run_prix(cfg: dict):
+def run_prix(cfg: dict, statut_region=None):
     """
     Calcule les indices de prix pour toutes les mailles et tous les segments.
 
@@ -530,24 +538,51 @@ def run_prix(cfg: dict):
         all_results.append(res)
 
     # ------------------------------------------------------------------
-    # CITY (avec gestion des arrondissements Paris / Lyon / Marseille)
+    # CITY — Paris / Lyon / Marseille
     # ------------------------------------------------------------------
-
+    # V1 (DVF+CL) : volumes suffisants → décomposition par arrondissement.
+    #   extract_arrondissement transforme Ville="PARIS" en "75101", "75102"…
+    #   _process_maille calcule les prix à l'arrondissement.
+    #   _aggregate_arrondissements regroupe vers PARIS/LYON/MARSEILLE
+    #   en utilisant les poids DVF+CL de structure_poids_arrondissements.csv.
+    # V2 (CL seul) : volumes trop faibles par arrondissement → Paris = ville unique.
+    # ------------------------------------------------------------------
     df_villes = base_prix.copy()
     if "IRIS" in df_villes.columns:
         mask_nice = df_villes["IRIS"].astype(str).str[:5].isin(params.CONFIG.get("codes_insee_nice", []))
         df_villes.loc[mask_nice, "Ville"] = "NICE"
         print(f"Nombre de transactions reclassées comme NICE: {mask_nice.sum()}")
-    df_villes = df_villes[df_villes["Ville"].isin(params.CONFIG["top_cities"])]
 
+    top_cities = params.CONFIG.get("top_cities", [])
     struct_villes = _load_struct("CITY")
-    if struct_villes is None:
-        print("structure_poids_CITY.csv introuvable — recalcul")
-        struct_villes, _ = get_structure_reference_city(base_prix)
 
-    res = _process_maille(df_villes, struct_villes, "Ville", "CITY", output_dir, label)
-    if res is not None:
-        all_results.append(res)
+    if label == "V1" and "IRIS" in df_villes.columns:
+        # V1 : décomposition arrondissements
+        print("  Mode arrondissements activé (V1)")
+        df_villes_city = df_villes[df_villes["Ville"].isin(top_cities)].copy()
+        df_villes_city["Ville"] = df_villes_city.apply(extract_arrondissement, axis=1)
+        df_villes_city["Ville"] = df_villes_city["Ville"].astype(str).str.strip().str.upper()
+
+        if struct_villes is None:
+            print("  structure_poids_CITY.csv introuvable — recalcul à la volée")
+            struct_villes, _ = get_structure_reference_city(df_villes_city)
+
+        path_arr = os.path.join(output_dir, "structure_poids_arrondissements.csv")
+        struct_arr_prix = pd.read_csv(path_arr) if os.path.exists(path_arr) else None
+
+        res_city = _process_maille(df_villes_city, struct_villes, "Ville", "CITY", output_dir, label)
+        if res_city is not None and struct_arr_prix is not None and not struct_arr_prix.empty:
+            res_city = _aggregate_arrondissements(res_city, struct_arr_prix, label)
+    else:
+        # V2 : Paris comme ville unique
+        df_villes_city = df_villes[df_villes["Ville"].isin(top_cities)]
+        if struct_villes is None:
+            print("  structure_poids_CITY.csv introuvable — recalcul à la volée")
+            struct_villes, _ = get_structure_reference_city(base_prix)
+        res_city = _process_maille(df_villes_city, struct_villes, "Ville", "CITY", output_dir, label)
+
+    if res_city is not None:
+        all_results.append(res_city)
 
 
     # ------------------------------------------------------------------
@@ -632,7 +667,7 @@ def run_prix(cfg: dict):
 # POINT D'ENTRÉE COMBINÉ : run(cfg)  —  structure + prix en une fois
 # ===========================================================================
 
-def run(cfg: dict):
+def run(cfg: dict, statut_region=None):
     """Lance run_structure() puis run_prix() en séquence."""
-    run_structure(cfg)
-    run_prix(cfg)
+    run_structure(cfg, statut_region=statut_region)
+    run_prix(cfg, statut_region=statut_region)
