@@ -1,5 +1,6 @@
-# Filtre ANCIENNETE=ENSEMBLE pour être comparable avec INSEE
-        # (sans ce filtre, 3 lignes CL par (zone × type × période) → doublons au merge)
-        if "ANCIENNETE" in df_final.columns:
-            df_final = df_final[df_final["ANCIENNETE"] == "ENSEMBLE"].copy()
-            df_final = df_final.drop(columns=["ANCIENNETE"])
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix> & "C:/Program Files/Python311/python.exe" z:/uflumth/gits/univers_elementaire/indicateur_prix/indice_de_prix_insee/main.py
+Traceback (most recent call last):
+  File "z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 5, in <module>
+    project_root = Path(_file__).parent
+                        ^^^^^^^
+NameError: name '_file__' is not defined. Did you mean: '__file__'?
