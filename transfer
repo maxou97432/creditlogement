@@ -1,16 +1,5 @@
-def calculate_cl_index(self, df_cl: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calcule l'indice CL base 2020.
-        
-        Args:
-            df_cl: DataFrame CL brut
-            
-        Returns:
-            DataFrame avec colonne 'Indice de prix (CL)'
-        """
-        print(f"\n📊 Calcul indice CL (Base {self.base_year})...")
-
-        # Court-circuit : indice déjà calculé par calc_indice.py de la pipeline indicateur_prix
-        if "Indice de prix (CL)" in df_cl.columns and df_cl["Indice de prix (CL)"].notna().any():
-            print(f"   ✓ Indice CL importé depuis calc_indice.py ({df_cl['VAL_MAILLE_GEO'].nunique()} zones)")
-            return df_cl
+# Filtre ANCIENNETE=ENSEMBLE pour être comparable avec INSEE
+        # (sans ce filtre, 3 lignes CL par (zone × type × période) → doublons au merge)
+        if "ANCIENNETE" in df_final.columns:
+            df_final = df_final[df_final["ANCIENNETE"] == "ENSEMBLE"].copy()
+            df_final = df_final.drop(columns=["ANCIENNETE"])
