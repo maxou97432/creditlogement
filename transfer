@@ -1,21 +1,11 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # Étape 3 : Estimer la valeur d'un bien
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
-============================================
-3. ESTIMATION DE VALEUR FONCIERE
-============================================
-
- Erreur: 'PropertyValueEstimator' object has no attribute 'print_estimation'
-Traceback (most recent call last):
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 247, in main
-    estimate_property_value(
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 126, in estimate_property_value
-    estimator.print_estimation(result)
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: 'PropertyValueEstimator' object has no attribute 'print_estimation'
 PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
 ============================================
 3. ESTIMATION DE VALEUR FONCIERE
 ============================================
 --------------------------------------------------
- ERREUR : Aucun taux trouvé pour période=3, type_bien=APT, code_iris=None, ville=PARIS, dept=75
+ Résultat de l'estimation :
+   Valeur estimée : 269 759 €
+   Taux appliqué  : -10.08%
+   Détail du taux : Maille géographique = CITY (PARIS)
+   Période (ans)  : 3 (de 2022 à 2025)
 --------------------------------------------------
