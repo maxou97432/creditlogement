@@ -14,18 +14,28 @@ PREPROCESSING DES DONNEES
 ===========================================
 
 Calcul indice CL (Base 2020)...
+   ✓ Indice CL importé depuis calc_indice.py (134 zones)
+ Indice INSEE rebasé sur 2020
 
- Erreur: 'NoneType' object has no attribute 'columns'
+ Erreur: Can only use .dt accessor with datetimelike values
 Traceback (most recent call last):
   File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 229, in main
     train_holt_winters(args.config)
   File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 34, in train_holt_winters
     df_merged = processor.process_all(data_cl,data_insee)
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\data_preprocessor.py", line 158, in process_all
-    df_cl = self.calcul_cl_indice(df_cl)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\data_preprocessor.py", line 33, in calcul_cl_indice
-    if "Indice de prix (CL)" in df_cl.columns and df_cl["Indice de prix (CL)"].notna().any():
-                                ^^^^^^^^^^^^^
-AttributeError: 'NoneType' object has no attribute 'columns'
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\data_preprocessor.py", line 160, in process_all
+    df_merged = self.merge_data(df_cl, df_insee)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\data_preprocessor.py", line 85, in merge_data
+    df_cl['Periode_Key'] = df_cl["Periode"].dt.to_period('Q').astype(str)
+                           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\generic.py", line 6318, in __getattr__
+    return object.__getattribute__(self, name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\accessor.py", line 224, in __get__
+    accessor_obj = self._accessor(obj)
+                   ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\indexes\accessors.py", line 643, in __new__
+    raise AttributeError("Can only use .dt accessor with datetimelike values")
+AttributeError: Can only use .dt accessor with datetimelike values
