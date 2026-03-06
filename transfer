@@ -1,114 +1,13 @@
-python main.py --mode estimate ^
+cd Z:\uflumth\gits\univers_elementaire\indice_prix_mlops
 
-================================================================================
-  PIPELINE INDICATEUR PRIX — BASE RESTREINTE CL UNIQUEMENT
-  Variante    : v2_restreint
-  Base pour les poids structurels    : dvf_cl
-  Étapes      : indice
-  Segment     : APT × ANCIEN
-  Graphiques avec vec LPI    : non
-  Sorties     : Z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint
-================================================================================
+# Étape 1 : entraîner les modèles Holt-Winters
+python main.py --mode train_holt_winters
 
+# Étape 2 : appliquer les corrections
+python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
 
-────────────────────────────────────────────────────────────
-  ÉTAPE : calc_indice (indice CL base 2020)
-────────────────────────────────────────────────────────────
+# Étape 3 : calculer les taux d'inflation
+python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
 
-Chargement Z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint\prix_m2_univ_elem_ALL.csv...
-Z:\uflumth\gits\univers_elementaire\indicateur_prix\pipeline\calc_indice.py:94: DtypeWarning: Columns (0) have mixed types. Specify dtype option on import or set low_memory=False.
-  df_all = pd.read_csv(path_all, parse_dates=["Periode"])
-  174,066 lignes lues
-
-  Calcul indice CL (Base 2020)...
-     ✓ Indice calculé pour 137 zones × 3 périmètres — 165921 valeurs non nulles
-
-============================================================
-EXPORT CSV PAR MAILLE
-============================================================
-  → prix_m2_univ_elem_complet_CITY.csv : 129,874 lignes, 17 zones
-  → prix_m2_univ_elem_complet_DEPT.csv : 724,632 lignes, 97 zones
-  → prix_m2_univ_elem_complet_REGION.csv : 164,250 lignes, 21 zones
-  → prix_m2_univ_elem_complet_PROVINCE.csv : 7,830 lignes, 1 zones
-
-  → indice_prix_CL_ALL.csv : 1,034,416 lignes
-
-✓ Étape 'indice' terminée — fichiers dans : Z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v2_restreint
-
-================================================================================
-  Pipeline terminée en 0:00:11.048949
-================================================================================
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --rates path/to/rates.csv ^
-Au caractère Ligne:1 : 5
-+   --rates path/to/rates.csv ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --rates path/to/rates.csv ^
-+     ~~~~~
-Jeton inattendu « rates » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --valeur_initiale 300000 ^
-Au caractère Ligne:1 : 5
-+   --valeur_initiale 300000 ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --valeur_initiale 300000 ^
-+     ~~~~~~~~~~~~~~~
-Jeton inattendu « valeur_initiale » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --date_achat 2022-03-15 ^
-Au caractère Ligne:1 : 5
-+   --date_achat 2022-03-15 ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --date_achat 2022-03-15 ^
-+     ~~~~~~~~~~
-Jeton inattendu « date_achat » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --type_bien APT ^
-Au caractère Ligne:1 : 5
-+   --type_bien APT ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --type_bien APT ^
-+     ~~~~~~~~~
-Jeton inattendu « type_bien » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --code_iris 75101 ^
-Au caractère Ligne:1 : 5
-+   --code_iris 75101 ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --code_iris 75101 ^
-+     ~~~~~~~~~
-Jeton inattendu « code_iris » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
- 
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --ville PARIS ^
-Au caractère Ligne:1 : 5
-+   --ville PARIS ^
-+     ~
-Expression manquante après l’opérateur unaire « -- ».
-Au caractère Ligne:1 : 5
-+   --ville PARIS ^
-+     ~~~~~
-Jeton inattendu « ville » dans l’expression ou l’instruction.
-    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
-    + FullyQualifiedErrorId : MissingExpressionAfterOperator
-
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix>   --dept 75
+# Étape 4 : estimer (tout sur une ligne en PowerShell)
+python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
