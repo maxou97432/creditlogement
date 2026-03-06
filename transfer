@@ -1,180 +1,359 @@
-""""
-Data Processor Module
-Preprocessing, fusion, et calcul des indices de prix
+"""Holt-Winters Module
+Modèle de lissage exponentiel pour correction de biais
 """
 
 import pandas as pd
 import numpy as np
-import sys
-import os
 from pathlib import Path
+from typing import Dict
+import sys
+import pickle
+import json
+from typing import Tuple, Dict, Optional
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+import warnings
+
+# Ajout du dossier racine au path pour l'import de config
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import config.config as cfg
 
+warnings.filterwarnings("ignore")
 
-class DataPreprocessor:
+class HoltWintersModel:
 
-    def __init__(self):
-        """Initialise depuis config/config.py."""
-        self.base_year = cfg.BASE_YEAR
-    
-    def calculate_cl_index(self, df_cl: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calcule l'indice CL base 2020.
-        
+
+    def __init__(self, zone: str, type_bien: str):
+
+        self.zone = zone
+        self.type_bien = type_bien
+
+        hw = cfg.HOLT_WINTERS
+        self.trend                   = hw['trend']
+        self.seasonal                = hw['seasonal']
+        self.damped_trend            = hw['damped_trend']
+        self.initialization_method   = hw['initialization_method']
+        self.min_observations        = hw['min_observations']
+        self.n_forecast              = hw['n_forecast']
+        self.confidence_level        = hw['confidence_level']
+        self.optimize_hyperparameters_flag = hw.get('optimize_hyperparameters', False)
+        self.cv_splits               = hw.get('cv_splits', 3)
+
+        # Modèle statsmodels
+        self.model = None
+        self.model_fit = None
+
+        self.metadata = {
+            'zone' : zone,
+            'type_bien': type_bien,
+            'trained': False,
+            'n_observations': 0,
+            'train_date': None,
+            'metrics':{}
+        }
+
+    def optimize_hyperparameters(self, biais_series: pd.Series, n_splits: int = 3) -> Dict:
+        """Optimisation des hyperparamètres par cross-validation temporelle
+
         Args:
-            df_cl: DataFrame CL brut
-            
-        Returns:
-            DataFrame avec colonne 'Indice de prix (CL)'
-        """
-        print(f"\nCalcul indice CL (Base {self.base_year})...")
-
-        # Court-circuit : indice déjà calculé par calc_indice.py de la pipeline indicateur_prix
-        if "Indice de prix (CL)" in df_cl.columns and df_cl["Indice de prix (CL)"].notna().any():
-            print(f"   ✓ Indice CL importé depuis calc_indice.py ({df_cl['VAL_MAILLE_GEO'].nunique()} zones)")
-            return df_cl
-    
-    def calcul_insee_indice(self, df_insee: pd.DataFrame) -> pd.DataFrame:
-        """Calcule des indices de prix de l'INSEE en base 2020
-
-        Args:
-            df_cl (pd.DataFrame): _description_
+            biais_series (pd.Series): _description_
+            n_splits (int, optional): _description_. Defaults to 3.
 
         Returns:
-            pd.DataFrame: _description_
+            Dict: _description_
         """
 
-        df_insee["Periode"] = pd.to_datetime(df_insee["Periode"])
-        mask_2020_insee = df_insee["Periode"].dt.year == self.base_year
+        best_score = float('inf')
+        best_params = None
 
-        if not df_insee.loc[mask_2020_insee].empty:
-            pivot_2020_insee = df_insee.loc[mask_2020_insee].groupby(
-                ["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]
-            )["Indice de prix (INSEE)"].mean()
-    
-            df_insee["Indice de prix (INSEE) - Base 2020"] = (
-                (df_insee["Indice de prix (INSEE)"] / 
-                df_insee.set_index(["CD_TYPE_BIEN", "VAL_MAILLE_GEO"]).index.map(pivot_2020_insee)
-                ) * 100 
-            ).round(2)
-    
-            print(" Indice INSEE rebasé sur 2020")
+        # Grid de paramètres
+        param_grid = {
+            'trend':['add', None],
+            'damped_trend': [True, False],
+        }
+
+        results = []
+
+        for trend in param_grid['trend']:
+            for damped in param_grid['damped_trend']:
+                if damped and trend is None:
+                    continue
+                try:
+                    # Times Series Cross-validation
+                    scores = []
+                    n = len(biais_series)
+
+                    for i in range(n_splits):
+                        train_size = int(n * (i+1) / (n_splits + 1))
+                        test_size = min(2, n - train_size)
+
+                        if test_size == 0:
+                            continue
+
+                        train = biais_series.iloc[:train_size]
+                        test = biais_series.iloc[train_size: train_size + test_size]
+
+                        # Vérifier minimum observations
+                        if len(train) < self.min_observations:
+                            continue
+
+                        # Entrainer
+                        model = ExponentialSmoothing(
+                            train,
+                            trend = trend,
+                            seasonal = self.seaonal,
+                            damped_trend = damped,
+                            initialization_method =self.initialization_method
+                        )
+
+                        fit = model.fit()
+                    
+                        # Prévisions
+                        forecast = fit.forecast(len(test))
+
+                        # RMSE sur validation
+                        rmse = np.sqrt(np.mean((test.values - forecast)**2))
+                        scores.append(rmse)
+                
+                    if len(scores) == 0:
+                        continue
+
+                    # Score moyen
+                    avg_score = np.mean(scores)
+
+                    results.append({
+                        'trend' : trend,
+                        'damped_trend': damped,
+                        'cv_rmse': avg_score
+                    })
+
+                    if avg_score < best_score:
+                        best_score = avg_score
+                        best_params = {
+                            'trend': trend,
+                            'damped': damped
+                        }
+                
+                except Exception as e:
+                    continue
+
+        if best_params is None:
+            print(f"Optimisation échouée, utilisation des paramètres par défaut")
+            best_params = {
+                'trend': self.trend,
+                'damped_trend': self.damped_trend
+            }
+            best_score = None
         else:
-            print("  Attention: Données INSEE 2020 manquantes.")
-            df_insee["Indice de prix (INSEE) - Base 2020"] = np.nan
-         
-        return df_insee
+            print(f"Meilleurs paramètres: trend={best_params['trend']}, damped={best_params['damped_trend']}, CV-RMSE={best_score:.3f}")
         
-    
-    def merge_data(self,df_cl: pd.DataFrame, df_insee: pd.DataFrame) -> pd.DataFrame:
-        """Fusionne les données de l'INSEE et de CL
+        return {
+            'best_params': best_params,
+            "best_score": best_score,
+            'all_results': results
+        }
+
+                
+    def fit(self, biais_series: pd.Series, optimize: bool = True)-> bool:
+        """Entriane le modèle sur la série de biais
 
         Args:
-            df_cl (pd.DataFrame): 
-            df_insee (pd.DataFrame): 
-
+            bias_series (pd.Series): 
+            optimize (bool):
         Returns:
-            pd.DataFrame: 
+            bool: True si entrainement reussi
         """
+        
+        if len(biais_series) < self.min_observations:
+            print("Pas assez de données")
+            return False
 
-        for df in (df_cl, df_insee):
-            df["VAL_MAILLE_GEO"] = df["VAL_MAILLE_GEO"].astype(str).str.strip().str.upper()
-            df["CD_TYPE_BIEN"] = df["CD_TYPE_BIEN"].astype(str).str.strip().str.upper()
+        
+        try:
+            # Optimisation des hyperparamètres
+            if optimize and len(biais_series) >= 12:
+                opt_result = self.optimize_hyperparameters(biais_series)
 
-        # Création de la clé string ROBUSTE "YYYYQx" (Ex: "2025Q2")
-        df_cl['Periode_Key'] = df_cl["Periode"].dt.to_period('Q').astype(str)
-        df_insee['Periode_Key'] = df_insee["Periode"].dt.to_period('Q').astype(str)
+                # Utiliser les meilleurs hyperparamètres
+                trend = opt_result['best_params']['trend']
+                damped_trend = opt_result['best_params']['damped_trend']
 
-        # DIAGNOSTIC: Vérification des doublons dans INSEE avant la fusion
-        duplicates_check = df_insee.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key']).size()
-        doublons = duplicates_check[duplicates_check > 1]
+                # Stocker résultats optimisation
+                self.metadata['optimization'] = {
+                    'optimized': True,
+                    'cv_score': opt_result['best_params'],
+                    'all_results': opt_result['all_results']
+                }
+            
+            else:
+                # utilisation des paramètres par défaut
 
-        if not doublons.empty:
-            print(f"\n  ATTENTION: {len(doublons)} doublons détectés dans les données INSEE !")
-            print(" Exemples de doublons:")
-            print(doublons.head(10))
+                trend = self.trend
+                damped_trend = self.damped_trend
+                self.metadata['optimization'] = {'optimized': False}
+
+            # Création du modèle
+            self.model = ExponentialSmoothing(
+                biais_series,
+                trend = trend,
+                seasonal = self.seasonal,
+                seasonal_periods = None,
+                damped_trend = damped_trend,
+                initialization_method = self.initialization_method
+            )
+            # Entraînement
+            self.model_fit = self.model.fit()
+
+            # Mise à jour métadonnées
+            self.metadata['trained'] = True
+            self.metadata['n_observations'] = len(biais_series)
+            self.metadata['train_date'] = pd.Timestamp.now().isoformat()
+            self.metadata['final_params'] = {
+                'trend': trend,
+                'damped_trend': damped_trend
+            }
+            
+            # Calcul métriques
+            residuals = self.model_fit.resid
+            self.metadata['metrics'] = {
+                'rmse':float(np.sqrt(np.mean(residuals**2))),
+                'mea': float(np.mean(np.abs(residuals))),
+                'std_resid': float(np.std(residuals))
+            }
+
+            return True
     
-            # DÉDUPLICATION: Moyenne des valeurs en cas de doublon
-            print("\n Déduplication en cours (moyenne des valeurs)...")
-            df_insee = df_insee.groupby(
-                ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode_Key'], 
-                as_index=False
-            ).agg({
-                'Periode': 'first',  # Garder la première valeur de Periode (elles sont identiques pour un même trimestre)
-                'Indice de prix (INSEE)': 'mean',
-                'Indice de prix (INSEE) - Base 2020': 'mean'
-            })
-            print(f" Après déduplication : {len(df_insee)} observations uniques")
+        except Exception as e:
+            print(f"Echec entrainement - {e}")
+            return False
+        
 
-        # --- Fusion (Merge) ---
-        merge = pd.merge(
-            df_cl, 
-            df_insee.drop(columns=['Periode'], errors='ignore'), # On enlève la date Timestamp INSEE pour éviter doublon
-            how="inner",
-            left_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"],
-            right_on=["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode_Key"]
-        )
-
-        # --- Nettoyage Final et Conversion Date ---
-
-        # Renommer la clé de fusion pour la clarté 
-        merge = merge.rename(columns={'Periode_Key': 'Periode_Trimestre_Str'})
-        merge = merge[merge['Periode_Trimestre_Str'].str.match(r'^\d{4}Q\d$', na=False)]
-
-        # Reconstruction de l'index temporel propre
-        merge["Periode"] = pd.PeriodIndex(merge['Periode_Trimestre_Str'], freq='Q').to_timestamp(how="end")
-        temp_period = pd.PeriodIndex(merge['Periode_Trimestre_Str'],freq='Q').to_timestamp(how='end')
-        merge["Periode"] = temp_period.normalize().map(lambda x: x.replace(day=1))
-
-        merge = merge.drop(columns=['prix_mm_value', 'Periode_Trimestre_Str', 'Periode_Merge'], errors='ignore')
-        merge = merge.loc[:, ~merge.columns.duplicated()]
-
-        # Tri final
-        merge = merge.sort_values(["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode"])
-
-        print(f"\n Fusion réussie ! {len(merge)} lignes prêtes pour l'analyse.")
-        merge = merge[~merge["Indice de prix (INSEE) - Base 2020"].isna()]
-
-        # Affichage des premières lignes
-        print("\n Aperçu des données fusionnées:")
-        print(merge.head())
-
-        return merge
-
-
-    def process_all(self,df_cl: pd.DataFrame, df_insee: pd.DataFrame) -> pd.DataFrame:
-        """Pipeline complet de preprocessing
+    def predict(self, last_cl_value: float):
+        """Prédit les ajustements futurs et les indices corrigés
 
         Args:
-            df_cl (pd.DataFrame): 
-            df_insee (pd.DataFrame): 
-
-        Returns:
-            pd.DataFrame: 
+            last_cl_value (float): Dernière valeur de l'indice CL
         """
-        print("===========================================")
-        print("PREPROCESSING DES DONNEES")
-        print("===========================================")
-        df_cl = self.caclul_cl_indice(df_cl)
-        df_insee = self.calcul_insee_indice(df_insee)
-        df_merged = self.merge_data(df_cl, df_insee)
-        print("===========================================")
-        print("PREPROCESSING TERMINE")
-        print("===========================================")
+
+        if not self.metadata['trained']:
+            raise ValueError("Modèle non entraîné")
         
-        return df_merged
+        #Prédiction du biais futur
+        forecast_biais = self.model_fit.forecast(self.n_forecast)
+
+        # Intervalle de confiance
+        sigma = np.std(self.model_fit.resid)
+        from scipy import stats
+        z_score = stats.norm.ppf((1 + self.confidence_level) / 2)
+
+        confidence_interval = [z_score * sigma * np.sqrt(step) for step in range(1,self.n_forecast + 1)]
+
+        # Predictions : CL - biais
+
+        predictions = last_cl_value -forecast_biais
+        upper_bound = predictions + confidence_interval
+        lower_bound = predictions - confidence_interval
+
+        # Métadonnées
+        pred_metadata = {
+            'adjustements': [round(float(biais)) for biais in forecast_biais],
+            'predictions': [round(float(pred)) for pred in predictions],
+            'confidence_intervals': [
+                (round(float(lower_bound[i]),2), round(float(upper_bound[i]),2))
+                for i in range(self.n_forecast)
+            ],
+            'last_cl_value': round(last_cl_value, 2),
+            'sigma': round(sigma, 4)
+        }
+
+    def backtest(self, full_series: pd.Series) -> pd.Series:
+       """
+       Calcule les valeurs corrigés historiques
+       """
+       if not self.metadata['trained']:
+           raise ValueError("Modèle non entrainé")
+       
+       return self.model_fit.fittedvalues
     
-if __name__ == "__init__":
-    from data_loader import DataLoader
-    loader = DataLoader()
-    processor = DataPreprocessor()
 
-    df_cl = loader.load_cl_data()
-    df_insee = loader.load_insee_data()
+    def save(self, filepath : str):
+        """Sauvegarde le modèle
 
-    df_final = processor.process_all(df_cl, df_insee)
+        Args:
+            filepath (str): 
+        """
 
-    print("===========================================")
-    print("APERCU DES DONNEES FINALES")
-    print("===========================================")
-    print(df_final.head())
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True,exist_ok = True)
+
+        # Sauvegarde modèle (pickle)
+
+        model_path = filepath.with_suffix('.pkl')
+        with open(model_path,'wb') as f:
+            pickle.dump({
+                'model':self.model,
+                'model_fit':self.model_fit,
+                'zone': self.zone,
+                'type_bien': self.type_bien
+            }, f)
+
+        meta_path = filepath.with_suffix('.json')
+        with open(meta_path, 'w',encoding = 'utf-8') as f:
+            json.dump(self.metadata, f , indent = 2, ensure_ascii = False)
+
+        print("Modèle sauvegardé")
+
+    @classmethod
+    def load(cls, filepath : str, config_path : str = None):
+        """Charge un modèle sauvegardé
+
+        Args:
+            filepath (str): _description_
+            config_path (str, optional): _description_. Defaults to None.
+        """
+        
+        filepath = Path(filepath)
+
+        # Chargement modèle
+        model_path = filepath.with_suffix('.pkl')
+        with open(model_path, 'rb') as f:
+            data = pickle.load(f)
+
+        # Chargement métadonnées
+        meta_path = filepath.with_suffix('.json')
+        with open(meta_path, encoding = 'utf-8') as f:
+            metadata = json.load(f)
+
+
+        instance = cls(data['zone'], data['type_bien'])
+        instance.model = data['model']
+        instance.model_fit = data['model_fit']
+        instance.metadata = metadata
+
+        return instance
+    
+    def get_metrics(self) -> Dict:
+        """Retourne la métrique du modèle"""
+        return self.metadata['metrics']
+    
+    def __repr__(self):
+        status = 'Trained' if self.metadata['trained'] else "Not trained"
+        return f"HoltWintersModel({self.zone}-{self.type_bien},{status})"
+    
+
+
+
+
+if __name__ == "__main__":
+    # Exemple de série de biais
+    dates = pd.date_range("2015-01-01", periods=60, freq="M")
+    biais = pd.Series(np.random.randn(60), index=dates)
+
+    # Création du modèle
+    model = HoltWintersModel(zone="Paris", type_bien="APT")
+
+    # Entraînement
+    ok = model.fit(biais)
+
+    if ok:
+        print("Modèle entraîné")
+        print(model.get_metrics())
