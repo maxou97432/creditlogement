@@ -1,1 +1,2 @@
 python main.py --mode plot --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/graphs/ --ville PARIS --type_bien APT --format html
+
