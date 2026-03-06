@@ -1,13 +1,1 @@
-cd Z:\uflumth\gits\univers_elementaire\indice_prix_mlops
-
-# Étape 1 : entraîner les modèles Holt-Winters
-python main.py --mode train_holt_winters
-
-# Étape 2 : appliquer les corrections
-python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
-
-# Étape 3 : calculer les taux d'inflation
-python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
-
-# Étape 4 : estimer (tout sur une ligne en PowerShell)
-python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
