@@ -1,29 +1,15 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # Étape 2b : Calculer les taux d'inflation
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
-============================================
-2. CALCUL DES TAUX D'INFLATIONS
-============================================
-============================================
-CALCUL DES TAUX D'INFLATIONS PAR MAILLE
-============================================
-Aucune données au niveau IRIS
-Aucune données au niveau COMMUNE
-   CITY : 228 taux calculés
-   DEPT : 168 taux calculés
-Aucune données au niveau REGION
-Table de taux sauvegardé
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # Étape 3 : Estimer la valeur d'un bien
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
-============================================
-3. ESTIMATION DE VALEUR FONCIERE
-============================================
-
- Erreur: 'PropertyValueEstimator' object has no attribute 'print_estimation'
-Traceback (most recent call last):
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 247, in main
-    estimate_property_value(
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 126, in estimate_property_value
-    estimator.print_estimation(result)
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: 'PropertyValueEstimator' object has no attribute 'print_estimation'
+    def print_estimation(self, result: Dict) -> None:
+        """Affiche les résultats d'une estimation de manière formatée"""
+        print("-" * 50)
+        
+        if not result["success"]:
+            print(f" ERREUR : {result['message']}")
+            print("-" * 50)
+            return
+            
+        print(f" Résultat de l'estimation :")
+        print(f"   Valeur estimée : {result['valeur_estimee']:,.0f} €".replace(',', ' '))
+        print(f"   Taux appliqué  : {result['taux_pourcent']}%")
+        print(f"   Détail du taux : Maille géographique = {result['niveau_geo']} ({result['maille']})")
+        print(f"   Période (ans)  : {result['periode']} (de {result['annee_achat']} à {result['annee_reference']})")
+        print("-" * 50)
