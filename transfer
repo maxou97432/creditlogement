@@ -1,13 +1,129 @@
-cd Z:\uflumth\gits\univers_elementaire\indice_prix_mlops
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix> cd Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # 1 - Entraîner les modèles
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode train_holt_winters
+============================================
+1. ENTRAINEMENT HOLT-WINTERS
+============================================
 
-# 1 - Entraîner les modèles
-python main.py --mode train_holt_winters
+ Erreur: while scanning a double-quoted scalar
+  in "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\config\config.yaml", line 2, column 15
+expected escape sequence of 4 hexadecimal numbers, but found 'l'
+  in "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\config\config.yaml", line 2, column 20
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 229, in main
+    train_holt_winters(args.config)
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 28, in train_holt_winters
+    loader = DataLoader()
+             ^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\data_loader.py", line 28, in __init__
+    self.config = yaml.safe_load(f)
+                  ^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\__init__.py", line 125, in safe_load
+    return load(stream, SafeLoader)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\__init__.py", line 81, in load
+    return loader.get_single_data()
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\constructor.py", line 49, in get_single_data
+    node = self.get_single_node()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 36, in get_single_node
+    document = self.compose_document()
+               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 55, in compose_document
+    node = self.compose_node(None, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\composer.py", line 64, in compose_node
+    if self.check_event(AliasEvent):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\parser.py", line 98, in check_event
+    self.current_event = self.state()
+                         ^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\parser.py", line 449, in parse_block_mapping_value
+    if not self.check_token(KeyToken, ValueToken, BlockEndToken):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 116, in check_token
+    self.fetch_more_tokens()
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 251, in fetch_more_tokens
+    return self.fetch_double()
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 655, in fetch_double
+    self.fetch_flow_scalar(style='"')
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 666, in fetch_flow_scalar
+    self.tokens.append(self.scan_flow_scalar(style))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 1149, in scan_flow_scalar
+    chunks.extend(self.scan_flow_scalar_non_spaces(double, start_mark))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\yaml\scanner.py", line 1213, in scan_flow_scalar_non_spaces
+    raise ScannerError("while scanning a double-quoted scalar", start_mark,
+yaml.scanner.ScannerError: while scanning a double-quoted scalar
+  in "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\config\config.yaml", line 2, column 15
+expected escape sequence of 4 hexadecimal numbers, but found 'l'
+  in "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\config\config.yaml", line 2, column 20
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # 2 - Appliquer les corrections
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
 
-# 2 - Appliquer les corrections
-python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
+ Erreur: name 'apply_corrections' is not defined
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 235, in main
+    apply_corrections(args.config, args.models_dir, args.output)
+    ^^^^^^^^^^^^^^^^^
+NameError: name 'apply_corrections' is not defined
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # 3 - Calculer les taux
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
 
-# 3 - Calculer les taux
-python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
+ Erreur: name 'calculate_inflation_rates' is not defined
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 241, in main
+    calculate_inflation_rates(args.input, args.output, args.config)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'calculate_inflation_rates' is not defined
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # 4 - Estimer
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+============================================
+3. ESTIMATION DE VALEUR FONCIERE
+============================================
 
-# 4 - Estimer
-python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+ Erreur: [Errno 2] No such file or directory: 'artifacts/inflation_rates/taux.csv'
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 247, in main
+    estimate_property_value(
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 117, in estimate_property_value
+    estimator = PropertyValueEstimator(rates_table)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\inference\estimation.py", line 25, in __init__
+    self.rates_table = pd.read_csv(rates_table_path)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'artifacts/inflation_rates/taux.csv'
