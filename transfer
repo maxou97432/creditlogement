@@ -38,12 +38,12 @@ dtype: int64
  Fusion réussie ! 13945 lignes prêtes pour l'analyse.
 
  Aperçu des données fusionnées:
-     VAL_MAILLE_GEO CD_TYPE_BIEN    Periode  Indice de prix (CL)  Indice de prix (INSEE)  Indice de prix (INSEE) - Base 2020
-1678             77          APT 2014-03-01                  NaN                   103.2                               96.95
-1679             77          APT 2014-03-01                  NaN                   103.2                               96.95
-1680             77          APT 2014-03-01                  NaN                   103.2                               96.95
-1681             77          APT 2014-03-01                  NaN                   103.2                               96.95
-1682             77          APT 2014-03-01                  NaN                   103.2                               96.95
+     VAL_MAILLE_GEO CD_TYPE_BIEN    Periode  Indice de prix (CL)  Indice de prix (INSEE)  Indice de prix (INSEE) - Base 2020   Dif
+1684             77          APT 2014-03-01                87.39                   103.2                               96.95 -9.56
+1685             77          APT 2014-03-01                88.39                   103.2                               96.95 -8.56
+1686             77          APT 2014-03-01                90.36                   103.2                               96.95 -6.59
+1687             77          APT 2014-06-01                89.64                   102.2                               96.01 -6.37
+1688             77          APT 2014-06-01                89.86                   102.2                               96.01 -6.15
 ===========================================
 PREPROCESSING TERMINE
 ===========================================
@@ -52,28 +52,11 @@ ENTRAINEMENT DES MDOELES
 ============================================
 77-APT
 
- Erreur: 'Dif'
-Traceback (most recent call last):
-  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\indexes\base.py", line 3812, in get_loc
-    return self._engine.get_loc(casted_key)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
-  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
-  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
-  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
-KeyError: 'Dif'
-
-The above exception was the direct cause of the following exception:
-
+ Erreur: HoltWintersModel.__init__() takes 3 positional arguments but 4 were given
 Traceback (most recent call last):
   File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 229, in main
     train_holt_winters(args.config)
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 53, in train_holt_winters
-    bias_series = group['Dif'].dropna()
-                  ~~~~~^^^^^^^
-  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\frame.py", line 4107, in __getitem__
-    indexer = self.columns.get_loc(key)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\core\indexes\base.py", line 3819, in get_loc
-    raise KeyError(key) from err
-KeyError: 'Dif'
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 56, in train_holt_winters
+    model = HoltWintersModel(zone, type_bien, config_path)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: HoltWintersModel.__init__() takes 3 positional arguments but 4 were given
