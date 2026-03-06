@@ -1,11 +1,136 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
-============================================
-3. ESTIMATION DE VALEUR FONCIERE
-============================================
---------------------------------------------------
- Résultat de l'estimation :
-   Valeur estimée : 269 759 €
-   Taux appliqué  : -10.08%
-   Détail du taux : Maille géographique = CITY (PARIS)
-   Période (ans)  : 3 (de 2022 à 2025)
---------------------------------------------------
+import pandas as pd
+import plotly.graph_objects as go
+import os
+import argparse
+import sys
+
+# Ajout du chemin parent pour importer la config si lancé en standalone
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config.config as cfg
+
+class IndexVisualizer:
+    """Génère des graphiques interactifs pour comparer les indices de prix (INSEE, CL Brut, CL Corrigé)"""
+    
+    def __init__(self, output_dir: str = None):
+        """Initialise le visualisateur avec le dossier de destination."""
+        self.output_dir = output_dir or os.path.join(cfg.PROJECT_DIR, "artifacts", "graphs")
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+    def plot_comparison(self, df: pd.DataFrame, maille: str = None, type_bien: str = None, format_export: str = 'html'):
+        """
+        Génère les graphiques de comparaison pour une maille et un type de bien donnés, ou pour tous.
+        
+        Args:
+            df (pd.DataFrame): DataFrame contenant les colonnes 'Periode', 'VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 
+                               'Indice de prix (INSEE) - Base 2020', 'Indice de prix (CL)', 'Indice de prix (CL) - Corrigé'
+            maille (str, optional): Filtre géographique (ex: 'PARIS'). Si None, génère pour toutes les mailles.
+            type_bien (str, optional): Filtre type bien ('APT', 'MAI'). Si None, génère pour tous les types.
+            format_export (str, optional): 'html' (interactif) ou 'png' (statique).
+        """
+        
+        # Filtrage
+        if maille:
+            df = df[df['VAL_MAILLE_GEO'] == maille].copy()
+            if len(df) == 0:
+                print(f" Aucune donnée pour la maille {maille}")
+                return
+        if type_bien:
+            df = df[df['CD_TYPE_BIEN'] == type_bien].copy()
+            if len(df) == 0:
+                print(f" Aucune donnée pour le type {type_bien}")
+                return
+                
+        # Groupement par Maille et par Type de bien
+        groups = df.groupby(['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'])
+        
+        count = 0
+        for (geo, type_b), group_df in groups:
+            # Tri chronologique indispensable pour les graphiques de lignes
+            group_df = group_df.sort_values(by='Periode')
+            
+            # Création du graphique Plotly
+            fig = go.Figure()
+
+            # Courbe 1: Crédit Logement Brut (Ligne fine)
+            if 'Indice de prix (CL)' in group_df.columns:
+                fig.add_trace(go.Scatter(
+                    x=group_df['Periode'], 
+                    y=group_df['Indice de prix (CL)'],
+                    mode='lines+markers',
+                    name='Indice Crédit Logement (Brut)',
+                    line=dict(color='gray', width=1, dash='dot')
+                ))
+
+            # Courbe 2: INSEE officiel (Ligne solide de référence)
+            if 'Indice de prix (INSEE) - Base 2020' in group_df.columns:
+                fig.add_trace(go.Scatter(
+                    x=group_df['Periode'], 
+                    y=group_df['Indice de prix (INSEE) - Base 2020'],
+                    mode='lines+markers',
+                    name='Indice INSEE (Base 2020)',
+                    line=dict(color='blue', width=2)
+                ))
+
+            # Courbe 3: Crédit Logement Corrigé Holt Winters (Ligne solide mise en valeur)
+            if 'Indice de prix (CL) - Corrigé' in group_df.columns:
+                fig.add_trace(go.Scatter(
+                    x=group_df['Periode'], 
+                    y=group_df['Indice de prix (CL) - Corrigé'],
+                    mode='lines+markers',
+                    name='Indice CL (Corrigé)',
+                    line=dict(color='red', width=3)
+                ))
+
+            # Mise en page du graphique
+            title = f"Comparaison Indices de Prix - {geo} ({type_b})"
+            fig.update_layout(
+                title=title,
+                xaxis_title="Temps (Trimestres)",
+                yaxis_title="Indice de Prix (Base 100 = 2020)",
+                legend_title="Sources :",
+                hovermode="x unified",
+                template="plotly_white"
+            )
+            
+            # Nom de fichier sain (remplacement des espaces et quotes interdits)
+            safe_geo = str(geo).replace(" ", "_").replace("'", "")
+            filename = f"comparaison_{safe_geo}_{type_b}"
+            
+            # Sauvegarde
+            if format_export == 'html':
+                filepath = os.path.join(self.output_dir, f"{filename}.html")
+                fig.write_html(filepath)
+            elif format_export == 'png':
+                filepath = os.path.join(self.output_dir, f"{filename}.png")
+                try:
+                    # Nécessite kaleido pour l'export d'images statiques dans plotly
+                    fig.write_image(filepath, scale=2)
+                except ImportError:
+                    print(" Erreur: le module 'kaleido' est requis pour exporter en PNG. Installez-le avec : pip install -U kaleido")
+                    return
+            else:
+                print(f"Format {format_export} non reconnu.")
+                return
+                
+            count += 1
+            
+        print(f" Succès : {count} graphiques générés dans {self.output_dir}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Générer les graphiques de l'indicateur de prix")
+    parser.add_argument("--input", required=True, help="Chemin du CSV des prix corrigés")
+    parser.add_argument("--output", default=None, help="Dossier de destination")
+    parser.add_argument("--ville", default=None, help="Filtrer pour une ville spécifique")
+    parser.add_argument("--type_bien", default=None, help="Filtrer pour APT ou MAI")
+    parser.add_argument("--format", default="html", choices=["html", "png"], help="Format de l'image")
+    
+    args = parser.parse_args()
+    
+    try:
+        df = pd.read_csv(args.input, parse_dates=['Periode'])
+    except Exception as e:
+        print(f"Erreur de lecture de {args.input} : {e}")
+        sys.exit(1)
+        
+    visualizer = IndexVisualizer(output_dir=args.output)
+    visualizer.plot_comparison(df, maille=args.ville, type_bien=args.type_bien, format_export=args.format)
