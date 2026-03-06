@@ -1,69 +1,164 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
-============================================
-PIPELINE
-============================================
-Chargement des données...
- Fichier INSEE chargé : 284 lignes
- Après filtre sur périmètres pertinents : 38 séries
-   Périmètres retenus : ['77', '78', '91', '92', '93', '94', '95', 'LILLE', 'LYON', 'MARSEILLE', 'NORD-PAS-DE-CALAIS', 'PARIS', "PROVENCE-ALPES-CÔTE D'AZUR", 'PROVINCE', 'RHÔNE-ALPES', 'ÎLE-DE-FRANCE']
- Données INSEE pivotées : 4333 observations
-    Périmètres uniques : 16
-    Types de biens : ['APT' 'MAI' 'ENSEMBLE']
-    Période : 1992-01-01 00:00:00 → 2025-07-01 00:00:00
-===========================================
-PREPROCESSING DES DONNEES
-===========================================
+"""
+Geo Hierarchy Module
+Gère la hiérarchie géographique pour la propagation des corrections
+"""
 
-Calcul indice CL (Base 2020)...
-   ✓ Indice CL importé depuis calc_indice.py (134 zones)
- Indice INSEE rebasé sur 2020
+import pandas as pd
+from typing import Dict, List, Optional
 
-  ATTENTION: 427 doublons détectés dans les données INSEE !
- Exemples de doublons:
-VAL_MAILLE_GEO  CD_TYPE_BIEN  Periode_Key
-RHÔNE-ALPES     APT           2010Q1         2
-                              2010Q2         2
-                              2010Q3         2
-                              2010Q4         2
-                              2011Q1         2
-                              2011Q2         2
-                              2011Q3         2
-                              2011Q4         2
-                              2012Q1         2
-                              2012Q2         2
-dtype: int64
 
- Déduplication en cours (moyenne des valeurs)...
- Après déduplication : 3906 observations uniques
+class GeoHierarchy:
+    """Gère la hiérarchie géographique pour propagation des corrections HW.
+    Hierarchie: IRIS -> Ville -> Département -> Région -> National
+    """
 
- Fusion réussie ! 13945 lignes prêtes pour l'analyse.
+    def __init__(self):
+        self.iris_to_city: Dict[str, str] = {}
+        self.city_to_dept: Dict[str, str] = {}
+        self.dept_to_region: Dict[str, str] = {}
+        self.city_to_iris: Dict[str, List[str]] = {}
 
- Aperçu des données fusionnées:
-     VAL_MAILLE_GEO CD_TYPE_BIEN    Periode  Indice de prix (CL)  Indice de prix (INSEE)  Indice de prix (INSEE) - Base 2020   Dif
-1684             77          APT 2014-03-01                87.39                   103.2                               96.95 -9.56
-1685             77          APT 2014-03-01                88.39                   103.2                               96.95 -8.56
-1686             77          APT 2014-03-01                90.36                   103.2                               96.95 -6.59
-1687             77          APT 2014-06-01                89.64                   102.2                               96.01 -6.37
-1688             77          APT 2014-06-01                89.86                   102.2                               96.01 -6.15
-===========================================
-PREPROCESSING TERMINE
-===========================================
-============================================
-APPLICATION DES CORRECTIONS HOLT-WINTERS
-============================================
+    def build_from_data(self, df: pd.DataFrame) -> 'GeoHierarchy':
+        """Construit la hiérarchie depuis les données CL.
 
- Erreur: cannot access local variable 'iris_city' where it is not associated with a value
-Traceback (most recent call last):
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 235, in main
-    apply_correction(args.config, args.models_dir, args.output)
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 159, in apply_correction
-    apply_corrections_pipeline(config_path,models_dir,output_file )
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\inference\apply_correction.py", line 201, in apply_corrections_pipeline
-    df_corrected = apply_holt_winters_corrections(df_merged, models_dir)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\inference\apply_correction.py", line 79, in apply_holt_winters_corrections
-    geo_hierarchy.build_from_data(df_merged)
-  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\data\geo_hierarchy.py", line 39, in build_from_data
-    for _, row in iris_city.iterrows():
-                  ^^^^^^^^^
-UnboundLocalError: cannot access local variable 'iris_city' where it is not associated with a value
+        Args:
+            df (pd.DataFrame): DataFrame avec au moins la colonne VAL_MAILLE_GEO
+
+        Returns:
+            GeoHierarchy: self
+        """
+
+        # 1. IRIS -> Ville (uniquement si les colonnes sont présentes)
+        if 'code_iris' in df.columns and 'Ville' in df.columns:
+            iris_city = df[['code_iris', 'Ville']].dropna()
+            iris_city = iris_city[
+                (iris_city['code_iris'].astype(str).str.len() == 5) &
+                (iris_city['code_iris'].astype(str).str.isdigit())
+            ].drop_duplicates()
+
+            for _, row in iris_city.iterrows():
+                iris_full = str(row['code_iris']).strip()
+                ville = str(row['Ville']).strip().upper()
+                iris_commune = iris_full[:5]
+
+                self.iris_to_city[iris_commune] = ville
+
+                if ville not in self.city_to_iris:
+                    self.city_to_iris[ville] = []
+                if iris_commune not in self.city_to_iris[ville]:
+                    self.city_to_iris[ville].append(iris_commune)
+
+        # 2. Département déduit des codes IRIS
+        for iris, ville in self.iris_to_city.items():
+            dept = iris[:2]
+            if ville not in self.city_to_dept:
+                self.city_to_dept[ville] = dept
+
+        # 3. Département -> Région (mapping statique)
+        self._build_dept_to_region()
+
+        return self
+
+    def _build_dept_to_region(self):
+        """Mapping statique Département -> Région"""
+        idf_depts = ['75', '77', '78', '91', '92', '93', '94', '95']
+        for dept in idf_depts:
+            self.dept_to_region[dept] = 'ÎLE-DE-FRANCE'
+
+        regions = {
+            "PROVENCE-ALPES-CÔTE D'AZUR": ['04', '05', '06', '13', '83', '84'],
+            'RHÔNE-ALPES':                ['01', '26', '38', '42', '69', '73', '74'],
+            'NORD-PAS-DE-CALAIS':         ['59', '62'],
+            'AUVERGNE':                   ['03', '15', '43', '63'],
+            'NOUVELLE-AQUITAINE':         ['16', '17', '19', '23', '24', '33', '40', '47', '64', '79', '86', '87'],
+            'OCCITANIE':                  ['09', '11', '12', '30', '31', '32', '34', '46', '48', '65', '66', '81', '82'],
+            'HAUTS-DE-FRANCE':            ['02', '60', '80'],
+            'GRAND EST':                  ['08', '10', '51', '52', '54', '55', '57', '67', '68', '88'],
+            'BRETAGNE':                   ['22', '29', '35', '56'],
+            'PAYS DE LA LOIRE':           ['44', '49', '53', '72', '85'],
+            'NORMANDIE':                  ['14', '27', '50', '61', '76'],
+        }
+
+        for region, depts in regions.items():
+            for dept in depts:
+                self.dept_to_region[dept] = region
+
+    def get_parent(self, geo_code: str) -> Optional[str]:
+        """Retourne le parent géographique direct."""
+        geo_code = str(geo_code).strip()
+
+        # Code commune (5 chiffres) -> Ville
+        if len(geo_code) == 5 and geo_code.isdigit():
+            return self.iris_to_city.get(geo_code)
+
+        # Ville -> Département
+        if geo_code in self.city_to_dept:
+            return self.city_to_dept[geo_code]
+
+        # Département (2 chiffres) -> Région
+        if len(geo_code) == 2 and geo_code.isdigit():
+            return self.dept_to_region.get(geo_code)
+
+        return None
+
+    def get_hierarchy(self, geo_code: str) -> List[str]:
+        """Retourne la hiérarchie complète du plus spécifique au plus général."""
+        hierarchy = [geo_code]
+        current = geo_code
+        max_depth = 10
+        depth = 0
+
+        while depth < max_depth:
+            parent = self.get_parent(current)
+            if parent is None:
+                break
+            if parent not in hierarchy:
+                hierarchy.append(parent)
+            current = parent
+            depth += 1
+
+        return hierarchy
+
+    def get_level(self, geo_code: str) -> str:
+        """Identifie le niveau géographique d'un code."""
+        geo_code = str(geo_code).strip()
+
+        if len(geo_code) == 5 and geo_code.isdigit():
+            return 'COMMUNE'
+        if len(geo_code) == 2 and geo_code.isdigit():
+            return 'DEPT'
+        if geo_code in self.city_to_dept:
+            return 'CITY'
+        if geo_code in self.dept_to_region:
+            return 'REGION'
+        return 'UNKNOWN'
+
+    def get_stats(self) -> Dict:
+        """Retourne des statistiques sur la hiérarchie."""
+        return {
+            'iris_count':   len(self.iris_to_city),
+            'city_count':   len(self.city_to_dept),
+            'dept_count':   len(set(self.city_to_dept.values())),
+            'region_count': len(set(self.dept_to_region.values())),
+        }
+
+    def __repr__(self):
+        stats = self.get_stats()
+        return (f"GeoHierarchy("
+                f"IRIS={stats['iris_count']}, "
+                f"Cities={stats['city_count']}, "
+                f"Depts={stats['dept_count']}, "
+                f"Regions={stats['region_count']})")
+
+
+if __name__ == "__main__":
+    test_data = pd.DataFrame({
+        'code_iris': ['751010101', '751020202', '130550201', '693810305'],
+        'Ville': ['PARIS', 'PARIS', 'MARSEILLE', 'LYON'],
+    })
+    h = GeoHierarchy()
+    h.build_from_data(test_data)
+    print(h)
+    for code in ['75101', 'PARIS', '75', 'ÎLE-DE-FRANCE']:
+        print(f"{code} → niveau={h.get_level(code)}, parent={h.get_parent(code)}")
+        print(f"  hiérarchie: {' → '.join(h.get_hierarchy(code))}")
