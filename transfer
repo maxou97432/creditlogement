@@ -1,95 +1,116 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
-============================================
-PIPELINE
-============================================
-Chargement des données...
- Fichier INSEE chargé : 284 lignes
- Après filtre sur périmètres pertinents : 38 séries
-   Périmètres retenus : ['77', '78', '91', '92', '93', '94', '95', 'LILLE', 'LYON', 'MARSEILLE', 'NORD-PAS-DE-CALAIS', 'PARIS', "PROVENCE-ALPES-CÔTE D'AZUR", 'PROVINCE', 'RHÔNE-ALPES', 'ÎLE-DE-FRANCE']
- Données INSEE pivotées : 4333 observations
-    Périmètres uniques : 16
-    Types de biens : ['APT' 'MAI' 'ENSEMBLE']
-    Période : 1992-01-01 00:00:00 → 2025-07-01 00:00:00
-===========================================
-PREPROCESSING DES DONNEES
-===========================================
+def apply_holt_winters_corrections(df_merged : pd.DataFrame, 
+                                   models_dir : str,
+                                   base_year : int = 2020) -> pd.DataFrame:
+    """
+    Applique les corrections Holt-Winters aux indices CL pour produire des indices corrigés
 
-Calcul indice CL (Base 2020)...
-   ✓ Indice CL importé depuis calc_indice.py (134 zones)
- Indice INSEE rebasé sur 2020
 
-  ATTENTION: 427 doublons détectés dans les données INSEE !
- Exemples de doublons:
-VAL_MAILLE_GEO  CD_TYPE_BIEN  Periode_Key
-RHÔNE-ALPES     APT           2010Q1         2
-                              2010Q2         2
-                              2010Q3         2
-                              2010Q4         2
-                              2011Q1         2
-                              2011Q2         2
-                              2011Q3         2
-                              2011Q4         2
-                              2012Q1         2
-                              2012Q2         2
-dtype: int64
+    Méthodologie:
+    1. Pour chaque zone/type on charge le modèle HW
+    2. Calculer le biais prédit 
+    3. Corriger l'inidice CL: indice_corrigé = indice_cl - biais_prédit
 
- Déduplication en cours (moyenne des valeurs)...
- Après déduplication : 3906 observations uniques
+    """
 
- Fusion réussie ! 13945 lignes prêtes pour l'analyse.
+    print("============================================")
+    print("APPLICATION DES CORRECTIONS HOLT-WINTERS")
+    print("============================================")
 
- Aperçu des données fusionnées:
-     VAL_MAILLE_GEO CD_TYPE_BIEN    Periode  Indice de prix (CL)  Indice de prix (INSEE)  Indice de prix (INSEE) - Base 2020   Dif
-1684             77          APT 2014-03-01                87.39                   103.2                               96.95 -9.56
-1685             77          APT 2014-03-01                88.39                   103.2                               96.95 -8.56
-1686             77          APT 2014-03-01                90.36                   103.2                               96.95 -6.59
-1687             77          APT 2014-06-01                89.64                   102.2                               96.01 -6.37
-1688             77          APT 2014-06-01                89.86                   102.2                               96.01 -6.15
-===========================================
-PREPROCESSING TERMINE
-===========================================
-============================================
-APPLICATION DES CORRECTIONS HOLT-WINTERS
-============================================
-GeoHierarchy(IRIS=0, Cities=0, Depts=0, Regions=12)
-============================================
-APPLICATION DES CORRECTIONS PAR ZONE/TYPE
-============================================
-Erreur pour 77 - APT : Incompatible indexer with Series
-Erreur pour 77 - MAI : Incompatible indexer with Series
-Erreur pour 78 - APT : Incompatible indexer with Series
-Erreur pour 78 - MAI : Incompatible indexer with Series
-Erreur pour 91 - APT : Incompatible indexer with Series
-Erreur pour 91 - MAI : Incompatible indexer with Series
-Erreur pour 92 - APT : Incompatible indexer with Series
-Erreur pour 92 - MAI : Incompatible indexer with Series
-Erreur pour 93 - APT : Incompatible indexer with Series
-Erreur pour 93 - MAI : Incompatible indexer with Series
-Erreur pour 94 - APT : Incompatible indexer with Series
-Erreur pour 94 - MAI : Incompatible indexer with Series
-Erreur pour 95 - APT : Incompatible indexer with Series
-Erreur pour 95 - MAI : Incompatible indexer with Series
-Erreur pour LILLE - MAI : Incompatible indexer with Series
-Erreur pour LYON - APT : Incompatible indexer with Series
-Erreur pour MARSEILLE - APT : Incompatible indexer with Series
-Erreur pour NORD-PAS-DE-CALAIS - APT : Incompatible indexer with Series
-Erreur pour NORD-PAS-DE-CALAIS - ENSEMBLE : Incompatible indexer with Series
-Erreur pour NORD-PAS-DE-CALAIS - MAI : Incompatible indexer with Series
-Erreur pour PARIS - APT : Incompatible indexer with Series
-Erreur pour PROVENCE-ALPES-CÔTE D'AZUR - APT : Incompatible indexer with Series
-Erreur pour PROVENCE-ALPES-CÔTE D'AZUR - ENSEMBLE : Incompatible indexer with Series
-Erreur pour PROVENCE-ALPES-CÔTE D'AZUR - MAI : Incompatible indexer with Series
-Erreur pour PROVINCE - APT : Incompatible indexer with Series
-Erreur pour PROVINCE - ENSEMBLE : Incompatible indexer with Series
-Erreur pour PROVINCE - MAI : Incompatible indexer with Series
-Erreur pour RHÔNE-ALPES - APT : Incompatible indexer with Series
-Erreur pour RHÔNE-ALPES - ENSEMBLE : Incompatible indexer with Series
-Erreur pour RHÔNE-ALPES - MAI : Incompatible indexer with Series
-Erreur pour ÎLE-DE-FRANCE - APT : Incompatible indexer with Series
-Erreur pour ÎLE-DE-FRANCE - ENSEMBLE : Incompatible indexer with Series
-Erreur pour ÎLE-DE-FRANCE - MAI : Incompatible indexer with Series
+    models_dir = Path(models_dir)
 
- Corrections appliquées à 0/33 zones/types
-   → Corrections directes: 33
-   → Corrections via parent: 0
-   → Couverture: 0/13731 observations (0.0%)
+    if not models_dir.exists():
+        print("Répertoir modèles introuvables")
+        df_merged["indices_corriges"] = df_merged["Indice de prix (CL)"]
+        df_merged["correction"] = False
+        df_merged['correction_source'] = None
+        
+        return df_merged
+    
+    geo_hierarchy = GeoHierarchy()
+    geo_hierarchy.build_from_data(df_merged)
+
+    print(f'{geo_hierarchy}')
+    df_merged = df_merged.copy()
+    df_merged['Periode'] = pd.to_datetime(df_merged['Periode'])
+    df_merged = df_merged.sort_values(['VAL_MAILLE_GEO','CD_TYPE_BIEN','Periode'])
+
+
+    df_merged['Indice de prix (CL) - Corrigé'] = df_merged['Indice de prix (CL)']
+    df_merged['correction'] = False
+    df_merged['correction_source'] = None
+
+    grouped = df_merged.groupby(['VAL_MAILLE_GEO','CD_TYPE_BIEN'])
+
+    corrections_count = 0
+    corrections_direct = 0
+    corrections_parent = 0
+    total_groups = len(grouped)
+
+
+    print("============================================")
+    print("APPLICATION DES CORRECTIONS PAR ZONE/TYPE")
+    print("============================================")
+
+
+    for (zone,type_bien), group in grouped:
+        model, source_level = find_model_with_fallback(zone, type_bien, models_dir, geo_hierarchy)
+
+        if model is None:
+            continue
+
+        try:
+
+            biais_series = group.set_index('Periode')['Dif'].dropna()
+
+            if len(biais_series) == 0:
+                continue
+            
+            # Backtest
+            biais_fitted = model.backtest(biais_series)
+
+            # Déterminer le type de correction
+
+            if source_level == zone:
+                correction_type = 'direct'
+                corrections_direct += 1
+            
+            else: 
+                correction_type = f"parent_{source_level}"
+                corrections_parent += 1
+                print(f"{zone}-{type_bien}: correction via {source_level}")
+
+            # Application de la correction
+            for idx, row in group.iterrows():
+                periode = row['Periode']
+                if periode in biais_fitted.index:
+                    biais_val = biais_fitted.loc[periode]
+                    # Plusieurs valeurs possibles si duplicats d'index → moyenne
+                    if isinstance(biais_val, pd.Series):
+                        biais_val = float(biais_val.mean())
+                    else:
+                        biais_val = float(biais_val)
+
+                    indice_cl = float(row['Indice de prix (CL)'])
+                    indice_corrige = round(indice_cl - biais_val, 2)
+
+                    df_merged.at[idx, 'Indice de prix (CL) - Corrigé'] = indice_corrige
+                    df_merged.at[idx, 'correction']        = True
+                    df_merged.at[idx, 'correction_source'] = correction_type
+            corrections_count += 1
+        except Exception as e:
+            print(f"Erreur pour {zone} - {type_bien} : {e}")
+
+
+    print(f"\n Corrections appliquées à {corrections_count}/{total_groups} zones/types")
+    print(f"   → Corrections directes: {corrections_direct}")
+    print(f"   → Corrections via parent: {corrections_parent}")
+    
+    # Statistiques de couverture
+    total_obs = len(df_merged)
+    corrected_obs = df_merged['correction'].sum()
+    coverage = corrected_obs / total_obs * 100 if total_obs > 0 else 0
+    print(f"   → Couverture: {corrected_obs}/{total_obs} observations ({coverage:.1f}%)")
+    
+
+    
+    return df_merged
