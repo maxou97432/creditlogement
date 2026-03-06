@@ -1,1 +1,62 @@
-python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
+============================================
+PIPELINE
+============================================
+Chargement des données...
+ Fichier INSEE chargé : 284 lignes
+ Après filtre sur périmètres pertinents : 38 séries
+   Périmètres retenus : ['77', '78', '91', '92', '93', '94', '95', 'LILLE', 'LYON', 'MARSEILLE', 'NORD-PAS-DE-CALAIS', 'PARIS', "PROVENCE-ALPES-CÔTE D'AZUR", 'PROVINCE', 'RHÔNE-ALPES', 'ÎLE-DE-FRANCE']
+ Données INSEE pivotées : 4333 observations
+    Périmètres uniques : 16
+    Types de biens : ['APT' 'MAI' 'ENSEMBLE']
+    Période : 1992-01-01 00:00:00 → 2025-07-01 00:00:00
+===========================================
+PREPROCESSING DES DONNEES
+===========================================
+
+Calcul indice CL (Base 2020)...
+   ✓ Indice CL importé depuis calc_indice.py (134 zones)
+ Indice INSEE rebasé sur 2020
+
+  ATTENTION: 427 doublons détectés dans les données INSEE !
+ Exemples de doublons:
+VAL_MAILLE_GEO  CD_TYPE_BIEN  Periode_Key
+RHÔNE-ALPES     APT           2010Q1         2
+                              2010Q2         2
+                              2010Q3         2
+                              2010Q4         2
+                              2011Q1         2
+                              2011Q2         2
+                              2011Q3         2
+                              2011Q4         2
+                              2012Q1         2
+                              2012Q2         2
+dtype: int64
+
+ Déduplication en cours (moyenne des valeurs)...
+ Après déduplication : 3906 observations uniques
+
+ Fusion réussie ! 13945 lignes prêtes pour l'analyse.
+
+ Aperçu des données fusionnées:
+     VAL_MAILLE_GEO CD_TYPE_BIEN    Periode  Indice de prix (CL)  Indice de prix (INSEE)  Indice de prix (INSEE) - Base 2020   Dif
+1684             77          APT 2014-03-01                87.39                   103.2                               96.95 -9.56
+1685             77          APT 2014-03-01                88.39                   103.2                               96.95 -8.56
+1686             77          APT 2014-03-01                90.36                   103.2                               96.95 -6.59
+1687             77          APT 2014-06-01                89.64                   102.2                               96.01 -6.37
+1688             77          APT 2014-06-01                89.86                   102.2                               96.01 -6.15
+===========================================
+PREPROCESSING TERMINE
+===========================================
+============================================
+APPLICATION DES CORRECTIONS HOLT-WINTERS
+============================================
+GeoHierarchy(IRIS=0, Cities=0, Depts=0, Regions=12)
+============================================
+APPLICATION DES CORRECTIONS PAR ZONE/TYPE
+============================================
+
+ Corrections appliquées à 33/33 zones/types
+   → Corrections directes: 33
+   → Corrections via parent: 0
+   → Couverture: 13731/13731 observations (100.0%)
