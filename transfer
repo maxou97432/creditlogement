@@ -1,15 +1,1 @@
-    def print_estimation(self, result: Dict) -> None:
-        """Affiche les résultats d'une estimation de manière formatée"""
-        print("-" * 50)
-        
-        if not result["success"]:
-            print(f" ERREUR : {result['message']}")
-            print("-" * 50)
-            return
-            
-        print(f" Résultat de l'estimation :")
-        print(f"   Valeur estimée : {result['valeur_estimee']:,.0f} €".replace(',', ' '))
-        print(f"   Taux appliqué  : {result['taux_pourcent']}%")
-        print(f"   Détail du taux : Maille géographique = {result['niveau_geo']} ({result['maille']})")
-        print(f"   Période (ans)  : {result['periode']} (de {result['annee_achat']} à {result['annee_reference']})")
-        print("-" * 50)
+python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
