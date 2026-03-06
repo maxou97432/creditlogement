@@ -3,3 +3,57 @@ python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_co
 
 # Étape 3 : Estimer la valeur d'un bien
 python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # Étape 2b : Calculer les taux d'inflation
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
+============================================
+2. CALCUL DES TAUX D'INFLATIONS
+============================================
+============================================
+CALCUL DES TAUX D'INFLATIONS PAR MAILLE
+============================================
+Aucune données au niveau IRIS
+
+ Erreur: Aucun taux d'inflation calculé
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 241, in main
+    calculate_inflation_rates(args.input, args.output, args.config)
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 90, in calculate_inflation_rates
+    df_rates = calculator.calculate_all_rates(df_corrected)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\models\inflation_rate_calculator.py", line 156, in calculate_all_rates
+    raise ValueError("Aucun taux d'inflation calculé")
+ValueError: Aucun taux d'inflation calculé
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> 
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> # Étape 3 : Estimer la valeur d'un bien
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+============================================
+3. ESTIMATION DE VALEUR FONCIERE
+============================================
+
+ Erreur: [Errno 2] No such file or directory: 'artifacts/inflation_rates/taux.csv'
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 247, in main
+    estimate_property_value(
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 117, in estimate_property_value
+    estimator = PropertyValueEstimator(rates_table)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\inference\estimation.py", line 25, in __init__
+    self.rates_table = pd.read_csv(rates_table_path)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "C:\Users\dmbmtl1\AppData\Roaming\Python\Python311\site-packages\pandas\io\common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'artifacts/inflation_rates/taux.csv'
