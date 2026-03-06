@@ -1,359 +1,220 @@
-"""Holt-Winters Module
-Modèle de lissage exponentiel pour correction de biais
+"""Inflation Rate Calculator Module
+Calcule les taux d'inflation par maille géographique et période
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 import sys
-import pickle
-import json
-from typing import Tuple, Dict, Optional
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import warnings
 
 # Ajout du dossier racine au path pour l'import de config
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import config.config as cfg
 
-warnings.filterwarnings("ignore")
 
-class HoltWintersModel:
+class InflationRateCalculator:
+    """Calcule les taux d'inflation à partir des prix corrigés
 
+    Méthodologie:
+    1. Période 0 = année de référence
+    2. Périodes 1, 2, 3... = années précédentes
+    3. Taux = (prix_period_0 - prix_period_t) / prix_period_t
+    4. Effectif = min(effectif_period_0, effectif_period_t)
+    """
 
-    def __init__(self, zone: str, type_bien: str):
-
-        self.zone = zone
-        self.type_bien = type_bien
-
-        hw = cfg.HOLT_WINTERS
-        self.trend                   = hw['trend']
-        self.seasonal                = hw['seasonal']
-        self.damped_trend            = hw['damped_trend']
-        self.initialization_method   = hw['initialization_method']
-        self.min_observations        = hw['min_observations']
-        self.n_forecast              = hw['n_forecast']
-        self.confidence_level        = hw['confidence_level']
-        self.optimize_hyperparameters_flag = hw.get('optimize_hyperparameters', False)
-        self.cv_splits               = hw.get('cv_splits', 3)
-
-        # Modèle statsmodels
-        self.model = None
-        self.model_fit = None
-
-        self.metadata = {
-            'zone' : zone,
-            'type_bien': type_bien,
-            'trained': False,
-            'n_observations': 0,
-            'train_date': None,
-            'metrics':{}
+    def __init__(self):
+        """Initialise depuis config/config.py."""
+        # Effectifs minimums par niveau géographique
+        self.min_effectifs = {
+            'IRIS': 10,
+            'CITY': 30,
+            'DEPT': 50
         }
 
-    def optimize_hyperparameters(self, biais_series: pd.Series, n_splits: int = 3) -> Dict:
-        """Optimisation des hyperparamètres par cross-validation temporelle
+        self.max_periods = 10
+
+
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prépare les donées pour le calcul des taux
 
         Args:
-            biais_series (pd.Series): _description_
-            n_splits (int, optional): _description_. Defaults to 3.
+            df (pd.DataFrame): _description_
 
         Returns:
-            Dict: _description_
+            pd.DataFrame: _description_
         """
 
-        best_score = float('inf')
-        best_params = None
+        df = df.copy()
+        df["Periode"] = pd.to_datetime(df['Periode'])
+        df["annee"] = df['Periode'].dt.year
 
-        # Grid de paramètres
-        param_grid = {
-            'trend':['add', None],
-            'damped_trend': [True, False],
-        }
-
-        results = []
-
-        for trend in param_grid['trend']:
-            for damped in param_grid['damped_trend']:
-                if damped and trend is None:
-                    continue
-                try:
-                    # Times Series Cross-validation
-                    scores = []
-                    n = len(biais_series)
-
-                    for i in range(n_splits):
-                        train_size = int(n * (i+1) / (n_splits + 1))
-                        test_size = min(2, n - train_size)
-
-                        if test_size == 0:
-                            continue
-
-                        train = biais_series.iloc[:train_size]
-                        test = biais_series.iloc[train_size: train_size + test_size]
-
-                        # Vérifier minimum observations
-                        if len(train) < self.min_observations:
-                            continue
-
-                        # Entrainer
-                        model = ExponentialSmoothing(
-                            train,
-                            trend = trend,
-                            seasonal = self.seaonal,
-                            damped_trend = damped,
-                            initialization_method =self.initialization_method
-                        )
-
-                        fit = model.fit()
-                    
-                        # Prévisions
-                        forecast = fit.forecast(len(test))
-
-                        # RMSE sur validation
-                        rmse = np.sqrt(np.mean((test.values - forecast)**2))
-                        scores.append(rmse)
-                
-                    if len(scores) == 0:
-                        continue
-
-                    # Score moyen
-                    avg_score = np.mean(scores)
-
-                    results.append({
-                        'trend' : trend,
-                        'damped_trend': damped,
-                        'cv_rmse': avg_score
-                    })
-
-                    if avg_score < best_score:
-                        best_score = avg_score
-                        best_params = {
-                            'trend': trend,
-                            'damped': damped
-                        }
-                
-                except Exception as e:
-                    continue
-
-        if best_params is None:
-            print(f"Optimisation échouée, utilisation des paramètres par défaut")
-            best_params = {
-                'trend': self.trend,
-                'damped_trend': self.damped_trend
-            }
-            best_score = None
-        else:
-            print(f"Meilleurs paramètres: trend={best_params['trend']}, damped={best_params['damped_trend']}, CV-RMSE={best_score:.3f}")
+        def identity_geo_level(code):
+            code_str = str(code).strip()
+            if code_str.isdigit():
+                if len(code_str) == 9:
+                    return 'IRIS'
+                if len(code_str) == 5:
+                    return 'IRIS'
+                if len(code_str) ==2:
+                    return 'DEPT'
+            
+            return 'CITY'
         
-        return {
-            'best_params': best_params,
-            "best_score": best_score,
-            'all_results': results
-        }
+        df['niveau_geo'] = df['VAL_MAILLE_GEO'].apply(identity_geo_level)
 
-                
-    def fit(self, biais_series: pd.Series, optimize: bool = True)-> bool:
-        """Entriane le modèle sur la série de biais
+        return df
+    
+
+    def calculate_rates_for_level(self, df: pd.DataFrame, geo_level: str,
+                                  geo_col: str = 'VAL_MAILLE_GEO',
+                                  type_col: str = 'CD_TYPE_BIEN',
+                                  price_col: str = 'prix_corrected') -> pd.DataFrame:
+        """Calcule les taux d'inflations pour un niveau géographique donné.
 
         Args:
-            bias_series (pd.Series): 
-            optimize (bool):
+            df (pd.DataFrame): _description_
+            geo_level (str): _description_
+            geo_col (str, optional): _description_. Defaults to 'VAL_MAILLE_GEO'.
+            type_col (str, optional): _description_. Defaults to 'CD_TYPE_BIEN'.
+            price_col (str, optional): _description_. Defaults to 'prix_corrected'.
+
         Returns:
-            bool: True si entrainement reussi
-        """
-        
-        if len(biais_series) < self.min_observations:
-            print("Pas assez de données")
-            return False
-
-        
-        try:
-            # Optimisation des hyperparamètres
-            if optimize and len(biais_series) >= 12:
-                opt_result = self.optimize_hyperparameters(biais_series)
-
-                # Utiliser les meilleurs hyperparamètres
-                trend = opt_result['best_params']['trend']
-                damped_trend = opt_result['best_params']['damped_trend']
-
-                # Stocker résultats optimisation
-                self.metadata['optimization'] = {
-                    'optimized': True,
-                    'cv_score': opt_result['best_params'],
-                    'all_results': opt_result['all_results']
-                }
-            
-            else:
-                # utilisation des paramètres par défaut
-
-                trend = self.trend
-                damped_trend = self.damped_trend
-                self.metadata['optimization'] = {'optimized': False}
-
-            # Création du modèle
-            self.model = ExponentialSmoothing(
-                biais_series,
-                trend = trend,
-                seasonal = self.seasonal,
-                seasonal_periods = None,
-                damped_trend = damped_trend,
-                initialization_method = self.initialization_method
-            )
-            # Entraînement
-            self.model_fit = self.model.fit()
-
-            # Mise à jour métadonnées
-            self.metadata['trained'] = True
-            self.metadata['n_observations'] = len(biais_series)
-            self.metadata['train_date'] = pd.Timestamp.now().isoformat()
-            self.metadata['final_params'] = {
-                'trend': trend,
-                'damped_trend': damped_trend
-            }
-            
-            # Calcul métriques
-            residuals = self.model_fit.resid
-            self.metadata['metrics'] = {
-                'rmse':float(np.sqrt(np.mean(residuals**2))),
-                'mea': float(np.mean(np.abs(residuals))),
-                'std_resid': float(np.std(residuals))
-            }
-
-            return True
-    
-        except Exception as e:
-            print(f"Echec entrainement - {e}")
-            return False
-        
-
-    def predict(self, last_cl_value: float):
-        """Prédit les ajustements futurs et les indices corrigés
-
-        Args:
-            last_cl_value (float): Dernière valeur de l'indice CL
+            pd.DataFrame: _description_
         """
 
-        if not self.metadata['trained']:
-            raise ValueError("Modèle non entraîné")
+        df_level = df[df['niveau_geo'] == geo_level].copy()
         
-        #Prédiction du biais futur
-        forecast_biais = self.model_fit.forecast(self.n_forecast)
+        if len(df_level) == 0:
+            print(f"Aucune données au niveau {geo_level}")
+            return pd.DataFrame()
+        
+        annee_ref = df_level['annee'].max()
 
-        # Intervalle de confiance
-        sigma = np.std(self.model_fit.resid)
-        from scipy import stats
-        z_score = stats.norm.ppf((1 + self.confidence_level) / 2)
+        # Aggrégation par maille, type et année
+        agg = df_level.groupby([geo_col,type_col,'annee']).agg({
+            price_col: 'mean',
+            'Periode': 'count'
+        }).rename(columns={price_col: "prix_moyen", 'Periode': 'effectif'}).reset_index()
 
-        confidence_interval = [z_score * sigma * np.sqrt(step) for step in range(1,self.n_forecast + 1)]
+        # Prix et effectif e la période 0 (année de référence)
+        periode_0 = agg[agg['annee'] == annee_ref].copy()
+        periode_0 = periode_0.rename(columns={
+            'prix_moyen': 'prix_moyen_0',
+            'effectif': 'effectif_0'
+        })
 
-        # Predictions : CL - biais
+        # Fusion avec toutes les périodes
+        rates = agg.merge(
+            periode_0[[geo_col,type_col, 'prix_periode_0','effectif_0']], on = [geo_col, type_col], how = 'left'
+        )
 
-        predictions = last_cl_value -forecast_biais
-        upper_bound = predictions + confidence_interval
-        lower_bound = predictions - confidence_interval
+        rates['periode'] = annee_ref - rates['annee']
 
-        # Métadonnées
-        pred_metadata = {
-            'adjustements': [round(float(biais)) for biais in forecast_biais],
-            'predictions': [round(float(pred)) for pred in predictions],
-            'confidence_intervals': [
-                (round(float(lower_bound[i]),2), round(float(upper_bound[i]),2))
-                for i in range(self.n_forecast)
-            ],
-            'last_cl_value': round(last_cl_value, 2),
-            'sigma': round(sigma, 4)
-        }
+        # Calcul du taux d'inflation
+        rates['taux_inflation'] = (rates['prix_periode_0'] - rates['prix_moyen']) / rates['prix_moyen']
 
-    def backtest(self, full_series: pd.Series) -> pd.Series:
-       """
-       Calcule les valeurs corrigés historiques
-       """
-       if not self.metadata['trained']:
-           raise ValueError("Modèle non entrainé")
-       
-       return self.model_fit.fittedvalues
+        # Effectif 
+        rates['effectif_final'] = rates[['effectif','effectif_0']].min(axis= 1)
+
+        # Filtrage par effectif minimum
+
+        min_eff = self.min_effectifs[geo_level]
+        rates = rates[rates['effectif_final'] >= min_eff].copy()
+
+        # Sélection des colonnes finales
+        rates = rates[[
+            geo_col, type_col, 'annee', 'periode', 'taux_inflation', 'effectif_final', 'niveau_geo'
+        ]].rename(columns={'effectif_final': 'effectif'})
+
+        return rates
     
 
-    def save(self, filepath : str):
-        """Sauvegarde le modèle
+    def calculate_all_rates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calcule les taux pour tous les niveaux géographiques"""
+
+        print("============================================")
+        print("CALCUL DES TAUX D'INFLATIONS PAR MAILLE")
+        print("============================================")
+
+        df_prep = self.prepare_data(df)
+
+        all_rates = []
+
+        # Calcul par niveau
+
+        for geo_level in ['IRIS','CITY','DEPT']:
+            rates = self.calculate_rates_for_level(df_prep, geo_level)
+
+            if len(rates) > 0:
+                all_rates.append(rates)
+        
+        if not all_rates:
+            raise ValueError("Aucun taux d'inflation calculé")
+        
+        # Consolidatioon
+        df_rates = pd.concat(all_rates, ignore_index=True)
+
+        # Tri
+        df_rates = df_rates.sort_values(['niveau_geo','VAL_MAILLE_GEO','CD_TYPE_BIEN','periode'])
+
+        return df_rates
+    
+    def save_rates_table(self, df_rates: pd.DataFrame, filepath: str):
+        """Sauvegarde la table de taux d'inflation.
 
         Args:
-            filepath (str): 
-        """
-
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True,exist_ok = True)
-
-        # Sauvegarde modèle (pickle)
-
-        model_path = filepath.with_suffix('.pkl')
-        with open(model_path,'wb') as f:
-            pickle.dump({
-                'model':self.model,
-                'model_fit':self.model_fit,
-                'zone': self.zone,
-                'type_bien': self.type_bien
-            }, f)
-
-        meta_path = filepath.with_suffix('.json')
-        with open(meta_path, 'w',encoding = 'utf-8') as f:
-            json.dump(self.metadata, f , indent = 2, ensure_ascii = False)
-
-        print("Modèle sauvegardé")
-
-    @classmethod
-    def load(cls, filepath : str, config_path : str = None):
-        """Charge un modèle sauvegardé
-
-        Args:
+            df_rates (pd.DataFrame): _description_
             filepath (str): _description_
-            config_path (str, optional): _description_. Defaults to None.
         """
-        
+
         filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok = True)
 
-        # Chargement modèle
-        model_path = filepath.with_suffix('.pkl')
-        with open(model_path, 'rb') as f:
-            data = pickle.load(f)
+        df_rates.to_csv(filepath, index = False, encoding = 'utf-8-sig')
 
-        # Chargement métadonnées
-        meta_path = filepath.with_suffix('.json')
-        with open(meta_path, encoding = 'utf-8') as f:
-            metadata = json.load(f)
-
-
-        instance = cls(data['zone'], data['type_bien'])
-        instance.model = data['model']
-        instance.model_fit = data['model_fit']
-        instance.metadata = metadata
-
-        return instance
-    
-    def get_metrics(self) -> Dict:
-        """Retourne la métrique du modèle"""
-        return self.metadata['metrics']
-    
-    def __repr__(self):
-        status = 'Trained' if self.metadata['trained'] else "Not trained"
-        return f"HoltWintersModel({self.zone}-{self.type_bien},{status})"
-    
-
-
+        print("Table de taux sauvegardé")
 
 
 if __name__ == "__main__":
-    # Exemple de série de biais
-    dates = pd.date_range("2015-01-01", periods=60, freq="M")
-    biais = pd.Series(np.random.randn(60), index=dates)
-
-    # Création du modèle
-    model = HoltWintersModel(zone="Paris", type_bien="APT")
-
-    # Entraînement
-    ok = model.fit(biais)
-
-    if ok:
-        print("Modèle entraîné")
-        print(model.get_metrics())
+    # Test avec données fictives
+    print("Test InflationRateCalculator\n")
+    
+    # Données de test
+    dates = pd.date_range('2020-01-01', periods=24, freq='Q')
+    
+    data = []
+    for date in dates:
+        # IRIS
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': '75101',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5000 + np.random.normal(0, 100) + (date.year - 2020) * 100
+        })
+        # Ville
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': 'PARIS',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5200 + np.random.normal(0, 100) + (date.year - 2020) * 120
+        })
+        # Dept
+        data.append({
+            'Periode': date,
+            'VAL_MAILLE_GEO': '75',
+            'CD_TYPE_BIEN': 'APT',
+            'prix_corrected': 5100 + np.random.normal(0, 100) + (date.year - 2020) * 110
+        })
+    
+    df = pd.DataFrame(data)
+    
+    # Calcul
+    calculator = InflationRateCalculator()
+    df_rates = calculator.calculate_all_rates(df)
+    
+    print("\nAperçu des taux:")
+    print(df_rates.head(10))
+    
+    # Sauvegarde
+    calculator.save_rates_table(df_rates, '/tmp/test_taux_inflation.csv')
