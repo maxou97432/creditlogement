@@ -3,5 +3,84 @@ python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_co
 
 # Étape 3 : Estimer la valeur d'un bien
 python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
-f geo_level == 'CITY':
+
+
+def calculate_rates_for_level(self, df: pd.DataFrame, geo_level: str,
+                                  geo_col: str = 'VAL_MAILLE_GEO',
+                                  type_col: str = 'CD_TYPE_BIEN',
+                                  price_col: str = 'Indice de prix (CL) - Corrigé') -> pd.DataFrame:
+        """Calcule les taux d'inflations pour un niveau géographique donné.
+
+        Args:
+            df (pd.DataFrame): _description_
+            geo_level (str): _description_
+            geo_col (str, optional): _description_. Defaults to 'VAL_MAILLE_GEO'.
+            type_col (str, optional): _description_. Defaults to 'CD_TYPE_BIEN'.
+            price_col (str, optional): _description_. Defaults to 'prix_corrected'.
+
+        Returns:
+            pd.DataFrame: _description_
+        """
+
+        df_level = df[df['niveau_geo'] == geo_level].copy()
+        
+        if len(df_level) == 0:
+            print(f"Aucune données au niveau {geo_level}")
+            return pd.DataFrame()
+        
+        annee_ref = df_level['annee'].max()
+
+        if geo_level == 'CITY':
             print(f"DEBUG {geo_level} | Colonnes dispos: {list(df_level.columns)}")
+
+        # L'effectif est la SOMME du nombre de biens sur l'année
+        agg_dict = {
+            price_col: 'mean'
+        }
+        
+        # Si la colonne des effectifs réels existe, on la somme, sinon on compte les trimestres par défaut
+        if 'NB_BIENS_PRIX' in df_level.columns:
+            agg_dict['NB_BIENS_PRIX'] = 'sum'
+            count_col = 'NB_BIENS_PRIX'
+        else:
+            agg_dict['Periode'] = 'count'
+            count_col = 'Periode'
+
+        agg = df_level.groupby([geo_col, type_col, 'annee']).agg(agg_dict).rename(
+            columns={price_col: "prix_moyen", count_col: 'effectif'}
+        ).reset_index()
+
+        # Prix et effectif e la période 0 (année de référence)
+        periode_0 = agg[agg['annee'] == annee_ref].copy()
+        periode_0 = periode_0.rename(columns={
+            'prix_moyen': 'prix_moyen_0',
+            'effectif': 'effectif_0'
+        })
+
+        # Fusion avec toutes les périodes
+        rates = agg.merge(
+            periode_0[[geo_col,type_col, 'prix_moyen_0','effectif_0']], on = [geo_col, type_col], how = 'left'
+        )
+
+        rates['periode'] = annee_ref - rates['annee']
+
+        # Calcul du taux d'inflation
+        rates['taux_inflation'] = (rates['prix_moyen_0'] - rates['prix_moyen']) / rates['prix_moyen']
+
+        # Effectif 
+        rates['effectif_final'] = rates[['effectif','effectif_0']].min(axis= 1)
+
+        # Filtrage par effectif minimum
+
+        min_eff = self.min_effectifs[geo_level]
+        rates = rates[rates['effectif_final'] >= min_eff].copy()
+
+        # Ajout du niveau géographique
+        rates['niveau_geo'] = geo_level
+
+        # Sélection des colonnes finales
+        rates = rates[[
+            geo_col, type_col, 'annee', 'periode', 'taux_inflation', 'effectif_final', 'niveau_geo'
+        ]].rename(columns={'effectif_final': 'effectif'})
+
+        return rates
