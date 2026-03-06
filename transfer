@@ -1,1 +1,13 @@
-PS Z:\uflumth\gits\univers_elementaire\indicateur_prix> python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
+cd Z:\uflumth\gits\univers_elementaire\indice_prix_mlops
+
+# 1 - Entraîner les modèles
+python main.py --mode train_holt_winters
+
+# 2 - Appliquer les corrections
+python main.py --mode apply_corrections --output artifacts/corrected_prices/prix_corriges.csv
+
+# 3 - Calculer les taux
+python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
+
+# 4 - Estimer
+python main.py --mode estimate --rates artifacts/inflation_rates/taux.csv --valeur_initiale 300000 --date_achat 2022-03-15 --type_bien APT --ville PARIS --dept 75
