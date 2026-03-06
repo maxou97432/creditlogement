@@ -1,1 +1,21 @@
 python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
+PS Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee> python main.py --mode calculate_rates --input artifacts/corrected_prices/prix_corriges.csv --output artifacts/inflation_rates/taux.csv
+============================================
+2. CALCUL DES TAUX D'INFLATIONS
+============================================
+============================================
+CALCUL DES TAUX D'INFLATIONS PAR MAILLE
+============================================
+Aucune données au niveau IRIS
+DEBUG CITY | Colonnes dispos: ['VAL_MAILLE_GEO', 'CD_TYPE_BIEN', 'Periode', 'Indice de prix (CL)', 'Indice de prix (INSEE) - Base 2020', 'Indice de prix (CL) - Corrigé', 'correction', 'correction_source', 'annee', 'niveau_geo']
+
+ Erreur: Aucun taux d'inflation calculé
+Traceback (most recent call last):
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 241, in main
+    calculate_inflation_rates(args.input, args.output, args.config)
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\main.py", line 90, in calculate_inflation_rates
+    df_rates = calculator.calculate_all_rates(df_corrected)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "Z:\uflumth\gits\univers_elementaire\indicateur_prix\indice_de_prix_insee\models\inflation_rate_calculator.py", line 170, in calculate_all_rates
+    raise ValueError("Aucun taux d'inflation calculé")
+ValueError: Aucun taux d'inflation calculé
