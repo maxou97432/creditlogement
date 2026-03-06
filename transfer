@@ -1,110 +1,253 @@
 """
-config.py - Configuration centrale pour indice_de_prix_insee.
-
-Remplace config.yaml (qui causait des erreurs de parsing avec les
-chemins Windows contenant des antislashs).
-
-Modifier ici les chemins avant de lancer main.py.
+Data Loader module
+Charge les données depuis les fichiers sources
 """
+
+
+import pandas as pd
+import numpy as np
+import sys
 import os
+from pathlib import Path
+import config.config as cfg
 
-# ---------------------------------------------------------------------------
-# Répertoire racine du projet
-# ---------------------------------------------------------------------------
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ---------------------------------------------------------------------------
-# DONNÉES — chemins à adapter selon l'environnement
-# ---------------------------------------------------------------------------
+class DataLoader:
+    """Charge les données issues des travaux des univers élémentaires, et les données de l'INSEE"""
 
-# Dossier contenant les CSV de prix (produits par indicateur_prix/pipeline/calc_indice.py)
-BASE_PATH = r"Z:\uflumth\gits\univers_elementaire\indicateur_prix\resultats\v1_complet"
+    def __init__(self):
+        """Initialise le loader depuis config/config.py."""
+        self.base_path  = cfg.BASE_PATH
+        self.insee_path = cfg.INSEE_PATH
 
-# Dossier contenant le fichier INSEE (valeurs_trimestrielles.csv)
-INSEE_PATH = r"Z:\uflumth\gits\univers_elementaire\TI\table_rapport (2025)"
+    def load_data(self) -> pd.DataFrame:
+        """Charge et concatène les données de Crédit Logement
 
-# Année de référence pour le calcul des indices (base 100)
-BASE_YEAR = 2020
+        Returns:
+            pd.DataFrame
+        """
+    
+        files = cfg.FILES
+        dfs = []
 
-# Noms des fichiers CSV à charger
-FILES = {
-    "city":     "prix_m2_univ_elem_complet_CITY.csv",
-    "dept":     "prix_m2_univ_elem_complet_DEPT.csv",
-    "region":   "prix_m2_univ_elem_complet_REGION.csv",
-    "province": "prix_m2_univ_elem_complet_PROVINCE.csv",
-    "insee":    "valeurs_trimestrielles.csv",
-}
+        for key in ['city','dept','region','province']:
+            filepath = os.path.join(self.base_path, files[key])
+            try:
+                df = pd.read_csv(filepath)
+                dfs.append(df)
+            except FileNotFoundError:
+                print(f"{files[key]} introuvable")
+        
+        if not dfs:
+            raise FileNotFoundError("Aucun fichier trouvé")
+        
+        df_final = pd.concat(dfs, ignore_index = True)
+        df_final = df_final[df_final['DIC_NAME'] != "prix_m2_12m"]
+        df_final = df_final.drop(columns=["TYPE_MAILLE","TAUX_INFL_12M","TAUX_INFL_3M", "DIC_NAME"], errors='ignore') 
 
-# Périmètres géographiques à conserver
-PERIMETRES = [
-    "77", "78", "91", "92", "93", "94", "95",          # Départements IDF
-    "MARSEILLE", "LYON", "LILLE", "PARIS",               # Agglomérations
-    "NORD-PAS-DE-CALAIS", "PROVENCE-ALPES-CÔTE D'AZUR", "RHÔNE-ALPES",
-    "PROVINCE", "AUVERGNE", "ÎLE-DE-FRANCE",
-]
+        # Filtre ANCIENNETE=ANCIEN pour être comparable avec INSEE
 
-# ---------------------------------------------------------------------------
-# MODÈLE HOLT-WINTERS
-# ---------------------------------------------------------------------------
-HOLT_WINTERS = {
-    "trend":                   "add",
-    "seasonal":                None,        # Pas de saisonnalité
-    "damped_trend":            True,
-    "initialization_method":   "estimated",
-    "min_observations":        8,
-    "n_forecast":              2,
-    "confidence_level":        0.95,
-    "optimize_hyperparameters": True,
-    "cv_splits":               3,
-}
+        if "ANCIENNETE" in df_final.columns:
+            df_final = df_final[df_final["ANCIENNETE"] == "ANCIEN"].copy()
+            df_final = df_final.drop(columns=["ANCIENNETE"])
 
-# ---------------------------------------------------------------------------
-# INFLATION
-# ---------------------------------------------------------------------------
-INFLATION = {
-    "method":           "compound",   # "simple" | "compound" | "exponential"
-    "lookback_periods": 4,
-    "smoothing_alpha":  0.3,
-}
+    
+    def load_data_insee(self) -> pd.DataFrame:
+        """Charge et traite les données de l'INSEE
 
-# ---------------------------------------------------------------------------
-# TRAINING
-# ---------------------------------------------------------------------------
-TRAINING = {
-    "retrain_frequency": "quarterly",
-    "validation_split":  0.2,
-    "min_train_size":    8,
-    "save_criteria": {
-        "min_correlation":        0.85,
-        "max_rmse":               10.0,
-        "improvement_threshold":  0.02,
-    },
-}
+        Returns:
+            pd.DataFrame: DataFrame mis dans le même format que pour les données de CL
+        """
+    
+        source_file = os.path.join(self.insee_path, cfg.FILES['insee'])
 
-# ---------------------------------------------------------------------------
-# INFERENCE
-# ---------------------------------------------------------------------------
-INFERENCE = {
-    "confidence_level": 0.95,
-    "output_format":    "csv",
-    "batch_size":       100,
-}
+        try:
+            df_insee_raw = pd.read_csv(source_file, sep=';')
+            print(f" Fichier INSEE chargé : {len(df_insee_raw)} lignes")
+    
+        except FileNotFoundError:
+            print(f" ERREUR: Fichier {source_file} introuvable.")
+            sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# CHEMINS DE SORTIE (relatifs au projet)
-# ---------------------------------------------------------------------------
-PATHS = {
-    "models":      os.path.join(PROJECT_DIR, "artifacts", "models"),
-    "predictions": os.path.join(PROJECT_DIR, "artifacts", "predictions"),
-    "metrics":     os.path.join(PROJECT_DIR, "artifacts", "metrics"),
-    "logs":        os.path.join(PROJECT_DIR, "logs"),
-}
+        # Filtrage des lignes de métadonnées (lignes "Codes")
+        df_insee_raw = df_insee_raw[df_insee_raw['Libellé'] != 'Codes'].copy()
 
-# ---------------------------------------------------------------------------
-# MONITORING
-# ---------------------------------------------------------------------------
-MONITORING = {
-    "metrics":         ["rmse", "correlation", "mean_absolute_error", "bias"],
-    "drift_threshold": 0.15,
-    "alert_email":     None,
-}
+        # Ne garder que les SÉRIES BRUTES (pas CVS)
+        df_insee_raw = df_insee_raw[
+            ~df_insee_raw['Libellé'].str.contains('CVS', na=False, case=False)
+        ].copy()
+
+
+
+        # Liste des séries régionales à GARDER (format "Région : Type")
+        series_regionales_a_garder = [
+            "Île-de-France : Maisons",
+            "Île-de-France : Appartements", 
+            "Île-de-France : Ensemble",
+        ]
+
+        # Créer un masque pour identifier les lignes à garder
+        mask_garder = df_insee_raw['Libellé'].apply(
+            lambda x: any(serie in str(x) for serie in series_regionales_a_garder) if isinstance(x, str) else False
+        )
+
+        # Créer un masque pour identifier les subdivisions à exclure (contiennent " : " mais pas dans la liste à garder)
+        mask_subdivision = (
+            df_insee_raw['Libellé'].str.contains(' : ', na=False, case=False) & 
+            ~mask_garder
+        )
+
+        # Appliquer le filtre : exclure les subdivisions
+        df_insee_raw = df_insee_raw[~mask_subdivision].copy()
+
+        # Application du parsing
+        df_insee_raw[['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']] = df_insee_raw['Libellé'].apply(
+            lambda x: pd.Series(_parse_libelle(x))
+        )
+
+        # Filtrage des lignes avec parsing réussi
+        df_insee_clean = df_insee_raw.dropna(subset=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN']).copy()
+
+        #  FILTRE POSITIF: Ne garder que les périmètres de la liste d'origine
+        # Correspond exactement à: perimetre_insee = ['92', '93', '94', '95', '91','75', '78', '77', ...]
+        perimetre_whitelist = [
+            '77', '78', '91', '92', '93', '94', '95',  # Départements IDF
+            'MARSEILLE', 'LYON', 'LILLE','PARIS',  # Agglomérations
+            'NORD-PAS-DE-CALAIS', 'PROVENCE-ALPES-CÔTE D\'AZUR', 'RHÔNE-ALPES',  # Régions
+            'PROVINCE', 'AUVERGNE', 'ÎLE-DE-FRANCE'
+                ]
+
+        df_insee_clean = df_insee_clean[
+            df_insee_clean['VAL_MAILLE_GEO'].isin(perimetre_whitelist)
+        ].copy()
+
+        print(f" Après filtre sur périmètres pertinents : {len(df_insee_clean)} séries")
+        print(f"   Périmètres retenus : {sorted(df_insee_clean['VAL_MAILLE_GEO'].unique())}")
+
+        # Identification des colonnes trimestrielles (format "YYYY-TX")
+        quarter_cols = [col for col in df_insee_clean.columns if col and '-T' in col and col[0].isdigit()]
+
+        if not quarter_cols:
+            print(" ERREUR: Aucune colonne trimestrielle détectée.")
+            sys.exit(1)
+
+        # PIVOT: Transformation WIDE (colonnes) → LONG (lignes)
+        df_insee_long = df_insee_clean.melt(
+            id_vars=['VAL_MAILLE_GEO', 'CD_TYPE_BIEN'],
+            value_vars=quarter_cols,
+            var_name='Periode_Str',
+            value_name='Indice de prix (INSEE)'
+        )
+
+        # Gestion des valeurs spéciales comme "(s)" = secret statistique
+        df_insee_long['Indice de prix (INSEE)'] = df_insee_long['Indice de prix (INSEE)'].astype(str).replace(
+            [r'\(s\)', r'\(p\)', r'\(r\)', 'nan', ''], 
+            np.nan, 
+            regex=True
+        )
+
+        # Conversion numérique (gérer virgules européennes)
+        df_insee_long['Indice de prix (INSEE)'] = pd.to_numeric(
+            df_insee_long['Indice de prix (INSEE)'].str.replace(',', '.').str.strip(),
+            errors='coerce'
+        )
+
+        # Filtrage des NaN
+        df_insee_long = df_insee_long.dropna(subset=['Indice de prix (INSEE)']).copy()
+
+        # Parsing temporel: "1992-T1" → Date
+        df_insee_long['Year'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('-')[0]))
+        df_insee_long['Quarter'] = df_insee_long['Periode_Str'].apply(lambda x: int(x.split('T')[1]))
+        df_insee_long["Date code"] = df_insee_long['Year'].astype(str) + 'Q' + df_insee_long["Quarter"].astype(str)
+        df_insee_long["Periode"] = pd.PeriodIndex(df_insee_long["Date code"], freq="Q").to_timestamp()
+
+        insee_final = df_insee_long[["VAL_MAILLE_GEO", "CD_TYPE_BIEN", "Periode", "Indice de prix (INSEE)"]].copy()
+
+        print(f" Données INSEE pivotées : {len(insee_final)} observations")
+        print(f"    Périmètres uniques : {insee_final['VAL_MAILLE_GEO'].nunique()}")
+        print(f"    Types de biens : {insee_final['CD_TYPE_BIEN'].unique()}")
+        print(f"    Période : {insee_final['Periode'].min()} → {insee_final['Periode'].max()}")
+
+        return insee_final
+
+
+    # Fonction de parsing des métadonnées depuis la colonne "Libellé"
+    def _parse_libelle(self, libelle_text):
+        """Extrait le périmètre géographique et le type de bien depuis le Libellé."""
+    
+        if not isinstance(libelle_text, str) or pd.isna(libelle_text):
+            return None, None
+    
+        if "Île-de-France : Maisons" in libelle_text:
+            return "ÎLE-DE-FRANCE", "MAI"
+        elif "Île-de-France : Appartements" in libelle_text:
+            return "ÎLE-DE-FRANCE", "APT"
+        elif "Île-de-France : Ensemble" in libelle_text:
+            return "ÎLE-DE-FRANCE", "ENSEMBLE"
+    
+        # Dictionnaire de normalisation géographique
+        geo_mapping = {
+        "Agglomération de Marseille": "MARSEILLE",
+        "Agglomération de Lyon": "LYON",
+        "Agglomération de Lille": "LILLE",
+        "Seine-et-Marne": "77",
+        "Yvelines": "78",
+        "Essonne": "91",
+        "Hauts-de-Seine": "92",
+        "Seine-Saint-Denis": "93",
+        "Val-de-Marne": "94",
+        "Val-d'Oise": "95",
+        "France métropolitaine": "France",
+        "Province": "PROVINCE",
+        "Île-de-France": "ÎLE-DE-FRANCE",
+        "Ile-de-France": "ÎLE-DE-FRANCE",
+        "Rhône-Alpes": "RHÔNE-ALPES",
+        "Provence-Alpes-Côte d'Azur": "PROVENCE-ALPES-CÔTE D'AZUR",
+        "Nord-Pas-de-Calais": "NORD-PAS-DE-CALAIS",
+        "Auvergne": "AUVERGNE",
+        "Marseille":"MARSEILLE",
+        "Paris": "PARIS",
+        "Lille": "LILLE"
+        }
+    
+        type_mapping = {
+        "Appartements": "APT",
+        "Maisons": "MAI",
+        "Ensemble": "ENSEMBLE"
+        }
+    
+        parts = [p.strip() for p in libelle_text.split(' - ')]
+    
+        geo = None
+        type_bien = None
+    
+        for part in parts:
+            for key, value in geo_mapping.items():
+                if key.lower() in part.lower():
+                    geo = value
+                    break
+            if geo:
+                break
+    
+        for part in parts:
+            for key, value in type_mapping.items():
+                if key in part:
+                    type_bien = value
+                    break
+            if type_bien:
+                break 
+
+        return geo, type_bien
+    
+
+if __name__ == "__init__":
+
+    loader = DataLoader()
+    df_cl = loader.load_data()
+    df_insee = loader.load_data_insee()
+    print(f"Données de CL chargéees:")
+    print("==================================================")
+    print(f"{df_cl.head()}")
+    print(f"Données de INSEE chargéees:")
+    print("==================================================")
+    print(f"{df_insee.head()}")
