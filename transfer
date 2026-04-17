@@ -1,30 +1,17 @@
-# ── Étape 1 : Recréer la sous-population ──────────────────────────
-sous_pop2 = base.filter(
-    (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
-    (pl.col("NB_MATURITE_IRBA") < 1.0) &
-    (pl.col("Flag_Revolving") == 0.0)
-).with_columns(
-    pl.when(pl.col("NB_DURATION_IRBA") == 1.0)
-    .then(pl.lit("floor_OK"))
-    .otherwise(pl.lit("pas_floor"))
-    .alias("groupe")
-)
+# Test 1 : Est-ce que MATURITE < seuil explique l'absence de floor ?
+print("Distribution NB_MATURITE_IRBA :")
+print("floor_OK :")
+print(floor_ok["NB_MATURITE_IRBA"].describe())
+print("\npas_floor :")
+print(pas_floor["NB_MATURITE_IRBA"].describe())
 
-floor_ok  = sous_pop2.filter(pl.col("groupe") == "floor_OK")
-pas_floor = sous_pop2.filter(pl.col("groupe") == "pas_floor")
-
-print(f"floor_OK  : {floor_ok.height} lignes")
-print(f"pas_floor : {pas_floor.height} lignes")
-
-# ── Étape 2 : Tester les colonnes candidates ───────────────────────
-for col in ["CD_PORT_PRUDENTIEL", "CD_CLASSE_COLLECTE",
-            "CD_SEGMENTATION_MAE", "CD_CLASS_EXP_STD",
-            "CD_TYPE_AMORT", "CD_PORTFOLIO"]:
-    if col not in base.columns:
-        print(f"{col} : absent")
-        continue
-    print(f"\n--- {col} ---")
-    print("floor_OK :")
-    print(floor_ok[col].value_counts().sort("count", descending=True).head(5))
-    print("pas_floor :")
-    print(pas_floor[col].value_counts().sort("count", descending=True).head(5))
+# Test 2 : Cherche automatiquement une colonne numérique discriminante
+for col in pas_floor.columns:
+    try:
+        mean_pas = pas_floor[col].cast(pl.Float64).mean()
+        mean_ok  = floor_ok[col].cast(pl.Float64).mean()
+        if mean_pas is not None and mean_ok is not None:
+            if abs(mean_pas - mean_ok) / (abs(mean_ok) + 1e-9) > 0.5:  # >50% d'écart
+                print(f"✅ {col} : mean_pas={mean_pas:.4f}, mean_ok={mean_ok:.4f}")
+    except:
+        pass
