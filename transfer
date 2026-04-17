@@ -1,29 +1,15 @@
-# Parmi les 4787 anomalies, combien de chaque type ?
-non_match = base.filter(
-    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+# Les lignes normales (floor appliqué correctement)
+normales = base.filter(
+    pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
 )
 
-# Groupe A : DURATION = MATURITE (pas de floor)
-groupe_A = non_match.filter(
-    pl.col("NB_DURATION_IRBA").round(4) == pl.col("NB_MATURITE_IRBA").round(4)
+# Parmi les normales, combien ont les mêmes caractéristiques que les anomalies ?
+normales_meme_profil = normales.filter(
+    (pl.col("Flag_Revolving") == 0.0) &
+    (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
+    (pl.col("NB_MATURITE_IRBA") < 1.0)
 )
 
-# Groupe B : DURATION > MATURITE (valeur d'une autre source)
-groupe_B = non_match.filter(
-    pl.col("NB_DURATION_IRBA").round(4) != pl.col("NB_MATURITE_IRBA").round(4)
-)
-
-print(f"Total anomalies            : {non_match.height}")
-print(f"Groupe A (DURATION=MATURITE, pas de floor) : {groupe_A.height}")
-print(f"Groupe B (DURATION ≠ MATURITE, autre valeur): {groupe_B.height}")
-
-# Aperçu du groupe B
-print("\nGroupe B - aperçu :")
-print(groupe_B.select([
-    "NB_MATURITE_IRBA",
-    "NB_DURATION_IRBA",
-    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA")).alias("ecart")
-]).head(10))
-
-print("\nGroupe B - distribution de NB_DURATION_IRBA :")
-print(groupe_B["NB_DURATION_IRBA"].describe())
+print(f"Lignes normales totales                          : {normales.height}")
+print(f"Lignes normales avec même profil (FlagRev=0, ICC=0, Mat<1) : {normales_meme_profil.height}")
+print(f"% des normales avec ce profil                    : {normales_meme_profil.height/normales.height*100:.1f}%")
