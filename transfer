@@ -1,32 +1,22 @@
-# On suppose NB_MATURITE_IRBA en années, T_INTRT en centièmes de %
 N = pl.col("NB_MATURITE_IRBA").cast(pl.Float64)
-r = pl.col("T_INTRT").cast(pl.Float64) / 10000.0   # centièmes de % → décimal
 
-# Formules Bâle II par type
-m1 = (N + 1) / 2 * (1 + r * (N + 2) / 3) / (1 + r * (N + 1) / 2)   # Linéaire
-m2 = N / 3                                                              # Dégressif (approx)
-m3 = (N + 1) / 2                                                        # Progressif (exact)
-m4 = N * (1 + r * (N + 1) / 2) / (1 + N * r)                          # Bullet
-m9 = N                                                                  # Autre
-
-duration_calculee = (
-    pl.when(pl.col("C_TYPE_AMORT") == 1).then(m1)
-    .when(pl.col("C_TYPE_AMORT") == 2).then(m2)
-    .when(pl.col("C_TYPE_AMORT") == 3).then(m3)
-    .when(pl.col("C_TYPE_AMORT") == 4).then(m4)
-    .when(pl.col("C_TYPE_AMORT") == 9).then(m9)
+# Formules r=0 (approximations sauf type 3 qui est exacte)
+duration_calc_sans_r = (
+    pl.when(pl.col("C_TYPE_AMORT") == 1).then((N + 1) / 2)   # approx (r=0)
+    .when(pl.col("C_TYPE_AMORT") == 2).then(N / 3)            # approx
+    .when(pl.col("C_TYPE_AMORT") == 3).then((N + 1) / 2)      # EXACT
+    .when(pl.col("C_TYPE_AMORT") == 4).then(N)                 # approx (r=0)
+    .when(pl.col("C_TYPE_AMORT") == 9).then(N)
     .otherwise(N)
 ).clip(1.0, 5.0)
 
-# Ajout dans le dataframe
-base = base.with_columns(duration_calculee.alias("DURATION_CALC"))
+base = base.with_columns(duration_calc_sans_r.alias("DURATION_CALC"))
 
-# Comparaison avec NB_DURATION_IRBA
-diff = pl.col("NB_DURATION_IRBA") - pl.col("DURATION_CALC")
-base = base.with_columns(diff.alias("DIFF_BALE2"))
+# Résultats globaux
+print("Somme écarts :", (base["NB_DURATION_IRBA"] - base["DURATION_CALC"]).sum())
 
-print("Somme des écarts (si 0 → formule parfaite) :", base["DIFF_BALE2"].sum())
-print("Ecart absolu moyen                          :", base["DIFF_BALE2"].abs().mean())
-print("Nb de lignes exactes (écart < 0.01)         :", 
-      base.filter(pl.col("DIFF_BALE2").abs() < 0.01).height)
-print("Nb de lignes total                          :", base.height)
+# Résultats par type d'amortissement
+print(base.group_by("C_TYPE_AMORT").agg([
+    (pl.col("NB_DURATION_IRBA") - pl.col("DURATION_CALC")).abs().mean().alias("ecart_moyen"),
+    pl.len().alias("n")
+]).sort("C_TYPE_AMORT"))
