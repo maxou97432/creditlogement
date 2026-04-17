@@ -1,80 +1,13 @@
-# ── Préparer les deux groupes ──────────────────────────────────────
-anomalies = base.filter(
-    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
-)
-normales = base.filter(
-    pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
-)
+# Refaire le test en excluant les colonnes d'identifiants
+id_cols = {c for c in base.columns if any(kw in c.upper() 
+           for kw in ["SK_", "ID_", "NO_", "NUM_", "REF_", "CD_DOS", "NB_DOS"])}
 
-skip_cols = {"NB_DURATION_IRBA", "NB_MATURITE_IRBA", "TEST_DURATION",
-             "DURATION_CALC", "NB_DURATION_IRBA_Auto", "NB_MATURITE_IRBA_Auto"}
+print("Colonnes ID exclues :", len(id_cols))
 
-print(f"Anomalies : {anomalies.height} | Normales : {normales.height}")
-print(f"Nb colonnes testées : {len([c for c in base.columns if c not in skip_cols])}\n")
+# Parmi les résultats, montrer uniquement les non-IDs avec score > 1%
+resultats_utiles = [(col, desc, score) for col, desc, score in resultats
+                    if col not in id_cols and score > 0.01]
 
-resultats = []
-
-for col in base.columns:
-    if col in skip_cols:
-        continue
-    try:
-        dtype = base[col].dtype
-
-        # ── Cas catégoriel / string / booléen ─────────────────────
-        if dtype in (pl.String, pl.Utf8, pl.Boolean, pl.Categorical) or dtype.is_integer():
-            # Inclure "null" comme valeur possible
-            def get_vals(df, c):
-                vals = set(df[c].drop_nulls().unique().to_list())
-                if df[c].null_count() > 0:
-                    vals.add("__NULL__")
-                return vals
-
-            vals_anom   = get_vals(anomalies, col)
-            vals_normal = get_vals(normales, col)
-
-            only_in_anom   = vals_anom - vals_normal
-            only_in_normal = vals_normal - vals_anom
-
-            if only_in_anom:
-                # Combien d'anomalies sont couvertes ?
-                mask = pl.col(col).is_null() if "__NULL__" in only_in_anom else pl.col(col).is_in([v for v in only_in_anom if v != "__NULL__"])
-                if "__NULL__" in only_in_anom and len(only_in_anom) > 1:
-                    mask = mask | pl.col(col).is_null()
-                n_couvert = anomalies.filter(mask).height
-                pct = n_couvert / anomalies.height
-                resultats.append((col, f"valeur(s) {only_in_anom} UNIQUEMENT dans anomalies", pct))
-
-            if only_in_normal and len(only_in_normal) <= 3:
-                # Est-ce que TOUTES les anomalies sont dans le complément ?
-                mask_anom_has_normal_vals = pl.col(col).is_in([v for v in only_in_normal if v != "__NULL__"])
-                n = anomalies.filter(mask_anom_has_normal_vals).height
-                if n == 0:
-                    pct_explained = normales.filter(pl.col(col).is_in([v for v in only_in_normal if v != "__NULL__"])).height / normales.height
-                    resultats.append((col, f"valeur(s) {only_in_normal} UNIQUEMENT dans normales → anomalies n'ont jamais ces valeurs", pct_explained))
-
-        # ── Cas numérique float ────────────────────────────────────
-        elif dtype in (pl.Float64, pl.Float32):
-            # Null comme discriminant ?
-            null_pct_anom = anomalies[col].null_count() / anomalies.height
-            null_pct_norm = normales[col].null_count() / normales.height
-            if abs(null_pct_anom - null_pct_norm) > 0.9:
-                resultats.append((col, f"null: {null_pct_anom:.0%} anomalies vs {null_pct_norm:.0%} normales", abs(null_pct_anom - null_pct_norm)))
-
-            # Range sans chevauchement ?
-            max_a, min_a = anomalies[col].max(), anomalies[col].min()
-            max_n, min_n = normales[col].max(), normales[col].min()
-            if None not in (max_a, min_a, max_n, min_n):
-                if max_a < min_n or max_n < min_a:
-                    resultats.append((col, f"ranges disjoints: anom=[{min_a:.3f},{max_a:.3f}] norm=[{min_n:.3f},{max_n:.3f}]", 1.0))
-
-    except Exception as e:
-        pass
-
-# ── Affichage des résultats ────────────────────────────────────────
-if resultats:
-    print("=== COLONNES DISCRIMINANTES TROUVÉES ===")
-    for col, desc, score in sorted(resultats, key=lambda x: -x[2]):
-        print(f"  ✅ {col} ({score:.1%}) : {desc}")
-else:
-    print("❌ Aucune colonne seule ne discrimine parfaitement les anomalies.")
-    print("→ La règle est probablement une combinaison de conditions ou dans le code SAS source.")
+print("\n=== RÉSULTATS UTILES (hors IDs) ===")
+for col, desc, score in sorted(resultats_utiles, key=lambda x: -x[2]):
+    print(f"  {score:.1%}  {col}: {desc}")
