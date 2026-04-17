@@ -1,4 +1,23 @@
-for col in ["C_TYPE_AMORT", "cd_portfolio", "PERIM_PD"]:
-    if col in base.columns:
-        print(f"\n--- {col} ---")
-        print(sous_pop2.group_by(["groupe", col]).agg(pl.len().alias("n")).sort(["groupe", col]))
+for col in ["CD_PORT_PRUDENTIEL", "CD_CLASSE_COLLECTE", 
+            "CD_SEGMENTATION_MAE", "CD_CLASS_EXP_STD",
+            "CD_TYPE_AMORT", "CD_PORTFOLIO"]:
+    if col not in sous_pop2.columns:
+        print(f"{col} : absent")
+        continue
+    print(f"\n--- {col} ---")
+    print("floor_OK :")
+    print(floor_ok[col].value_counts().sort("count", descending=True).head(5))
+    print("pas_floor :")
+    print(pas_floor[col].value_counts().sort("count", descending=True).head(5))
+
+for col in ["CD_PORT_PRUDENTIEL", "CD_CLASSE_COLLECTE", 
+            "CD_SEGMENTATION_MAE", "CD_CLASS_EXP_STD",
+            "CD_TYPE_AMORT", "CD_PORTFOLIO"]:
+    if col not in sous_pop2.columns:
+        print(f"{col} : absent")
+        continue
+    print(f"\n--- {col} ---")
+    print("floor_OK :")
+    print(floor_ok[col].value_counts().sort("count", descending=True).head(5))
+    print("pas_floor :")
+    print(pas_floor[col].value_counts().sort("count", descending=True).head(5))
