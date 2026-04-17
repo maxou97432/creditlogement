@@ -1,13 +1,29 @@
-# Les dates peuvent révéler un batch différent
-cols_dates = [c for c in sous_pop2.columns if "DT" in c or "DATE" in c.upper()]
-print("Colonnes dates :", cols_dates)
+# Parmi les 4787 anomalies, combien de chaque type ?
+non_match = base.filter(
+    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+)
 
-for col in cols_dates[:5]:
-    print(f"\n--- {col} ---")
-    print("floor_OK :", floor_ok[col].value_counts().sort("count", descending=True).head(3))
-    print("pas_floor :", pas_floor[col].value_counts().sort("count", descending=True).head(3))
+# Groupe A : DURATION = MATURITE (pas de floor)
+groupe_A = non_match.filter(
+    pl.col("NB_DURATION_IRBA").round(4) == pl.col("NB_MATURITE_IRBA").round(4)
+)
 
+# Groupe B : DURATION > MATURITE (valeur d'une autre source)
+groupe_B = non_match.filter(
+    pl.col("NB_DURATION_IRBA").round(4) != pl.col("NB_MATURITE_IRBA").round(4)
+)
 
-# Ranges d'IDs
-print("floor_OK  SK_FAC  - min/max:", floor_ok["SK_FAC"].min(), "/", floor_ok["SK_FAC"].max())
-print("pas_floor SK_FAC  - min/max:", pas_floor["SK_FAC"].min(), "/", pas_floor["SK_FAC"].max())
+print(f"Total anomalies            : {non_match.height}")
+print(f"Groupe A (DURATION=MATURITE, pas de floor) : {groupe_A.height}")
+print(f"Groupe B (DURATION ≠ MATURITE, autre valeur): {groupe_B.height}")
+
+# Aperçu du groupe B
+print("\nGroupe B - aperçu :")
+print(groupe_B.select([
+    "NB_MATURITE_IRBA",
+    "NB_DURATION_IRBA",
+    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA")).alias("ecart")
+]).head(10))
+
+print("\nGroupe B - distribution de NB_DURATION_IRBA :")
+print(groupe_B["NB_DURATION_IRBA"].describe())
