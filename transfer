@@ -8,3 +8,10 @@ for col in cols_numeriques:
     match = (anomalies[col].round(4) == anomalies["NB_DURATION_IRBA"].round(4)).sum()
     if match > 100:
         print(f"{col} : {match} matches sur {len(anomalies)} anomalies")
+
+# Quel segment/portfolio ?
+print(anomalies["cd_portfolio"].value_counts())
+print(anomalies["PERIM_PD"].value_counts() if "PERIM_PD" in anomalies.columns else "N/A")
+
+# Les valeurs de DURATION sur les anomalies
+print(anomalies["NB_DURATION_IRBA"].describe())
