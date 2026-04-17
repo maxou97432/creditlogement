@@ -1,17 +1,35 @@
-anomalies = df[
-    df["NB_DURATION_IRBA"].round(4) != df["NB_MATURITE_IRBA"].round(4)
+import polars as pl
+
+# Masque des anomalies
+anomalies = df.filter(
+    pl.col("NB_DURATION_IRBA").round(4) != pl.col("NB_MATURITE_IRBA").round(4)
+)
+
+print(f"Nombre d'anomalies : {len(anomalies)}")
+
+# Chercher quelle colonne numérique explique NB_DURATION_IRBA
+cols_numeriques = [
+    c for c, t in zip(df.columns, df.dtypes)
+    if t in (pl.Float64, pl.Float32, pl.Int64, pl.Int32)
+    and c not in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA")
 ]
 
-# Chercher quelle colonne est corrélée à NB_DURATION_IRBA sur ces lignes
-cols_numeriques = df.select_dtypes("number").columns
 for col in cols_numeriques:
-    match = (anomalies[col].round(4) == anomalies["NB_DURATION_IRBA"].round(4)).sum()
-    if match > 100:
-        print(f"{col} : {match} matches sur {len(anomalies)} anomalies")
+    try:
+        n_match = anomalies.filter(
+            pl.col(col).round(4) == pl.col("NB_DURATION_IRBA").round(4)
+        ).height
+        if n_match > 50:
+            print(f"  ✅ {col} : {n_match} / {len(anomalies)} matches")
+    except Exception:
+        pass
 
-# Quel segment/portfolio ?
-print(anomalies["cd_portfolio"].value_counts())
-print(anomalies["PERIM_PD"].value_counts() if "PERIM_PD" in anomalies.columns else "N/A")
+# Profil des anomalies
+print("\ncd_portfolio :")
+print(anomalies["cd_portfolio"].value_counts() if "cd_portfolio" in anomalies.columns else "N/A")
 
-# Les valeurs de DURATION sur les anomalies
+print("\nNB_DURATION_IRBA sur anomalies :")
 print(anomalies["NB_DURATION_IRBA"].describe())
+
+print("\nAperçu :")
+print(anomalies.select(["NB_MATURITE_IRBA", "NB_DURATION_IRBA"]).head(20))
