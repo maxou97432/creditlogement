@@ -1,17 +1,3 @@
-# Test 1 : Est-ce que MATURITE < seuil explique l'absence de floor ?
-print("Distribution NB_MATURITE_IRBA :")
-print("floor_OK :")
-print(floor_ok["NB_MATURITE_IRBA"].describe())
-print("\npas_floor :")
-print(pas_floor["NB_MATURITE_IRBA"].describe())
-
-# Test 2 : Cherche automatiquement une colonne numérique discriminante
-for col in pas_floor.columns:
-    try:
-        mean_pas = pas_floor[col].cast(pl.Float64).mean()
-        mean_ok  = floor_ok[col].cast(pl.Float64).mean()
-        if mean_pas is not None and mean_ok is not None:
-            if abs(mean_pas - mean_ok) / (abs(mean_ok) + 1e-9) > 0.5:  # >50% d'écart
-                print(f"✅ {col} : mean_pas={mean_pas:.4f}, mean_ok={mean_ok:.4f}")
-    except:
-        pass
+# Vérifier NO_PARTITION
+print("floor_OK  NO_PARTITION:", floor_ok["NO_PARTITION"].value_counts())
+print("pas_floor NO_PARTITION:", pas_floor["NO_PARTITION"].value_counts())
