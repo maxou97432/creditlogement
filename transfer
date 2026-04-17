@@ -1,25 +1,15 @@
-# Groupe 1 : MATURITE < 1 ET DURATION = 1.0 (floor appliqué correctement)
-groupe_normal = base.filter(
-    (pl.col("NB_MATURITE_IRBA") < 1.0) &
-    (pl.col("NB_DURATION_IRBA") == 1.0)
+# Vérifier : est-ce que IND_CREDIT_CONFIRME=0 + MATURITE<1 = les anomalies ?
+regle_candidate = base.filter(
+    (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
+    (pl.col("NB_MATURITE_IRBA") < 1.0)
 )
 
-# Groupe 2 : MATURITE < 1 ET DURATION != 1.0 (anomalie - pas de floor)
-groupe_anomalie = base.filter(
-    (pl.col("NB_MATURITE_IRBA") < 1.0) &
-    (pl.col("NB_DURATION_IRBA") != 1.0) &
-    (pl.col("NB_DURATION_IRBA") < 1.0)  # On isole d'abord les DURATION < 1
-)
+print(f"Prédit par la règle IND_CREDIT_CONFIRME=0 + MATURITE<1 : {regle_candidate.height}")
+print(f"Anomalies réelles                                       : {groupe_anomalie.height}")
 
-print(f"Normal (floor OK)  : {groupe_normal.height} lignes")
-print(f"Anomalie (pas floor): {groupe_anomalie.height} lignes")
-
-# Comparer les colonnes catégorielles entre les deux groupes
-for col in ["C_TYPE_AMORT", "Flag_Revolving", "IND_TITRISATION_IRBA", 
-            "IND_TRANSFERT_RISK_IRBA", "IND_CREDIT_CONFIRME"]:
-    if col in base.columns:
-        print(f"\n--- {col} ---")
-        print("NORMAL :")
-        print(groupe_normal[col].value_counts())
-        print("ANOMALIE :")
-        print(groupe_anomalie[col].value_counts())
+# Chevauchement
+match = base.filter(
+    (pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)) &
+    (pl.col("IND_CREDIT_CONFIRME") == 0.0)
+).height
+print(f"Anomalies expliquées par IND_CREDIT_CONFIRME=0 : {match}/{groupe_anomalie.height}")
