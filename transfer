@@ -1,15 +1,19 @@
-# Vérifier : est-ce que IND_CREDIT_CONFIRME=0 + MATURITE<1 = les anomalies ?
-regle_candidate = base.filter(
+# Parmi les IND_CREDIT_CONFIRME=0 + MATURITE<1,
+# qu'est-ce qui différencie ceux qui ont le floor de ceux qui n'ont pas le floor ?
+
+sous_pop = base.filter(
     (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
     (pl.col("NB_MATURITE_IRBA") < 1.0)
+).with_columns(
+    pl.when(pl.col("NB_DURATION_IRBA") == 1.0)
+    .then(pl.lit("floor_OK"))
+    .otherwise(pl.lit("pas_floor"))
+    .alias("groupe")
 )
 
-print(f"Prédit par la règle IND_CREDIT_CONFIRME=0 + MATURITE<1 : {regle_candidate.height}")
-print(f"Anomalies réelles                                       : {groupe_anomalie.height}")
-
-# Chevauchement
-match = base.filter(
-    (pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)) &
-    (pl.col("IND_CREDIT_CONFIRME") == 0.0)
-).height
-print(f"Anomalies expliquées par IND_CREDIT_CONFIRME=0 : {match}/{groupe_anomalie.height}")
+# Chercher la colonne discriminante dans cette sous-population
+for col in ["C_TYPE_AMORT", "Flag_Revolving", "IND_TITRISATION_IRBA", 
+            "IND_TRANSFERT_RISK_IRBA", "cd_portfolio", "PERIM_PD"]:
+    if col in base.columns:
+        print(f"\n--- {col} ---")
+        print(sous_pop.group_by(["groupe", col]).agg(pl.len().alias("n")).sort(["groupe", col]))
