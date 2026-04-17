@@ -1,25 +1,25 @@
-# Identifier les lignes qui ne matchent pas le clip
-non_match = base.filter(
-    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+# Groupe 1 : MATURITE < 1 ET DURATION = 1.0 (floor appliqué correctement)
+groupe_normal = base.filter(
+    (pl.col("NB_MATURITE_IRBA") < 1.0) &
+    (pl.col("NB_DURATION_IRBA") == 1.0)
 )
 
-print(f"Nombre de non-matches : {non_match.height}")
+# Groupe 2 : MATURITE < 1 ET DURATION != 1.0 (anomalie - pas de floor)
+groupe_anomalie = base.filter(
+    (pl.col("NB_MATURITE_IRBA") < 1.0) &
+    (pl.col("NB_DURATION_IRBA") != 1.0) &
+    (pl.col("NB_DURATION_IRBA") < 1.0)  # On isole d'abord les DURATION < 1
+)
 
-# Répartition par type d'amortissement
-print("\nPar C_TYPE_AMORT :")
-print(non_match.group_by("C_TYPE_AMORT").agg([
-    pl.len().alias("n"),
-    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).mean().alias("ecart_moyen"),
-    pl.col("NB_MATURITE_IRBA").mean().alias("maturite_moy"),
-    pl.col("NB_DURATION_IRBA").mean().alias("duration_moy"),
-]).sort("n", descending=True))
+print(f"Normal (floor OK)  : {groupe_normal.height} lignes")
+print(f"Anomalie (pas floor): {groupe_anomalie.height} lignes")
 
-# Les 20 premières lignes pour voir les valeurs
-print("\nAperçu des non-matches :")
-print(non_match.select([
-    "NB_MATURITE_IRBA", 
-    "NB_DURATION_IRBA",
-    "C_TYPE_AMORT",
-    (pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).alias("clip_attendu"),
-    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).alias("ecart")
-]).head(20))
+# Comparer les colonnes catégorielles entre les deux groupes
+for col in ["C_TYPE_AMORT", "Flag_Revolving", "IND_TITRISATION_IRBA", 
+            "IND_TRANSFERT_RISK_IRBA", "IND_CREDIT_CONFIRME"]:
+    if col in base.columns:
+        print(f"\n--- {col} ---")
+        print("NORMAL :")
+        print(groupe_normal[col].value_counts())
+        print("ANOMALIE :")
+        print(groupe_anomalie[col].value_counts())
