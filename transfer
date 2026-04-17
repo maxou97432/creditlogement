@@ -1,17 +1,4 @@
-# Zoom sur Flag_Revolving=0 + IND_CREDIT_CONFIRME=0 + MATURITE<1
-sous_pop2 = base.filter(
-    (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
-    (pl.col("NB_MATURITE_IRBA") < 1.0) &
-    (pl.col("Flag_Revolving") == 0.0)
-).with_columns(
-    pl.when(pl.col("NB_DURATION_IRBA") == 1.0)
-    .then(pl.lit("floor_OK"))
-    .otherwise(pl.lit("pas_floor"))
-    .alias("groupe")
-)
-
-for col in ["C_TYPE_AMORT", "cd_portfolio", "PERIM_PD", 
-            "IND_TITRISATION_IRBA", "IND_TRANSFERT_RISK_IRBA"]:
+for col in ["C_TYPE_AMORT", "cd_portfolio", "PERIM_PD"]:
     if col in base.columns:
         print(f"\n--- {col} ---")
         print(sous_pop2.group_by(["groupe", col]).agg(pl.len().alias("n")).sort(["groupe", col]))
