@@ -1,5 +1,25 @@
-n_ok = base.filter(
-    pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
-).height
+# Identifier les lignes qui ne matchent pas le clip
+non_match = base.filter(
+    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+)
 
-print(f"Confirmé par clip : {n_ok} / {base.height} ({100*n_ok/base.height:.1f}%)")
+print(f"Nombre de non-matches : {non_match.height}")
+
+# Répartition par type d'amortissement
+print("\nPar C_TYPE_AMORT :")
+print(non_match.group_by("C_TYPE_AMORT").agg([
+    pl.len().alias("n"),
+    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).mean().alias("ecart_moyen"),
+    pl.col("NB_MATURITE_IRBA").mean().alias("maturite_moy"),
+    pl.col("NB_DURATION_IRBA").mean().alias("duration_moy"),
+]).sort("n", descending=True))
+
+# Les 20 premières lignes pour voir les valeurs
+print("\nAperçu des non-matches :")
+print(non_match.select([
+    "NB_MATURITE_IRBA", 
+    "NB_DURATION_IRBA",
+    "C_TYPE_AMORT",
+    (pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).alias("clip_attendu"),
+    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).alias("ecart")
+]).head(20))
