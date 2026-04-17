@@ -1,6 +1,10 @@
-print(vrais_anomalies["NB_DURATION_IRBA"].describe())
-print(vrais_anomalies["NB_DURATION_IRBA"].value_counts().head(10))
+anomalies = df[
+    df["NB_DURATION_IRBA"].round(4) != df["NB_MATURITE_IRBA"].round(4)
+]
 
-print(vrais_anomalies[["NB_MATURITE_IRBA", "NB_DURATION_IRBA"]].describe())
-# Et quelques exemples concrets :
-print(vrais_anomalies[["NB_MATURITE_IRBA", "NB_DURATION_IRBA"]].head(20))
+# Chercher quelle colonne est corrélée à NB_DURATION_IRBA sur ces lignes
+cols_numeriques = df.select_dtypes("number").columns
+for col in cols_numeriques:
+    match = (anomalies[col].round(4) == anomalies["NB_DURATION_IRBA"].round(4)).sum()
+    if match > 100:
+        print(f"{col} : {match} matches sur {len(anomalies)} anomalies")
