@@ -6,39 +6,75 @@ normales = base.filter(
     pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
 )
 
+skip_cols = {"NB_DURATION_IRBA", "NB_MATURITE_IRBA", "TEST_DURATION",
+             "DURATION_CALC", "NB_DURATION_IRBA_Auto", "NB_MATURITE_IRBA_Auto"}
+
 print(f"Anomalies : {anomalies.height} | Normales : {normales.height}")
+print(f"Nb colonnes testées : {len([c for c in base.columns if c not in skip_cols])}\n")
 
-# ── Test sur colonnes catégorielles (string) ───────────────────────
-print("\n=== COLONNES CATÉGORIELLES ===")
-cols_str = [c for c, t in zip(base.columns, base.dtypes) if t == pl.String or t == pl.Utf8]
+resultats = []
 
-for col in cols_str:
-    vals_anom   = set(anomalies[col].drop_nulls().unique().to_list())
-    vals_normal = set(normales[col].drop_nulls().unique().to_list())
-    
-    only_in_anom   = vals_anom - vals_normal    # valeurs UNIQUEMENT dans anomalies
-    only_in_normal = vals_normal - vals_anom    # valeurs UNIQUEMENT dans normales
-    
-    if only_in_anom:
-        pct = anomalies.filter(pl.col(col).is_in(list(only_in_anom))).height / anomalies.height
-        print(f"✅ {col}: valeur(s) {only_in_anom} présentes UNIQUEMENT dans anomalies ({pct:.1%})")
-
-# ── Test sur colonnes numériques (seuil) ───────────────────────────
-print("\n=== COLONNES NUMÉRIQUES ===")
-cols_num = [c for c, t in zip(base.columns, base.dtypes) 
-            if t in (pl.Float64, pl.Float32, pl.Int32, pl.Int64)
-            and c not in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA", "TEST_DURATION", "DURATION_CALC")]
-
-for col in cols_num:
+for col in base.columns:
+    if col in skip_cols:
+        continue
     try:
-        max_anom = anomalies[col].max()
-        min_anom = anomalies[col].min()
-        max_norm = normales[col].max()
-        min_norm = normales[col].min()
-        
-        # Vérifier si les ranges ne se chevauchent pas
-        if max_anom is not None and min_norm is not None:
-            if max_anom < min_norm or max_norm < min_anom:
-                print(f"✅ {col}: range anomalies [{min_anom}, {max_anom}] ne chevauche pas normales [{min_norm}, {max_norm}]")
-    except:
+        dtype = base[col].dtype
+
+        # ── Cas catégoriel / string / booléen ─────────────────────
+        if dtype in (pl.String, pl.Utf8, pl.Boolean, pl.Categorical) or dtype.is_integer():
+            # Inclure "null" comme valeur possible
+            def get_vals(df, c):
+                vals = set(df[c].drop_nulls().unique().to_list())
+                if df[c].null_count() > 0:
+                    vals.add("__NULL__")
+                return vals
+
+            vals_anom   = get_vals(anomalies, col)
+            vals_normal = get_vals(normales, col)
+
+            only_in_anom   = vals_anom - vals_normal
+            only_in_normal = vals_normal - vals_anom
+
+            if only_in_anom:
+                # Combien d'anomalies sont couvertes ?
+                mask = pl.col(col).is_null() if "__NULL__" in only_in_anom else pl.col(col).is_in([v for v in only_in_anom if v != "__NULL__"])
+                if "__NULL__" in only_in_anom and len(only_in_anom) > 1:
+                    mask = mask | pl.col(col).is_null()
+                n_couvert = anomalies.filter(mask).height
+                pct = n_couvert / anomalies.height
+                resultats.append((col, f"valeur(s) {only_in_anom} UNIQUEMENT dans anomalies", pct))
+
+            if only_in_normal and len(only_in_normal) <= 3:
+                # Est-ce que TOUTES les anomalies sont dans le complément ?
+                mask_anom_has_normal_vals = pl.col(col).is_in([v for v in only_in_normal if v != "__NULL__"])
+                n = anomalies.filter(mask_anom_has_normal_vals).height
+                if n == 0:
+                    pct_explained = normales.filter(pl.col(col).is_in([v for v in only_in_normal if v != "__NULL__"])).height / normales.height
+                    resultats.append((col, f"valeur(s) {only_in_normal} UNIQUEMENT dans normales → anomalies n'ont jamais ces valeurs", pct_explained))
+
+        # ── Cas numérique float ────────────────────────────────────
+        elif dtype in (pl.Float64, pl.Float32):
+            # Null comme discriminant ?
+            null_pct_anom = anomalies[col].null_count() / anomalies.height
+            null_pct_norm = normales[col].null_count() / normales.height
+            if abs(null_pct_anom - null_pct_norm) > 0.9:
+                resultats.append((col, f"null: {null_pct_anom:.0%} anomalies vs {null_pct_norm:.0%} normales", abs(null_pct_anom - null_pct_norm)))
+
+            # Range sans chevauchement ?
+            max_a, min_a = anomalies[col].max(), anomalies[col].min()
+            max_n, min_n = normales[col].max(), normales[col].min()
+            if None not in (max_a, min_a, max_n, min_n):
+                if max_a < min_n or max_n < min_a:
+                    resultats.append((col, f"ranges disjoints: anom=[{min_a:.3f},{max_a:.3f}] norm=[{min_n:.3f},{max_n:.3f}]", 1.0))
+
+    except Exception as e:
         pass
+
+# ── Affichage des résultats ────────────────────────────────────────
+if resultats:
+    print("=== COLONNES DISCRIMINANTES TROUVÉES ===")
+    for col, desc, score in sorted(resultats, key=lambda x: -x[2]):
+        print(f"  ✅ {col} ({score:.1%}) : {desc}")
+else:
+    print("❌ Aucune colonne seule ne discrimine parfaitement les anomalies.")
+    print("→ La règle est probablement une combinaison de conditions ou dans le code SAS source.")
