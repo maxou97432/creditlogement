@@ -1,35 +1,32 @@
-import polars as pl
+# On suppose NB_MATURITE_IRBA en années, T_INTRT en centièmes de %
+N = pl.col("NB_MATURITE_IRBA").cast(pl.Float64)
+r = pl.col("T_INTRT").cast(pl.Float64) / 10000.0   # centièmes de % → décimal
 
-# Masque des anomalies
-anomalies = df.filter(
-    pl.col("NB_DURATION_IRBA").round(4) != pl.col("NB_MATURITE_IRBA").round(4)
-)
+# Formules Bâle II par type
+m1 = (N + 1) / 2 * (1 + r * (N + 2) / 3) / (1 + r * (N + 1) / 2)   # Linéaire
+m2 = N / 3                                                              # Dégressif (approx)
+m3 = (N + 1) / 2                                                        # Progressif (exact)
+m4 = N * (1 + r * (N + 1) / 2) / (1 + N * r)                          # Bullet
+m9 = N                                                                  # Autre
 
-print(f"Nombre d'anomalies : {len(anomalies)}")
+duration_calculee = (
+    pl.when(pl.col("C_TYPE_AMORT") == 1).then(m1)
+    .when(pl.col("C_TYPE_AMORT") == 2).then(m2)
+    .when(pl.col("C_TYPE_AMORT") == 3).then(m3)
+    .when(pl.col("C_TYPE_AMORT") == 4).then(m4)
+    .when(pl.col("C_TYPE_AMORT") == 9).then(m9)
+    .otherwise(N)
+).clip(1.0, 5.0)
 
-# Chercher quelle colonne numérique explique NB_DURATION_IRBA
-cols_numeriques = [
-    c for c, t in zip(df.columns, df.dtypes)
-    if t in (pl.Float64, pl.Float32, pl.Int64, pl.Int32)
-    and c not in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA")
-]
+# Ajout dans le dataframe
+base = base.with_columns(duration_calculee.alias("DURATION_CALC"))
 
-for col in cols_numeriques:
-    try:
-        n_match = anomalies.filter(
-            pl.col(col).round(4) == pl.col("NB_DURATION_IRBA").round(4)
-        ).height
-        if n_match > 50:
-            print(f"  ✅ {col} : {n_match} / {len(anomalies)} matches")
-    except Exception:
-        pass
+# Comparaison avec NB_DURATION_IRBA
+diff = pl.col("NB_DURATION_IRBA") - pl.col("DURATION_CALC")
+base = base.with_columns(diff.alias("DIFF_BALE2"))
 
-# Profil des anomalies
-print("\ncd_portfolio :")
-print(anomalies["cd_portfolio"].value_counts() if "cd_portfolio" in anomalies.columns else "N/A")
-
-print("\nNB_DURATION_IRBA sur anomalies :")
-print(anomalies["NB_DURATION_IRBA"].describe())
-
-print("\nAperçu :")
-print(anomalies.select(["NB_MATURITE_IRBA", "NB_DURATION_IRBA"]).head(20))
+print("Somme des écarts (si 0 → formule parfaite) :", base["DIFF_BALE2"].sum())
+print("Ecart absolu moyen                          :", base["DIFF_BALE2"].abs().mean())
+print("Nb de lignes exactes (écart < 0.01)         :", 
+      base.filter(pl.col("DIFF_BALE2").abs() < 0.01).height)
+print("Nb de lignes total                          :", base.height)
