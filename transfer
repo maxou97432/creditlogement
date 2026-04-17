@@ -1,15 +1,44 @@
-# Les lignes normales (floor appliqué correctement)
+# ── Préparer les deux groupes ──────────────────────────────────────
+anomalies = base.filter(
+    pl.col("NB_DURATION_IRBA").round(3) != pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+)
 normales = base.filter(
     pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
 )
 
-# Parmi les normales, combien ont les mêmes caractéristiques que les anomalies ?
-normales_meme_profil = normales.filter(
-    (pl.col("Flag_Revolving") == 0.0) &
-    (pl.col("IND_CREDIT_CONFIRME") == 0.0) &
-    (pl.col("NB_MATURITE_IRBA") < 1.0)
-)
+print(f"Anomalies : {anomalies.height} | Normales : {normales.height}")
 
-print(f"Lignes normales totales                          : {normales.height}")
-print(f"Lignes normales avec même profil (FlagRev=0, ICC=0, Mat<1) : {normales_meme_profil.height}")
-print(f"% des normales avec ce profil                    : {normales_meme_profil.height/normales.height*100:.1f}%")
+# ── Test sur colonnes catégorielles (string) ───────────────────────
+print("\n=== COLONNES CATÉGORIELLES ===")
+cols_str = [c for c, t in zip(base.columns, base.dtypes) if t == pl.String or t == pl.Utf8]
+
+for col in cols_str:
+    vals_anom   = set(anomalies[col].drop_nulls().unique().to_list())
+    vals_normal = set(normales[col].drop_nulls().unique().to_list())
+    
+    only_in_anom   = vals_anom - vals_normal    # valeurs UNIQUEMENT dans anomalies
+    only_in_normal = vals_normal - vals_anom    # valeurs UNIQUEMENT dans normales
+    
+    if only_in_anom:
+        pct = anomalies.filter(pl.col(col).is_in(list(only_in_anom))).height / anomalies.height
+        print(f"✅ {col}: valeur(s) {only_in_anom} présentes UNIQUEMENT dans anomalies ({pct:.1%})")
+
+# ── Test sur colonnes numériques (seuil) ───────────────────────────
+print("\n=== COLONNES NUMÉRIQUES ===")
+cols_num = [c for c, t in zip(base.columns, base.dtypes) 
+            if t in (pl.Float64, pl.Float32, pl.Int32, pl.Int64)
+            and c not in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA", "TEST_DURATION", "DURATION_CALC")]
+
+for col in cols_num:
+    try:
+        max_anom = anomalies[col].max()
+        min_anom = anomalies[col].min()
+        max_norm = normales[col].max()
+        min_norm = normales[col].min()
+        
+        # Vérifier si les ranges ne se chevauchent pas
+        if max_anom is not None and min_norm is not None:
+            if max_anom < min_norm or max_norm < min_anom:
+                print(f"✅ {col}: range anomalies [{min_anom}, {max_anom}] ne chevauche pas normales [{min_norm}, {max_norm}]")
+    except:
+        pass
