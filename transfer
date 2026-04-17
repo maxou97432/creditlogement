@@ -1,3 +1,13 @@
-# Vérifier NO_PARTITION
-print("floor_OK  NO_PARTITION:", floor_ok["NO_PARTITION"].value_counts())
-print("pas_floor NO_PARTITION:", pas_floor["NO_PARTITION"].value_counts())
+# Les dates peuvent révéler un batch différent
+cols_dates = [c for c in sous_pop2.columns if "DT" in c or "DATE" in c.upper()]
+print("Colonnes dates :", cols_dates)
+
+for col in cols_dates[:5]:
+    print(f"\n--- {col} ---")
+    print("floor_OK :", floor_ok[col].value_counts().sort("count", descending=True).head(3))
+    print("pas_floor :", pas_floor[col].value_counts().sort("count", descending=True).head(3))
+
+
+# Ranges d'IDs
+print("floor_OK  SK_FAC  - min/max:", floor_ok["SK_FAC"].min(), "/", floor_ok["SK_FAC"].max())
+print("pas_floor SK_FAC  - min/max:", pas_floor["SK_FAC"].min(), "/", pas_floor["SK_FAC"].max())
