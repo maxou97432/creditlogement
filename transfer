@@ -1,22 +1,5 @@
-N = pl.col("NB_MATURITE_IRBA").cast(pl.Float64)
+n_ok = base.filter(
+    pl.col("NB_DURATION_IRBA").round(3) == pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).round(3)
+).height
 
-# Formules r=0 (approximations sauf type 3 qui est exacte)
-duration_calc_sans_r = (
-    pl.when(pl.col("C_TYPE_AMORT") == 1).then((N + 1) / 2)   # approx (r=0)
-    .when(pl.col("C_TYPE_AMORT") == 2).then(N / 3)            # approx
-    .when(pl.col("C_TYPE_AMORT") == 3).then((N + 1) / 2)      # EXACT
-    .when(pl.col("C_TYPE_AMORT") == 4).then(N)                 # approx (r=0)
-    .when(pl.col("C_TYPE_AMORT") == 9).then(N)
-    .otherwise(N)
-).clip(1.0, 5.0)
-
-base = base.with_columns(duration_calc_sans_r.alias("DURATION_CALC"))
-
-# Résultats globaux
-print("Somme écarts :", (base["NB_DURATION_IRBA"] - base["DURATION_CALC"]).sum())
-
-# Résultats par type d'amortissement
-print(base.group_by("C_TYPE_AMORT").agg([
-    (pl.col("NB_DURATION_IRBA") - pl.col("DURATION_CALC")).abs().mean().alias("ecart_moyen"),
-    pl.len().alias("n")
-]).sort("C_TYPE_AMORT"))
+print(f"Confirmé par clip : {n_ok} / {base.height} ({100*n_ok/base.height:.1f}%)")
