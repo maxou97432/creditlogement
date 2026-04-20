@@ -1,13 +1,210 @@
-# Crée une colonne avec la différence de RWA entre Python et SAS
-verification = result.with_columns(
-    (pl.col('RWA_init').fill_null(0) - pl.col('RWA_Reboot').fill_null(0)).alias('diff_RWA')
+import polars as pl
+import numpy as np
+
+# ─────────────────────────────────────────────────────────────
+# 0. CHARGEMENT — adapte les noms de fichier / colonnes
+# ─────────────────────────────────────────────────────────────
+df = pl.read_parquet("rwa_irba.parquet")   # ou read_csv(...)
+
+# Colonnes attendues (à adapter selon ton schéma réel) :
+# NB_MATURITE_IRBA, NB_DURATION_IRBA,
+# RWA_IRBA, EAD_IRBA,
+# EAD_BILAN, EAD_HORSBI,          ← composantes de l'EAD
+# CCF,                             ← facteur de conversion hors-bilan
+# PD_IRBA, LGD_IRBA,
+# IND_CREDIT_CONFIRME, Flag_Revolving, PORTEFEUILLE
+# INSTRUMENT_TYPE (optionnel)
+
+# ─────────────────────────────────────────────────────────────
+# 1. SEGMENTATION anomalies vs normales
+# ─────────────────────────────────────────────────────────────
+df = df.with_columns([
+    pl.when(
+        (pl.col("NB_MATURITE_IRBA") < 1.0) &
+        (pl.col("NB_DURATION_IRBA") == pl.col("NB_MATURITE_IRBA"))
+    )
+    .then(pl.lit("ANOMALIE"))          # pas de floor → duration = maturité contractuelle
+    .otherwise(pl.lit("NORMAL"))
+    .alias("SEGMENT"),
+])
+
+anomalies = df.filter(pl.col("SEGMENT") == "ANOMALIE")
+normales   = df.filter(
+    (pl.col("SEGMENT") == "NORMAL") &
+    (pl.col("IND_CREDIT_CONFIRME") == 0) &
+    (pl.col("Flag_Revolving") == 0) &
+    (pl.col("PORTEFEUILLE") == "Corporate")
 )
 
-# Filtre sur les lignes avec un gros écart et affiche les coupables
-coupables = verification.filter(pl.col('diff_RWA').abs() > 1000)
+print(f"Anomalies : {len(anomalies):,}   Normales (même profil) : {len(normales):,}")
 
-print(f"Nombre de lignes avec gros écart : {coupables.height}")
-print("\Aperçu des lignes coupables :")
-print(coupables.select(
-    ["duration", "RWA_init", "RWA_Reboot", "cd_portfolio", "EAD_IRBA", "diff_RWA"]
-).sort("diff_RWA", descending=True).head(10))
+# ─────────────────────────────────────────────────────────────
+# 2. DÉCOMPOSITION EAD
+#    Hypothèse : EAD = EAD_BILAN + CCF × MONTANT_NON_TIRE
+#    Si MONTANT_NON_TIRE absent, on approxime via EAD_HORSBI
+# ─────────────────────────────────────────────────────────────
+df = df.with_columns([
+    (pl.col("EAD_HORSBI") / pl.col("EAD_IRBA").replace(0, None))
+        .alias("SHARE_HORSBI"),        # part hors-bilan dans l'EAD total
+    (pl.col("EAD_BILAN")  / pl.col("EAD_IRBA").replace(0, None))
+        .alias("SHARE_BILAN"),
+    (pl.col("RWA_IRBA")   / pl.col("EAD_IRBA").replace(0, None))
+        .alias("RW_BRUT"),             # Risk Weight = RWA / EAD
+])
+
+def describe_segment(seg_df: pl.DataFrame, label: str) -> None:
+    """Statistiques descriptives clés par segment."""
+    print(f"\n{'='*60}")
+    print(f"  SEGMENT : {label}  (n={len(seg_df):,})")
+    print(f"{'='*60}")
+
+    num_cols = [
+        "NB_MATURITE_IRBA", "NB_DURATION_IRBA",
+        "EAD_IRBA", "EAD_BILAN", "EAD_HORSBI",
+        "SHARE_HORSBI", "CCF",
+        "PD_IRBA", "LGD_IRBA", "RW_BRUT",
+    ]
+    # garde seulement les colonnes qui existent
+    num_cols = [c for c in num_cols if c in seg_df.columns]
+
+    stats = (
+        seg_df.select(num_cols)
+        .describe()
+        .filter(pl.col("statistic").is_in(["mean", "50%", "min", "max", "std"]))
+    )
+    print(stats)
+
+describe_segment(anomalies, "ANOMALIE (pas de floor)")
+describe_segment(normales,  "NORMAL   (floor appliqué, même profil)")
+
+# ─────────────────────────────────────────────────────────────
+# 3. TEST CLÉ : EAD_HORSBI = 0 est-il le discriminant ?
+# ─────────────────────────────────────────────────────────────
+print("\n\n>>> TEST : répartition EAD_HORSBI = 0")
+
+for label, seg in [("ANOMALIE", anomalies), ("NORMAL", normales)]:
+    zero_hb = seg.filter(pl.col("EAD_HORSBI") == 0.0)
+    pct = 100 * len(zero_hb) / max(len(seg), 1)
+    print(f"  {label} : EAD_HORSBI=0  →  {len(zero_hb):,} / {len(seg):,}  ({pct:.1f}%)")
+
+# ─────────────────────────────────────────────────────────────
+# 4. TEST CCF : distribution des CCF dans chaque segment
+# ─────────────────────────────────────────────────────────────
+if "CCF" in df.columns:
+    print("\n\n>>> Distribution CCF par segment")
+    ccf_dist = (
+        df.filter(
+            (pl.col("IND_CREDIT_CONFIRME") == 0) &
+            (pl.col("Flag_Revolving") == 0) &
+            (pl.col("PORTEFEUILLE") == "Corporate")
+        )
+        .group_by(["SEGMENT", "CCF"])
+        .agg(pl.count().alias("N"))
+        .sort(["SEGMENT", "CCF"])
+    )
+    print(ccf_dist)
+
+# ─────────────────────────────────────────────────────────────
+# 5. CROSSTAB SEGMENT × (EAD_HORSBI = 0)
+#    Si le discriminant est EAD_HORSBI = 0, la matrice doit être
+#    quasi-diagonale : anomalies ↔ HORSBI=0 ; normales ↔ HORSBI>0
+# ─────────────────────────────────────────────────────────────
+pop_corporate = df.filter(
+    (pl.col("IND_CREDIT_CONFIRME") == 0) &
+    (pl.col("Flag_Revolving") == 0) &
+    (pl.col("PORTEFEUILLE") == "Corporate")
+).with_columns(
+    (pl.col("EAD_HORSBI") == 0.0).alias("HORSBI_NUL")
+)
+
+crosstab = (
+    pop_corporate
+    .group_by(["SEGMENT", "HORSBI_NUL"])
+    .agg(pl.count().alias("N"))
+    .sort(["SEGMENT", "HORSBI_NUL"])
+)
+print("\n\n>>> Crosstab SEGMENT × (EAD_HORSBI == 0)")
+print(crosstab)
+
+# Précision / rappel du discriminant EAD_HORSBI=0 → ANOMALIE
+tp = len(anomalies.filter(pl.col("EAD_HORSBI") == 0.0))
+fp = len(normales.filter(pl.col("EAD_HORSBI") == 0.0))
+fn = len(anomalies.filter(pl.col("EAD_HORSBI") != 0.0))
+precision = tp / max(tp + fp, 1)
+recall    = tp / max(tp + fn, 1)
+print(f"\n  Précision  (HORSBI=0 → ANOMALIE) : {precision:.3f}")
+print(f"  Rappel     (ANOMALIE → HORSBI=0)  : {recall:.3f}")
+
+# ─────────────────────────────────────────────────────────────
+# 6. SI HORSBI_NUL n'est pas parfait : chercher d'autres axes
+# ─────────────────────────────────────────────────────────────
+# Ratio tiré : BILAN / LIMITE_CREDIT (si disponible)
+for col in ["LIMITE_CREDIT", "MONTANT_AUTORISE", "LIGNE_CREDIT"]:
+    if col in df.columns:
+        pop_corporate = pop_corporate.with_columns(
+            (pl.col("EAD_BILAN") / pl.col(col).replace(0, None))
+            .alias("TAUX_TIRAGE")
+        )
+        print(f"\n>>> Taux de tirage (EAD_BILAN / {col}) par segment")
+        print(
+            pop_corporate
+            .group_by("SEGMENT")
+            .agg(
+                pl.col("TAUX_TIRAGE").mean().alias("mean_tirage"),
+                pl.col("TAUX_TIRAGE").median().alias("med_tirage"),
+                (pl.col("TAUX_TIRAGE") >= 0.99).sum().alias("n_100pct_tire"),
+            )
+        )
+
+# ─────────────────────────────────────────────────────────────
+# 7. VÉRIFICATION RÈGLE CANDIDATE
+#    Simule la règle SAS supposée et calcule le taux de match
+# ─────────────────────────────────────────────────────────────
+df = df.with_columns(
+    pl.when(
+        (pl.col("IND_CREDIT_CONFIRME") == 0) &
+        (pl.col("Flag_Revolving") == 0) &
+        (pl.col("PORTEFEUILLE") == "Corporate") &
+        (pl.col("EAD_HORSBI") == 0.0)            # ← condition testée
+    )
+    .then(pl.col("NB_MATURITE_IRBA"))             # pas de floor
+    .otherwise(
+        pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0) # floor standard
+    )
+    .alias("NB_DURATION_SIMULE")
+)
+
+match = (
+    (df["NB_DURATION_SIMULE"] - df["NB_DURATION_IRBA"]).abs() < 1e-6
+).sum()
+total = len(df)
+print(f"\n\n>>> Taux de réplication avec règle EAD_HORSBI=0 : "
+      f"{match:,} / {total:,}  ({100*match/total:.2f}%)")
+
+# ─────────────────────────────────────────────────────────────
+# 8. LIGNES ENCORE MAL RÉPLIQUÉES — export pour investigation
+# ─────────────────────────────────────────────────────────────
+residus = df.filter(
+    (pl.col("NB_DURATION_SIMULE") - pl.col("NB_DURATION_IRBA")).abs() >= 1e-6
+)
+print(f"\n  Résidus non répliqués : {len(residus):,}")
+
+if len(residus) > 0:
+    residus.write_csv("residus_duration.csv")
+    print("  → export : residus_duration.csv")
+
+    # Profils les plus fréquents parmi les résidus
+    profil_cols = [c for c in [
+        "PORTEFEUILLE", "IND_CREDIT_CONFIRME", "Flag_Revolving",
+        "INSTRUMENT_TYPE", "CCF", "HORSBI_NUL"
+    ] if c in residus.columns]
+
+    if profil_cols:
+        print("\n  Top profils résiduels :")
+        print(
+            residus
+            .group_by(profil_cols)
+            .agg(pl.count().alias("N"))
+            .sort("N", descending=True)
+            .head(20)
+        )
