@@ -1,34 +1,39 @@
-# Cherche les colonnes dates
-date_cols = [c for c in df.columns if any(k in c.upper() for k in 
-             ["DATE", "DT_", "_DT", "DEBUT", "FIN", "ECH", "ORIG", "MISE"])]
-print(date_cols)
+# 3) Pour chaque CD_PORTFOLIO, trouver la colonne qui explique NB_DURATION_IRBA
+print("\n>>> Colonne source de NB_DURATION_IRBA par CD_PORTFOLIO")
 
-# Une fois identifiées (ex : DT_MISE_PLACE et DT_ECHEANCE) :
-df = df.with_columns(
-    ((pl.col("DT_ECHEANCE") - pl.col("DT_MISE_PLACE")).dt.total_days() / 365.25)
-    .alias("MATURITE_ORIGINELLE")
-)
-
-pop = df.filter(
-    (pl.col("IND_CREDIT_CONFIRME") == 0) &
-    (pl.col("Flag_Revolving") == 0) &
-    (pl.col("PORTEFEUILLE") == "Corporate")
-)
-
-# Distribution comparée
-print(
-    pop.group_by("SEGMENT").agg(
-        pl.col("MATURITE_ORIGINELLE").mean().alias("mat_orig_mean"),
-        pl.col("MATURITE_ORIGINELLE").median().alias("mat_orig_median"),
-        (pl.col("MATURITE_ORIGINELLE") < 1.0).sum().alias("n_mat_orig_lt_1y"),
-        pl.count().alias("N"),
-    )
-)
-
-# Test discriminant
-pop = pop.with_columns((pl.col("MATURITE_ORIGINELLE") < 1.0).alias("COURT_TERME_ORIG"))
-print(
-    pop.group_by(["SEGMENT", "COURT_TERME_ORIG"])
-    .agg(pl.count().alias("N"))
-    .sort(["SEGMENT", "COURT_TERME_ORIG"])
-)
+for ptf in df["CD_PORTFOLIO"].unique().to_list():
+    sub = df.filter(pl.col("CD_PORTFOLIO") == ptf)
+    if len(sub) < 50:
+        continue
+    
+    print(f"\n  ── CD_PORTFOLIO = {ptf!r}  (n={len(sub):,}) ──")
+    
+    # Test 1 : NB_DURATION_IRBA == clip(NB_MATURITE_IRBA, 1, 5) ?
+    match_clip = (
+        (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"].clip(1.0, 5.0)).abs() < 1e-6
+    ).sum()
+    print(f"    clip(NB_MATURITE_IRBA, 1, 5)     : {match_clip:,} / {len(sub):,}")
+    
+    # Test 2 : NB_DURATION_IRBA == NB_MATURITE_IRBA brute (sans floor) ?
+    match_raw = (
+        (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"]).abs() < 1e-6
+    ).sum()
+    print(f"    NB_MATURITE_IRBA brute (no floor): {match_raw:,} / {len(sub):,}")
+    
+    # Test 3 : toute autre colonne candidate ?
+    for col in mat_like:
+        if col in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA"): 
+            continue
+        if col not in sub.columns: 
+            continue
+        try:
+            match_col = (
+                (sub["NB_DURATION_IRBA"] - sub[col]).abs() < 1e-6
+            ).sum()
+            match_col_clip = (
+                (sub["NB_DURATION_IRBA"] - sub[col].clip(1.0, 5.0)).abs() < 1e-6
+            ).sum()
+            if match_col > 0.5 * len(sub) or match_col_clip > 0.5 * len(sub):
+                print(f"    {col:30s} brute={match_col:,}  clip={match_col_clip:,}")
+        except:
+            pass
