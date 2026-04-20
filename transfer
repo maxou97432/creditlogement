@@ -1,39 +1,59 @@
 import polars as pl
 
-# Segment ANOMALIE déjà défini au script précédent
 pop = df.filter(pl.col("CD_PORTFOLIO") == "Corporate")
 
-# 1) Distribution du flag par SEGMENT
-print(">>> IND_EXPO_SHOR_TERM × SEGMENT (Corporate uniquement)")
+# Résidus : ni clip ni brute ne matchent
+resid = pop.filter(
+    ((pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).abs() >= 1e-6) &
+    ((pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA")).abs() >= 1e-6)
+)
+
+print(f"Résidus Corporate : {len(resid):,}")
+
+# 1) Distribution de NB_DURATION_IRBA dans les résidus
+print("\n>>> Top valeurs de NB_DURATION_IRBA dans les résidus")
 print(
-    pop.group_by(["SEGMENT", "IND_EXPO_SHOR_TERM"])
+    resid.group_by("NB_DURATION_IRBA")
     .agg(pl.len().alias("N"))
-    .sort(["SEGMENT", "IND_EXPO_SHOR_TERM"])
+    .sort("N", descending=True)
+    .head(20)
 )
 
-# 2) Règle candidate : 
-#    SI IND_EXPO_SHOR_TERM = 1  → pas de floor (duration = maturité brute)
-#    SINON                       → clip(maturité, 1, 5)
-pop = pop.with_columns(
-    pl.when(pl.col("IND_EXPO_SHOR_TERM") == 1)
-    .then(pl.col("NB_MATURITE_IRBA"))
-    .otherwise(pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0))
-    .alias("NB_DURATION_SIMULE")
-)
+# 2) Relation NB_MATURITE vs NB_DURATION dans les résidus
+print("\n>>> Statistiques NB_MATURITE_IRBA vs NB_DURATION_IRBA (résidus)")
+print(resid.select([
+    pl.col("NB_MATURITE_IRBA").min().alias("mat_min"),
+    pl.col("NB_MATURITE_IRBA").max().alias("mat_max"),
+    pl.col("NB_MATURITE_IRBA").mean().alias("mat_mean"),
+    pl.col("NB_DURATION_IRBA").min().alias("dur_min"),
+    pl.col("NB_DURATION_IRBA").max().alias("dur_max"),
+    pl.col("NB_DURATION_IRBA").mean().alias("dur_mean"),
+]))
 
-# 3) Taux de réplication
-match = ((pop["NB_DURATION_SIMULE"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
-total = len(pop)
-print(f"\n>>> Taux de réplication Corporate avec IND_EXPO_SHOR_TERM : "
-      f"{match:,} / {total:,}  ({100*match/total:.2f}%)")
+# 3) Valeurs constantes suspectes (2.5 = défaut Bâle)
+for const in [2.5, 0.5, 1.0, 3.0, 5.0]:
+    n = (resid["NB_DURATION_IRBA"] == const).sum()
+    if n > 0:
+        print(f"  NB_DURATION_IRBA == {const}  →  {n:,} lignes")
 
-# 4) Résidus résiduels (si < 100%)
-residus = pop.filter(
-    (pl.col("NB_DURATION_SIMULE") - pl.col("NB_DURATION_IRBA")).abs() >= 1e-6
-)
-if len(residus) > 0:
-    print(f"\n>>> Résidus : {len(residus):,}")
-    print(residus.select([
-        "NB_MATURITE_IRBA", "NB_DURATION_IRBA", "NB_DURATION_SIMULE",
-        "IND_EXPO_SHOR_TERM"
-    ]).head(20))
+# 4) Relations linéaires simples
+resid = resid.with_columns([
+    (pl.col("NB_DURATION_IRBA") / pl.col("NB_MATURITE_IRBA").replace(0, None))
+        .alias("ratio_dur_mat"),
+    (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA"))
+        .alias("diff_dur_mat"),
+])
+
+print("\n>>> Ratios et différences dans les résidus")
+print(resid.select([
+    pl.col("ratio_dur_mat").median().alias("ratio_median"),
+    pl.col("diff_dur_mat").median().alias("diff_median"),
+    pl.col("diff_dur_mat").mode().first().alias("diff_mode"),
+]))
+
+# 5) Top 20 lignes pour inspection visuelle
+print("\n>>> 20 résidus pour inspection manuelle")
+print(resid.select([
+    "NB_MATURITE_IRBA", "NB_DURATION_IRBA",
+    "IND_EXPO_SHOR_TERM", "IND_CREDIT_CONFIRME", "Flag_Revolving",
+]).head(20))
