@@ -1,30 +1,57 @@
-# 3) Pour chaque CD_PORTFOLIO, trouver la colonne qui explique NB_DURATION_IRBA
+import polars as pl
+
+# ─── Pré-requis : df doit contenir la colonne SEGMENT ───
+# Si pas encore créée :
+if "SEGMENT" not in df.columns:
+    df = df.with_columns(
+        pl.when(
+            (pl.col("NB_MATURITE_IRBA") < 1.0) &
+            (pl.col("NB_DURATION_IRBA") == pl.col("NB_MATURITE_IRBA"))
+        )
+        .then(pl.lit("ANOMALIE"))
+        .otherwise(pl.lit("NORMAL"))
+        .alias("SEGMENT")
+    )
+
+# ─── 1) Colonnes candidates "maturité" ───────────────────
+mat_like = [c for c in df.columns if any(k in c.upper() for k in [
+    "MATUR", "DUREE", "ECH", "TERM", "NB_MOIS", "NB_ANNEE", "NB_JOUR",
+    "RESID", "ORIG", "CONTRAT"
+])]
+print("Colonnes maturité candidates :", mat_like)
+
+# ─── 2) Distribution CD_PORTFOLIO × SEGMENT ──────────────
+print("\n>>> CD_PORTFOLIO × SEGMENT")
+print(
+    df.group_by(["CD_PORTFOLIO", "SEGMENT"])
+    .agg(pl.count().alias("N"))
+    .sort(["CD_PORTFOLIO", "SEGMENT"])
+)
+
+# ─── 3) Source de NB_DURATION_IRBA par CD_PORTFOLIO ──────
 print("\n>>> Colonne source de NB_DURATION_IRBA par CD_PORTFOLIO")
 
 for ptf in df["CD_PORTFOLIO"].unique().to_list():
     sub = df.filter(pl.col("CD_PORTFOLIO") == ptf)
     if len(sub) < 50:
         continue
-    
+
     print(f"\n  ── CD_PORTFOLIO = {ptf!r}  (n={len(sub):,}) ──")
-    
-    # Test 1 : NB_DURATION_IRBA == clip(NB_MATURITE_IRBA, 1, 5) ?
+
     match_clip = (
         (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"].clip(1.0, 5.0)).abs() < 1e-6
     ).sum()
     print(f"    clip(NB_MATURITE_IRBA, 1, 5)     : {match_clip:,} / {len(sub):,}")
-    
-    # Test 2 : NB_DURATION_IRBA == NB_MATURITE_IRBA brute (sans floor) ?
+
     match_raw = (
         (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"]).abs() < 1e-6
     ).sum()
     print(f"    NB_MATURITE_IRBA brute (no floor): {match_raw:,} / {len(sub):,}")
-    
-    # Test 3 : toute autre colonne candidate ?
+
     for col in mat_like:
-        if col in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA"): 
+        if col in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA"):
             continue
-        if col not in sub.columns: 
+        if col not in sub.columns:
             continue
         try:
             match_col = (
@@ -35,5 +62,5 @@ for ptf in df["CD_PORTFOLIO"].unique().to_list():
             ).sum()
             if match_col > 0.5 * len(sub) or match_col_clip > 0.5 * len(sub):
                 print(f"    {col:30s} brute={match_col:,}  clip={match_col_clip:,}")
-        except:
+        except Exception:
             pass
