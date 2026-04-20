@@ -43,11 +43,8 @@ def _ppf(expr: pl.Expr) -> pl.Expr:
 
 
 def _clip_duration(col: str = "duration") -> pl.Expr:
-    # Parité SAS : en SAS, une valeur manquante (.) est considérée < tout nombre.
-    # Donc "if duree < 1 then D = 1" est Vrai si duree est null → D = 1.0.
-    # Les 56 lignes CORP/SME_CORP avec duration nulle sont concernées.
     return (
-        pl.when(pl.col(col).is_null() | (pl.col(col) < 1))
+        pl.when(pl.col(col) < 1)
         .then(1.0)
         .when(pl.col(col) > 5)
         .then(5.0)
