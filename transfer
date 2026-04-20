@@ -1,66 +1,39 @@
 import polars as pl
 
-# ─── Pré-requis : df doit contenir la colonne SEGMENT ───
-# Si pas encore créée :
-if "SEGMENT" not in df.columns:
-    df = df.with_columns(
-        pl.when(
-            (pl.col("NB_MATURITE_IRBA") < 1.0) &
-            (pl.col("NB_DURATION_IRBA") == pl.col("NB_MATURITE_IRBA"))
-        )
-        .then(pl.lit("ANOMALIE"))
-        .otherwise(pl.lit("NORMAL"))
-        .alias("SEGMENT")
-    )
+# Segment ANOMALIE déjà défini au script précédent
+pop = df.filter(pl.col("CD_PORTFOLIO") == "Corporate")
 
-# ─── 1) Colonnes candidates "maturité" ───────────────────
-mat_like = [c for c in df.columns if any(k in c.upper() for k in [
-    "MATUR", "DUREE", "ECH", "TERM", "NB_MOIS", "NB_ANNEE", "NB_JOUR",
-    "RESID", "ORIG", "CONTRAT"
-])]
-print("Colonnes maturité candidates :", mat_like)
-
-# ─── 2) Distribution CD_PORTFOLIO × SEGMENT ──────────────
-print("\n>>> CD_PORTFOLIO × SEGMENT")
+# 1) Distribution du flag par SEGMENT
+print(">>> IND_EXPO_SHOR_TERM × SEGMENT (Corporate uniquement)")
 print(
-    df.group_by(["CD_PORTFOLIO", "SEGMENT"])
-    .agg(pl.count().alias("N"))
-    .sort(["CD_PORTFOLIO", "SEGMENT"])
+    pop.group_by(["SEGMENT", "IND_EXPO_SHOR_TERM"])
+    .agg(pl.len().alias("N"))
+    .sort(["SEGMENT", "IND_EXPO_SHOR_TERM"])
 )
 
-# ─── 3) Source de NB_DURATION_IRBA par CD_PORTFOLIO ──────
-print("\n>>> Colonne source de NB_DURATION_IRBA par CD_PORTFOLIO")
+# 2) Règle candidate : 
+#    SI IND_EXPO_SHOR_TERM = 1  → pas de floor (duration = maturité brute)
+#    SINON                       → clip(maturité, 1, 5)
+pop = pop.with_columns(
+    pl.when(pl.col("IND_EXPO_SHOR_TERM") == 1)
+    .then(pl.col("NB_MATURITE_IRBA"))
+    .otherwise(pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0))
+    .alias("NB_DURATION_SIMULE")
+)
 
-for ptf in df["CD_PORTFOLIO"].unique().to_list():
-    sub = df.filter(pl.col("CD_PORTFOLIO") == ptf)
-    if len(sub) < 50:
-        continue
+# 3) Taux de réplication
+match = ((pop["NB_DURATION_SIMULE"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
+total = len(pop)
+print(f"\n>>> Taux de réplication Corporate avec IND_EXPO_SHOR_TERM : "
+      f"{match:,} / {total:,}  ({100*match/total:.2f}%)")
 
-    print(f"\n  ── CD_PORTFOLIO = {ptf!r}  (n={len(sub):,}) ──")
-
-    match_clip = (
-        (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"].clip(1.0, 5.0)).abs() < 1e-6
-    ).sum()
-    print(f"    clip(NB_MATURITE_IRBA, 1, 5)     : {match_clip:,} / {len(sub):,}")
-
-    match_raw = (
-        (sub["NB_DURATION_IRBA"] - sub["NB_MATURITE_IRBA"]).abs() < 1e-6
-    ).sum()
-    print(f"    NB_MATURITE_IRBA brute (no floor): {match_raw:,} / {len(sub):,}")
-
-    for col in mat_like:
-        if col in ("NB_DURATION_IRBA", "NB_MATURITE_IRBA"):
-            continue
-        if col not in sub.columns:
-            continue
-        try:
-            match_col = (
-                (sub["NB_DURATION_IRBA"] - sub[col]).abs() < 1e-6
-            ).sum()
-            match_col_clip = (
-                (sub["NB_DURATION_IRBA"] - sub[col].clip(1.0, 5.0)).abs() < 1e-6
-            ).sum()
-            if match_col > 0.5 * len(sub) or match_col_clip > 0.5 * len(sub):
-                print(f"    {col:30s} brute={match_col:,}  clip={match_col_clip:,}")
-        except Exception:
-            pass
+# 4) Résidus résiduels (si < 100%)
+residus = pop.filter(
+    (pl.col("NB_DURATION_SIMULE") - pl.col("NB_DURATION_IRBA")).abs() >= 1e-6
+)
+if len(residus) > 0:
+    print(f"\n>>> Résidus : {len(residus):,}")
+    print(residus.select([
+        "NB_MATURITE_IRBA", "NB_DURATION_IRBA", "NB_DURATION_SIMULE",
+        "IND_EXPO_SHOR_TERM"
+    ]).head(20))
