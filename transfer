@@ -1,25 +1,29 @@
-import polars as pl
 import numpy as np
-from scipy.stats import norm
 
-def implied_M(rwa, ead, pd_val, lgd):
-    if ead <= 0 or pd_val <= 0 or pd_val >= 1 or lgd <= 0:
-        return None
-    K = rwa / (12.5 * ead)
-    R = 0.12*(1-np.exp(-50*pd_val))/(1-np.exp(-50)) + \
-        0.24*(1-(1-np.exp(-50*pd_val))/(1-np.exp(-50)))
-    b = (0.11852 - 0.05478*np.log(pd_val))**2
-    K_base = lgd * (norm.cdf((norm.ppf(pd_val) + np.sqrt(R)*norm.ppf(0.999))
-                             / np.sqrt(1-R)) - pd_val)
-    if K_base <= 0: return None
-    ratio = K / K_base
-    return 2.5 + (ratio*(1 - 1.5*b) - 1) / b
+# 1) Restreindre à Corporate uniquement
+corp = df_pl[df_pl["CD_PORTFOLIO"] == "Corporate"].copy()
+print(f"Corporate : {len(corp):,}")
 
-# Applique à chaque ligne et compare avec NB_DURATION_IRBA
-df_pl = df.to_pandas()
-df_pl["M_implied"] = df_pl.apply(
-    lambda r: implied_M(r["RWA_IRBA"], r["EAD_IRBA"], r["PD_IRBA"], r["LGD_IRBA"]),
-    axis=1
-)
-df_pl["delta"] = (df_pl["M_implied"] - df_pl["NB_DURATION_IRBA"]).abs()
-print(df_pl["delta"].describe())
+# 2) Stats robustes (médiane, pas moyenne)
+print("\n>>> Delta Corporate (stats robustes)")
+print(corp["delta"].describe(percentiles=[.1, .25, .5, .75, .9, .95, .99]))
+
+# 3) Répartition par ordres de grandeur
+bins = [0, 0.001, 0.01, 0.1, 0.5, 1, 5, 100, np.inf]
+print("\n>>> Répartition du delta Corporate")
+print(corp["delta"].dropna().pipe(
+    lambda s: pd.cut(s, bins).value_counts().sort_index()
+))
+
+# 4) Où explose-t-il ?
+extremes = corp.nlargest(20, "delta")[
+    ["PD_IRBA", "LGD_IRBA", "EAD_IRBA", "RWA_IRBA",
+     "NB_MATURITE_IRBA", "NB_DURATION_IRBA", "M_implied", "delta"]
+]
+print("\n>>> 20 plus grosses valeurs de delta")
+print(extremes)
+
+# 5) Distribution de PD dans les extrêmes vs normaux
+print("\n>>> PD dans les deltas > 1 vs deltas < 0.01")
+print("  extrêmes :", corp[corp["delta"]>1]["PD_IRBA"].describe())
+print("  OK       :", corp[corp["delta"]<0.01]["PD_IRBA"].describe())
