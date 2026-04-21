@@ -3,6 +3,18 @@ import pandas as pd
 from sklearn.tree import DecisionTreeClassifier, export_text
 from sklearn.model_selection import cross_val_score
 
+# 0) Création de la variable SEGMENT si absente
+if "SEGMENT" not in df.columns:
+    df = df.with_columns(
+        pl.when(
+            (pl.col("NB_MATURITE_IRBA") < 1.0) &
+            (pl.col("NB_DURATION_IRBA") == pl.col("NB_MATURITE_IRBA"))
+        )
+        .then(pl.lit("ANOMALIE"))
+        .otherwise(pl.lit("NORMAL"))
+        .alias("SEGMENT")
+    )
+
 # 1) Prépare le dataset : Corporate uniquement (signal le plus fort)
 pop = df.filter(pl.col("CD_PORTFOLIO") == "Corporate").to_pandas()
 
