@@ -1,28 +1,23 @@
-# Combien de lignes ont NB_DURATION > NB_MATURITE (impossible avec clip) ?
-impossibles = pop[pop["NB_DURATION_IRBA"] > pop["NB_MATURITE_IRBA"] + 1e-6]
-print(f"Lignes impossibles avec clip : {len(impossibles):,}")
-print(f"Dont NB_MATURITE < 1        : {(impossibles['NB_MATURITE_IRBA'] < 1).sum():,}")
+# Pour les lignes "impossibles", NB_DURATION_IRBA doit venir de quelque part
+# → quelle colonne de la base est EGALE à NB_DURATION_IRBA sur ces lignes ?
 
-# Stats
-print("\n>>> Profil des 'impossibles'")
-print(impossibles[["NB_MATURITE_IRBA", "NB_DURATION_IRBA", "CD_OBJ_FIN"]].describe())
+imp = impossibles.copy()
+num_cols = imp.select_dtypes(include=[np.number]).columns.tolist()
 
-# Répartition par code objet
-print("\n>>> CD_OBJ_FIN × SEGMENT sur les impossibles")
-print(impossibles.groupby("CD_OBJ_FIN").size().sort_values(ascending=False))
+for col in num_cols:
+    if col in ["NB_DURATION_IRBA", "NB_MATURITE_IRBA"]:
+        continue
+    match = ((imp[col] - imp["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
+    if match > 0.5 * len(imp):
+        print(f"  {col:40s} match sur {match:,} / {len(imp):,} lignes ({100*match/len(imp):.1f}%)")
 
-# Est-ce inclus dans nos 1,268 résidus V3 ?
-mask_v3 = (
-    (pop["CD_OBJ_FIN"] == "FA2")
-    | ((pop["CD_OBJ_FIN"] == "GA5") 
-       & (pop["TX_CCF_IRBA_PNU"] <= 0.27) 
-       & (pop["DT_DEBUT_AUTO"] > 23276))
-)
-import numpy as np
-pop["NB_DURATION_SIMULE_V3"] = np.where(
-    mask_v3, pop["NB_MATURITE_IRBA"],
-    pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
-)
-residus_v3 = pop[(pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
-overlap = len(impossibles) - len(impossibles.index.difference(residus_v3.index))
-print(f"\nLignes impossibles ∩ résidus V3 : {overlap:,} / {len(residus_v3):,}")
+# Variante : NB_DURATION = clip(col, 1, 5)
+for col in num_cols:
+    if col in ["NB_DURATION_IRBA", "NB_MATURITE_IRBA"]:
+        continue
+    try:
+        match = ((imp[col].clip(1.0, 5.0) - imp["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
+        if match > 0.5 * len(imp):
+            print(f"  clip({col}, 1, 5) match sur {match:,} / {len(imp):,} lignes")
+    except Exception:
+        pass
