@@ -1,24 +1,57 @@
-import matplotlib.pyplot as plt
 import polars as pl
+import pandas as pd
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.model_selection import cross_val_score
 
-# Échantillon par segment pour visualiser
-for ptf in ["Corporate", "Retail"]:
-    sub = df.filter(pl.col("CD_PORTFOLIO") == ptf).sample(n=20_000, seed=42)
-    mat = sub["NB_MATURITE_IRBA"].to_numpy()
-    dur = sub["NB_DURATION_IRBA"].to_numpy()
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.scatter(mat, dur, s=1, alpha=0.2)
-    ax.plot([0, 10], [0, 10], 'r--', lw=0.5, label='y=x')
-    ax.axhline(1, color='g', ls=':', lw=0.5)
-    ax.axhline(5, color='g', ls=':', lw=0.5)
-    ax.axvline(1, color='g', ls=':', lw=0.5)
-    ax.axvline(5, color='g', ls=':', lw=0.5)
-    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
-    ax.set_xlabel("NB_MATURITE_IRBA")
-    ax.set_ylabel("NB_DURATION_IRBA")
-    ax.set_title(f"{ptf}  (n={len(sub):,})")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(f"scatter_{ptf}.png", dpi=120)
-    plt.show()
+# 1) Prépare le dataset : Corporate uniquement (signal le plus fort)
+pop = df.filter(pl.col("CD_PORTFOLIO") == "Corporate").to_pandas()
+
+# Target binaire
+y = (pop["SEGMENT"] == "ANOMALIE").astype(int)
+
+# Features : TOUTES les colonnes numériques (sauf NB_DURATION_IRBA lui-même ≈ leak)
+leak_cols = {"NB_DURATION_IRBA", "SEGMENT", "NB_DURATION_SIMULE"}
+num_cols = [c for c in pop.columns 
+            if c not in leak_cols 
+            and pd.api.types.is_numeric_dtype(pop[c])]
+
+# Encodage des catégorielles (one-hot sur les colonnes à faible cardinalité)
+cat_cols = [c for c in pop.columns 
+            if c not in leak_cols
+            and c not in num_cols 
+            and pop[c].nunique() < 50]
+
+X = pd.concat([
+    pop[num_cols].fillna(-999),
+    pd.get_dummies(pop[cat_cols], drop_first=False),
+], axis=1)
+
+print(f"n_samples = {len(X):,}   n_features = {X.shape[1]}")
+print(f"Base rate ANOMALIE : {y.mean():.3%}")
+
+# 2) Arbre peu profond d'abord (pour voir la logique)
+for depth in [3, 5, 8, 15, None]:
+    clf = DecisionTreeClassifier(
+        max_depth=depth,
+        class_weight="balanced",
+        min_samples_leaf=50,
+        random_state=42,
+    )
+    scores = cross_val_score(clf, X, y, cv=5, scoring="f1")
+    clf.fit(X, y)
+    train_acc = clf.score(X, y)
+    print(f"depth={str(depth):>4}  F1_cv={scores.mean():.4f}  "
+          f"train_acc={train_acc:.4f}  n_leaves={clf.get_n_leaves()}")
+
+# 3) Feature importance (top 15)
+clf = DecisionTreeClassifier(max_depth=10, class_weight="balanced",
+                              min_samples_leaf=50, random_state=42).fit(X, y)
+imp = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False)
+print("\n>>> Top 15 variables discriminantes")
+print(imp.head(15))
+
+# 4) Règles textuelles de l'arbre peu profond
+clf_shallow = DecisionTreeClassifier(max_depth=4, class_weight="balanced",
+                                      min_samples_leaf=100, random_state=42).fit(X, y)
+print("\n>>> Règles de l'arbre (profondeur 4)")
+print(export_text(clf_shallow, feature_names=list(X.columns), max_depth=4))
