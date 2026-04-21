@@ -1,23 +1,29 @@
-# Pour les lignes "impossibles", NB_DURATION_IRBA doit venir de quelque part
-# → quelle colonne de la base est EGALE à NB_DURATION_IRBA sur ces lignes ?
+import numpy as np
 
-imp = impossibles.copy()
-num_cols = imp.select_dtypes(include=[np.number]).columns.tolist()
+# Les vrais cas problématiques : NB_DURATION > 1 AND NB_MATURITE < 1 AND les deux diffèrent significativement
+vrais_cas = pop[
+    (pop["NB_MATURITE_IRBA"] < 1.0) &
+    (pop["NB_DURATION_IRBA"] > 1.0 + 1e-6)
+]
+print(f"Vrais cas 'NB_DURATION > 1 malgré NB_MATURITE < 1' : {len(vrais_cas):,}")
 
-for col in num_cols:
-    if col in ["NB_DURATION_IRBA", "NB_MATURITE_IRBA"]:
-        continue
-    match = ((imp[col] - imp["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
-    if match > 0.5 * len(imp):
-        print(f"  {col:40s} match sur {match:,} / {len(imp):,} lignes ({100*match/len(imp):.1f}%)")
+# Distribution des NB_DURATION dans ces cas
+print("\n>>> Distribution de NB_DURATION_IRBA dans ces cas")
+print(vrais_cas["NB_DURATION_IRBA"].describe())
 
-# Variante : NB_DURATION = clip(col, 1, 5)
-for col in num_cols:
+# Par code objet
+print("\n>>> Par CD_OBJ_FIN")
+print(vrais_cas.groupby("CD_OBJ_FIN").size().sort_values(ascending=False).head(10))
+
+# Quelle colonne ≠ NB_MATURITE pourrait être la source ?
+print("\n>>> Colonnes candidates (match exact avec NB_DURATION_IRBA, sans clip)")
+for col in vrais_cas.select_dtypes(include=[np.number]).columns:
     if col in ["NB_DURATION_IRBA", "NB_MATURITE_IRBA"]:
         continue
     try:
-        match = ((imp[col].clip(1.0, 5.0) - imp["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
-        if match > 0.5 * len(imp):
-            print(f"  clip({col}, 1, 5) match sur {match:,} / {len(imp):,} lignes")
+        m_exact = ((vrais_cas[col] - vrais_cas["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
+        m_clip  = ((vrais_cas[col].clip(1.0, 5.0) - vrais_cas["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
+        if m_exact > 0.3 * len(vrais_cas) or m_clip > 0.3 * len(vrais_cas):
+            print(f"  {col:40s}  exact={m_exact:,}  clip={m_clip:,}  / {len(vrais_cas):,}")
     except Exception:
         pass
