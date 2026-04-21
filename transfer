@@ -1,37 +1,38 @@
 import numpy as np
 
-# ── Règles individuelles ──
-v1 = (
-    ((pop["TX_CCF_IRBA_PNU"] <= 0.27) & (pop["DT_DEBUT_AUTO"] > 23276))
-    | ((pop["TX_CCF_IRBA_PNU"] > 0.27) & (pop["CD_OBJ_FIN"] == "FA2"))
-)
+# Maturité originelle en jours
+pop["MATURITE_ORIG_J"] = pop["DT_ECHEANCE_FEM"] - pop["DT_DEBUT_AUTO"]
 
-v3 = (
+# Règle candidate V2
+mask_no_floor = (
+    # FA2 → exemption quasi-systématique
     (pop["CD_OBJ_FIN"] == "FA2")
-    | ((pop["CD_OBJ_FIN"] == "GA5") 
-       & (pop["TX_CCF_IRBA_PNU"] <= 0.27) 
-       & (pop["DT_DEBUT_AUTO"] > 23276))
+    |
+    # GA5 → exemption si maturité originelle < 1 an
+    ((pop["CD_OBJ_FIN"] == "GA5") & (pop["MATURITE_ORIG_J"] < 365))
 )
 
-# ── Mix possibles ──
-union        = v1 | v3   # élargit : "anomalie si V1 OU V3"
-intersection = v1 & v3   # restreint : "anomalie si V1 ET V3"
-
-# ── Mix enrichi : on garde le meilleur de chaque ──
-# V1 capture bien le cas "low CCF + recent date"
-# V3 capture bien le cas "FA2 quel que soit le CCF"
-mix = (
-    (pop["CD_OBJ_FIN"] == "FA2")                                    # toutes les FA2
-    | ((pop["TX_CCF_IRBA_PNU"] <= 0.27) & (pop["DT_DEBUT_AUTO"] > 23276))  # court-terme récent
+pop["NB_DURATION_SIMULE_V2"] = np.where(
+    mask_no_floor,
+    pop["NB_MATURITE_IRBA"],
+    pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
 )
 
-# ── Test des 4 règles ──
-for name, mask in [("V1", v1), ("V3", v3), ("UNION", union), 
-                   ("INTERSECTION", intersection), ("MIX", mix)]:
-    sim = np.where(
-        mask,
-        pop["NB_MATURITE_IRBA"],
-        pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
-    )
-    match = ((sim - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
-    print(f"{name:15s}  {match:>7,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
+match = ((pop["NB_DURATION_SIMULE_V2"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
+print(f"V2 : {match:,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
+
+# Analyse des résidus
+residus = pop[(pop["NB_DURATION_SIMULE_V2"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
+print(f"\nRésidus : {len(residus):,}")
+print("\n>>> Résidus par CD_OBJ_FIN × SEGMENT")
+print(residus.groupby(["CD_OBJ_FIN", "SEGMENT"]).size())
+
+# Sur les résidus GA5, voir la distribution de maturité originelle
+if "GA5" in residus["CD_OBJ_FIN"].values:
+    ga5_res = residus[residus["CD_OBJ_FIN"] == "GA5"]
+    print("\n>>> Résidus GA5 — maturité originelle (jours)")
+    print(ga5_res["MATURITE_ORIG_J"].describe())
+
+# Pour FA2 : quelle condition fait basculer les 138 normales ?
+print("\n>>> FA2 ANOMALIE vs NORMAL — maturité originelle")
+print(pop[pop["CD_OBJ_FIN"] == "FA2"].groupby("SEGMENT")["MATURITE_ORIG_J"].describe())    print(f"{name:15s}  {match:>7,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
