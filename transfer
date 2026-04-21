@@ -1,15 +1,37 @@
-residus = pop[(pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
+import numpy as np
 
-# Écart RWA estimé : comparer RWA actuel vs RWA qu'on aurait avec notre M reconstituée
-# (nécessite un recalcul complet de K, mais approximation linéaire avec dérivée en M)
-print(f"Nombre de résidus : {len(residus):,}")
-print(f"RWA cumulé des résidus : {residus['RWA_IRBA'].sum():,.0f}")
-print(f"RWA total Corporate   : {pop['RWA_IRBA'].sum():,.0f}")
-print(f"Part RWA résiduelle   : {100*residus['RWA_IRBA'].sum()/pop['RWA_IRBA'].sum():.3f}%")
+# ── Règles individuelles ──
+v1 = (
+    ((pop["TX_CCF_IRBA_PNU"] <= 0.27) & (pop["DT_DEBUT_AUTO"] > 23276))
+    | ((pop["TX_CCF_IRBA_PNU"] > 0.27) & (pop["CD_OBJ_FIN"] == "FA2"))
+)
 
-NB_DURATION_IRBA = 
-    IF   CD_OBJ_FIN = 'FA2'                            → NB_MATURITE_IRBA
-    ELIF CD_OBJ_FIN = 'GA5' 
-         AND TX_CCF_IRBA_PNU ≤ 0.27 
-         AND DT_DEBUT_AUTO > 23276 (≈ 2023-09-26)      → NB_MATURITE_IRBA
-    ELSE                                                → clip(NB_MATURITE_IRBA, 1.0, 5.0)
+v3 = (
+    (pop["CD_OBJ_FIN"] == "FA2")
+    | ((pop["CD_OBJ_FIN"] == "GA5") 
+       & (pop["TX_CCF_IRBA_PNU"] <= 0.27) 
+       & (pop["DT_DEBUT_AUTO"] > 23276))
+)
+
+# ── Mix possibles ──
+union        = v1 | v3   # élargit : "anomalie si V1 OU V3"
+intersection = v1 & v3   # restreint : "anomalie si V1 ET V3"
+
+# ── Mix enrichi : on garde le meilleur de chaque ──
+# V1 capture bien le cas "low CCF + recent date"
+# V3 capture bien le cas "FA2 quel que soit le CCF"
+mix = (
+    (pop["CD_OBJ_FIN"] == "FA2")                                    # toutes les FA2
+    | ((pop["TX_CCF_IRBA_PNU"] <= 0.27) & (pop["DT_DEBUT_AUTO"] > 23276))  # court-terme récent
+)
+
+# ── Test des 4 règles ──
+for name, mask in [("V1", v1), ("V3", v3), ("UNION", union), 
+                   ("INTERSECTION", intersection), ("MIX", mix)]:
+    sim = np.where(
+        mask,
+        pop["NB_MATURITE_IRBA"],
+        pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
+    )
+    match = ((sim - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
+    print(f"{name:15s}  {match:>7,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
