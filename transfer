@@ -1,37 +1,15 @@
-import numpy as np
-
-mask_no_floor = (
-    # FA2 (Exportations) : exemption trade finance systématique
-    (pop["CD_OBJ_FIN"] == "FA2")
-    |
-    # GA5 (Autres) : exemption court terme conditionnelle
-    ((pop["CD_OBJ_FIN"] == "GA5") 
-     & (pop["TX_CCF_IRBA_PNU"] <= 0.27)
-     & (pop["DT_DEBUT_AUTO"] > 23276))
-)
-
-pop["NB_DURATION_SIMULE_V3"] = np.where(
-    mask_no_floor,
-    pop["NB_MATURITE_IRBA"],
-    pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
-)
-
-match = ((pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
-print(f"V3 : {match:,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
-
-# Résidus V3
 residus = pop[(pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
-print(f"\nRésidus V3 : {len(residus):,}")
-print("\n>>> Résidus par CD_OBJ_FIN × SEGMENT")
-print(residus.groupby(["CD_OBJ_FIN", "SEGMENT"]).size())
 
-# Si encore des GA5 anomalies résiduelles, regarder CCF et date finement
-ga5_anom_resid = residus[(residus["CD_OBJ_FIN"] == "GA5") & (residus["SEGMENT"] == "ANOMALIE")]
-if len(ga5_anom_resid) > 0:
-    print("\n>>> GA5 anomalies ratées — stats")
-    print(ga5_anom_resid[["TX_CCF_IRBA_PNU", "DT_DEBUT_AUTO", "MATURITE_ORIG_J"]].describe())
+# Écart RWA estimé : comparer RWA actuel vs RWA qu'on aurait avec notre M reconstituée
+# (nécessite un recalcul complet de K, mais approximation linéaire avec dérivée en M)
+print(f"Nombre de résidus : {len(residus):,}")
+print(f"RWA cumulé des résidus : {residus['RWA_IRBA'].sum():,.0f}")
+print(f"RWA total Corporate   : {pop['RWA_IRBA'].sum():,.0f}")
+print(f"Part RWA résiduelle   : {100*residus['RWA_IRBA'].sum()/pop['RWA_IRBA'].sum():.3f}%")
 
-ga5_norm_resid = residus[(residus["CD_OBJ_FIN"] == "GA5") & (residus["SEGMENT"] == "NORMAL")]
-if len(ga5_norm_resid) > 0:
-    print("\n>>> GA5 normales faussement détectées — stats")
-    print(ga5_norm_resid[["TX_CCF_IRBA_PNU", "DT_DEBUT_AUTO", "MATURITE_ORIG_J"]].describe())
+NB_DURATION_IRBA = 
+    IF   CD_OBJ_FIN = 'FA2'                            → NB_MATURITE_IRBA
+    ELIF CD_OBJ_FIN = 'GA5' 
+         AND TX_CCF_IRBA_PNU ≤ 0.27 
+         AND DT_DEBUT_AUTO > 23276 (≈ 2023-09-26)      → NB_MATURITE_IRBA
+    ELSE                                                → clip(NB_MATURITE_IRBA, 1.0, 5.0)
