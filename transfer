@@ -1,42 +1,30 @@
 import numpy as np
 
-# 1) Simuler la règle en pandas
 mask_no_floor = (
     ((pop["TX_CCF_IRBA_PNU"] <= 0.27) & (pop["DT_DEBUT_AUTO"] > 23276))
-    | ((pop["TX_CCF_IRBA_PNU"] > 0.27) & (pop["CD_OBJ_FIN_FA2"] == 1))
+    | ((pop["TX_CCF_IRBA_PNU"] > 0.27) & (pop["CD_OBJ_FIN"] == "FA2"))
 )
 
 pop["NB_DURATION_SIMULE"] = np.where(
     mask_no_floor,
-    pop["NB_MATURITE_IRBA"],                                 # pas de floor
-    pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),      # clip standard
+    pop["NB_MATURITE_IRBA"],
+    pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
 )
 
 match = ((pop["NB_DURATION_SIMULE"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
 total = len(pop)
 print(f"Réplication Corporate : {match:,} / {total:,}  ({100*match/total:.3f}%)")
 
-# 2) Sémantique de CD_OBJ_FIN_FA2
-print("\n>>> CD_OBJ_FIN_FA2 × LB_OBJ_FIN_Exportations")
-print(
-    pop.groupby(["CD_OBJ_FIN_FA2", "LB_OBJ_FIN_Exportations"])
-       .size().reset_index(name="N")
-       .sort_values("N", ascending=False)
-       .head(20)
-)
+# Distribution CD_OBJ_FIN × SEGMENT — confirmation sémantique
+print("\n>>> CD_OBJ_FIN × SEGMENT")
+print(pop.groupby(["CD_OBJ_FIN", "SEGMENT"]).size().unstack(fill_value=0)
+         .sort_values("ANOMALIE", ascending=False))
 
-# 3) Conversion dates SAS (base 1960-01-01)
-import datetime
-base = datetime.date(1960, 1, 1)
-print("\nDT_DEBUT_AUTO = 23276 →", base + datetime.timedelta(days=23276))
-print("DT_ECHEANCE_FEM = 24471 →", base + datetime.timedelta(days=24471))
-
-# 4) Analyse des résidus éventuels
+# Résidus
 residus = pop[(pop["NB_DURATION_SIMULE"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
 print(f"\nRésidus non répliqués : {len(residus):,}")
-if len(residus) > 0:
-    print("\n>>> Profil des résidus")
+if len(residus) > 0 and len(residus) < 50:
     print(residus[[
         "TX_CCF_IRBA_PNU", "DT_DEBUT_AUTO", "DT_ECHEANCE_FEM",
-        "CD_OBJ_FIN_FA2", "NB_MATURITE_IRBA", "NB_DURATION_IRBA"
-    ]].describe())
+        "CD_OBJ_FIN", "NB_MATURITE_IRBA", "NB_DURATION_IRBA"
+    ]])
