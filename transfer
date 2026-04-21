@@ -1,37 +1,28 @@
-import numpy as np
+# Combien de lignes ont NB_DURATION > NB_MATURITE (impossible avec clip) ?
+impossibles = pop[pop["NB_DURATION_IRBA"] > pop["NB_MATURITE_IRBA"] + 1e-6]
+print(f"Lignes impossibles avec clip : {len(impossibles):,}")
+print(f"Dont NB_MATURITE < 1        : {(impossibles['NB_MATURITE_IRBA'] < 1).sum():,}")
 
-mask_no_floor = (
-    # FA2 (Exportations) : exemption trade finance systématique
+# Stats
+print("\n>>> Profil des 'impossibles'")
+print(impossibles[["NB_MATURITE_IRBA", "NB_DURATION_IRBA", "CD_OBJ_FIN"]].describe())
+
+# Répartition par code objet
+print("\n>>> CD_OBJ_FIN × SEGMENT sur les impossibles")
+print(impossibles.groupby("CD_OBJ_FIN").size().sort_values(ascending=False))
+
+# Est-ce inclus dans nos 1,268 résidus V3 ?
+mask_v3 = (
     (pop["CD_OBJ_FIN"] == "FA2")
-    |
-    # GA5 (Autres) : exemption court terme conditionnelle
-    ((pop["CD_OBJ_FIN"] == "GA5") 
-     & (pop["TX_CCF_IRBA_PNU"] <= 0.27)
-     & (pop["DT_DEBUT_AUTO"] > 23276))
+    | ((pop["CD_OBJ_FIN"] == "GA5") 
+       & (pop["TX_CCF_IRBA_PNU"] <= 0.27) 
+       & (pop["DT_DEBUT_AUTO"] > 23276))
 )
-
+import numpy as np
 pop["NB_DURATION_SIMULE_V3"] = np.where(
-    mask_no_floor,
-    pop["NB_MATURITE_IRBA"],
+    mask_v3, pop["NB_MATURITE_IRBA"],
     pop["NB_MATURITE_IRBA"].clip(lower=1.0, upper=5.0),
 )
-
-match = ((pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() < 1e-6).sum()
-print(f"V3 : {match:,} / {len(pop):,}  ({100*match/len(pop):.3f}%)")
-
-# Résidus V3
-residus = pop[(pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
-print(f"\nRésidus V3 : {len(residus):,}")
-print("\n>>> Résidus par CD_OBJ_FIN × SEGMENT")
-print(residus.groupby(["CD_OBJ_FIN", "SEGMENT"]).size())
-
-# Si encore des GA5 anomalies résiduelles, regarder CCF et date finement
-ga5_anom_resid = residus[(residus["CD_OBJ_FIN"] == "GA5") & (residus["SEGMENT"] == "ANOMALIE")]
-if len(ga5_anom_resid) > 0:
-    print("\n>>> GA5 anomalies ratées — stats")
-    print(ga5_anom_resid[["TX_CCF_IRBA_PNU", "DT_DEBUT_AUTO", "MATURITE_ORIG_J"]].describe())
-
-ga5_norm_resid = residus[(residus["CD_OBJ_FIN"] == "GA5") & (residus["SEGMENT"] == "NORMAL")]
-if len(ga5_norm_resid) > 0:
-    print("\n>>> GA5 normales faussement détectées — stats")
-    print(ga5_norm_resid[["TX_CCF_IRBA_PNU", "DT_DEBUT_AUTO", "MATURITE_ORIG_J"]].describe())
+residus_v3 = pop[(pop["NB_DURATION_SIMULE_V3"] - pop["NB_DURATION_IRBA"]).abs() >= 1e-6]
+overlap = len(impossibles) - len(impossibles.index.difference(residus_v3.index))
+print(f"\nLignes impossibles ∩ résidus V3 : {overlap:,} / {len(residus_v3):,}")
