@@ -1,12 +1,9 @@
-print("Type I_RIB_DAR dans srs_complet :", srs_complet['I_RIB_DAR'].dtype)
-print("Type I_RIB_DAR dans capret :", capret['I_RIB_DAR'].dtype)
+# Combien de lignes ont I_RIB_DAR null après le 1er join (srs → srs_unpooled) ?
+print("I_RIB_DAR null après 1er join :", srs_complet['I_RIB_DAR'].null_count())
+# → Si c'est proche de 295 000, le problème est là !
 
-# Une valeur de I_RIB_DAR dans srs_complet qui existe vraiment ?
-exemple_srs = srs_complet['I_RIB_DAR'].drop_nulls()[0]
-print("Exemple côté SRS :", exemple_srs)
-
-# Est-elle présente dans capret ?
-print("Trouvée dans capret :", capret.filter(pl.col('I_RIB_DAR') == exemple_srs).height)
-
-# Combien de I_RIB_DAR sont null après srs → srs_unpooled ?
-print("I_RIB_DAR null après premier join :", srs_complet['I_RIB_DAR'].null_count())
+# Vérifier ce que contient srs_unpooled sur la clé ID_FEM
+cles_srs         = set(srs['ID_FEM'].drop_nulls().unique().to_list())
+cles_bridge      = set(srs_unpooled['ID_FEM'].drop_nulls().unique().to_list())
+print(f"Clés ID_FEM communes srs ↔ srs_unpooled : {len(cles_srs & cles_bridge)}")
+print(f"Clés ID_FEM dans srs ABSENTES de srs_unpooled : {len(cles_srs - cles_bridge)}")
