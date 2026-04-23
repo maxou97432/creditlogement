@@ -1,23 +1,4 @@
-# 1. Récupérer les ID_DOSS_LOC des lignes à RWA nul dans la base jointe
-ids_null_rwa = (
-    srs_X_capret
-    .filter(pl.col('RWA_Reboot').is_null())
-    ['ID_DOSS_LOC']
-    .drop_nulls()
-    .unique()
-)
-print(f"IDs uniques avec RWA nul après join : {ids_null_rwa.height}")
-
-# 2. Chercher ces IDs dans capret
-capret_check = capret.filter(pl.col('I_RIB_DWR').is_in(ids_null_rwa))
-print(f"Trouvés dans capret : {capret_check.height}")
-
-# 3. Parmi ceux trouvés dans capret, combien ont un RWA non nul ?
-capret_avec_rwa = capret_check.filter(pl.col('RWA_Reboot').is_not_null())
-print(f"Dont RWA non nul dans capret : {capret_avec_rwa.height}")
-
-# 4. Aperçu des lignes qui auraient DÛ matcher
-if capret_avec_rwa.height > 0:
-    print("\nExemple de lignes manquées :")
-    print(capret_avec_rwa.select(['I_RIB_DWR', 'RWA_Reboot', 'NB_DURATION_IRBA']).head(5))
-
+# Montrer côte à côte les valeurs réelles
+print("=== Exemples ID_FEM ===")
+print("Dans srs         :", srs['ID_FEM'][:5].to_list())
+print("Dans srs_unpooled:", srs_unpooled['ID_FEM'][:5].to_list())
