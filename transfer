@@ -1,30 +1,12 @@
-# 1. On s'assure que srs_unpooled possède bien les clés des DEUX mondes.
-# Il faut que tu l'importes avec l'identifiant de CAPRET (I_AUTRS_UNIQ) 
-# ET les identifiants de SRS (ID_FEM, ID_DOSS_LOC)
-srs_unpooled = pl.read_parquet(BASE_PATH_SRS_UNPOOLED, columns=['ID_FEM', 'ID_DOSS_LOC', 'I_AUTRS_UNIQ'])
+print("Type I_RIB_DAR dans srs_complet :", srs_complet['I_RIB_DAR'].dtype)
+print("Type I_RIB_DAR dans capret :", capret['I_RIB_DAR'].dtype)
 
-# (Optionnel mais recommandé) On enlève les doublons de la table de passage pour éviter la multiplication des lignes
-bridge_unique = srs_unpooled.unique(subset=['ID_FEM', 'ID_DOSS_LOC', 'I_AUTRS_UNIQ'])
+# Une valeur de I_RIB_DAR dans srs_complet qui existe vraiment ?
+exemple_srs = srs_complet['I_RIB_DAR'].drop_nulls()[0]
+print("Exemple côté SRS :", exemple_srs)
 
-# 2. Fusion 1 : On colle I_AUTRS_UNIQ sur ta base SRS principale
-srs_avec_cle = srs.join(
-    bridge_unique,
-    on=['ID_FEM', 'ID_DOSS_LOC'],  # Remplace par les vraies clés communes si besoin
-    how='left'  # 'left' pour ne pas perdre les lignes de SRS qui n'auraient pas de correspondance
-)
+# Est-elle présente dans capret ?
+print("Trouvée dans capret :", capret.filter(pl.col('I_RIB_DAR') == exemple_srs).height)
 
-# 3. Fusion 2 : On ramène la duration de CAPRET 
-srs_final = srs_avec_cle.join(
-    capret.select(['I_AUTRS_UNIQ', 'duration']),  # Ne prends que l'ID et la durée pour pas polluer
-    on='I_AUTRS_UNIQ',
-    how='left',
-    suffix='_capret' # Si la colonne duration existait déjà dans srs, elle s'appellera duration_capret
-)
-
-# 4. Vérification du résultat (y a-t-il plein de nulls ?)
-print("Lignes sans correspondance capret :", srs_final.filter(pl.col('duration_capret').is_null()).height)
-
-# Tu peux faire ta comparaison :
-srs_final = srs_final.with_columns(
-    (pl.col("duration") - pl.col("duration_capret")).alias("Ecart_Duration")
-)
+# Combien de I_RIB_DAR sont null après srs → srs_unpooled ?
+print("I_RIB_DAR null après premier join :", srs_complet['I_RIB_DAR'].null_count())
