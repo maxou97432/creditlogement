@@ -1,19 +1,6 @@
-# ── ÉTAPE 1 : La table bridge est-elle utile ? ──────────────────────
-print("=== BRIDGE ===")
-print(f"Nb lignes bridge          : {srs_unpooled.height}")
-print(f"ID_FEM uniques bridge     : {srs_unpooled['ID_FEM'].n_unique()}")
-print(f"ID_DOSS_LOC uniques bridge: {srs_unpooled['ID_DOSS_LOC'].n_unique()}")
-print(f"\nExemple ID_FEM bridge     : {srs_unpooled['ID_FEM'][0]}")
-print(f"Exemple ID_DOSS_LOC bridge: {srs_unpooled['ID_DOSS_LOC'][0]}")
+# Montre un exemple de ID_FEM côté srs
+print("Exemple ID_FEM dans SRS :", srs['ID_FEM'][0])
+print("Exemple ID_FEM dans bridge :", srs_unpooled['ID_FEM'][0])
 
-# ── ÉTAPE 2 : Cette valeur existe-t-elle dans srs ? ─────────────────
-exemple_fem_bridge = srs_unpooled['ID_FEM'][0]
-print(f"\nCet ID_FEM existe dans srs : {srs.filter(pl.col('ID_FEM') == exemple_fem_bridge).height}")
-
-# ── ÉTAPE 3 : La valeur DOSS_LOC existe-t-elle dans capret ? ────────
-exemple_loc_bridge = srs_unpooled['ID_DOSS_LOC'][0]
-print(f"\nExemple ID_DOSS_LOC       : {exemple_loc_bridge}")
-print(f"Exemple I_RIB_DWR capret  : {capret['I_RIB_DWR'][0]}")
-print(f"Type ID_DOSS_LOC bridge   : {srs_unpooled['ID_DOSS_LOC'].dtype}")
-print(f"Type I_RIB_DWR capret     : {capret['I_RIB_DWR'].dtype}")
-print(f"Trouvé dans capret        : {capret.filter(pl.col('I_RIB_DWR') == exemple_loc_bridge).height}")
+# Est-ce que srs contient directement un RIB ou ID_DOSS_LOC ?
+print("\nColonnes de srs :", srs.columns)
