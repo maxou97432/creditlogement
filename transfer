@@ -1,9 +1,20 @@
-# Combien de lignes ont I_RIB_DAR null après le 1er join (srs → srs_unpooled) ?
-print("I_RIB_DAR null après 1er join :", srs_complet['I_RIB_DAR'].null_count())
-# → Si c'est proche de 295 000, le problème est là !
+# Étape 1 : Chargement du bridge SANS filtre restrictif
+srs_unpooled = pl.read_parquet(BASE_PATH_SRS_UNPOOLED)
+print(f"Bridge total : {srs_unpooled.height} lignes, {srs_unpooled['ID_FEM'].n_unique()} ID_FEM uniques")
 
-# Vérifier ce que contient srs_unpooled sur la clé ID_FEM
-cles_srs         = set(srs['ID_FEM'].drop_nulls().unique().to_list())
-cles_bridge      = set(srs_unpooled['ID_FEM'].drop_nulls().unique().to_list())
-print(f"Clés ID_FEM communes srs ↔ srs_unpooled : {len(cles_srs & cles_bridge)}")
-print(f"Clés ID_FEM dans srs ABSENTES de srs_unpooled : {len(cles_srs - cles_bridge)}")
+# Étape 2 : Join srs → bridge (récupère ID_DOSS_LOC = le RIB)
+srs_complet = srs.join(
+    srs_unpooled.select(['ID_FEM', 'ID_DOSS_LOC']),
+    on='ID_FEM',
+    how='left'
+)
+print(f"ID_DOSS_LOC null après 1er join : {srs_complet['ID_DOSS_LOC'].null_count()}")
+
+# Étape 3 : Join sur capret via le RIB (I_RIB_DWR et non I_RIB_DAR !)
+srs_X_capret = srs_complet.join(
+    capret.select(['I_RIB_DWR', 'RWA_Reboot', 'NB_DURATION_IRBA']),
+    left_on='ID_DOSS_LOC',
+    right_on='I_RIB_DWR',   # ← correction ici
+    how='left'
+)
+print(f"RWA_Reboot null : {srs_X_capret['RWA_Reboot'].null_count()}/{srs_X_capret.height}")
