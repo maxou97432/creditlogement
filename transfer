@@ -1,29 +1,30 @@
-import numpy as np
+# 1. On s'assure que srs_unpooled possède bien les clés des DEUX mondes.
+# Il faut que tu l'importes avec l'identifiant de CAPRET (I_AUTRS_UNIQ) 
+# ET les identifiants de SRS (ID_FEM, ID_DOSS_LOC)
+srs_unpooled = pl.read_parquet(BASE_PATH_SRS_UNPOOLED, columns=['ID_FEM', 'ID_DOSS_LOC', 'I_AUTRS_UNIQ'])
 
-# Les vrais cas problématiques : NB_DURATION > 1 AND NB_MATURITE < 1 AND les deux diffèrent significativement
-vrais_cas = pop[
-    (pop["NB_MATURITE_IRBA"] < 1.0) &
-    (pop["NB_DURATION_IRBA"] > 1.0 + 1e-6)
-]
-print(f"Vrais cas 'NB_DURATION > 1 malgré NB_MATURITE < 1' : {len(vrais_cas):,}")
+# (Optionnel mais recommandé) On enlève les doublons de la table de passage pour éviter la multiplication des lignes
+bridge_unique = srs_unpooled.unique(subset=['ID_FEM', 'ID_DOSS_LOC', 'I_AUTRS_UNIQ'])
 
-# Distribution des NB_DURATION dans ces cas
-print("\n>>> Distribution de NB_DURATION_IRBA dans ces cas")
-print(vrais_cas["NB_DURATION_IRBA"].describe())
+# 2. Fusion 1 : On colle I_AUTRS_UNIQ sur ta base SRS principale
+srs_avec_cle = srs.join(
+    bridge_unique,
+    on=['ID_FEM', 'ID_DOSS_LOC'],  # Remplace par les vraies clés communes si besoin
+    how='left'  # 'left' pour ne pas perdre les lignes de SRS qui n'auraient pas de correspondance
+)
 
-# Par code objet
-print("\n>>> Par CD_OBJ_FIN")
-print(vrais_cas.groupby("CD_OBJ_FIN").size().sort_values(ascending=False).head(10))
+# 3. Fusion 2 : On ramène la duration de CAPRET 
+srs_final = srs_avec_cle.join(
+    capret.select(['I_AUTRS_UNIQ', 'duration']),  # Ne prends que l'ID et la durée pour pas polluer
+    on='I_AUTRS_UNIQ',
+    how='left',
+    suffix='_capret' # Si la colonne duration existait déjà dans srs, elle s'appellera duration_capret
+)
 
-# Quelle colonne ≠ NB_MATURITE pourrait être la source ?
-print("\n>>> Colonnes candidates (match exact avec NB_DURATION_IRBA, sans clip)")
-for col in vrais_cas.select_dtypes(include=[np.number]).columns:
-    if col in ["NB_DURATION_IRBA", "NB_MATURITE_IRBA"]:
-        continue
-    try:
-        m_exact = ((vrais_cas[col] - vrais_cas["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
-        m_clip  = ((vrais_cas[col].clip(1.0, 5.0) - vrais_cas["NB_DURATION_IRBA"]).abs() < 1e-3).sum()
-        if m_exact > 0.3 * len(vrais_cas) or m_clip > 0.3 * len(vrais_cas):
-            print(f"  {col:40s}  exact={m_exact:,}  clip={m_clip:,}  / {len(vrais_cas):,}")
-    except Exception:
-        pass
+# 4. Vérification du résultat (y a-t-il plein de nulls ?)
+print("Lignes sans correspondance capret :", srs_final.filter(pl.col('duration_capret').is_null()).height)
+
+# Tu peux faire ta comparaison :
+srs_final = srs_final.with_columns(
+    (pl.col("duration") - pl.col("duration_capret")).alias("Ecart_Duration")
+)
