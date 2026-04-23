@@ -1,20 +1,19 @@
-# Étape 1 : Chargement du bridge SANS filtre restrictif
-srs_unpooled = pl.read_parquet(BASE_PATH_SRS_UNPOOLED)
-print(f"Bridge total : {srs_unpooled.height} lignes, {srs_unpooled['ID_FEM'].n_unique()} ID_FEM uniques")
+# ── ÉTAPE 1 : La table bridge est-elle utile ? ──────────────────────
+print("=== BRIDGE ===")
+print(f"Nb lignes bridge          : {srs_unpooled.height}")
+print(f"ID_FEM uniques bridge     : {srs_unpooled['ID_FEM'].n_unique()}")
+print(f"ID_DOSS_LOC uniques bridge: {srs_unpooled['ID_DOSS_LOC'].n_unique()}")
+print(f"\nExemple ID_FEM bridge     : {srs_unpooled['ID_FEM'][0]}")
+print(f"Exemple ID_DOSS_LOC bridge: {srs_unpooled['ID_DOSS_LOC'][0]}")
 
-# Étape 2 : Join srs → bridge (récupère ID_DOSS_LOC = le RIB)
-srs_complet = srs.join(
-    srs_unpooled.select(['ID_FEM', 'ID_DOSS_LOC']),
-    on='ID_FEM',
-    how='left'
-)
-print(f"ID_DOSS_LOC null après 1er join : {srs_complet['ID_DOSS_LOC'].null_count()}")
+# ── ÉTAPE 2 : Cette valeur existe-t-elle dans srs ? ─────────────────
+exemple_fem_bridge = srs_unpooled['ID_FEM'][0]
+print(f"\nCet ID_FEM existe dans srs : {srs.filter(pl.col('ID_FEM') == exemple_fem_bridge).height}")
 
-# Étape 3 : Join sur capret via le RIB (I_RIB_DWR et non I_RIB_DAR !)
-srs_X_capret = srs_complet.join(
-    capret.select(['I_RIB_DWR', 'RWA_Reboot', 'NB_DURATION_IRBA']),
-    left_on='ID_DOSS_LOC',
-    right_on='I_RIB_DWR',   # ← correction ici
-    how='left'
-)
-print(f"RWA_Reboot null : {srs_X_capret['RWA_Reboot'].null_count()}/{srs_X_capret.height}")
+# ── ÉTAPE 3 : La valeur DOSS_LOC existe-t-elle dans capret ? ────────
+exemple_loc_bridge = srs_unpooled['ID_DOSS_LOC'][0]
+print(f"\nExemple ID_DOSS_LOC       : {exemple_loc_bridge}")
+print(f"Exemple I_RIB_DWR capret  : {capret['I_RIB_DWR'][0]}")
+print(f"Type ID_DOSS_LOC bridge   : {srs_unpooled['ID_DOSS_LOC'].dtype}")
+print(f"Type I_RIB_DWR capret     : {capret['I_RIB_DWR'].dtype}")
+print(f"Trouvé dans capret        : {capret.filter(pl.col('I_RIB_DWR') == exemple_loc_bridge).height}")
