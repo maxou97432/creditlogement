@@ -1,6 +1,23 @@
-# Montre un exemple de ID_FEM côté srs
-print("Exemple ID_FEM dans SRS :", srs['ID_FEM'][0])
-print("Exemple ID_FEM dans bridge :", srs_unpooled['ID_FEM'][0])
+# 1. Récupérer les ID_DOSS_LOC des lignes à RWA nul dans la base jointe
+ids_null_rwa = (
+    srs_X_capret
+    .filter(pl.col('RWA_Reboot').is_null())
+    ['ID_DOSS_LOC']
+    .drop_nulls()
+    .unique()
+)
+print(f"IDs uniques avec RWA nul après join : {ids_null_rwa.height}")
 
-# Est-ce que srs contient directement un RIB ou ID_DOSS_LOC ?
-print("\nColonnes de srs :", srs.columns)
+# 2. Chercher ces IDs dans capret
+capret_check = capret.filter(pl.col('I_RIB_DWR').is_in(ids_null_rwa))
+print(f"Trouvés dans capret : {capret_check.height}")
+
+# 3. Parmi ceux trouvés dans capret, combien ont un RWA non nul ?
+capret_avec_rwa = capret_check.filter(pl.col('RWA_Reboot').is_not_null())
+print(f"Dont RWA non nul dans capret : {capret_avec_rwa.height}")
+
+# 4. Aperçu des lignes qui auraient DÛ matcher
+if capret_avec_rwa.height > 0:
+    print("\nExemple de lignes manquées :")
+    print(capret_avec_rwa.select(['I_RIB_DWR', 'RWA_Reboot', 'NB_DURATION_IRBA']).head(5))
+
