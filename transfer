@@ -1,8 +1,45 @@
-# Combien de valeurs nulles dans la clé de jointure ?
-print("Nulls ID_DOSS_LOC dans srs_complet :", srs_complet['ID_DOSS_LOC'].null_count())
-print("Nulls ID_DOSS_LOC dans capret_unique:", capret_unique['ID_DOSS_LOC'].null_count())
+import polars as pl
 
-# Combien de valeurs distinctes non-nulles ?
-print("Distincts srs_complet :", srs_complet['ID_DOSS_LOC'].drop_nulls().n_unique())
-print("Distincts capret_unique:", capret_unique['ID_DOSS_LOC'].n_unique())
+# ── 1. Vue d'ensemble ────────────────────────────────────────────
+print("=== STATISTIQUES COMPARÉES ===")
+print(result.select([
+    pl.col('duration').alias('SRS'),
+    pl.col('NB_DURATION_IRBA').alias('CAPRET')
+]).describe())
 
+# ── 2. Taux de correspondance exacte ─────────────────────────────
+result = result.with_columns(
+    (pl.col('duration').round(4) == pl.col('NB_DURATION_IRBA').round(4)).alias('match_exact'),
+    (pl.col('NB_DURATION_IRBA') - pl.col('duration')).alias('ecart')
+)
+
+n_match = result.filter(pl.col('match_exact')).height
+print(f"\nMatch exact  : {n_match}/{result.height} ({n_match/result.height:.1%})")
+print(f"Non-match    : {result.height - n_match}")
+
+# ── 3. Distribution des écarts ───────────────────────────────────
+print("\n=== DISTRIBUTION DES ÉCARTS ===")
+print(result['ecart'].describe())
+
+# ── 4. Aperçu des lignes avec écart ──────────────────────────────
+ecarts = result.filter(~pl.col('match_exact'))
+print(f"\n=== LIGNES AVEC ÉCART ({ecarts.height} lignes) ===")
+print(ecarts.select([
+    'duration',
+    'NB_DURATION_IRBA',
+    'ecart'
+]).sort('ecart', descending=True).head(20))
+
+# ── 5. Typer les écarts ───────────────────────────────────────────
+print("\n=== CLASSIFICATION DES ÉCARTS ===")
+ecarts = ecarts.with_columns(
+    pl.when(pl.col('NB_DURATION_IRBA') == 1.0)
+    .then(pl.lit("floor_capret_1an"))
+    .when(pl.col('duration') == 1.0)
+    .then(pl.lit("floor_srs_1an"))
+    .when(pl.col('ecart').abs() < 0.01)
+    .then(pl.lit("arrondi"))
+    .otherwise(pl.lit("autre"))
+    .alias('type_ecart')
+)
+print(ecarts.group_by('type_ecart').len().sort('len', descending=True))
