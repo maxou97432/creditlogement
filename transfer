@@ -1,45 +1,47 @@
-import polars as pl
-
-# ── 1. Vue d'ensemble ────────────────────────────────────────────
-print("=== STATISTIQUES COMPARÉES ===")
-print(result.select([
-    pl.col('duration').alias('SRS'),
-    pl.col('NB_DURATION_IRBA').alias('CAPRET')
-]).describe())
-
-# ── 2. Taux de correspondance exacte ─────────────────────────────
-result = result.with_columns(
-    (pl.col('duration').round(4) == pl.col('NB_DURATION_IRBA').round(4)).alias('match_exact'),
-    (pl.col('NB_DURATION_IRBA') - pl.col('duration')).alias('ecart')
-)
-
-n_match = result.filter(pl.col('match_exact')).height
-print(f"\nMatch exact  : {n_match}/{result.height} ({n_match/result.height:.1%})")
-print(f"Non-match    : {result.height - n_match}")
-
-# ── 3. Distribution des écarts ───────────────────────────────────
-print("\n=== DISTRIBUTION DES ÉCARTS ===")
-print(result['ecart'].describe())
-
-# ── 4. Aperçu des lignes avec écart ──────────────────────────────
-ecarts = result.filter(~pl.col('match_exact'))
-print(f"\n=== LIGNES AVEC ÉCART ({ecarts.height} lignes) ===")
-print(ecarts.select([
-    'duration',
-    'NB_DURATION_IRBA',
-    'ecart'
-]).sort('ecart', descending=True).head(20))
-
-# ── 5. Typer les écarts ───────────────────────────────────────────
-print("\n=== CLASSIFICATION DES ÉCARTS ===")
-ecarts = ecarts.with_columns(
-    pl.when(pl.col('NB_DURATION_IRBA') == 1.0)
-    .then(pl.lit("floor_capret_1an"))
-    .when(pl.col('duration') == 1.0)
-    .then(pl.lit("floor_srs_1an"))
-    .when(pl.col('ecart').abs() < 0.01)
-    .then(pl.lit("arrondi"))
-    .otherwise(pl.lit("autre"))
-    .alias('type_ecart')
-)
-print(ecarts.group_by('type_ecart').len().sort('len', descending=True))
+def _calc_duration(base: pl.DataFrame) -> pl.DataFrame:
+    """
+    Implémentation de la règle réglementaire IRBA Maturity.
+    Source: doc "3. IRB Maturity - Effective Maturity"
+    
+    Règle générale : 1 an ≤ Duration ≤ 5 ans
+    
+    EXCEPTION (pas de floor à 1 an) :
+      - Trade Finance & LEQ
+      - Facilités "ne relevant pas du financement courant du débiteur"
+        avec maturité initiale < 1 an
+    """
+    
+    # ── Étape 1 : Calcul de la maturité résiduelle brute ────────────
+    # Si NB_MATURITE_IRBA est fourni, on l'utilise directement
+    # Sinon : D = (Date_Echeance - Date_Arrete) / 365.25
+    duration_brute = (
+        pl.when(pl.col('NB_MATURITE_IRBA').is_not_null())
+        .then(pl.col('NB_MATURITE_IRBA'))
+        .otherwise(
+            (pl.col('DT_ECHEANCE_FEM') - pl.lit(24106)) / 365.25
+        )
+    )
+    
+    # ── Étape 2 : Condition d'exception (pas de floor) ───────────────
+    # Exception 1 : Trade Finance et LEQ
+    is_trade_finance_leq = pl.col('CD_TYPE_FACILITE').is_in([
+        'Trade Finance', 'LEQ', 'TF'  # ajuste selon tes codes exacts
+    ])
+    
+    # Exception 2 : Facilités court-terme hors financement courant
+    # = non confirmé (uncommitted) ET maturité initiale < 1 an
+    is_short_term_non_current = (
+        (pl.col('IND_CREDIT_CONFIRME') == 0) &
+        (pl.col('NB_MATURITE_IRBA') < 1.0)
+    )
+    
+    is_exception = is_trade_finance_leq | is_short_term_non_current
+    
+    # ── Étape 3 : Application du clip réglementaire ──────────────────
+    duration_finale = (
+        pl.when(is_exception)
+        .then(duration_brute)                    # Pas de floor (< 1 an autorisé)
+        .otherwise(duration_brute.clip(1.0, 5.0)) # Floor + Cap standard
+    )
+    
+    return base.with_columns(duration_finale.alias('duration'))
