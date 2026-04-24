@@ -1,41 +1,35 @@
-DT_ARRT_CAPRET = 24106  # 31/12/2025
+# ── Correction 1 : date d'arrêté corrigée ────────────────────────
+DT_ARRT = 23922  # 30/06/2025 (pas 24106 !)
 
-# ════════════════════════════════════════════════════════════════
-# TEST 1 : clip(NB_MATURITE_IRBA, 1, 5) vs NB_DURATION_IRBA
-# (On part de la maturité déjà fournie, on applique juste le clip)
-# ════════════════════════════════════════════════════════════════
-result = result.with_columns(
-    pl.col('NB_MATURITE_IRBA').clip(1.0, 5.0).alias('TEST1_duration')
+# ── Vérification des colonnes disponibles ────────────────────────
+print("Colonnes disponibles pour l'exception :")
+print([c for c in result.columns if any(kw in c.upper() 
+      for kw in ['TYPE_FAC', 'CONFIRME', 'REVOLVING', 'OBJET', 'LEQ', 'TF'])])
+
+# ── Application de _calc_duration sur capret ─────────────────────
+duration_brute = (
+    pl.when(pl.col('NB_MATURITE_IRBA').is_not_null())
+    .then(pl.col('NB_MATURITE_IRBA'))
+    .otherwise((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25)
 )
 
-n1 = result.filter(
-    (pl.col('TEST1_duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+# Exception (adapte les noms de colonnes selon ce que tu as)
+is_exception = (
+    (pl.col('IND_CREDIT_CONFIRME') == 0) &
+    (pl.col('NB_MATURITE_IRBA') < 1.0)
+)
+
+duration_finale = (
+    pl.when(is_exception)
+    .then(duration_brute)                     # Pas de floor
+    .otherwise(duration_brute.clip(1.0, 5.0)) # Clip standard
+)
+
+result = result.with_columns(duration_finale.alias('TEST3_calc_duration'))
+
+# ── Comparaison Test 3 vs NB_DURATION_IRBA ───────────────────────
+n3 = result.filter(
+    (pl.col('TEST3_calc_duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
 ).height
-print(f"TEST 1 — clip(MATURITE, 1, 5) vs NB_DURATION_IRBA :")
-print(f"  Match : {n1}/{result.height} ({n1/result.height:.1%})")
-
-# ════════════════════════════════════════════════════════════════
-# TEST 2 : Recréer MATURITE depuis les dates, PUIS clip, vs NB_DURATION_IRBA
-# D = (DT_ECHEANCE_FEM - DT_ARRT) / 365.25
-# ════════════════════════════════════════════════════════════════
-result = result.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT_CAPRET) / 365.25).alias('MATURITE_recalculee')
-).with_columns(
-    pl.col('MATURITE_recalculee').clip(1.0, 5.0).alias('TEST2_duration')
-)
-
-n2 = result.filter(
-    (pl.col('TEST2_duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
-).height
-print(f"\nTEST 2 — clip(dates→MATURITE, 1, 5) vs NB_DURATION_IRBA :")
-print(f"  Match : {n2}/{result.height} ({n2/result.height:.1%})")
-
-# ── Écarts résiduels du Test 2 ───────────────────────────────────
-ecarts2 = result.filter(
-    (pl.col('TEST2_duration') - pl.col('NB_DURATION_IRBA')).abs() > 0.001
-)
-print(f"\n  Aperçu des {ecarts2.height} non-matchs du Test 2 :")
-print(ecarts2.select([
-    'MATURITE_recalculee', 'NB_MATURITE_IRBA',
-    'TEST2_duration', 'NB_DURATION_IRBA'
-]).head(10))
+print(f"\nTEST 3 — _calc_duration vs NB_DURATION_IRBA : {n3}/{result.height} ({n3/result.height:.1%})")
+print(f"(vs TEST 1 qui avait 4 mismatches — est-ce que les 4 sont résolus ?)")
