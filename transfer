@@ -1,4 +1,8 @@
-# Montrer côte à côte les valeurs réelles
-print("=== Exemples ID_FEM ===")
-print("Dans srs         :", srs['ID_FEM'][:5].to_list())
-print("Dans srs_unpooled:", srs_unpooled['ID_FEM'][:5].to_list())
+# Combien de valeurs nulles dans la clé de jointure ?
+print("Nulls ID_DOSS_LOC dans srs_complet :", srs_complet['ID_DOSS_LOC'].null_count())
+print("Nulls ID_DOSS_LOC dans capret_unique:", capret_unique['ID_DOSS_LOC'].null_count())
+
+# Combien de valeurs distinctes non-nulles ?
+print("Distincts srs_complet :", srs_complet['ID_DOSS_LOC'].drop_nulls().n_unique())
+print("Distincts capret_unique:", capret_unique['ID_DOSS_LOC'].n_unique())
+
