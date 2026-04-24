@@ -1,47 +1,41 @@
-def _calc_duration(base: pl.DataFrame) -> pl.DataFrame:
-    """
-    Implémentation de la règle réglementaire IRBA Maturity.
-    Source: doc "3. IRB Maturity - Effective Maturity"
-    
-    Règle générale : 1 an ≤ Duration ≤ 5 ans
-    
-    EXCEPTION (pas de floor à 1 an) :
-      - Trade Finance & LEQ
-      - Facilités "ne relevant pas du financement courant du débiteur"
-        avec maturité initiale < 1 an
-    """
-    
-    # ── Étape 1 : Calcul de la maturité résiduelle brute ────────────
-    # Si NB_MATURITE_IRBA est fourni, on l'utilise directement
-    # Sinon : D = (Date_Echeance - Date_Arrete) / 365.25
-    duration_brute = (
-        pl.when(pl.col('NB_MATURITE_IRBA').is_not_null())
-        .then(pl.col('NB_MATURITE_IRBA'))
-        .otherwise(
-            (pl.col('DT_ECHEANCE_FEM') - pl.lit(24106)) / 365.25
-        )
-    )
-    
-    # ── Étape 2 : Condition d'exception (pas de floor) ───────────────
-    # Exception 1 : Trade Finance et LEQ
-    is_trade_finance_leq = pl.col('CD_TYPE_FACILITE').is_in([
-        'Trade Finance', 'LEQ', 'TF'  # ajuste selon tes codes exacts
-    ])
-    
-    # Exception 2 : Facilités court-terme hors financement courant
-    # = non confirmé (uncommitted) ET maturité initiale < 1 an
-    is_short_term_non_current = (
-        (pl.col('IND_CREDIT_CONFIRME') == 0) &
-        (pl.col('NB_MATURITE_IRBA') < 1.0)
-    )
-    
-    is_exception = is_trade_finance_leq | is_short_term_non_current
-    
-    # ── Étape 3 : Application du clip réglementaire ──────────────────
-    duration_finale = (
-        pl.when(is_exception)
-        .then(duration_brute)                    # Pas de floor (< 1 an autorisé)
-        .otherwise(duration_brute.clip(1.0, 5.0)) # Floor + Cap standard
-    )
-    
-    return base.with_columns(duration_finale.alias('duration'))
+DT_ARRT_CAPRET = 24106  # 31/12/2025
+
+# ════════════════════════════════════════════════════════════════
+# TEST 1 : clip(NB_MATURITE_IRBA, 1, 5) vs NB_DURATION_IRBA
+# (On part de la maturité déjà fournie, on applique juste le clip)
+# ════════════════════════════════════════════════════════════════
+result = result.with_columns(
+    pl.col('NB_MATURITE_IRBA').clip(1.0, 5.0).alias('TEST1_duration')
+)
+
+n1 = result.filter(
+    (pl.col('TEST1_duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+).height
+print(f"TEST 1 — clip(MATURITE, 1, 5) vs NB_DURATION_IRBA :")
+print(f"  Match : {n1}/{result.height} ({n1/result.height:.1%})")
+
+# ════════════════════════════════════════════════════════════════
+# TEST 2 : Recréer MATURITE depuis les dates, PUIS clip, vs NB_DURATION_IRBA
+# D = (DT_ECHEANCE_FEM - DT_ARRT) / 365.25
+# ════════════════════════════════════════════════════════════════
+result = result.with_columns(
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT_CAPRET) / 365.25).alias('MATURITE_recalculee')
+).with_columns(
+    pl.col('MATURITE_recalculee').clip(1.0, 5.0).alias('TEST2_duration')
+)
+
+n2 = result.filter(
+    (pl.col('TEST2_duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+).height
+print(f"\nTEST 2 — clip(dates→MATURITE, 1, 5) vs NB_DURATION_IRBA :")
+print(f"  Match : {n2}/{result.height} ({n2/result.height:.1%})")
+
+# ── Écarts résiduels du Test 2 ───────────────────────────────────
+ecarts2 = result.filter(
+    (pl.col('TEST2_duration') - pl.col('NB_DURATION_IRBA')).abs() > 0.001
+)
+print(f"\n  Aperçu des {ecarts2.height} non-matchs du Test 2 :")
+print(ecarts2.select([
+    'MATURITE_recalculee', 'NB_MATURITE_IRBA',
+    'TEST2_duration', 'NB_DURATION_IRBA'
+]).head(10))
