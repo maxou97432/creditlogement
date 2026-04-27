@@ -1,19 +1,20 @@
-# Hypothèse : T_INTRT = 54 signifie 0.054 (5.4%) ou 0.0054 (54 bps)
+# T_INTRT supposé en Points de Base (54 = 0.54% annuel)
 # r = taux mensuel
 test_analytique = srs_X_capret.filter(pl.col('CD_TYPE_AMORT') == '3').with_columns(
-    # Par exemple, si T_INTRT = 5.4, format %
-    (pl.col('T_INTRT') / 100.0 / 12.0).alias('r_cf')
+    (pl.col('T_INTRT') / 10000.0 / 12.0).alias('r_cf')
 ).with_columns(
     pl.when(pl.col('r_cf') > 0)
     .then(
-        (1.0 + pl.col('r_cf')) / pl.col('r_cf') 
-        - pl.col('MATURITE') / ((1.0 + pl.col('r_cf')) ** pl.col('MATURITE') - 1.0)
+        (pl.col('MATURITE') * (1.0 + pl.col('r_cf')) ** pl.col('MATURITE')) 
+        / ((1.0 + pl.col('r_cf')) ** pl.col('MATURITE') - 1.0)
+        - (1.0 / pl.col('r_cf'))
     )
-    .otherwise((pl.col('MATURITE') + 1) / 2) # Formule r=0
+    .otherwise((pl.col('MATURITE') + 1) / 2) # Limite quand r -> 0
     .alias('Duration_Mois')
 ).with_columns(
     (pl.col('Duration_Mois') / 12.0).alias('MATURITE_CALCULEE')
 )
 
+# Comparaison 
 n = test_analytique.filter((pl.col('MATURITE_CALCULEE') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01).height
-print(f"Match analytique Type 3 avec taux : {n}/{test_analytique.height} ({n/test_analytique.height:.1%})")
+print(f"Match analytique EXACT Type 3 : {n}/{test_analytique.height} ({n/test_analytique.height:.1%})")
