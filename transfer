@@ -1,25 +1,553 @@
-# ══════════════════════════════════════════════════════════════════
-# ÉTAPE 1 : Comparaison MATURITE capret (duration) vs NB_MATURITE_IRBA (srs)
-# ══════════════════════════════════════════════════════════════════
+"""
+=============================================================================
+duration_reglementaire.py
+=============================================================================
+Implémentation réglementaire Bâle II / CRR de la maturité effective IRBA.
 
-etape1 = srs_X_capret.with_columns(
-    (pl.col('duration') - pl.col('NB_MATURITE_IRBA')).alias('Ecart_Maturite')
-)
+Source : Document "3. IRB Maturity – Effective Maturity" (BNP Paribas)
 
-n_match = etape1.filter(pl.col('Ecart_Maturite').abs() < 0.01).height
-print(f"Match : {n_match}/{etape1.height} ({n_match/etape1.height:.1%})")
+Règle générale :
+    Duration = clip(M_calculée, 1 an, 5 ans)
 
-print("\nStats de l'écart :")
-print(etape1['Ecart_Maturite'].describe())
+Exception (pas de floor d'un an) :
+    - Trade Finance & LEQ
+    - Facilités "ne relevant pas du financement courant du débiteur"
+      ET maturité initiale < 1 an
 
-print("\nDivergences par Type_Credit :")
-print(
-    etape1.filter(pl.col('Ecart_Maturite').abs() >= 0.01)
-    .group_by('Type_Credit')
-    .agg(
-        pl.len().alias('nb'),
-        pl.col('Ecart_Maturite').mean().round(3).alias('Ecart_moyen'),
-        pl.col('Ecart_Maturite').min().round(3).alias('Ecart_min'),
-        pl.col('Ecart_Maturite').max().round(3).alias('Ecart_max')
-    ).sort('nb', descending=True)
-)
+Hiérarchie des sources :
+    1. effective_maturity_sourced (valeur déjà fournie)
+    2. Profil de cashflows réel (cashflows_df)
+    3. Reconstruction synthétique (type + périodicité + encours)
+    4. Fallback conservateur : (maturity_date - as_of_date) / 365.25
+=============================================================================
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import polars as pl
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Duration depuis un échéancier de cashflows réels
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_duration_from_cashflows(
+    cashflows_df: pl.DataFrame,
+    as_of_date: date,
+) -> pl.DataFrame:
+    """
+    Calcule la duration Bâle II à partir d'un profil de cashflows.
+
+    Parameters
+    ----------
+    cashflows_df : pl.DataFrame
+        Colonnes attendues :
+        - facility_id   (str)   : identifiant unique de la facilité
+        - cashflow_date (date)  : date de l'encours
+        - outstanding   (float) : encours C_{t_i} à cette date
+    as_of_date : date
+        Date de calcul réglementaire (t_0).
+
+    Returns
+    -------
+    pl.DataFrame
+        Colonnes : facility_id, duration_raw (float, en années).
+
+    Notes
+    -----
+    Formule Bâle II :
+        Duration = Σ max(0; C_{t_{i-1}} − C_{t_i}) · t_i
+                 / Σ max(0; C_{t_{i-1}} − C_{t_i})
+
+    Seuls les remboursements (flux positifs = baisse d'encours) sont comptés.
+    Les tirages additionnels (hausse d'encours) sont ignorés via max(0, ...).
+    """
+    t0 = pl.lit(as_of_date)
+
+    result = (
+        cashflows_df
+        # Tri chronologique pour que shift(1) donne le bon prédécesseur
+        .sort(["facility_id", "cashflow_date"])
+        .with_columns(
+            # t_i : durée résiduelle en années depuis as_of_date
+            (
+                (pl.col("cashflow_date") - t0).dt.total_days() / 365.25
+            ).alias("t_years"),
+            # C_{t_{i-1}} : encours de la période précédente
+            pl.col("outstanding")
+            .shift(1)
+            .over("facility_id")
+            .alias("outstanding_prev"),
+        )
+        .with_columns(
+            # Remboursement positif = baisse d'encours
+            (pl.col("outstanding_prev") - pl.col("outstanding"))
+            .clip(lower_bound=0.0)
+            .alias("repayment_pos")
+        )
+        .with_columns(
+            (pl.col("repayment_pos") * pl.col("t_years")).alias("weighted_repayment")
+        )
+        .group_by("facility_id")
+        .agg(
+            pl.col("weighted_repayment").sum().alias("numerator"),
+            pl.col("repayment_pos").sum().alias("denominator"),
+        )
+        .with_columns(
+            pl.when(pl.col("denominator") > 0.0)
+            .then(pl.col("numerator") / pl.col("denominator"))
+            .otherwise(None)  # Null si aucun remboursement détecté
+            .cast(pl.Float64)
+            .alias("duration_raw")
+        )
+        .select(["facility_id", "duration_raw"])
+    )
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Reconstruction synthétique d'un échéancier
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reconstruct_cashflows(facilities_df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Génère un échéancier synthétique pour les facilités sans cashflows sourcés.
+
+    Parameters
+    ----------
+    facilities_df : pl.DataFrame
+        Colonnes attendues :
+        - facility_id              (str)
+        - as_of_date               (date)
+        - maturity_date            (date)
+        - outstanding              (float) : encours courant
+        - amortization_type        (str)   : "bullet" | "linear"
+        - amortization_periodicity (str)   : "monthly" | "quarterly" | "annual"
+        - residual_value           (float, nullable) : valeur résiduelle (bullet)
+
+    Returns
+    -------
+    pl.DataFrame
+        Colonnes : facility_id, cashflow_date (date), outstanding (float).
+        Prêt à être passé à compute_duration_from_cashflows().
+    """
+    # Durée en jours par périodicité
+    period_days_expr = (
+        pl.when(pl.col("amortization_periodicity") == "monthly").then(pl.lit(30))
+        .when(pl.col("amortization_periodicity") == "quarterly").then(pl.lit(91))
+        .when(pl.col("amortization_periodicity") == "annual").then(pl.lit(365))
+        .otherwise(pl.lit(365))  # Fallback : annuel
+    )
+
+    df = (
+        facilities_df
+        .with_columns(
+            period_days_expr.cast(pl.Int64).alias("period_days"),
+            (
+                (pl.col("maturity_date") - pl.col("as_of_date")).dt.total_days()
+            )
+            .cast(pl.Int64)
+            .alias("total_days_remaining"),
+        )
+        .with_columns(
+            # Nombre de périodes (arrondi au supérieur)
+            (
+                pl.col("total_days_remaining").cast(pl.Float64)
+                / pl.col("period_days").cast(pl.Float64)
+            )
+            .ceil()
+            .cast(pl.Int64)
+            .alias("n_periods")
+        )
+    )
+
+    # Explosion : une ligne par (facility, période)
+    # pl.int_ranges(1, N+1) génère [1, 2, ..., N] par ligne
+    df_exploded = (
+        df
+        .with_columns(
+            pl.int_ranges(1, pl.col("n_periods") + 1).alias("period_idx")
+        )
+        .explode("period_idx")
+    )
+
+    # Calcul de l'encours à chaque période selon le type d'amortissement
+    outstanding_expr = (
+        # ── Bullet : encours constant jusqu'à l'avant-dernière période ──
+        pl.when(pl.col("amortization_type") == "bullet")
+        .then(
+            pl.when(pl.col("period_idx") < pl.col("n_periods"))
+            .then(pl.col("outstanding"))
+            .otherwise(pl.col("residual_value").fill_null(0.0))
+        )
+        # ── Linéaire : remboursement en parts égales ─────────────────────
+        .when(pl.col("amortization_type") == "linear")
+        .then(
+            pl.col("outstanding")
+            * (1.0 - pl.col("period_idx").cast(pl.Float64) / pl.col("n_periods").cast(pl.Float64))
+        )
+        # ── Fallback : traitement bullet ─────────────────────────────────
+        .otherwise(
+            pl.when(pl.col("period_idx") < pl.col("n_periods"))
+            .then(pl.col("outstanding"))
+            .otherwise(pl.col("residual_value").fill_null(0.0))
+        )
+    )
+
+    cashflows = (
+        df_exploded
+        .with_columns(
+            (
+                pl.col("as_of_date")
+                + pl.duration(days=pl.col("period_idx") * pl.col("period_days"))
+            ).alias("cashflow_date"),
+            outstanding_expr.alias("outstanding"),
+        )
+        .select(["facility_id", "cashflow_date", "outstanding"])
+    )
+    return cashflows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Orchestration hiérarchique
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_effective_maturity(
+    facilities_df: pl.DataFrame,
+    cashflows_df: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """
+    Calcule la maturité effective réglementaire IRBA (Bâle II / CRR).
+
+    Hiérarchie des sources (1 → 2 → 3 → 4) :
+        1. ``effective_maturity_sourced``   (valeur déjà fournie)
+        2. Cashflows réels (``cashflows_df``)
+        3. Reconstruction synthétique (type + périodicité + encours)
+        4. Fallback : (maturity_date − as_of_date) / 365.25
+
+    Ensuite :
+        - Exceptions au floor : Trade Finance, LEQ, non-courant CT
+        - Floor/cap réglementaire : 1 an ≤ D ≤ 5 ans
+          (floor levé pour les facilités exemptées)
+
+    Parameters
+    ----------
+    facilities_df : pl.DataFrame
+        Colonnes attendues :
+        - facility_id                  (str)
+        - as_of_date                   (date)
+        - maturity_date                (date)
+        - initial_maturity_days        (int)
+        - facility_type                (str)    : "trade_finance" | "leq"
+                                                  | "non_courant" | "standard"
+        - effective_maturity_sourced   (float, nullable)  : en années
+        - amortization_type            (str, nullable)    : "bullet" | "linear"
+        - amortization_periodicity     (str, nullable)    : "monthly" | "quarterly"
+                                                            | "annual"
+        - residual_value               (float, nullable)
+        - outstanding                  (float)
+    cashflows_df : pl.DataFrame | None
+        Profil de cashflows réels (optionnel). Colonnes : facility_id,
+        cashflow_date, outstanding.
+
+    Returns
+    -------
+    pl.DataFrame
+        Colonnes :
+        - facility_id        (str)
+        - duration_raw       (float)  : duration avant floor/cap
+        - duration_source    (str)    : "sourced" | "cashflows"
+                                        | "reconstructed" | "fallback"
+        - floor_exempt       (bool)   : True si exempt du floor d'un an
+        - effective_maturity (float)  : duration après floor/cap réglementaire
+    """
+    # Date de référence commune (première valeur non-nulle)
+    as_of_date: date = facilities_df["as_of_date"].drop_nulls()[0]
+
+    # ── Initialisation ────────────────────────────────────────────────
+    result = facilities_df.with_columns(
+        pl.lit(None).cast(pl.Float64).alias("duration_raw"),
+        pl.lit(None).cast(pl.Utf8).alias("duration_source"),
+    )
+
+    # ── Source 1 : valeur déjà fournie ───────────────────────────────
+    result = result.with_columns(
+        pl.when(pl.col("effective_maturity_sourced").is_not_null())
+        .then(pl.col("effective_maturity_sourced"))
+        .otherwise(pl.col("duration_raw"))
+        .alias("duration_raw"),
+
+        pl.when(pl.col("effective_maturity_sourced").is_not_null())
+        .then(pl.lit("sourced"))
+        .otherwise(pl.col("duration_source"))
+        .alias("duration_source"),
+    )
+
+    # ── Source 2 : cashflows réels ────────────────────────────────────
+    if cashflows_df is not None:
+        dur_cf = compute_duration_from_cashflows(cashflows_df, as_of_date)
+        result = (
+            result
+            .join(dur_cf, on="facility_id", how="left", suffix="_cf")
+            .with_columns(
+                pl.when(
+                    pl.col("duration_source").is_null()
+                    & pl.col("duration_raw_cf").is_not_null()
+                )
+                .then(pl.col("duration_raw_cf"))
+                .otherwise(pl.col("duration_raw"))
+                .alias("duration_raw"),
+
+                pl.when(
+                    pl.col("duration_source").is_null()
+                    & pl.col("duration_raw_cf").is_not_null()
+                )
+                .then(pl.lit("cashflows"))
+                .otherwise(pl.col("duration_source"))
+                .alias("duration_source"),
+            )
+            .drop("duration_raw_cf")
+        )
+
+    # ── Source 3 : reconstruction synthétique ────────────────────────
+    has_amort_params = (
+        pl.col("amortization_type").is_not_null()
+        & pl.col("amortization_periodicity").is_not_null()
+        & pl.col("outstanding").is_not_null()
+    )
+
+    to_reconstruct = result.filter(
+        pl.col("duration_source").is_null() & has_amort_params
+    )
+
+    if to_reconstruct.height > 0:
+        rec_cf = reconstruct_cashflows(to_reconstruct)
+        dur_rec = compute_duration_from_cashflows(rec_cf, as_of_date)
+        result = (
+            result
+            .join(dur_rec, on="facility_id", how="left", suffix="_rec")
+            .with_columns(
+                pl.when(
+                    pl.col("duration_source").is_null()
+                    & pl.col("duration_raw_rec").is_not_null()
+                )
+                .then(pl.col("duration_raw_rec"))
+                .otherwise(pl.col("duration_raw"))
+                .alias("duration_raw"),
+
+                pl.when(
+                    pl.col("duration_source").is_null()
+                    & pl.col("duration_raw_rec").is_not_null()
+                )
+                .then(pl.lit("reconstructed"))
+                .otherwise(pl.col("duration_source"))
+                .alias("duration_source"),
+            )
+            .drop("duration_raw_rec")
+        )
+
+    # ── Source 4 : fallback = maturité résiduelle contractuelle ──────
+    fallback_duration = (
+        (pl.col("maturity_date") - pl.col("as_of_date")).dt.total_days()
+        / 365.25
+    )
+
+    result = result.with_columns(
+        pl.when(pl.col("duration_source").is_null())
+        .then(fallback_duration)
+        .otherwise(pl.col("duration_raw"))
+        .alias("duration_raw"),
+
+        pl.when(pl.col("duration_source").is_null())
+        .then(pl.lit("fallback"))
+        .otherwise(pl.col("duration_source"))
+        .alias("duration_source"),
+    )
+
+    # ── Exception au floor d'un an ────────────────────────────────────
+    # Exemptées : Trade Finance, LEQ, facilités hors financement courant
+    # avec maturité initiale < 1 an (< 365 jours)
+    floor_exempt_condition = pl.col("facility_type").is_in(
+        ["trade_finance", "leq", "non_courant"]
+    ) & (pl.col("initial_maturity_days") < 365)
+
+    result = result.with_columns(
+        floor_exempt_condition.alias("floor_exempt")
+    )
+
+    # ── Floor / Cap réglementaire (Bâle II) ──────────────────────────
+    result = result.with_columns(
+        pl.when(pl.col("floor_exempt"))
+        .then(pl.col("duration_raw").clip(upper_bound=5.0))       # Cap seul
+        .otherwise(pl.col("duration_raw").clip(1.0, 5.0))          # Floor + Cap
+        .alias("effective_maturity")
+    )
+
+    return result.select(
+        [
+            "facility_id",
+            "duration_raw",
+            "duration_source",
+            "floor_exempt",
+            "effective_maturity",
+        ]
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Tests pytest
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_facility(
+    facility_id: str,
+    as_of_date: date,
+    maturity_date: date,
+    initial_maturity_days: int,
+    facility_type: str = "standard",
+    effective_maturity_sourced: float | None = None,
+    amortization_type: str | None = None,
+    amortization_periodicity: str | None = None,
+    residual_value: float | None = None,
+    outstanding: float = 1_000_000.0,
+) -> pl.DataFrame:
+    """Helper : crée un facilities_df à une seule ligne pour les tests."""
+    return pl.DataFrame(
+        {
+            "facility_id": [facility_id],
+            "as_of_date": [as_of_date],
+            "maturity_date": [maturity_date],
+            "initial_maturity_days": [initial_maturity_days],
+            "facility_type": [facility_type],
+            "effective_maturity_sourced": [effective_maturity_sourced],
+            "amortization_type": [amortization_type],
+            "amortization_periodicity": [amortization_periodicity],
+            "residual_value": [residual_value],
+            "outstanding": [outstanding],
+        },
+        schema={
+            "facility_id": pl.Utf8,
+            "as_of_date": pl.Date,
+            "maturity_date": pl.Date,
+            "initial_maturity_days": pl.Int64,
+            "facility_type": pl.Utf8,
+            "effective_maturity_sourced": pl.Float64,
+            "amortization_type": pl.Utf8,
+            "amortization_periodicity": pl.Utf8,
+            "residual_value": pl.Float64,
+            "outstanding": pl.Float64,
+        },
+    )
+
+
+def test_bullet_3_ans() -> None:
+    """Bullet 3 ans → effective_maturity = 3.0 (≥ 1, ≤ 5)."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F001", t0, date(2028, 6, 30),
+        initial_maturity_days=3 * 365,
+        amortization_type="bullet",
+        amortization_periodicity="annual",
+    )
+    res = compute_effective_maturity(fac)
+    em = res["effective_maturity"][0]
+    assert abs(em - 3.0) < 0.05, f"Attendu ~3.0, obtenu {em}"
+
+
+def test_linear_5_ans_annuel() -> None:
+    """
+    Linéaire 5 ans annuel → duration ≈ (N+1)/2 = 3.0 mais dépend du taux.
+    On vérifie que 1 ≤ duration ≤ 5 et duration < 5.
+    """
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F002", t0, date(2030, 6, 30),
+        initial_maturity_days=5 * 365,
+        amortization_type="linear",
+        amortization_periodicity="annual",
+    )
+    res = compute_effective_maturity(fac)
+    em = res["effective_maturity"][0]
+    assert 1.0 <= em <= 5.0, f"Hors bornes : {em}"
+    assert em < 5.0, f"Linear 5 ans ne devrait pas être capé : {em}"
+
+
+def test_floor_facilite_standard_6_mois() -> None:
+    """Facilité standard 6 mois → floor à 1.0 an appliqué."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F003", t0, date(2025, 12, 31),
+        initial_maturity_days=184,
+        facility_type="standard",
+        amortization_type="bullet",
+        amortization_periodicity="monthly",
+    )
+    res = compute_effective_maturity(fac)
+    em = res["effective_maturity"][0]
+    assert em == 1.0, f"Floor standard attendu = 1.0, obtenu {em}"
+    assert res["floor_exempt"][0] is False
+
+
+def test_floor_exempt_trade_finance_6_mois() -> None:
+    """Trade Finance 6 mois → floor levé, effective_maturity ≈ 0.5 an."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F004", t0, date(2025, 12, 31),
+        initial_maturity_days=184,
+        facility_type="trade_finance",
+        amortization_type="bullet",
+        amortization_periodicity="monthly",
+    )
+    res = compute_effective_maturity(fac)
+    em = res["effective_maturity"][0]
+    assert res["floor_exempt"][0] is True
+    assert em < 1.0, f"Trade Finance 6M devrait être < 1.0, obtenu {em}"
+    assert em > 0.0
+
+
+def test_cap_facilite_10_ans() -> None:
+    """Facilité 10 ans → plafonnée à 5.0 ans."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F005", t0, date(2035, 6, 30),
+        initial_maturity_days=10 * 365,
+        amortization_type="bullet",
+        amortization_periodicity="annual",
+    )
+    res = compute_effective_maturity(fac)
+    em = res["effective_maturity"][0]
+    assert em == 5.0, f"Cap attendu = 5.0, obtenu {em}"
+
+
+def test_fallback_sans_cashflows() -> None:
+    """Sans cashflows ni amortissement → fallback = maturité résiduelle clippée."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility(
+        "F006", t0, date(2027, 6, 30),
+        initial_maturity_days=2 * 365,
+        # Pas de type ni périodicité → fallback
+    )
+    res = compute_effective_maturity(fac)
+    assert res["duration_source"][0] == "fallback"
+    em = res["effective_maturity"][0]
+    assert 1.0 <= em <= 5.0
+
+
+def test_source_depuis_cashflows_reels() -> None:
+    """Duration calculée depuis un cashflow réel bullet simple."""
+    t0 = date(2025, 6, 30)
+    fac = _make_facility("F007", t0, date(2028, 6, 30), 3 * 365)
+    # Cashflow bullet : encours de 1M jusqu'en 2028, puis 0
+    cf = pl.DataFrame(
+        {
+            "facility_id": ["F007", "F007"],
+            "cashflow_date": [date(2027, 6, 30), date(2028, 6, 30)],
+            "outstanding": [1_000_000.0, 0.0],
+        },
+        schema={"facility_id": pl.Utf8, "cashflow_date": pl.Date, "outstanding": pl.Float64},
+    )
+    res = compute_effective_maturity(fac, cashflows_df=cf)
+    assert res["duration_source"][0] == "cashflows"
+    em = res["effective_maturity"][0]
+    assert 1.0 <= em <= 5.0
