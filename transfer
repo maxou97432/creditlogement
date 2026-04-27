@@ -1,16 +1,25 @@
-# Les lignes où SRS n'applique PAS le plancher (NB_DURATION_IRBA < 1.0)
-# → ce sont les vraies exceptions
+# ══════════════════════════════════════════════════════════════════
+# ÉTAPE 1 : Comparaison MATURITE capret (duration) vs NB_MATURITE_IRBA (srs)
+# ══════════════════════════════════════════════════════════════════
 
-exceptions_srs = srs_X_capret.filter(pl.col('NB_DURATION_IRBA') < 1.0)
-print(f"Lignes avec durée < 1 an dans srs : {exceptions_srs.height}")
-
-# Leur répartition par Type_Credit
-print(exceptions_srs.group_by('Type_Credit').len().sort('len', descending=True))
-
-# Ligne NON-exception avec durée < 1 an dans capret mais floored à 1 par srs
-non_exception = srs_X_capret.filter(
-    (pl.col('duration') < 1.0) & 
-    (pl.col('NB_DURATION_IRBA') == 1.0)
+etape1 = srs_X_capret.with_columns(
+    (pl.col('duration') - pl.col('NB_MATURITE_IRBA')).alias('Ecart_Maturite')
 )
-print(f"\nLignes où SRS APPLIQUE le floor (duration capret < 1 mais srs = 1) :")
-print(non_exception.group_by('Type_Credit').len().sort('len', descending=True))
+
+n_match = etape1.filter(pl.col('Ecart_Maturite').abs() < 0.01).height
+print(f"Match : {n_match}/{etape1.height} ({n_match/etape1.height:.1%})")
+
+print("\nStats de l'écart :")
+print(etape1['Ecart_Maturite'].describe())
+
+print("\nDivergences par Type_Credit :")
+print(
+    etape1.filter(pl.col('Ecart_Maturite').abs() >= 0.01)
+    .group_by('Type_Credit')
+    .agg(
+        pl.len().alias('nb'),
+        pl.col('Ecart_Maturite').mean().round(3).alias('Ecart_moyen'),
+        pl.col('Ecart_Maturite').min().round(3).alias('Ecart_min'),
+        pl.col('Ecart_Maturite').max().round(3).alias('Ecart_max')
+    ).sort('nb', descending=True)
+)
