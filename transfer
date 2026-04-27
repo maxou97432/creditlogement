@@ -1,44 +1,5 @@
-from datetime import date
+# Combien de nulls au total ?
+print(f"Nulls DT_ECHEANCE_AUTO_MOY : {srs_X_capret['DT_ECHEANCE_AUTO_MOY'].null_count()}/{srs_X_capret.height}")
 
-# Conversion YYYYMMDD → date → durée en années
-srs_X_capret_test = srs_X_capret.with_columns(
-    (
-        pl.col('DT_ECHEANCE_AUTO_MOY')
-        .cast(pl.Utf8)
-        .str.to_date('%Y%m%d')
-        .cast(pl.Date)
-        - pl.lit(date(2025, 6, 30))
-    ).dt.total_days() / 365.25
-).alias('Duration_AUTO_MOY')
-
-# Correction : with_columns avec alias correct
-srs_X_capret_test = srs_X_capret.with_columns(
-    (
-        (
-            pl.col('DT_ECHEANCE_AUTO_MOY')
-            .cast(pl.Utf8)
-            .str.to_date('%Y%m%d')
-            .cast(pl.Date)
-            - pl.lit(date(2025, 6, 30))
-        ).dt.total_days() / 365.25
-    ).alias('Duration_AUTO_MOY')
-)
-
-# Comparaison 1 : vs NB_MATURITE_IRBA (maturité srs)
-n1 = srs_X_capret_test.filter(
-    (pl.col('Duration_AUTO_MOY') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
-).height
-print(f"Duration_AUTO_MOY vs NB_MATURITE_IRBA : {n1}/{srs_X_capret_test.height} ({n1/srs_X_capret_test.height:.1%})")
-
-# Comparaison 2 : vs duration (maturité brute capret)
-n2 = srs_X_capret_test.filter(
-    (pl.col('Duration_AUTO_MOY') - pl.col('duration')).abs() < 0.01
-).height
-print(f"Duration_AUTO_MOY vs duration (capret) : {n2}/{srs_X_capret_test.height} ({n2/srs_X_capret_test.height:.1%})")
-
-# Aperçu des valeurs
-print("\nAperçu :")
-print(srs_X_capret_test.select([
-    'DT_ECHEANCE_AUTO_MOY', 'Duration_AUTO_MOY', 
-    'NB_MATURITE_IRBA', 'duration'
-]).head(5))
+# Est-ce que la colonne est mieux remplie dans le capret original ?
+print(f"Nulls dans capret brut     : {capret['DT_ECHEANCE_AUTO_MOY'].null_count()}/{capret.height}")
