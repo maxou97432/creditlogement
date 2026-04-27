@@ -1,82 +1,28 @@
-import polars as pl
-from datetime import date
-
-print("=================================================================")
-print(" 🔬 AUDIT RÉGLEMENTAIRE BÂLE II - SUR LA BASE DE RÉFÉRENCE (SRS)")
-print("=================================================================\n")
-
-# 0. Initialisation et calcul des dates (Arrêté au 30/06/2025 -> 23922 en SAS)
-DT_ARRT = 23922 
-srs_audit = srs.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Maturite_Residuelle_Ans')
-)
-
 # -------------------------------------------------------------
-# RÈGLE 1 : Maturité Conservatrice et Prêts In Fine
-# Text: "duration is equal to residual maturity (conservative choice)"
-# -------------------------------------------------------------
-print("▶ RÈGLE 1 : Fallback sur la maturité résiduelle (Prêts Bullet ou manque de data)")
-n_r1 = srs_audit.filter(
-    (pl.col('Maturite_Residuelle_Ans') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
-).height
-print(f"  └─> Conformité : {n_r1} contrats ({n_r1/srs_audit.height:.1%}) utilisent strictement la maturité finale.\n")
-
-# -------------------------------------------------------------
-# RÈGLE 2 : Calcul de la Date de Maturité Bâloise (Reverse-Engineering)
-# Text: "D = (Duration date - As of date) / 365.25"
-# -------------------------------------------------------------
-print("▶ RÈGLE 2 : Date de Centre de Gravité (Macaulay Duration Date)")
-# Optima calcule une "Duration date" intermédiaire. Si on ne l'a pas en base, on l'inverse !
-srs_audit = srs_audit.with_columns(
-    (pl.lit(DT_ARRT) + pl.col('NB_MATURITE_IRBA') * 365.25).alias('Expected_Duration_Date_Jours')
-)
-n_r2 = srs_audit.filter(
-    (pl.col('Expected_Duration_Date_Jours') - pl.col('DT_ECHEANCE_FEM')).abs() <= 1.0
-).height
-print(f"  └─> Prouvé : Pour {n_r2} lignes, la Duration Date tombe exactement le jour de la maturité finale.")
-print(f"  └─> Pour les ~{srs_audit.height - n_r2} autres, Optima a pondéré les flux passés, mais cette date intermédiaire n'est pas exportée dans l'extract.\n")
-
-# -------------------------------------------------------------
-# RÈGLE 3 : Plafonds Réglementaires (Floor et Cap)
-# Text: "1 year <= Duration <= 5 years"
-# -------------------------------------------------------------
-print("▶ RÈGLE 3 : Application du Floor (1 an) et du Cap (5 ans)")
-anomalies_cap = srs_audit.filter(pl.col('NB_DURATION_IRBA') > 5.001)
-anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
-print(f"  └─> Dépassements hors limites hautes (> 5 ans) : {anomalies_cap.height} anomalies.")
-print(f"  └─> Dépassements sous limites basses (< 1 an)  : {anomalies_floor.height} candidats aux exemptions.\n")
-
-# -------------------------------------------------------------
-# RÈGLE 4 : Exceptions Réglementaires au Floor (Ex: Trade Finance, C.A.V)
-# Text: "Exception: Trade Finance, LEQ, initial maturity < 1 year"
+# RÈGLE 4 : Exceptions Réglementaires au Floor (< 1 an)
 # -------------------------------------------------------------
 print("▶ RÈGLE 4 : Validité des Exceptions (< 1 an)")
 if anomalies_floor.height > 0:
-    # 1. On uniformise la date de début pour calculer la Maturité Initiale :
-    audit_init_mat = anomalies_floor.with_columns(
-        pl.when(pl.col('DT_DEBUT_AUTO') > 300000) # Si encodé en YYYYMMDD
-        .then(pl.col('DT_DEBUT_AUTO').cast(pl.Utf8).str.to_date('%Y%m%d'))
-        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_DEBUT_AUTO').cast(pl.Int64)))
-        .alias('Date_Debut_Format'),
-        
-        pl.when(pl.col('DT_ECHEANCE_FEM') > 300000)
-        .then(pl.col('DT_ECHEANCE_FEM').cast(pl.Utf8).str.to_date('%Y%m%d'))
-        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_ECHEANCE_FEM').cast(pl.Int64)))
-        .alias('Date_Fin_Format')
+    print(f"  └─> {anomalies_floor.height} prêts ont une duration < 1 an. Voici les dates brutes de ces prêts :")
+    
+    # Affichons directement les données brutes pour voir le format de ton 'DT_DEBUT_AUTO'
+    print(anomalies_floor.select(['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'NB_DURATION_IRBA']).head(10))
+    
+    # On calcule bêtement la différence mathématique selon si c'est du YYYYMMDD ou du jour SAS
+    # Si c'est du SAS (ex: 24000), Date_Fin - Date_Debut donne les jours
+    # Si c'est du YYYYMMDD (ex: 20250630), la différence brute n'est pas exacte en jours mais donne un ordre de grandeur
+    audit_init = anomalies_floor.with_columns(
+        (pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')).alias('difference_brute')
+    ).with_columns(
+        pl.when(pl.col('DT_DEBUT_AUTO') > 300000)
+        .then(pl.col('difference_brute') / 10000.0) # Approx ans direct pour YYYYMMDD (20250630 - 20240630 = 10000 -> 1 an)
+        .otherwise(pl.col('difference_brute') / 365.25) # Pour Jours SAS
+        .alias('Maturite_Initiale_Approx_Ans')
     )
     
-    # 2. Maturité Initiale (Années) = Date Fin - Date Début
-    audit_init_mat = audit_init_mat.with_columns(
-        ((pl.col('Date_Fin_Format') - pl.col('Date_Debut_Format')).dt.total_days() / 365.25).alias('Maturite_Initiale_Ans')
-    )
+    respectent = audit_init.filter(pl.col('Maturite_Initiale_Approx_Ans') <= 1.0).height
+    print(f"  └─> {respectent} prêts sur {anomalies_floor.height} respectent l'exception de maturité initiale < 1 an.")
     
-    respectent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') <= 1.0).height
-    violent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0).height
-    
-    print(f"  └─> Sur les {anomalies_floor.height} exceptions :")
-    print(f"      ✅ {respectent_regle} contrats sont légaux (Maturité initiale <= 1 an).")
-    print(f"      ❌ Seulement {violent_regle} bruits de data (erreur de date d'octroi).")
-    print("      L'intégrité réglementaire du moteur d'origine concernant les CAV et Trade Finance est démontrée.")
 else:
     print("  └─> Aucune exception détectée.")
 
