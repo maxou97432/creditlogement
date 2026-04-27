@@ -1,9 +1,32 @@
-# Vérifie la distribution des "micro-écarts"
-check = srs_X_capret.with_columns(
-    ((pl.col('MATURITE')/12).clip(1,5) - pl.col('NB_DURATION_IRBA')).alias('diff')
+from datetime import date
+
+DT_ARRT = 23922  # 30/06/2025 en SAS days
+
+# ── Calculer la maturité résiduelle en mois dans srs ─────────────
+srs_analyse = srs.with_columns(
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 30.4375).round(0).cast(pl.Int64).alias('N_mois_srs')
 )
 
-print("Exactement 0.0        :", check.filter(pl.col('diff') == 0.0).height)
-print("Entre 0 et 0.001      :", check.filter((pl.col('diff').abs() > 0.0) & (pl.col('diff').abs() < 0.001)).height)
-print("Entre 0.001 et 0.01   :", check.filter((pl.col('diff').abs() >= 0.001) & (pl.col('diff').abs() < 0.01)).height)
-print("Supérieur à 0.01      :", check.filter(pl.col('diff').abs() >= 0.01).height)
+# ── Pour chaque type d'amortissement : ratio NB_MATURITE_IRBA / N_mois ───
+print("=== RATIO NB_MATURITE_IRBA / (N_mois/12) PAR TYPE AMORT ===")
+print("(= le facteur multiplicateur de la maturité résiduelle)\n")
+
+analyse = (
+    srs_analyse
+    .filter(pl.col('N_mois_srs') > 0)
+    .with_columns(
+        (pl.col('NB_MATURITE_IRBA') / (pl.col('N_mois_srs') / 12.0)).alias('Ratio')
+    )
+    .group_by('CD_TYPE_AMORT')
+    .agg(
+        pl.len().alias('nb'),
+        pl.col('Ratio').mean().round(4).alias('Ratio_moyen'),
+        pl.col('Ratio').median().round(4).alias('Ratio_median'),
+        pl.col('Ratio').std().round(4).alias('Ratio_std'),
+        pl.col('Ratio').min().round(4).alias('Ratio_min'),
+        pl.col('Ratio').max().round(4).alias('Ratio_max'),
+    )
+    .sort('CD_TYPE_AMORT')
+)
+
+print(analyse)
