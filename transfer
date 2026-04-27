@@ -1,22 +1,16 @@
-# N = durée résiduelle en "nombre de periodes" (mensuel = *12)
-# Formules sans taux d'intérêt (approximation r=0)
+srs_X_capret3 = srs_X_capret.filter(pl.col('CD_TYPE_AMORT') == '3')
 
-srs_X_capret_test = srs_X_capret.with_columns(
-    (pl.col('duration') * 12).round(0).cast(pl.Int64).alias('N_mois')
-).with_columns(
-    pl.when(pl.col('CD_TYPE_AMORT') == '4')   # Bullet/In fine → M = N
-    .then(pl.col('duration'))
-    .when(pl.col('CD_TYPE_AMORT').is_in(['1', '3']))  # Linéaire/Progressif → M = (N+1)/2
-    .then((pl.col('duration') + 1.0/12) / 2)
-    .when(pl.col('CD_TYPE_AMORT') == '2')   # Dégressif → M ≈ N/3
-    .then(pl.col('duration') / 3)
-    .otherwise(pl.col('duration'))           # Fallback conservateur
-    .alias('Duration_Analytique')
-).with_columns(
-    pl.col('Duration_Analytique').clip(1.0, 5.0).alias('Duration_Reglementaire')
+# Formule analytique Type 3 : M = (N+1)/2, N = nombre de mois restants
+srs_X_capret3 = srs_X_capret3.with_columns(
+    ((pl.col('MATURITE') + 1) / 2 / 12).alias('MATURITE_CALCULEE')
 )
 
-n = srs_X_capret_test.filter(
-    (pl.col('Duration_Reglementaire') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+# Comparaison
+n = srs_X_capret3.filter(
+    (pl.col('MATURITE_CALCULEE') - pl.col('NB_MATURITE_IRBA')).abs() < 0.1
 ).height
-print(f"Avec type amort → match : {n}/{srs_X_capret_test.height} ({n/srs_X_capret_test.height:.1%})")
+print(f"Match Type 3 avec (MATURITE+1)/2/12 : {n}/{srs_X_capret3.height} ({n/srs_X_capret3.height:.1%})")
+
+# Statistiques de l'écart résiduel
+print(srs_X_capret3['MATURITE_CALCULEE'].alias('calc').describe())
+print((srs_X_capret3['MATURITE_CALCULEE'] - srs_X_capret3['NB_MATURITE_IRBA']).describe())
