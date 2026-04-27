@@ -1,15 +1,24 @@
-# 1. Combien de NB_MATURITE_IRBA sont null dans la base complète ?
-print("=== NULL CHECK ===")
-print(f"NB_MATURITE_IRBA null : {capret['NB_MATURITE_IRBA'].null_count()}/{capret.height}")
+# ═══════════════════════════════════════════════════════════════
+# BILAN DES 3 ÉCARTS SUR LA BASE FUSIONNÉE
+# ═══════════════════════════════════════════════════════════════
 
-# 2. Parmi les mismatches, est-ce que ce sont principalement des lignes avec MATURITE nulle ?
-mismatches_analyse = df_test.filter(pl.col('Ecart').abs() >= 0.001)
-print(f"\nDont MATURITE nulle dans les mismatches : {mismatches_analyse['NB_MATURITE_IRBA'].null_count()}/{mismatches_analyse.height}")
+# Attention : si les deux bases ont NB_MATURITE_IRBA, le join Polars
+# peut créer NB_MATURITE_IRBA (srs) et NB_MATURITE_IRBA_right (capret)
+print("=== COLONNES AUTOUR DE MATURITE ===")
+print([c for c in srs_X_capret.columns if 'MATURIT' in c.upper() or 'DURAT' in c.upper()])
 
-# 3. Profil des 'autre' (écarts > 0.001 et NB_DURATION_IRBA != 1.0)
-autres = df_test.filter(
-    (pl.col('Ecart').abs() >= 0.001) & 
-    (pl.col('NB_DURATION_IRBA') != 1.0)
-)
-print(f"\n=== ZOOM SUR 'AUTRE' ({autres.height} lignes) ===")
-print(autres.select(['NB_MATURITE_IRBA', 'NB_DURATION_IRBA', 'Duration_Calculee', 'Ecart']).head(10))
+# 1. Ecart BRUT : les deux bases sont-elles alignées ?
+print("\n=== ECART BRUT (SRS vs CAPRET) ===")
+print(srs_X_capret['Ecart_brut'].describe())
+n_brut =srs_X_capret.filter(pl.col('Ecart_brut').abs() < 0.001).height
+print(f"Match NB_DURATION_IRBA == duration : {n_brut}/{srs_X_capret.height} ({n_brut/srs_X_capret.height:.1%})")
+
+# 2. Ecart SRS : notre formule reproduit-elle la référence srs ?
+print("\n=== ECART SRS (Duration_Calculee vs NB_DURATION_IRBA) ===")
+n_srs = srs_X_capret.filter(pl.col('Ecart_srs').abs() < 0.001).height
+print(f"Match : {n_srs}/{srs_X_capret.height} ({n_srs/srs_X_capret.height:.1%})")
+
+# 3. Sur quelle MATURITE est basé Duration_Calculee ?
+print("\n=== QUELLE MATURITE UTILISONS-NOUS ? ===")
+comp = srs_X_capret.select(['NB_MATURITE_IRBA', 'Duration_Calculee']).head(5)
+print(comp)
