@@ -1,9 +1,16 @@
-# Sur quelles lignes les deux bases s'accordent-elles ?
-accord = srs_X_capret.filter(pl.col('Ecart_brut').abs() < 0.001)
-print(f"Lignes en accord : {accord.height}")
-print(f"Leur Type_Credit : {accord.group_by('Type_Credit').len().sort('len', descending=True)}")
+# Scanner toutes les colonnes string pour trouver 
+# celle qui a des modalités "Trade Finance" ou "LEQ"
+mots_cles = ['trade', 'leq', 'finance', 'court', 'cav', 'uncommit', 'confirme', 'hors', 'TF']
 
-# Et les grosses divergences ?
-gros_ecarts = srs_X_capret.filter(pl.col('Ecart_brut').abs() > 1.0)
-print(f"\nEcarts > 1 an : {gros_ecarts.height}")
-print(gros_ecarts.select(['NB_DURATION_IRBA', 'duration', 'Ecart_brut', 'Type_Credit']).head(10))
+print("=== RECHERCHE DE LA VARIABLE EXCEPTION ===")
+for col in srs_X_capret.columns:
+    try:
+        if srs_X_capret[col].dtype == pl.Utf8:
+            valeurs = srs_X_capret[col].drop_nulls().unique().to_list()
+            # Cherche si une modalité contient un des mots-clés
+            match = [v for v in valeurs 
+                     if any(kw.lower() in str(v).lower() for kw in mots_cles)]
+            if match:
+                print(f"\n✅ {col} : {valeurs[:10]}")  # Max 10 modalités
+    except:
+        pass
