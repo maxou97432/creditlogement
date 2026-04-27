@@ -1,24 +1,9 @@
-# ═══════════════════════════════════════════════════════════════
-# BILAN DES 3 ÉCARTS SUR LA BASE FUSIONNÉE
-# ═══════════════════════════════════════════════════════════════
+# Sur quelles lignes les deux bases s'accordent-elles ?
+accord = srs_X_capret.filter(pl.col('Ecart_brut').abs() < 0.001)
+print(f"Lignes en accord : {accord.height}")
+print(f"Leur Type_Credit : {accord.group_by('Type_Credit').len().sort('len', descending=True)}")
 
-# Attention : si les deux bases ont NB_MATURITE_IRBA, le join Polars
-# peut créer NB_MATURITE_IRBA (srs) et NB_MATURITE_IRBA_right (capret)
-print("=== COLONNES AUTOUR DE MATURITE ===")
-print([c for c in srs_X_capret.columns if 'MATURIT' in c.upper() or 'DURAT' in c.upper()])
-
-# 1. Ecart BRUT : les deux bases sont-elles alignées ?
-print("\n=== ECART BRUT (SRS vs CAPRET) ===")
-print(srs_X_capret['Ecart_brut'].describe())
-n_brut =srs_X_capret.filter(pl.col('Ecart_brut').abs() < 0.001).height
-print(f"Match NB_DURATION_IRBA == duration : {n_brut}/{srs_X_capret.height} ({n_brut/srs_X_capret.height:.1%})")
-
-# 2. Ecart SRS : notre formule reproduit-elle la référence srs ?
-print("\n=== ECART SRS (Duration_Calculee vs NB_DURATION_IRBA) ===")
-n_srs = srs_X_capret.filter(pl.col('Ecart_srs').abs() < 0.001).height
-print(f"Match : {n_srs}/{srs_X_capret.height} ({n_srs/srs_X_capret.height:.1%})")
-
-# 3. Sur quelle MATURITE est basé Duration_Calculee ?
-print("\n=== QUELLE MATURITE UTILISONS-NOUS ? ===")
-comp = srs_X_capret.select(['NB_MATURITE_IRBA', 'Duration_Calculee']).head(5)
-print(comp)
+# Et les grosses divergences ?
+gros_ecarts = srs_X_capret.filter(pl.col('Ecart_brut').abs() > 1.0)
+print(f"\nEcarts > 1 an : {gros_ecarts.height}")
+print(gros_ecarts.select(['NB_DURATION_IRBA', 'duration', 'Ecart_brut', 'Type_Credit']).head(10))
