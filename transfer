@@ -1,35 +1,87 @@
-# 📊 Regulatory Framework & Data Audit: Basel II IRB Effective Maturity
+import polars as pl
 
-## 1. Regulatory Context (Optima / SRS Methodology)
-According to the Basel II internal ratings-based (IRB) approach, the effective maturity is calculated as the weighted average of the residual durations for the various positive cash flows of a facility's repayment schedule (Macaulay duration).
+print("==========================================================")
+print(" VERIFICATION POINT PAR POINT DES REGLES BALE II (BASE SRS ORIGINALE)")
+print("==========================================================\n")
 
-The reference document outlines a strict hierarchical methodology applied by the upstream engine (Optima) to compute this value (`NB_MATURITE_IRBA`) before yielding the final regulatory duration (`NB_DURATION_IRBA`):
+# Constante : La date d'arrêté est le 30/06/2025 (23922 en format SAS)
+DT_ARRT = 23922 
 
-1. **Analytical Cashflow Calculation:** 
-   $$\text{Duration} = \frac{\sum_{i=1}^{M} \max\left[0; \left(C_{t_{i-1}} - C_{t_i}\right)\right] \cdot \left(t_i - t_0\right)}{\sum_{i=1}^{M} \max\left[0; \left(C_{t_{i-1}} - C_{t_i}\right)\right]}$$
-   *Applied when the real amortization profile is available.*
-2. **Synthetic Cashflow Reconstruction:** Reconstructed from amortization type, periodicity, and residual value if the real schedule is missing.
-3. **Conservative Fallback:** If no data is available, duration defaults strictly to the residual contractual maturity: $D = \frac{\text{Maturity Date} - \text{As of Date}}{365.25}$.
+# Préparation : Calcul de la maturité résiduelle mathématique en années
+srs_audit = srs.with_columns(
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Maturite_Residuelle_Ans')
+)
 
-Finally, a **Regulatory Window** constraint is applied:
-> **1 year ≤ Duration ≤ 5 years** *(Floor and Cap)*
+# -------------------------------------------------------------
+# REGLE 1 : "duration is equal to residual maturity (conservative choice)"
+# -------------------------------------------------------------
+print("Règle 1 : Fallback sur la maturité résiduelle brute")
+# Le texte dit que c'est le choix conservateur quand il manque des données
+check_r1 = srs_audit.with_columns(
+    (pl.col('Maturite_Residuelle_Ans') - pl.col('NB_MATURITE_IRBA')).abs().alias('diff_mat')
+)
+n_r1 = check_r1.filter(pl.col('diff_mat') < 0.001).height
+print(f"-> Contrats appliquant strictement le fallback : {n_r1}/{srs_audit.height} ({n_r1/srs_audit.height:.1%})")
 
-**Exemptions to the 1-year floor:**
-- Trade Finance and LEQ facilities.
-- Facilities that do not belong to the debtor's current financing (*"ne relevant pas du financement courant"*) and possess an initial maturity < 1 year.
 
----
+# -------------------------------------------------------------
+# REGLE 2 : "D = (Duration date - As of date) / 365.25"
+# -------------------------------------------------------------
+print("\nRègle 2 : Formule de la date de duration")
+# On recherche une colonne qui ressemblerait à une date moyenne (Duration Date)
+duration_date_cols = [c for c in srs.columns if 'DURATION' in c.upper() or 'MOY' in c.upper() or 'AUTO' in c.upper()]
+if len(duration_date_cols) > 0:
+    print(f"-> Colonnes candidates trouvées : {duration_date_cols}")
+else:
+    print("-> Aucune colonne 'Duration Date' isolée dans SRS trouvée (elle n'est probablement pas exportée).")
 
-## 2. Empirical Verification on Legacy Data (SRS vs Capret)
-To map the flat target database (`Capret`) with the legacy SAS application (`SRS`), an empirical audit was conducted to verify how deeply the regulatory rules permeate the reference data.
 
-### Findings from the Audit (Sample: ~266k facilities):
-* **Rule 1 (Conservative Fallback):** Only **1.7%** (4,654 facilities) fell back to the gross residual maturity approach (`MATURITE / 12`).
-* **Rule 2 (Sourced Dates):** Exactly **7,809** facilities bypassed the calculation with hardcoded duration dates inside the engine.
-* **Main Cohort (Cashflow computation):** For the remaining **~95%** of the portfolio, the duration is precisely dynamically computed via the exact cashflow weighting or mathematical restitution. This effectively cuts the perceived residual maturity roughly in half for standard amortizing loans (Yielding an empirical scaling factor of **~0.51 to 0.54** depending on standard/progressive amortizations).
-* **Rule 3 & 4 (Floors & Exemptions):** The dataset presents a **100% adherence** to the 1-to-5-year bounds. The audit isolated exactly **42 anomalies** breaking the 1-year floor. **100% of these exceptions** belong to the `CAV & autres` segment (Crédit À Vue), which perfectly aligns with the regulatory exemption for short-term, non-current financing tools.
+# -------------------------------------------------------------
+# REGLE 3 : "1 year <= Duration <= 5 years" (Le Floor et le Cap)
+# -------------------------------------------------------------
+print("\nRègle 3 : Le Floor (1 an) et le Cap (5 ans)")
+# Tolérance flottante très légère
+anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
+anomalies_cap = srs_audit.filter(pl.col('NB_DURATION_IRBA') > 5.001)
 
-## 3. Conclusion & Migration Strategy
-The audit formally proves that the legacy reference dataset (`SRS`) contains highly deterministic Macaulay durations reflecting heavy upstream processing from the Optima engine. 
+print(f"-> Dépassements strict du Cap (> 5 ans) : {anomalies_cap.height} (Devrait être 0)")
+print(f"-> Dépassements du Floor (< 1 an)       : {anomalies_floor.height} (Ce sont nos exemptions potentielles)")
 
-As the `Capret` database does not persist granular cashflow schedules, mathematically reproducing the exact float computation is structurally impossible. To migrate the logic to Python/Polars, **a statistical heuristic leveraging the established ~0.54 multiplier for amortizing loan profiles** provides the highest possible accuracy (**96.5% matching threshold**) given the current flat variables. 
+
+# -------------------------------------------------------------
+# REGLE 4 : "Exceptions : duration can be less than 1 year (Trade Finance, LEQ, <1yr origination)"
+# -------------------------------------------------------------
+print("\nRègle 4 : Analyse des Exemptions au Floor d'un an")
+
+if anomalies_floor.height > 0:
+    print(f"-> {anomalies_floor.height} prêts ont une duration < 1 an. Audit de conformité réglementaire :")
+    
+    # Étape A : Trouver la colonne qui définit le produit (Nature/Code Produit dans SRS)
+    col_nature = [c for c in srs.columns if c in ['CD_PRODUIT', 'CD_NATURE', 'NATURE', 'FAMILLE', 'TYPE_FINANCEMENT']]
+    if col_nature:
+        print(f"   Répartition par {col_nature[0]} :")
+        print(anomalies_floor[col_nature[0]].value_counts())
+        
+    # Étape B : Vérifier "initial maturity less than 1 year"
+    # Il nous faut la date d'octroi ou de début pour calculer la maturité initiale
+    col_deb = [c for c in srs.columns if c in ['DT_OCTROI', 'D_DEB', 'DT_DEB', 'DT_MISE_EN_FORCE', 'C_TIMES']]
+    
+    if col_deb:
+        nom_col_deb = col_deb[0]
+        print(f"   Vérification de la Maturité Initiale via la colonne '{nom_col_deb}'...")
+        
+        # Calcul : (Date Fin - Date Début) / 365.25
+        audit_init_mat = anomalies_floor.with_columns(
+            ((pl.col('DT_ECHEANCE_FEM') - pl.col(nom_col_deb)) / 365.25).alias('Maturite_Initiale_Ans')
+        )
+        
+        respectent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') <= 1.0).height
+        violent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0).height
+        
+        print(f"   -> Conformité trouvée : {respectent_regle} prêts ont bien une maturité initiale <= 1 an !")
+        if violent_regle > 0:
+            print(f"   -> ATTENTION : {violent_regle} prêts ont une maturité initiale > 1 an mais un Floor inactif.")
+    else:
+        print("   Impossible de vérifier la condition de maturité initiale : aucune colonne de date d'octroi (DT_OCTROI, D_DEB...) trouvée dans SRS.")
+else:
+    print("-> Aucun prêt avec duration < 1 an dans SRS. La règle est donc parfaitement vierge d'exceptions.")
