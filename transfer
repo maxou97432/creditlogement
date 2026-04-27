@@ -1,10 +1,63 @@
-# Affiche toutes les colonnes contenant au moins 10% de zéros/nulls mais avec des montants (pour la Valeur Résiduelle)
-for col in capret.columns:
-    if capret[col].dtype in [pl.Float32, pl.Float64, pl.Int32, pl.Int64]:
-        non_nulls = capret[col].drop_nulls()
-        if len(non_nulls) > 0:
-            max_val = non_nulls.max()
-            min_val = non_nulls.min()
-            # Cherche un comportement de "montant" (0 à grand montant)
-            if min_val == 0 and max_val > 5000:
-                print(f"{col} - Min: {min_val}, Max: {max_val}, Moy: {non_nulls.mean():.1f}")
+print("==========================================================")
+print(" VERIFICATION POINT PAR POINT DES REGLES BALE II DANS SRS")
+print("==========================================================\n")
+
+# -------------------------------------------------------------
+# REGLE 1 : "duration is equal to residual maturity (conservative choice)"
+# -------------------------------------------------------------
+print("Règle 1 : Fallback sur la maturité résiduelle (MATURITE / 12)")
+# On cherche combien de lignes dans SRS ont exactement NB_MATURITE_IRBA = MATURITE / 12 (au jour près)
+# Le texte dit que c'est le choix conservateur quand il manque des données
+check_r1 = srs_X_capret.with_columns(
+    ((pl.col('MATURITE') / 12.0) - pl.col('NB_MATURITE_IRBA')).abs().alias('diff_mat')
+)
+n_r1 = check_r1.filter(pl.col('diff_mat') < 0.001).height
+print(f"-> Contrats appliquant strictement cette règle : {n_r1}/{srs_X_capret.height} ({n_r1/srs_X_capret.height:.1%})")
+
+
+# -------------------------------------------------------------
+# REGLE 2 : "D = (Duration date - As of date) / 365.25"
+# -------------------------------------------------------------
+print("\nRègle 2 : Formule de la date de duration")
+# On vérifie si SRS contient une colonne de duration date qu'on aurait ratée (ex: DT_ECHEANCE_AUTO_MOY)
+# S'il y a une colonne qui satisfait l'équation D * 365.25 = Jours
+if 'DT_ECHEANCE_AUTO_MOY' in srs_X_capret.columns:
+    sans_nulls = srs_X_capret.filter(pl.col('DT_ECHEANCE_AUTO_MOY').is_not_null())
+    print(f"-> Nombre de Duration Date sourcées : {sans_nulls.height}")
+    if sans_nulls.height > 0:
+        # Poursuivre le test
+        pass
+else:
+    print("-> Colonne Duration Date introuvable ou vide.")
+
+
+# -------------------------------------------------------------
+# REGLE 3 : "1 year <= Duration <= 5 years" (Le Floor et le Cap)
+# -------------------------------------------------------------
+print("\nRègle 3 : Le Floor (1 an) et le Cap (5 ans)")
+# On vérifie si NB_DURATION_IRBA respecte strictement ces bornes hors exceptions
+check_r3 = srs_X_capret.filter(
+    (pl.col('NB_DURATION_IRBA') > 5.0) | (pl.col('NB_DURATION_IRBA') < 1.0)
+)
+print(f"-> Lignes en dehors du range [1, 5] : {check_r3.height} anomalies trouvées")
+if check_r3.height == 0:
+    print("-> RÉUSSITE: 100% des lignes respectent le Floor et le Cap.")
+
+
+# -------------------------------------------------------------
+# REGLE 4 : "Exceptions : duration can be less than 1 year"
+#             (Trade Finance, LEQ, facilités non courantes)
+# -------------------------------------------------------------
+print("\nRègle 4 : Les Exceptions au floor < 1 an")
+# On cherche qui sont ces exceptions et si elles croisent les 42 fameuses lignes dont on avait parlé 
+exceptions = srs_X_capret.filter(pl.col('NB_DURATION_IRBA') < 1.0)
+if exceptions.height > 0:
+    print(f"-> {exceptions.height} exceptions trouvées !")
+    print("Nature de ces exceptions (Type_Credit) :")
+    print(exceptions['Type_Credit'].value_counts())
+    
+    # Vérification de la condition "initial maturity less than 1 year"
+    # Si on a MATURITE_INITIALE, on vérifie
+    # ...
+else:
+    print("-> 0 exception trouvée dans `srs_X_capret`. Le filtre de base a sûrement exclu les Trade Finance.")
