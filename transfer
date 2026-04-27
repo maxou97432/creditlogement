@@ -1,16 +1,16 @@
-# Scanner toutes les colonnes string pour trouver 
-# celle qui a des modalités "Trade Finance" ou "LEQ"
-mots_cles = ['trade', 'leq', 'finance', 'court', 'cav', 'uncommit', 'confirme', 'hors', 'TF']
+# Les lignes où SRS n'applique PAS le plancher (NB_DURATION_IRBA < 1.0)
+# → ce sont les vraies exceptions
 
-print("=== RECHERCHE DE LA VARIABLE EXCEPTION ===")
-for col in srs_X_capret.columns:
-    try:
-        if srs_X_capret[col].dtype == pl.Utf8:
-            valeurs = srs_X_capret[col].drop_nulls().unique().to_list()
-            # Cherche si une modalité contient un des mots-clés
-            match = [v for v in valeurs 
-                     if any(kw.lower() in str(v).lower() for kw in mots_cles)]
-            if match:
-                print(f"\n✅ {col} : {valeurs[:10]}")  # Max 10 modalités
-    except:
-        pass
+exceptions_srs = srs_X_capret.filter(pl.col('NB_DURATION_IRBA') < 1.0)
+print(f"Lignes avec durée < 1 an dans srs : {exceptions_srs.height}")
+
+# Leur répartition par Type_Credit
+print(exceptions_srs.group_by('Type_Credit').len().sort('len', descending=True))
+
+# Ligne NON-exception avec durée < 1 an dans capret mais floored à 1 par srs
+non_exception = srs_X_capret.filter(
+    (pl.col('duration') < 1.0) & 
+    (pl.col('NB_DURATION_IRBA') == 1.0)
+)
+print(f"\nLignes où SRS APPLIQUE le floor (duration capret < 1 mais srs = 1) :")
+print(non_exception.group_by('Type_Credit').len().sort('len', descending=True))
