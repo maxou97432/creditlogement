@@ -1,2 +1,21 @@
-mots = ['INIT', 'PERIOD', 'RESID', 'SOLDE', 'ECHEANCE', 'CASH', 'FLUX', 'REMB']
-[c for c in capret.columns if any(kw in c.upper() for kw in mots)]
+print("=== COLONNES DATES (pour cashflow_date / initial_maturity) ===")
+date_cols = [c for c in capret.columns 
+             if capret[c].dtype in [pl.Date, pl.Datetime]]
+for c in date_cols:
+    print(f"  {c} : {capret[c].min()} → {capret[c].max()}")
+
+print("\n=== COLONNES CATÉGORIELLES (peu de modalités, pour périodicité) ===")
+for c in capret.columns:
+    n = capret[c].n_unique()
+    if 2 <= n <= 20 and capret[c].dtype == pl.Utf8:
+        print(f"  {c} ({n} vals): {capret[c].drop_nulls().unique().to_list()}")
+
+print("\n=== COLONNES NUMÉRIQUES ENTIÈRES (pour initial_maturity_days) ===")
+for c in capret.columns:
+    if capret[c].dtype in [pl.Int32, pl.Int64]:
+        vals = capret[c].drop_nulls()
+        if vals.min() > 0 and vals.max() < 50000:  # Plage raisonnable en jours
+            print(f"  {c} : min={vals.min()}, max={vals.max()}, mean={vals.mean():.0f}")
+
+print("\n=== ZOOM SUR C_EST_PERIODE ===")
+print(capret['C_EST_PERIODE'].value_counts().sort('count', descending=True))
