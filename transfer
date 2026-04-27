@@ -1,18 +1,22 @@
-# Zoom sur C_EST_PERIODE
-print("=== C_EST_PERIODE ===")
-print(capret['C_EST_PERIODE'].value_counts().sort('count', descending=True))
+# Convertir DT_ECHEANCE_AUTO_MOY de YYYYMMDD entier → date réelle
+capret_test = capret.with_columns(
+    pl.col('DT_ECHEANCE_AUTO_MOY')
+    .cast(pl.Utf8)
+    .str.to_date('%Y%m%d')
+    .alias('DT_DURATION_DATE')
+).with_columns(
+    (
+        (pl.col('DT_DURATION_DATE') - pl.lit(date(2025, 6, 30))).dt.total_days() / 365.25
+    ).alias('Duration_depuis_AUTO_MOY')
+)
 
-# Et DT_ECHEANCE_AUTO_MOY (mentionné plus tôt)
-print("\n=== DT_ECHEANCE_AUTO_MOY ===")
-if 'DT_ECHEANCE_AUTO_MOY' in capret.columns:
-    print(f"Min: {capret['DT_ECHEANCE_AUTO_MOY'].min()}")
-    print(f"Max: {capret['DT_ECHEANCE_AUTO_MOY'].max()}")
-    print(f"Null: {capret['DT_ECHEANCE_AUTO_MOY'].null_count()}")
-
-# Colonnes numériques entières qui ressemblent à des jours (100 à 36500)
-print("\n=== CANDIDATS initial_maturity_days ===")
-for c in capret.columns:
-    if capret[c].dtype in [pl.Int32, pl.Int64]:
-        mn, mx = capret[c].min(), capret[c].max()
-        if mn is not None and 100 < mn and mx < 36500:
-            print(f"{c}: min={mn}, max={mx}")
+# Comparer avec NB_MATURITE_IRBA (srs) sur la base fusionnée
+print("Match Duration_AUTO_MOY vs NB_MATURITE_IRBA :")
+compare = srs_X_capret.join(
+    capret_test.select(['ta_cle', 'Duration_depuis_AUTO_MOY']),
+    on='ta_cle', how='left'
+)
+n = compare.filter(
+    (pl.col('Duration_depuis_AUTO_MOY') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
+).height
+print(f"{n}/{compare.height} ({n/compare.height:.1%})")
