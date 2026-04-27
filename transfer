@@ -1,20 +1,10 @@
-# T_INTRT supposé en Points de Base (54 = 0.54% annuel)
-# r = taux mensuel
-test_analytique = srs_X_capret.filter(pl.col('CD_TYPE_AMORT') == '3').with_columns(
-    (pl.col('T_INTRT') / 10000.0 / 12.0).alias('r_cf')
-).with_columns(
-    pl.when(pl.col('r_cf') > 0)
-    .then(
-        (pl.col('MATURITE') * (1.0 + pl.col('r_cf')) ** pl.col('MATURITE')) 
-        / ((1.0 + pl.col('r_cf')) ** pl.col('MATURITE') - 1.0)
-        - (1.0 / pl.col('r_cf'))
-    )
-    .otherwise((pl.col('MATURITE') + 1) / 2) # Limite quand r -> 0
-    .alias('Duration_Mois')
-).with_columns(
-    (pl.col('Duration_Mois') / 12.0).alias('MATURITE_CALCULEE')
-)
-
-# Comparaison 
-n = test_analytique.filter((pl.col('MATURITE_CALCULEE') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01).height
-print(f"Match analytique EXACT Type 3 : {n}/{test_analytique.height} ({n/test_analytique.height:.1%})")
+# Affiche toutes les colonnes contenant au moins 10% de zéros/nulls mais avec des montants (pour la Valeur Résiduelle)
+for col in capret.columns:
+    if capret[col].dtype in [pl.Float32, pl.Float64, pl.Int32, pl.Int64]:
+        non_nulls = capret[col].drop_nulls()
+        if len(non_nulls) > 0:
+            max_val = non_nulls.max()
+            min_val = non_nulls.min()
+            # Cherche un comportement de "montant" (0 à grand montant)
+            if min_val == 0 and max_val > 5000:
+                print(f"{col} - Min: {min_val}, Max: {max_val}, Moy: {non_nulls.mean():.1f}")
