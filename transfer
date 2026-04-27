@@ -1,5 +1,5 @@
-# Combien de nulls au total ?
-print(f"Nulls DT_ECHEANCE_AUTO_MOY : {srs_X_capret['DT_ECHEANCE_AUTO_MOY'].null_count()}/{srs_X_capret.height}")
-
-# Est-ce que la colonne est mieux remplie dans le capret original ?
-print(f"Nulls dans capret brut     : {capret['DT_ECHEANCE_AUTO_MOY'].null_count()}/{capret.height}")
+n = srs_X_capret.filter(
+    (pl.col('duration').clip(1.0, 5.0) - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+).height
+total = srs_X_capret.height
+print(f"clip(duration_capret, 1,5) vs NB_DURATION_IRBA : {n}/{total} ({n/total:.1%})")
