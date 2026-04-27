@@ -1,21 +1,18 @@
-print("=== COLONNES DATES (pour cashflow_date / initial_maturity) ===")
-date_cols = [c for c in capret.columns 
-             if capret[c].dtype in [pl.Date, pl.Datetime]]
-for c in date_cols:
-    print(f"  {c} : {capret[c].min()} → {capret[c].max()}")
+# Zoom sur C_EST_PERIODE
+print("=== C_EST_PERIODE ===")
+print(capret['C_EST_PERIODE'].value_counts().sort('count', descending=True))
 
-print("\n=== COLONNES CATÉGORIELLES (peu de modalités, pour périodicité) ===")
-for c in capret.columns:
-    n = capret[c].n_unique()
-    if 2 <= n <= 20 and capret[c].dtype == pl.Utf8:
-        print(f"  {c} ({n} vals): {capret[c].drop_nulls().unique().to_list()}")
+# Et DT_ECHEANCE_AUTO_MOY (mentionné plus tôt)
+print("\n=== DT_ECHEANCE_AUTO_MOY ===")
+if 'DT_ECHEANCE_AUTO_MOY' in capret.columns:
+    print(f"Min: {capret['DT_ECHEANCE_AUTO_MOY'].min()}")
+    print(f"Max: {capret['DT_ECHEANCE_AUTO_MOY'].max()}")
+    print(f"Null: {capret['DT_ECHEANCE_AUTO_MOY'].null_count()}")
 
-print("\n=== COLONNES NUMÉRIQUES ENTIÈRES (pour initial_maturity_days) ===")
+# Colonnes numériques entières qui ressemblent à des jours (100 à 36500)
+print("\n=== CANDIDATS initial_maturity_days ===")
 for c in capret.columns:
     if capret[c].dtype in [pl.Int32, pl.Int64]:
-        vals = capret[c].drop_nulls()
-        if vals.min() > 0 and vals.max() < 50000:  # Plage raisonnable en jours
-            print(f"  {c} : min={vals.min()}, max={vals.max()}, mean={vals.mean():.0f}")
-
-print("\n=== ZOOM SUR C_EST_PERIODE ===")
-print(capret['C_EST_PERIODE'].value_counts().sort('count', descending=True))
+        mn, mx = capret[c].min(), capret[c].max()
+        if mn is not None and 100 < mn and mx < 36500:
+            print(f"{c}: min={mn}, max={mx}")
