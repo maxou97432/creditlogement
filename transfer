@@ -1,16 +1,12 @@
-srs_X_capret3 = srs_X_capret.filter(pl.col('CD_TYPE_AMORT') == '3')
-
-# Formule analytique Type 3 : M = (N+1)/2, N = nombre de mois restants
-srs_X_capret3 = srs_X_capret3.with_columns(
-    ((pl.col('MATURITE') + 1) / 2 / 12).alias('MATURITE_CALCULEE')
+# Y-a-t-il un pattern dans les gros écarts ?
+gros_ecarts3 = srs_X_capret3.with_columns(
+    ((pl.col('MATURITE') + 1) / 2 / 12 - pl.col('NB_MATURITE_IRBA')).alias('Ecart')
 )
 
-# Comparaison
-n = srs_X_capret3.filter(
-    (pl.col('MATURITE_CALCULEE') - pl.col('NB_MATURITE_IRBA')).abs() < 0.1
-).height
-print(f"Match Type 3 avec (MATURITE+1)/2/12 : {n}/{srs_X_capret3.height} ({n/srs_X_capret3.height:.1%})")
+# Répartition des écarts positifs (surestimation) vs négatifs (sous-estimation)
+print("Ecart > 0.5 (surestimation) :", gros_ecarts3.filter(pl.col('Ecart') > 0.5).height)
+print("Ecart < -0.5 (sous-estimation):", gros_ecarts3.filter(pl.col('Ecart') < -0.5).height)
 
-# Statistiques de l'écart résiduel
-print(srs_X_capret3['MATURITE_CALCULEE'].alias('calc').describe())
-print((srs_X_capret3['MATURITE_CALCULEE'] - srs_X_capret3['NB_MATURITE_IRBA']).describe())
+# Est-ce que les gros écarts ont un MATURITE anormalement élevé ?
+print("\nMATURITE des lignes avec écart > 1 an :")
+print(gros_ecarts3.filter(pl.col('Ecart') > 1.0).select(['MATURITE', 'NB_MATURITE_IRBA', 'Ecart']).head(10))
