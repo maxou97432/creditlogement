@@ -1,44 +1,15 @@
-import polars as pl
+# 1. Combien de NB_MATURITE_IRBA sont null dans la base complète ?
+print("=== NULL CHECK ===")
+print(f"NB_MATURITE_IRBA null : {capret['NB_MATURITE_IRBA'].null_count()}/{capret.height}")
 
-# ── 1. On part de ta base capret ─────────────────────────────────
-# Vérifie juste que les variables NB_MATURITE_IRBA, NB_DURATION_IRBA 
-# et Type_Credit sont bien chargées dans ton df 'capret'.
-df_test = capret
+# 2. Parmi les mismatches, est-ce que ce sont principalement des lignes avec MATURITE nulle ?
+mismatches_analyse = df_test.filter(pl.col('Ecart').abs() >= 0.001)
+print(f"\nDont MATURITE nulle dans les mismatches : {mismatches_analyse['NB_MATURITE_IRBA'].null_count()}/{mismatches_analyse.height}")
 
-# ── 2. On applique la règle du document (Le Floor 1an / 5ans) ────
-# (NB: Si NB_MATURITE_IRBA est vide, la banque utilise les dates)
-DT_ARRT_CAPRET = 23922  # Date d'arrêté 30/06/2025 en jours SAS
-
-df_test = df_test.with_columns(
-    # Étape A : Recréer la maturité brute si elle est nulle
-    pl.when(pl.col('NB_MATURITE_IRBA').is_not_null())
-    .then(pl.col('NB_MATURITE_IRBA'))
-    .otherwise((pl.col('DT_ECHEANCE_FEM') - DT_ARRT_CAPRET) / 365.25)
-    .alias('Maturite_Brute')
-).with_columns(
-    # Étape B : Appliquer le clip Bâle II
-    pl.col('Maturite_Brute').clip(1.0, 5.0).alias('Duration_Calculee')
-).with_columns(
-    # Étape C : Calculer l'écart avec la vraie donnée de la banque
-    (pl.col('Duration_Calculee') - pl.col('NB_DURATION_IRBA')).alias('Ecart')
+# 3. Profil des 'autre' (écarts > 0.001 et NB_DURATION_IRBA != 1.0)
+autres = df_test.filter(
+    (pl.col('Ecart').abs() >= 0.001) & 
+    (pl.col('NB_DURATION_IRBA') != 1.0)
 )
-
-# ── 3. Résultats  ────────────────────────────────────────────────
-n_match = df_test.filter(pl.col('Ecart').abs() < 0.001).height
-print("=== RÉSULTAT DU TEST ===")
-print(f"Match exact : {n_match}/{df_test.height} lignes ({n_match/df_test.height:.2%})\n")
-
-# ── 4. Zoom sur les Mismatches (Les exceptions au plancher) ──────
-erreurs = df_test.filter(pl.col('Ecart').abs() >= 0.001)
-
-print("=== LE PROFIL DES EXCEPTIONS ===")
-print(f"Il y a {erreurs.height} exceptions.")
-
-if erreurs.height > 0:
-    # On affiche tout ce qu'il faut pour comprendre pourquoi le plancher a sauté :
-    print(erreurs.select([
-        'NB_MATURITE_IRBA',    # Maturité avant le floor
-        'NB_DURATION_IRBA',    # Vraie duration finale (la référence)
-        'Duration_Calculee',   # Ce qu'on pensait obtenir (souvent 1.0)
-        'Type_Credit'          # La fameuse info métier !
-    ]))
+print(f"\n=== ZOOM SUR 'AUTRE' ({autres.height} lignes) ===")
+print(autres.select(['NB_MATURITE_IRBA', 'NB_DURATION_IRBA', 'Duration_Calculee', 'Ecart']).head(10))
