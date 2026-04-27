@@ -1,12 +1,13 @@
-# Y-a-t-il un pattern dans les gros écarts ?
-gros_ecarts3 = srs_X_capret3.with_columns(
-    ((pl.col('MATURITE') + 1) / 2 / 12 - pl.col('NB_MATURITE_IRBA')).alias('Ecart')
-)
+# Vérifie si duration capret ≈ NB_MATURITE_IRBA srs (pour les non-nulls)
+test_dur = srs_X_capret.filter(pl.col('duration').is_not_null())
+n = test_dur.filter(
+    (pl.col('duration') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
+).height
+print(f"duration capret ≈ NB_MATURITE_IRBA srs : {n}/{test_dur.height} ({n/test_dur.height:.1%})")
 
-# Répartition des écarts positifs (surestimation) vs négatifs (sous-estimation)
-print("Ecart > 0.5 (surestimation) :", gros_ecarts3.filter(pl.col('Ecart') > 0.5).height)
-print("Ecart < -0.5 (sous-estimation):", gros_ecarts3.filter(pl.col('Ecart') < -0.5).height)
-
-# Est-ce que les gros écarts ont un MATURITE anormalement élevé ?
-print("\nMATURITE des lignes avec écart > 1 an :")
-print(gros_ecarts3.filter(pl.col('Ecart') > 1.0).select(['MATURITE', 'NB_MATURITE_IRBA', 'Ecart']).head(10))
+# Et pour les lignes nulles : DR_a ≈ NB_MATURITE_IRBA ?
+test_null = srs_X_capret.filter(pl.col('duration').is_null())
+n2 = test_null.filter(
+    (pl.col('DR_a') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
+).height
+print(f"Lignes nulles : DR_a ≈ NB_MATURITE_IRBA : {n2}/{test_null.height} ({n2/test_null.height:.1%})")
