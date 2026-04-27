@@ -1,13 +1,14 @@
-# Vérifie si duration capret ≈ NB_MATURITE_IRBA srs (pour les non-nulls)
-test_dur = srs_X_capret.filter(pl.col('duration').is_not_null())
-n = test_dur.filter(
-    (pl.col('duration') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
-).height
-print(f"duration capret ≈ NB_MATURITE_IRBA srs : {n}/{test_dur.height} ({n/test_dur.height:.1%})")
+srs_X_capret_test = srs_X_capret.with_columns(
+    (pl.col('MATURITE') / 12.0).clip(1.0, 5.0).alias('Duration_depuis_MATURITE')
+)
 
-# Et pour les lignes nulles : DR_a ≈ NB_MATURITE_IRBA ?
-test_null = srs_X_capret.filter(pl.col('duration').is_null())
-n2 = test_null.filter(
-    (pl.col('DR_a') - pl.col('NB_MATURITE_IRBA')).abs() < 0.01
+n = srs_X_capret_test.filter(
+    (pl.col('Duration_depuis_MATURITE') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
 ).height
-print(f"Lignes nulles : DR_a ≈ NB_MATURITE_IRBA : {n2}/{test_null.height} ({n2/test_null.height:.1%})")
+print(f"clip(MATURITE/12, 1, 5) vs NB_DURATION_IRBA : {n}/{srs_X_capret_test.height} ({n/srs_X_capret_test.height:.1%})")
+
+# Et pour comprendre la différence avec clipper la maturité Bâle directement
+n2 = srs_X_capret_test.filter(
+    (pl.col('duration') - pl.col('NB_DURATION_IRBA')).abs() < 0.001
+).height
+print(f"duration (capret, déjà clippée) vs NB_DURATION_IRBA : {n2}/{srs_X_capret_test.height} ({n2/srs_X_capret_test.height:.1%})")
