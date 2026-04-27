@@ -1,44 +1,33 @@
-# -------------------------------------------------------------
-# REGLE 4 : "Exceptions : duration can be less than 1 year"
-#             Vérification de la "maturité initiale < 1 an"
-# -------------------------------------------------------------
-print("\nRègle 4 : Analyse de la Maturité Initiale pour les exemptions")
+# Test des colonnes candidates trouvées pour la Règle 2
+colonnes_candidates = [c for c in srs.columns if 'DURATION' in c.upper() or 'MOY' in c.upper() or 'AUTO' in c.upper()]
 
-anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
-
-if anomalies_floor.height > 0:
-    print(f"-> {anomalies_floor.height} prêts ont une duration < 1 an (Exemptions).")
+for col_name in colonnes_candidates:
+    print(f"\n--- Test de la colonne {col_name} ---")
     
-    # 1. Uniformisation des dates (srs a parfois des YYYYMMDD, parfois des jours SAS)
-    audit_init_mat = anomalies_floor.with_columns(
-        pl.when(pl.col('DT_DEB_AUTO') > 300000) # C'est le format YYYYMMDD (ex: 20240101)
-        .then(pl.col('DT_DEB_AUTO').cast(pl.Utf8).str.to_date('%Y%m%d'))
-        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_DEB_AUTO').cast(pl.Int64))) # Format SAS
-        .alias('Date_Debut_Formatee'),
+    # Exclure les dates de début (on ne veut que des dates de maturité)
+    if 'DEB' in col_name.upper():
+        print("Ignorée (c'est une date de début).")
+        continue
+
+    # Transformation de la date candidate
+    test_r2 = srs.with_columns(
+        pl.when(pl.col(col_name) > 300000) # Format YYYYMMDD
+        .then(pl.col(col_name).cast(pl.Utf8).str.to_date('%Y%m%d'))
+        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col(col_name).cast(pl.Int64)))
+        .alias('Candidate_Date')
+    ).filter(pl.col('Candidate_Date').is_not_null())
+
+    if test_r2.height == 0:
+        print(f"La colonne {col_name} est vide.")
+        continue
         
-        pl.when(pl.col('DT_ECHEANCE_FEM') > 300000)
-        .then(pl.col('DT_ECHEANCE_FEM').cast(pl.Utf8).str.to_date('%Y%m%d'))
-        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_ECHEANCE_FEM').cast(pl.Int64)))
-        .alias('Date_Fin_Formatee')
+    # Appliquer la Règle 2 de ton document : D = (Duration date - As of date) / 365.25
+    test_r2 = test_r2.with_columns(
+        ((pl.col('Candidate_Date') - pl.lit(date(2025, 6, 30))).dt.total_days() / 365.25).alias('D_Rule2')
+    ).with_columns(
+        (pl.col('D_Rule2') - pl.col('NB_MATURITE_IRBA')).abs().alias('Ecart')
     )
     
-    # 2. Calcul Maturité Initiale en années
-    audit_init_mat = audit_init_mat.with_columns(
-        ((pl.col('Date_Fin_Formatee') - pl.col('Date_Debut_Formatee')).dt.total_days() / 365.25).alias('Maturite_Initiale_Ans')
-    )
-    
-    # 3. Vérification de la règle Bâle
-    respectent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') <= 1.0).height
-    violent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0).height
-    
-    print(f"-> EXAMEN REGLEMENTAIRE (Maturité Initiale) :")
-    print(f"   ✅ CONFORMES (Maturité intiale <= 1 an)  : {respectent_regle}")
-    print(f"   ❌ ANOMALIES (Maturité initiale > 1 an)  : {violent_regle}")
-    
-    if violent_regle > 0:
-        print("\nAperçu des anomalies en violation du texte Bâle (devraient être 'Trade Finance / LEQ') :")
-        print(audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0)
-              .select(['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'Maturite_Initiale_Ans', 'NB_DURATION_IRBA']).head(5))
-
-else:
-    print("-> Aucun prêt avec duration < 1 an dans SRS.")
+    # Vérifier le Match exact !
+    matches = test_r2.filter(pl.col('Ecart') < 0.001).height
+    print(f"Match avec NB_MATURITE_IRBA : {matches} / {test_r2.height} ({matches/test_r2.height:.1%})")
