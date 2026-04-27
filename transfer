@@ -1,87 +1,44 @@
-import polars as pl
-
-print("==========================================================")
-print(" VERIFICATION POINT PAR POINT DES REGLES BALE II (BASE SRS ORIGINALE)")
-print("==========================================================\n")
-
-# Constante : La date d'arrêté est le 30/06/2025 (23922 en format SAS)
-DT_ARRT = 23922 
-
-# Préparation : Calcul de la maturité résiduelle mathématique en années
-srs_audit = srs.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Maturite_Residuelle_Ans')
-)
-
 # -------------------------------------------------------------
-# REGLE 1 : "duration is equal to residual maturity (conservative choice)"
+# REGLE 4 : "Exceptions : duration can be less than 1 year"
+#             Vérification de la "maturité initiale < 1 an"
 # -------------------------------------------------------------
-print("Règle 1 : Fallback sur la maturité résiduelle brute")
-# Le texte dit que c'est le choix conservateur quand il manque des données
-check_r1 = srs_audit.with_columns(
-    (pl.col('Maturite_Residuelle_Ans') - pl.col('NB_MATURITE_IRBA')).abs().alias('diff_mat')
-)
-n_r1 = check_r1.filter(pl.col('diff_mat') < 0.001).height
-print(f"-> Contrats appliquant strictement le fallback : {n_r1}/{srs_audit.height} ({n_r1/srs_audit.height:.1%})")
+print("\nRègle 4 : Analyse de la Maturité Initiale pour les exemptions")
 
-
-# -------------------------------------------------------------
-# REGLE 2 : "D = (Duration date - As of date) / 365.25"
-# -------------------------------------------------------------
-print("\nRègle 2 : Formule de la date de duration")
-# On recherche une colonne qui ressemblerait à une date moyenne (Duration Date)
-duration_date_cols = [c for c in srs.columns if 'DURATION' in c.upper() or 'MOY' in c.upper() or 'AUTO' in c.upper()]
-if len(duration_date_cols) > 0:
-    print(f"-> Colonnes candidates trouvées : {duration_date_cols}")
-else:
-    print("-> Aucune colonne 'Duration Date' isolée dans SRS trouvée (elle n'est probablement pas exportée).")
-
-
-# -------------------------------------------------------------
-# REGLE 3 : "1 year <= Duration <= 5 years" (Le Floor et le Cap)
-# -------------------------------------------------------------
-print("\nRègle 3 : Le Floor (1 an) et le Cap (5 ans)")
-# Tolérance flottante très légère
 anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
-anomalies_cap = srs_audit.filter(pl.col('NB_DURATION_IRBA') > 5.001)
-
-print(f"-> Dépassements strict du Cap (> 5 ans) : {anomalies_cap.height} (Devrait être 0)")
-print(f"-> Dépassements du Floor (< 1 an)       : {anomalies_floor.height} (Ce sont nos exemptions potentielles)")
-
-
-# -------------------------------------------------------------
-# REGLE 4 : "Exceptions : duration can be less than 1 year (Trade Finance, LEQ, <1yr origination)"
-# -------------------------------------------------------------
-print("\nRègle 4 : Analyse des Exemptions au Floor d'un an")
 
 if anomalies_floor.height > 0:
-    print(f"-> {anomalies_floor.height} prêts ont une duration < 1 an. Audit de conformité réglementaire :")
+    print(f"-> {anomalies_floor.height} prêts ont une duration < 1 an (Exemptions).")
     
-    # Étape A : Trouver la colonne qui définit le produit (Nature/Code Produit dans SRS)
-    col_nature = [c for c in srs.columns if c in ['CD_PRODUIT', 'CD_NATURE', 'NATURE', 'FAMILLE', 'TYPE_FINANCEMENT']]
-    if col_nature:
-        print(f"   Répartition par {col_nature[0]} :")
-        print(anomalies_floor[col_nature[0]].value_counts())
+    # 1. Uniformisation des dates (srs a parfois des YYYYMMDD, parfois des jours SAS)
+    audit_init_mat = anomalies_floor.with_columns(
+        pl.when(pl.col('DT_DEB_AUTO') > 300000) # C'est le format YYYYMMDD (ex: 20240101)
+        .then(pl.col('DT_DEB_AUTO').cast(pl.Utf8).str.to_date('%Y%m%d'))
+        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_DEB_AUTO').cast(pl.Int64))) # Format SAS
+        .alias('Date_Debut_Formatee'),
         
-    # Étape B : Vérifier "initial maturity less than 1 year"
-    # Il nous faut la date d'octroi ou de début pour calculer la maturité initiale
-    col_deb = [c for c in srs.columns if c in ['DT_OCTROI', 'D_DEB', 'DT_DEB', 'DT_MISE_EN_FORCE', 'C_TIMES']]
+        pl.when(pl.col('DT_ECHEANCE_FEM') > 300000)
+        .then(pl.col('DT_ECHEANCE_FEM').cast(pl.Utf8).str.to_date('%Y%m%d'))
+        .otherwise(pl.lit(date(1960, 1, 1)) + pl.duration(days=pl.col('DT_ECHEANCE_FEM').cast(pl.Int64)))
+        .alias('Date_Fin_Formatee')
+    )
     
-    if col_deb:
-        nom_col_deb = col_deb[0]
-        print(f"   Vérification de la Maturité Initiale via la colonne '{nom_col_deb}'...")
-        
-        # Calcul : (Date Fin - Date Début) / 365.25
-        audit_init_mat = anomalies_floor.with_columns(
-            ((pl.col('DT_ECHEANCE_FEM') - pl.col(nom_col_deb)) / 365.25).alias('Maturite_Initiale_Ans')
-        )
-        
-        respectent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') <= 1.0).height
-        violent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0).height
-        
-        print(f"   -> Conformité trouvée : {respectent_regle} prêts ont bien une maturité initiale <= 1 an !")
-        if violent_regle > 0:
-            print(f"   -> ATTENTION : {violent_regle} prêts ont une maturité initiale > 1 an mais un Floor inactif.")
-    else:
-        print("   Impossible de vérifier la condition de maturité initiale : aucune colonne de date d'octroi (DT_OCTROI, D_DEB...) trouvée dans SRS.")
+    # 2. Calcul Maturité Initiale en années
+    audit_init_mat = audit_init_mat.with_columns(
+        ((pl.col('Date_Fin_Formatee') - pl.col('Date_Debut_Formatee')).dt.total_days() / 365.25).alias('Maturite_Initiale_Ans')
+    )
+    
+    # 3. Vérification de la règle Bâle
+    respectent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') <= 1.0).height
+    violent_regle = audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0).height
+    
+    print(f"-> EXAMEN REGLEMENTAIRE (Maturité Initiale) :")
+    print(f"   ✅ CONFORMES (Maturité intiale <= 1 an)  : {respectent_regle}")
+    print(f"   ❌ ANOMALIES (Maturité initiale > 1 an)  : {violent_regle}")
+    
+    if violent_regle > 0:
+        print("\nAperçu des anomalies en violation du texte Bâle (devraient être 'Trade Finance / LEQ') :")
+        print(audit_init_mat.filter(pl.col('Maturite_Initiale_Ans') > 1.0)
+              .select(['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'Maturite_Initiale_Ans', 'NB_DURATION_IRBA']).head(5))
+
 else:
-    print("-> Aucun prêt avec duration < 1 an dans SRS. La règle est donc parfaitement vierge d'exceptions.")
+    print("-> Aucun prêt avec duration < 1 an dans SRS.")
