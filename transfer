@@ -22,5 +22,3 @@ distribution = anomalies_types.group_by('NB_MATURITE_IRBA').agg(
 ).sort('Nombre_de_Contrats', descending=True)
 
 print(distribution.head(10))
-    'ANALYTIQUE_MATURITE_IRBA', 'NB_MATURITE_IRBA'
-]).head(5))
