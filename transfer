@@ -1,28 +1,10 @@
-print("▶ INVESTIGATION : Quelle est la vraie nature de la colonne 'MATURITE' de Capret ?\n")
-
-DT_ARRT = 23922 
-
-# On calcule les 3 métriques possibles en "MOIS" (1 mois = 30.4375 jours)
 srs_test = srs_fusion.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 30.4375).alias('Test_Maturite_Residuelle'),
-    ((pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')) / 30.4375).alias('Test_Maturite_Initiale'),
-    ((DT_ARRT - pl.col('DT_DEBUT_AUTO')) / 30.4375).alias('Test_Age_Credit')
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Test_Maturite_Residuelle'),
+    ((pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')) / 365.25).alias('Test_Maturite_Initiale'),
+    ((DT_ARRT - pl.col('DT_DEBUT_AUTO')) / 365.25).alias('Test_Age_Credit')
 )
 
-# Lignes valides sans vide pour avoir un périmètre propre
-valides = srs_test.filter(pl.col('MATURITE').is_not_null())
+# On vérifie avec la variable SAS (tolérance d'un jour = 0.01 an)
+m_residuelle = srs_test.filter((pl.col('Test_Maturite_Residuelle') - pl.col('NB_MATURITE_IRBA')).abs() <= 0.01).height
 
-# On cherche un match (en tolérant +/- 1 mois à cause des arrondis des 30/31 jours)
-m_residuelle = valides.filter((pl.col('Test_Maturite_Residuelle') - pl.col('MATURITE')).abs() <= 1.0).height
-m_initiale   = valides.filter((pl.col('Test_Maturite_Initiale') - pl.col('MATURITE')).abs() <= 1.0).height
-m_age        = valides.filter((pl.col('Test_Age_Credit') - pl.col('MATURITE')).abs() <= 1.0).height
-
-print(f"Sur {valides.height} contrats analysés, avec quelle équation la variable Capret matche-t-elle ?")
-print(f"  └─> MATURITE = Résiduelle (Fin - Aujourd'hui)    : {m_residuelle} matchs ({(m_residuelle/valides.height)*100:.1f}%)")
-print(f"  └─> MATURITE = Initiale (Fin - Début)            : {m_initiale} matchs ({(m_initiale/valides.height)*100:.1f}%)")
-print(f"  └─> MATURITE = Âge du crédit (Aujourd'hui - Deb) : {m_age} matchs ({(m_age/valides.height)*100:.1f}%)\n")
-
-# Petit contrôle visuel si Résiduelle gagne haut la main
-if m_residuelle > m_initiale:
-    print("Preuve visuelle des valeurs :")
-    print(valides.select(['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'Test_Maturite_Residuelle', 'MATURITE']).head(3))
+print(f"Match Résiduel (Fin - Arrt) : {m_residuelle} sur {srs_test.height} lignes !")
