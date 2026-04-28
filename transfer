@@ -1,53 +1,19 @@
-print("▶ ÉTAPE 1 : Apprentissage des Lois Empiriques par Type d'Amortissement")
-
-# Création de ta variable de ratio historique
-srs_fusion = srs_fusion.with_columns(
-    (pl.col('NB_MATURITE_IRBA') / (pl.col('MATURITE') / 12.0)).alias('Ratio_Deduction_Empirique')
+# On isole strictement la sous-population concernée par la Règle 1
+lignes_conservatives = srs_fusion.filter(
+    (pl.col('Conservative_Residual_Maturity') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
 )
 
-# Filtre de sécurité
-donnees_propres = srs_fusion.filter(
-    (pl.col('MATURITE') > 0) & pl.col('Ratio_Deduction_Empirique').is_not_null()
-)
+print(f"▶ INVESTIGATION sur les {lignes_conservatives.height} contrats à choix conservateur :")
 
-# Extraction dynamique des coefficients pour TOUS les types d'amortissement !
-table_coefs = donnees_propres.group_by('CD_TYPE_AMORT').agg(
-    pl.col('Ratio_Deduction_Empirique').median().round(4).alias('COEF_APPRIS'),
-    pl.len().alias('Volume_Contrats')
-).sort('Volume_Contrats', descending=True)
-
-print("Coefficients médians appris sur l'historique :")
-print(table_coefs)
-
-
-print("\n▶ ÉTAPE 2 : Projection Bâle II et Validation")
-
-# Application du Pipeline de Déduction (Par jointure du dictionnaire de pondérations)
-srs_fusion = srs_fusion.join(
-    table_coefs.select(['CD_TYPE_AMORT', 'COEF_APPRIS']), 
-    on='CD_TYPE_AMORT', 
-    how='left'
-)
-
-srs_fusion = srs_fusion.with_columns(
-    # Multiplication du ratio appris sur la maturité (les types inconnus tombent sur 1.0)
-    (pl.col('MATURITE') / 12.0 * pl.col('COEF_APPRIS').fill_null(1.0)).alias('PROXY_MATURITE_IRBA')
+print("\n1. Analyse de la donnée d'amortissement (CD_TYPE_AMORT) :")
+# On compte la répartition pour vérifier si la donnée était vraiment "non disponible"
+repartition_amort = lignes_conservatives.group_by('CD_TYPE_AMORT').agg(
+    pl.len().alias('Nombre_de_Contrats')
 ).with_columns(
-    # Sécurisation réglementaire Floor/Cap Bâloise [1, 5]
-    pl.col('PROXY_MATURITE_IRBA').clip(1.0, 5.0).alias('PROXY_DURATION_IRBA')
-)
+    (pl.col('Nombre_de_Contrats') / lignes_conservatives.height * 100).round(1).alias('Proportion_%')
+).sort('Nombre_de_Contrats', descending=True)
+print(repartition_amort)
 
-# Périmètre de validation
-match_candidat = srs_fusion.filter(pl.col('MATURITE').is_not_null())
-
-# Validation Score final
-match_proxy = match_candidat.filter(
-    (pl.col('PROXY_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs() <= 0.1
-).height
-
-taux_reussite = (match_proxy / match_candidat.height) * 100
-
-print(f"Bilan d'implémentation du Proxy Automatique :")
-print(f"  ✅ Sur un total de {match_candidat.height} contrats disponibles.")
-print(f"  ✅ Précision de la réconciliation : {taux_reussite:.1f}% ({match_proxy} succès).")
-print("CONCLUSION : Le dictionnaire de ratios compense formellement l'absence des cashflows dans SAS.")
+if 'Type_Credit' in lignes_conservatives.columns:
+    print("\n2. Analyse métier du pole Capret (Type_Credit) :")
+    print(lignes_conservatives.group_by('Type_Credit').len().sort('len', descending=True).head(5))
