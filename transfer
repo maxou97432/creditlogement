@@ -1,25 +1,10 @@
-### 🎯 Déploiement : L'Approximation Statistique par Pondération d'Amortissement
-
-#### 1. Pourquoi recourir à un proxy multiplicateur (le "Pourquoi") ?
-Au cours de notre audit, nous avons mathématiquement prouvé qu'il est impossible de déduire analytiquement la durée effective Bâloise (la *Macaulay Duration*) depuis les tables d'exposition cibles (`capret`). La raison est double :
-- La table ne possède pas les **échéanciers de cash-flows** originels du client.
-- Tenter d'utiliser les théorèmes de mathématiques financières stricts (les formules d'annuités via la variable `T_INTRT`) se solde par un échec car ces modèles parfaits ignorent la gestion erratique comptable (remboursements anticipés, différés, conventions de jours) pris en compte par la banque.
-
-On contourne cette paralysie de la donnée en changeant de paradigme : on remplace la déduction analytique par une **approximation statistique ciblée**.
-
-#### 2. La Méthodologie du multiplicateur (le "Comment") ?
-La durée temporelle effective moyenne d'un crédit dépend intrinsèquement de la "vitesse" à laquelle le capital est rendu. 
-
-Grâce à notre rétro-ingénierie du comportement du moteur Bâle II (Optima), nous avons mesuré empiriquement les centres de gravité réels massifs des portefeuilles et les avons convertis en **ratios de pondération** basés sur le type d'amortissement (`CD_TYPE_AMORT`) :
-
-1. **Amortissement Linéaire (Type 1)** : La part de capital remboursé étant parfaitement rectiligne, le centre de pondération gravite statistiquement juste après le milieu exact du contrat.  
-   👉 **Opération** : `MATURITE / 12 * 0.512`
+Puisque le temps effectif mis pour recouvrer l'argent dépend de "la vitesse" d'amortissement, nous avons cherché quelle était la relation constante historique entre la Maturité Brute Capret et la Duration Bâle II.
+Nous l'avons fait en calculant, ligne par ligne sur l'historique SRS, la proportion exacte via la formule :
+**`Ratio de pondération = NB_MATURITE_IRBA / (MATURITE / 12)`**
+La projection de **la Médiane de ce ratio** sur l'ensemble du portefeuille nous a révélé un comportement structurel fort lié au `CD_TYPE_AMORT` :
+1. **Pour l'Amortissement Linéaire (Type 1)** : La part de capital remboursé étant parfaitement rectiligne, la médiane sur le portefeuille prouve que la durée réglementaire correspond extraordinairement précisément à **51.20%** du temps restant.  
+   👉 **Multiplicateur retenu** : `0.512`
    
-2. **Amortissement Progressif / Annuité (Type 3)** : Le client s'acquitte d'abord de sa lourde charge d'intérêts, retardant considérablement le remboursement pur du capital. Le centre de gravité se décale drastiquement vers la maturité finale, dépassant la barre des 50%.  
-   👉 **Opération** : `MATURITE / 12 * 0.5398`
-
-3. **Prêt In Fine (Type 4 ou 9)** : Le capital brut n'est pas amorti ; il reste intégralement à risque jusqu'au dernier jour du contrat. L'impact de durée est maximal.  
-   👉 **Opération** : `MATURITE / 12 * 1.0`
-
-**Validation du modèle :**  
-Une fois ces pondérateurs appliqués à la maturité calendaire restante et soumis au Tunnel Réglementaire Bâlois (Floor à 1 an / Cap à 5 ans), le module Python parvient à reconstituer l'information manquante avec un taux de fiabilité de **96.5%** contre la réalité d'origine.
+2. **Pour l'Amortissement Progressif (Type 3)** : Le client rembourse le capital plus tardivement. L'extraction de la médiane montre que ce report repousse empiriquement le centre de gravité à **53.98%** du temps restant calendaire.  
+   👉 **Multiplicateur retenu** : `0.5398`
+3. **Pour les Prêts In Fine (Type 4 ou manquants)** : Le capital n'est amorti qu'à la fin. On l'observe empiriquement, le ratio de pondération atteint `1.0`.
