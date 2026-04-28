@@ -1,13 +1,5 @@
-if anomalies_floor.height > 0:
-    
-    # Calcul basique : Différence en jours SAS divisée par 365.25
-    audit_init = anomalies_floor.with_columns(
-        ((pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')) / 365.25).alias('Initial_Maturity_Years')
-    )
-    
-    # Audit du filtre
-    respectent = audit_init.filter(pl.col('Initial_Maturity_Years') <= 1.0).height
-    print(f"✅ Validation Réglementaire : {respectent}/{anomalies_floor.height} des lignes sous le floor valident strictement la contrainte d'Optima.")
-    print("La clause 'having an initial maturity less than 1 year' a bien régit ce comportement.")
-else:
-    print("✅ Aucune exception 'sub 1-year' identifiée dans le filtrage.")
+# Aperçu des 43 contrats (potentiels Trade Finance / LEQ) dont la maturité était > 1 an !
+print("\nLes 43 lignes restantes (Exception 'Trade Finance / LEQ' présumée) :")
+print(audit_init.filter(pl.col('Initial_Maturity_Years') > 1.0).select(
+    ['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'Initial_Maturity_Years', 'NB_DURATION_IRBA']
+).head(5))
