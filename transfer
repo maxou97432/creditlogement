@@ -1,77 +1,8 @@
-# 🔬 Audit : Vérification des règles Bâle II (3. IRB Maturity – Effective Maturity)
-
----
-### ▶ RÈGLE 1 : Les méthodes de calcul d'Optima et le "Conservative Choice"
-**📜 Le texte :** *"Optima calculates the duration for each facility, except when the effective maturity is sourced: [...] If the necessary data needed to calculate the duration are not available, the duration is equal to residual maturity (conservative choice)."*
-
-**🎯 Protocole d'audit :** Séparer la part du portefeuille pour laquelle Optima a pu calculer/sourcer la duration (via la formule `sum(max(...))`), de la part de portefeuille qui n'avait pas les données nécessaires et qui a donc subi l'exacte clause du *conservative choice*.
-
-import polars as pl
-
-# Définition du "As of date" pour cet audit (Arrêté SAS = 30/06/2025 -> 23922)
-DT_ARRT = 23922 
-
-# Calcul de la "residual maturity" évoquée par le texte : (Date de fin - As of date) / 365.25
-srs_audit = srs.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Conservative_Residual_Maturity')
-)
-
-# Test : combien de prêts vérifient strictement l'équation du 'conservative choice' ?
-n_fallback = srs_audit.filter(
-    (pl.col('Conservative_Residual_Maturity') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
-).height
-
-print(f"✅ Optima a sourcé/calculé la formule 'Duration' pour : {srs_audit.height - n_fallback} facilités.")
-print(f"✅ Application stricte du 'conservative choice' pour      : {n_fallback} facilités.")
-
----
-### ▶ RÈGLE 2 : Le passage par la "Duration Date"
-**📜 Le texte :** *"The result of the calculation is expressed in years : D = (Duration date - As of date) / 365.25"*
-
-**🎯 Protocole d'audit :** Le texte dicte que le format du résultat est exprimé au travers d'une `Duration date`. Nous vérifions par ingénierie inverse l'intégration de cette formule dans le système de la banque : on cherche à extraire ou reconstituer cette `Duration date` fictive depuis le calcul pré-mâché `D`.
-
-# Inversion algébrique de la formule du texte : Duration date = As of date + (D * 365.25)
-srs_audit = srs_audit.with_columns(
-    (pl.lit(DT_ARRT) + pl.col('NB_MATURITE_IRBA') * 365.25).alias('Expected_Duration_Date')
-)
-
-# Comparaison par rapport aux dates connues en base
-n_date_match = srs_audit.filter(
-    (pl.col('Expected_Duration_Date') - pl.col('DT_ECHEANCE_FEM')).abs() <= 1.0
-).height
-
-print(f"👉 Résultat inverse :")
-print(f"- Pour les {n_date_match} lignes 'conservative', Duration date s'aligne avec la fin de contrat.")
-print(f"- Pour la majorité ({srs_audit.height - n_date_match} contrats), la 'Duration Date' de la formule est construite virtuellement par le calcul d'Optima, mais ne correspond et n'est injectée dans aucune date source exportable.")
-
----
-### ▶ RÈGLE 3 : Les Limites Bâloises
-**📜 Le texte :** *"According to IRBA regulation, a one-year floor and five-year ceil is applied to every facility: 1 year ≤ Duration ≤ 5 years"*
-
-**🎯 Protocole d'audit :** Valider à 100% le respect impératif des bornes $[1, 5]$ sur le résultat final de durée publié à Bâle II.
-
-# Vérification exhaustive des bornes
-anomalies_cap = srs_audit.filter(pl.col('NB_DURATION_IRBA') > 5.001)
-anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
-
-print(f"✅ Violations de la limite haute (> 5 years) : {anomalies_cap.height} (Strict 0 attendu).")
-print(f"✅ Candidats aux exceptions basses (< 1 year) : {anomalies_floor.height}.")
-
----
-### ▶ RÈGLE 4 : Justification des Lignes < 1 An
-**📜 Le texte :** *"Exception : duration can be less than 1 year for [...] facilities having an initial maturity less than 1 year"*
-
-**🎯 Protocole d'audit :** Vérifier minutieusement que toutes exceptions au plafond d'un an identifiées à l'étape précédente justifient la clause *"initial maturity less than 1 year"*. 
-
 if anomalies_floor.height > 0:
-    # Calcul de la clause exigée : "initial maturity" = (Maturité finale - Date de création)
+    
+    # Calcul basique : Différence en jours SAS divisée par 365.25
     audit_init = anomalies_floor.with_columns(
-        (pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')).alias('difference_brute')
-    ).with_columns(
-        pl.when(pl.col('DT_DEBUT_AUTO') > 300000)
-        .then(pl.col('difference_brute') / 10000.0) 
-        .otherwise(pl.col('difference_brute') / 365.25)
-        .alias('Initial_Maturity_Years')
+        ((pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')) / 365.25).alias('Initial_Maturity_Years')
     )
     
     # Audit du filtre
