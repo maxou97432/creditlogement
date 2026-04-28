@@ -1,13 +1,58 @@
-### 🎯 La Solution Industrielle : Le Proxy Statistique Bâle II
+---
+### ▶ ÉTAPE D'INVESTIGATION : Tentative de Reconstruction Analytique Exacte
+**🎯 Hypothèse :** Puisque la table `capret` contient la maturité totale en mois (`MATURITE`) et le taux d'intérêt (`T_INTRT`), la théorie des mathématiques financières nous permet de déduire la Macaulay Duration analytique selon la nature de l'amortissement.
 
-**Le Problème Data :**  
-Pour calculer l'authentique *Macaulay Duration* exigée par Bâle II, le moteur mathématique a besoin de l'échéancier complet de tous les futurs versements du client (pour en extraire le centre de gravité). Or, notre table source `capret` est une vue d'exposition "plate" : elle nous donne la durée totale restante, mais ne contient ni l'échéancier, ni les montants intermédiaires.
+**Mathématiques Financières appliquées :**
+* **Type 1 (Linéaire)** : Le capital décroît de façon constante. Duration mensuelle $\approx \frac{n + 1}{2}$.
+* **Type 3 (Progressif)** : Annuité constante. $D_{mensuelle} = \frac{1 + r}{r} - \frac{n}{(1+r)^n - 1}$
+* **Type 4/9 (In Fine)** : Duration mensuelle $= n$.
 
-**La Logique Financière (L'Approximation) :**  
-Plutôt que de contourner l'ajustement de maturité réglementaire, nous exploitons une propriété mathématique robuste des crédits. Le "centre de gravité" temporel d'un prêt dépend quasi exclusivement de sa typologie :
-* **Amortissement Linéaire (Type 1)** : Le capital est remboursé en parts parfaitement égales chaque mois. Le point d'équilibre de l'argent se situe logiquement à la **moitié** du temps restant. *(Multiplier empirique optimal : ~0.512)*
-* **Amortissement Progressif (Type 3)** : Le client rembourse d'abord beaucoup d'intérêts et peu de capital. Le gros du remboursement de capital est repoussé vers la fin. Le point d'équilibre est logiquement décalé vers la droite, dépassant la moitié du temps. *(Multiplier empirique optimal : ~0.539)*
-* **Prêt In Fine (Type 4 ou Manquant)** : 100% de l'argent est bloqué et rendu le tout dernier jour. *(Multiplier empirique : 1.0)*
+**Protocole :** Nous allons créer deux variables :
+1. `ANALYTIQUE_MATURITE_IRBA` (en années, brut) -> à comparer à `NB_MATURITE_IRBA`
+2. `ANALYTIQUE_DURATION_IRBA` (bornée 1-5 ans) -> à comparer à `NB_DURATION_IRBA`
 
-**Conclusion Algorithmique :**  
-En multipliant ces ratios d'amortissement directement sur la variable brute `MATURITE` rapatriée depuis Capret, le pipeline Python reconstruit synthétiquement la *Macaulay Duration* théorique. Ce proxy atteint un taux de succès de **96.5% d'équivalence** avec l'ancien modèle SAS, corrigeant l'asymétrie de nos bases de données.
+print("▶ TEST ANALYTIQUE : Calcul théorique exact par type d'amortissement")
+
+# 1. Variables Financières de base (Taux mensuel, Durée mensuelle)
+r_mensuel = (pl.col('T_INTRT') / 100.0) / 12.0
+n_mois = pl.col('MATURITE').cast(pl.Float64)
+
+# 2. Formules Mathématiques Analytiques selon le Profil (Résultat en MOIS)
+srs_fusion = srs_fusion.with_columns(
+    
+    # TYPE 1 : Amortissement Linéaire
+    pl.when(pl.col('CD_TYPE_AMORT').is_in(['1']))
+    .then((n_mois + 1.0) / 2.0)
+    
+    # TYPE 3 : Amortissement Progressif (Annuités constantes)
+    .when(pl.col('CD_TYPE_AMORT').is_in(['3']))
+    .then(
+        pl.when(r_mensuel > 0)
+        .then( ((1.0 + r_mensuel) / r_mensuel) - (n_mois / (((1.0 + r_mensuel) ** n_mois) - 1.0)) )
+        .otherwise((n_mois + 1.0) / 2.0) # Sécurité si taux = 0
+    )
+    
+    # TYPE 4, 9, BULLET : Prêts In fine
+    .otherwise(n_mois)
+    .alias('ANALYTIQUE_MATURITE_MOIS')
+)
+
+# 3. Conversion en ANNÉES et application des limites Bâloises (1 à 5 ans)
+srs_fusion = srs_fusion.with_columns(
+    (pl.col('ANALYTIQUE_MATURITE_MOIS') / 12.0).alias('ANALYTIQUE_MATURITE_IRBA')
+).with_columns(
+    pl.col('ANALYTIQUE_MATURITE_IRBA').clip(1.0, 5.0).alias('ANALYTIQUE_DURATION_IRBA')
+)
+
+# 4. Évaluation des résultats croisés 
+nb_lignes_utiles = srs_fusion.drop_nulls('T_INTRT').height
+
+match_brute = srs_fusion.drop_nulls('T_INTRT').filter(
+    (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs() <= 0.1
+).height
+
+match_clippe = srs_fusion.drop_nulls('T_INTRT').filter(
+    (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs() <= 0.1
+).height
+
+print(f"Bilan de concordance sur {nb
