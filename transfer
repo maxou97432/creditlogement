@@ -1,38 +1,26 @@
-print("▶ TEST ANALYTIQUE : Ventilation de la parité par Type d'amortissement")
+print("▶ INVESTIGATION : Que fait Optima quand le type d'amortissement est vide ?")
 
-# [ÉTAPE 1 à 3 : Conserver le code précédent pour créer ANALYTIQUE_MATURITE_IRBA et ANALYTIQUE_DURATION_IRBA]
-
-# 4. Évaluation détaillée par Type d'Amortissement
-dataset_valide = srs_fusion.drop_nulls('T_INTRT')
-
-# Création des drapeaux de réussite (Tolérance de 0.1 an)
-evaluation = dataset_valide.with_columns(
-    (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs().le(0.1).alias('Match_Brute'),
-    (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs().le(0.1).alias('Match_Clippe')
+# 1. On renomme proprement les vides pour l'affichage
+srs_fusion = srs_fusion.with_columns(
+    pl.when(pl.col('CD_TYPE_AMORT').is_null() | (pl.col('CD_TYPE_AMORT') == ''))
+    .then(pl.lit('NON RENSEIGNE'))
+    .otherwise(pl.col('CD_TYPE_AMORT'))
+    .alias('CD_TYPE_AMORT_CLEAN')
 )
 
-# Agrégation par type d'amortissement
-resultats_par_type = evaluation.group_by('CD_TYPE_AMORT').agg([
-    pl.len().alias('Total_Lignes'),
-    pl.col('Match_Brute').sum().alias('Succes_Brut'),
-    pl.col('Match_Clippe').sum().alias('Succes_Clippe')
-]).with_columns(
-    (pl.col('Succes_Brut') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Brute_%'),
-    (pl.col('Succes_Clippe') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Clippee_%')
-).sort('Total_Lignes', descending=True)
+# 2. On isole ces ~50 000 lignes fantômes
+anomalies_types = srs_fusion.filter(pl.col('CD_TYPE_AMORT_CLEAN') == 'NON RENSEIGNE')
 
-print("\n--- Bilan de la Modélisation Théorique vs Réalité SAS ---")
-print(resultats_par_type.select([
-    'CD_TYPE_AMORT', 'Total_Lignes', 'Reussite_Brute_%', 'Reussite_Clippee_%'
-]))
+print(f"Total des lignes sans type d'amortissement : {anomalies_types.height}")
+print("Top 10 des valeurs réglementaires (NB_MATURITE_IRBA) que le moteur leur a assignées :")
 
-# On tire quelques cas extrêmes pour le type où le modèle théorique souffre le plus
-type_problematique = resultats_par_type.sort('Reussite_Brute_%').row(0)[0]
+# 3. On compte les occurrences de chaque valeur de duration
+distribution = anomalies_types.group_by('NB_MATURITE_IRBA').agg(
+    pl.len().alias('Nombre_de_Contrats')
+).with_columns(
+    (pl.col('Nombre_de_Contrats') / anomalies_types.height * 100).round(1).alias('Pourcentage_%')
+).sort('Nombre_de_Contrats', descending=True)
 
-print(f"\n--- Zoom sur les échecs du Type = '{type_problematique}' ---")
-print(evaluation.filter(
-    (pl.col('CD_TYPE_AMORT') == type_problematique) & (~pl.col('Match_Brute'))
-).select([
-    'ID_FEM', 'MATURITE', 'T_INTRT', 
+print(distribution.head(10))
     'ANALYTIQUE_MATURITE_IRBA', 'NB_MATURITE_IRBA'
 ]).head(5))
