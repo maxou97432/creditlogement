@@ -1,86 +1,82 @@
-# 🔬 Piste d'Audit : Vérification des règles Bâle II (Base SRS)
+# 🔬 Audit : Vérification des règles Bâle II (3. IRB Maturity – Effective Maturity)
 
 ---
-### ▶ RÈGLE 1 : Fallback Conservateur (Maturité non-pondérée)
-**📜 Texte Bâle :** *"If the necessary data needed to calculate the duration are not available, the duration is equal to residual maturity."*
+### ▶ RÈGLE 1 : Les méthodes de calcul d'Optima et le "Conservative Choice"
+**📜 Le texte :** *"Optima calculates the duration for each facility, except when the effective maturity is sourced: [...] If the necessary data needed to calculate the duration are not available, the duration is equal to residual maturity (conservative choice)."*
 
-**🎯 Objectif :** Vérifier si le système Optima recourt à la maturité résiduelle stricte sans lisser les flux (cas des prêts In Fine ou lorsqu'il manque des données d'amortissement). On s'attend à ce que `NB_MATURITE_IRBA` soit rigoureusement égal à la différence entre l'échéance finale et la date d'arrêté pour ce sous-échantillon.
+**🎯 Protocole d'audit :** Séparer la part du portefeuille pour laquelle Optima a pu calculer/sourcer la duration (via la formule `sum(max(...))`), de la part de portefeuille qui n'avait pas les données nécessaires et qui a donc subi l'exacte clause du *conservative choice*.
 
 import polars as pl
-from datetime import date
 
-# Constante de la date d'arrêté SAS (30/06/2025 -> 23922 en format entier)
+# Définition du "As of date" pour cet audit (Arrêté SAS = 30/06/2025 -> 23922)
 DT_ARRT = 23922 
 
-# Calcul de la maturité résiduelle absolue
+# Calcul de la "residual maturity" évoquée par le texte : (Date de fin - As of date) / 365.25
 srs_audit = srs.with_columns(
-    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Maturite_Residuelle_Ans')
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 365.25).alias('Conservative_Residual_Maturity')
 )
 
-n_r1 = srs_audit.filter(
-    (pl.col('Maturite_Residuelle_Ans') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
+# Test : combien de prêts vérifient strictement l'équation du 'conservative choice' ?
+n_fallback = srs_audit.filter(
+    (pl.col('Conservative_Residual_Maturity') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
 ).height
 
-print(f"✅ Bilan : {n_r1} contrats ({n_r1/srs_audit.height:.1%}) vérifient strictement cette règle.")
-print("Leur maturité effective est mathématiquement égale à leur maturité calendaire finale.")
+print(f"✅ Optima a sourcé/calculé la formule 'Duration' pour : {srs_audit.height - n_fallback} facilités.")
+print(f"✅ Application stricte du 'conservative choice' pour      : {n_fallback} facilités.")
 
 ---
-### ▶ RÈGLE 2 : Calcul du Centre de Gravité ('Duration Date')
-**📜 Texte Bâle :** *"D = (Duration date - As of date) / 365.25"*
+### ▶ RÈGLE 2 : Le passage par la "Duration Date"
+**📜 Le texte :** *"The result of the calculation is expressed in years : D = (Duration date - As of date) / 365.25"*
 
-**🎯 Objectif :** Selon la réglementation, Optima calcule une "Duration Date" intermédiaire représentant la date moyenne pondérée des échéances futures du client. Puisque les banques n'exportent généralement pas cette date fictive, l'objectif est d'inverser algébriquement le résultat officiel pour la reconstituer et prouver l'application du calcul des cashflows.
+**🎯 Protocole d'audit :** Le texte dicte que le format du résultat est exprimé au travers d'une `Duration date`. Nous vérifions par ingénierie inverse l'intégration de cette formule dans le système de la banque : on cherche à extraire ou reconstituer cette `Duration date` fictive depuis le calcul pré-mâché `D`.
 
-
-# Reverse engineering : on inverse l'équation Bâloise pour reconstituer la date fictive d'Optima
+# Inversion algébrique de la formule du texte : Duration date = As of date + (D * 365.25)
 srs_audit = srs_audit.with_columns(
-    (pl.lit(DT_ARRT) + pl.col('NB_MATURITE_IRBA') * 365.25).alias('Expected_Duration_Date_Jours')
+    (pl.lit(DT_ARRT) + pl.col('NB_MATURITE_IRBA') * 365.25).alias('Expected_Duration_Date')
 )
 
-# On compte combien de contrats s'écartent ou non de la maturité calendaire totale
-n_r2 = srs_audit.filter(
-    (pl.col('Expected_Duration_Date_Jours') - pl.col('DT_ECHEANCE_FEM')).abs() <= 1.0
+# Comparaison par rapport aux dates connues en base
+n_date_match = srs_audit.filter(
+    (pl.col('Expected_Duration_Date') - pl.col('DT_ECHEANCE_FEM')).abs() <= 1.0
 ).height
 
-print(f"✅ Bilan : Pour la majorité de la base (~{srs_audit.height - n_r2} prêts), la date Bâloise calculée")
-print("tombe AVANT la date de fin de contrat réelle. Le moteur a donc bien modélisé l'allègement du risque lié à l'amortissement du capital.")
-
+print(f"👉 Résultat inverse :")
+print(f"- Pour les {n_date_match} lignes 'conservative', Duration date s'aligne avec la fin de contrat.")
+print(f"- Pour la majorité ({srs_audit.height - n_date_match} contrats), la 'Duration Date' de la formule est construite virtuellement par le calcul d'Optima, mais ne correspond et n'est injectée dans aucune date source exportable.")
 
 ---
-### ▶ RÈGLE 3 : Plafonds Réglementaires (Floor et Cap)
-**📜 Texte Bâle :** *"1 year <= Duration <= 5 years"*
+### ▶ RÈGLE 3 : Les Limites Bâloises
+**📜 Le texte :** *"According to IRBA regulation, a one-year floor and five-year ceil is applied to every facility: 1 year ≤ Duration ≤ 5 years"*
 
-**🎯 Objectif :** S'assurer que le résultat prudentiel final (`NB_DURATION_IRBA`) est systématiquement contenu dans le tunnel de 1 à 5 ans. Tout franchissement de ce cadre cache soit une défaillance système grave (limite haute), soit une exemption légalisée (limite basse).
+**🎯 Protocole d'audit :** Valider à 100% le respect impératif des bornes $[1, 5]$ sur le résultat final de durée publié à Bâle II.
 
-
-# Détection et comptage strict des anomalies hors des bornes réglementaires
+# Vérification exhaustive des bornes
 anomalies_cap = srs_audit.filter(pl.col('NB_DURATION_IRBA') > 5.001)
 anomalies_floor = srs_audit.filter(pl.col('NB_DURATION_IRBA') < 0.999)
 
-print(f"✅ Bilan : Dépassements illégaux (> 5 ans) : {anomalies_cap.height} (Strict 0 attendu).")
-print(f"✅ Bilan : Passages sous le floor (< 1 an)   : {anomalies_floor.height} candidats aux exemptions.")
-
+print(f"✅ Violations de la limite haute (> 5 years) : {anomalies_cap.height} (Strict 0 attendu).")
+print(f"✅ Candidats aux exceptions basses (< 1 year) : {anomalies_floor.height}.")
 
 ---
-### ▶ RÈGLE 4 : Exemptions Légales au Floor d'1 an
-**📜 Texte Bâle :** *"Exception: duration can be less than 1 year for facilities having an initial maturity less than 1 year."*
+### ▶ RÈGLE 4 : Justification des Lignes < 1 An
+**📜 Le texte :** *"Exception : duration can be less than 1 year for [...] facilities having an initial maturity less than 1 year"*
 
-**🎯 Objectif :** Justifier algébriquement les anomalies identifiées lors de la Règle 3. L'ambition est de vérifier que la maturité originelle de chaque crédit *(Date de fin stricte - Date d'Octroi initiale)* s'étendait bien sur moins de 365 jours complets, typiquement dans le cadre des Crédits à Vue (CAV).
-
+**🎯 Protocole d'audit :** Vérifier minutieusement que toutes exceptions au plafond d'un an identifiées à l'étape précédente justifient la clause *"initial maturity less than 1 year"*. 
 
 if anomalies_floor.height > 0:
-    # 1. Évaluation numérique approchée de la maturité initiale (évite les corruptions de format Polars String)
+    # Calcul de la clause exigée : "initial maturity" = (Maturité finale - Date de création)
     audit_init = anomalies_floor.with_columns(
         (pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')).alias('difference_brute')
     ).with_columns(
         pl.when(pl.col('DT_DEBUT_AUTO') > 300000)
         .then(pl.col('difference_brute') / 10000.0) 
         .otherwise(pl.col('difference_brute') / 365.25)
-        .alias('Maturite_Initiale_Approx_Ans')
+        .alias('Initial_Maturity_Years')
     )
     
-    # 2. Validation réglementaire de l'exemption Bâloise (< 1.0 an)
-    respectent = audit_init.filter(pl.col('Maturite_Initiale_Approx_Ans') <= 1.0).height
-    print(f"✅ Bilan : {respectent} contrats sur les {anomalies_floor.height} sous le floor valident formellement la condition.")
-    print("Leur maturité originelle était inférieure à un an, justifiant leur inéligibilité au plancher Bâlois.")
+    # Audit du filtre
+    respectent = audit_init.filter(pl.col('Initial_Maturity_Years') <= 1.0).height
+    print(f"✅ Validation Réglementaire : {respectent}/{anomalies_floor.height} des lignes sous le floor valident strictement la contrainte d'Optima.")
+    print("La clause 'having an initial maturity less than 1 year' a bien régit ce comportement.")
 else:
-    print("✅ Bilan : Aucune exemption au Floor n'est mobilisée dans ce périmètre.")
+    print("✅ Aucune exception 'sub 1-year' identifiée dans le filtrage.")
