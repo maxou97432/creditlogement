@@ -1,65 +1,38 @@
-print("▶ TEST ANALYTIQUE : Calcul théorique selon 'demonstrations_duration.md'")
+print("▶ TEST ANALYTIQUE : Ventilation de la parité par Type d'amortissement")
 
-# 1. Variables Financières 
-r_mensuel = (pl.col('T_INTRT') / 100.0) / 12.0
-n_mois = pl.col('MATURITE').cast(pl.Float64)
+# [ÉTAPE 1 à 3 : Conserver le code précédent pour créer ANALYTIQUE_MATURITE_IRBA et ANALYTIQUE_DURATION_IRBA]
 
-# 2. Implémentation des formules de ton fichier
-srs_fusion = srs_fusion.with_columns(
-    
-    # TYPE 3 : Amortissement Progressif (CF constants -> centre de gravité = milieu exact)
-    pl.when(pl.col('CD_TYPE_AMORT').is_in(['3']))
-    .then((n_mois + 1.0) / 2.0)
-    
-    # TYPE 1 : Amortissement Linéaire (CF décroissants -> centre de gravité tiré vers la gauche par r)
-    .when(pl.col('CD_TYPE_AMORT').is_in(['1']))
-    .then(
-        ((n_mois + 1.0) / 2.0) * ((1.0 + r_mensuel * (n_mois + 2.0) / 3.0) / (1.0 + r_mensuel * (n_mois + 1.0) / 2.0))
-    )
-    
-    # TYPE 4 : Prêts Bullet (Intérêts constants puis gros capital -> tiré un tout petit peu vers la gauche par r)
-    .when(pl.col('CD_TYPE_AMORT').is_in(['4']))
-    .then(
-        (n_mois * (1.0 + r_mensuel * (n_mois + 1.0) / 2.0)) / (1.0 + n_mois * r_mensuel)
-    )
-    
-    # TYPE 2 : Dégressif
-    .when(pl.col('CD_TYPE_AMORT').is_in(['2']))
-    .then(n_mois / 3.0)
-    
-    # DEFAULT
-    .otherwise(n_mois)
-    .alias('ANALYTIQUE_MATURITE_MOIS')
-)
-
-# 3. Conversion en ANNÉES et application du Clip [1; 5] Bâle II
-srs_fusion = srs_fusion.with_columns(
-    (pl.col('ANALYTIQUE_MATURITE_MOIS') / 12.0).alias('ANALYTIQUE_MATURITE_IRBA')
-).with_columns(
-    pl.col('ANALYTIQUE_MATURITE_IRBA').clip(1.0, 5.0).alias('ANALYTIQUE_DURATION_IRBA')
-)
-
-# 4. Évaluation factuelle
+# 4. Évaluation détaillée par Type d'Amortissement
 dataset_valide = srs_fusion.drop_nulls('T_INTRT')
-if dataset_valide.height > 0:
-    match_brute = dataset_valide.filter(
-        (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs() <= 0.1
-    ).height
-    
-    match_clippe = dataset_valide.filter(
-        (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs() <= 0.1
-    ).height
 
-    print(f"Bilan de concordance des formules 'demonstrations_duration.md' sur {dataset_valide.height} lignes avec taux :")
-    print(f"  └─> Taux de Parité brute (Équations pures vs Réalité SAS) : {match_brute/dataset_valide.height:.1%} ({match_brute} lignes).")
-    print(f"  └─> Taux de Parité réglementaire (Bornes [1, 5] appliquées) : {match_clippe/dataset_valide.height:.1%} ({match_clippe} lignes).\n")
+# Création des drapeaux de réussite (Tolérance de 0.1 an)
+evaluation = dataset_valide.with_columns(
+    (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs().le(0.1).alias('Match_Brute'),
+    (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs().le(0.1).alias('Match_Clippe')
+)
 
-    # Zoom sur les divergences 
-    if match_brute < dataset_valide.height:
-        print("Lignes où Bâle II n'a visiblement PAS suivi le comportement mathématique standard :")
-        print(dataset_valide.filter(
-            (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs() > 0.5
-        ).select([
-            'CD_TYPE_AMORT', 'MATURITE', 'T_INTRT', 
-            'ANALYTIQUE_MATURITE_IRBA', 'NB_MATURITE_IRBA'
-        ]).head(5))
+# Agrégation par type d'amortissement
+resultats_par_type = evaluation.group_by('CD_TYPE_AMORT').agg([
+    pl.len().alias('Total_Lignes'),
+    pl.col('Match_Brute').sum().alias('Succes_Brut'),
+    pl.col('Match_Clippe').sum().alias('Succes_Clippe')
+]).with_columns(
+    (pl.col('Succes_Brut') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Brute_%'),
+    (pl.col('Succes_Clippe') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Clippee_%')
+).sort('Total_Lignes', descending=True)
+
+print("\n--- Bilan de la Modélisation Théorique vs Réalité SAS ---")
+print(resultats_par_type.select([
+    'CD_TYPE_AMORT', 'Total_Lignes', 'Reussite_Brute_%', 'Reussite_Clippee_%'
+]))
+
+# On tire quelques cas extrêmes pour le type où le modèle théorique souffre le plus
+type_problematique = resultats_par_type.sort('Reussite_Brute_%').row(0)[0]
+
+print(f"\n--- Zoom sur les échecs du Type = '{type_problematique}' ---")
+print(evaluation.filter(
+    (pl.col('CD_TYPE_AMORT') == type_problematique) & (~pl.col('Match_Brute'))
+).select([
+    'ID_FEM', 'MATURITE', 'T_INTRT', 
+    'ANALYTIQUE_MATURITE_IRBA', 'NB_MATURITE_IRBA'
+]).head(5))
