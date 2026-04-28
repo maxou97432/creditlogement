@@ -1,19 +1,28 @@
-# On isole strictement la sous-population concernée par la Règle 1
-lignes_conservatives = srs_fusion.filter(
-    (pl.col('Conservative_Residual_Maturity') - pl.col('NB_MATURITE_IRBA')).abs() < 0.001
+print("▶ INVESTIGATION : Quelle est la vraie nature de la colonne 'MATURITE' de Capret ?\n")
+
+DT_ARRT = 23922 
+
+# On calcule les 3 métriques possibles en "MOIS" (1 mois = 30.4375 jours)
+srs_test = srs_fusion.with_columns(
+    ((pl.col('DT_ECHEANCE_FEM') - DT_ARRT) / 30.4375).alias('Test_Maturite_Residuelle'),
+    ((pl.col('DT_ECHEANCE_FEM') - pl.col('DT_DEBUT_AUTO')) / 30.4375).alias('Test_Maturite_Initiale'),
+    ((DT_ARRT - pl.col('DT_DEBUT_AUTO')) / 30.4375).alias('Test_Age_Credit')
 )
 
-print(f"▶ INVESTIGATION sur les {lignes_conservatives.height} contrats à choix conservateur :")
+# Lignes valides sans vide pour avoir un périmètre propre
+valides = srs_test.filter(pl.col('MATURITE').is_not_null())
 
-print("\n1. Analyse de la donnée d'amortissement (CD_TYPE_AMORT) :")
-# On compte la répartition pour vérifier si la donnée était vraiment "non disponible"
-repartition_amort = lignes_conservatives.group_by('CD_TYPE_AMORT').agg(
-    pl.len().alias('Nombre_de_Contrats')
-).with_columns(
-    (pl.col('Nombre_de_Contrats') / lignes_conservatives.height * 100).round(1).alias('Proportion_%')
-).sort('Nombre_de_Contrats', descending=True)
-print(repartition_amort)
+# On cherche un match (en tolérant +/- 1 mois à cause des arrondis des 30/31 jours)
+m_residuelle = valides.filter((pl.col('Test_Maturite_Residuelle') - pl.col('MATURITE')).abs() <= 1.0).height
+m_initiale   = valides.filter((pl.col('Test_Maturite_Initiale') - pl.col('MATURITE')).abs() <= 1.0).height
+m_age        = valides.filter((pl.col('Test_Age_Credit') - pl.col('MATURITE')).abs() <= 1.0).height
 
-if 'Type_Credit' in lignes_conservatives.columns:
-    print("\n2. Analyse métier du pole Capret (Type_Credit) :")
-    print(lignes_conservatives.group_by('Type_Credit').len().sort('len', descending=True).head(5))
+print(f"Sur {valides.height} contrats analysés, avec quelle équation la variable Capret matche-t-elle ?")
+print(f"  └─> MATURITE = Résiduelle (Fin - Aujourd'hui)    : {m_residuelle} matchs ({(m_residuelle/valides.height)*100:.1f}%)")
+print(f"  └─> MATURITE = Initiale (Fin - Début)            : {m_initiale} matchs ({(m_initiale/valides.height)*100:.1f}%)")
+print(f"  └─> MATURITE = Âge du crédit (Aujourd'hui - Deb) : {m_age} matchs ({(m_age/valides.height)*100:.1f}%)\n")
+
+# Petit contrôle visuel si Résiduelle gagne haut la main
+if m_residuelle > m_initiale:
+    print("Preuve visuelle des valeurs :")
+    print(valides.select(['ID_FEM', 'DT_DEBUT_AUTO', 'DT_ECHEANCE_FEM', 'Test_Maturite_Residuelle', 'MATURITE']).head(3))
