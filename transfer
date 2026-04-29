@@ -1,77 +1,19 @@
-print("\n--- TEST ANALYTIQUE : Calcul théorique selon type d'amortissement ---")
+import polars as pl
 
-# 1. Variables Financières
-# Attention : on s'assure que T_INTRT et MATURITE sont castés en Float64 pour éviter les erreurs de précision
-r_mensuel = (pl.col('T_INTRT').cast(pl.Float64).fill_null(0.0) / 100.0) / 12.0
-n_mois = pl.col('MATURITE').cast(pl.Float64)
-
-# 2. Implémentation des formules basée sur le PDF et vos tests
-srs_fusion = srs_fusion.with_columns(
-    pl.when(pl.col('CD_TYPE_AMORT') == '3')
-    .then(
-        # TYPE 3 (Progressif / Annuité constante) : Formule exacte (le taux s'annule)
-        (n_mois + 1.0) / 2.0
-    )
-    .when(pl.col('CD_TYPE_AMORT') == '1')
-    .then(
-        # TYPE 1 (Linéaire / Capital constant) : Formule exacte intégrant la dégressivité des intérêts
-        ((n_mois + 1.0) / 2.0) * 
-        (1.0 + r_mensuel * (n_mois + 2.0) / 3.0) / 
-        (1.0 + r_mensuel * (n_mois + 1.0) / 2.0)
-    )
-    .when(pl.col('CD_TYPE_AMORT').is_in(['4', '9']) | (pl.col('CD_TYPE_AMORT') == "") | pl.col('CD_TYPE_AMORT').is_null())
-    .then(
-        # TYPE 4 (Bullet), 9 (Autres) ou Vide : Conservation de la maturité résiduelle
-        n_mois
-    )
-    .when(pl.col('CD_TYPE_AMORT') == '2')
-    .then(
-        # TYPE 2 : Dégressif (Approximation centre de gravité plus tôt, env 1/3)
-        n_mois / 3.0
-    )
-    .otherwise(n_mois)
-    .alias('ANALYTIQUE_MATURITE_MOIS')
+print("\n--- Échantillon Groupe 1 (Linéaire) ---")
+df_groupe1 = (
+    dataset_valide.filter(pl.col('CD_TYPE_AMORT') == '1')
+    .select(['MATURITE', 'T_INTRT', 'NB_DURATION_IRBA'])
+    .drop_nulls()
+    .head(10)
 )
+print(df_groupe1)
 
-# 3. Conversion en ANNÉES et application du Clip [1; 5] Bâle II
-# Le PDF dit explicitement : 1 year <= Duration <= 5 years
-srs_fusion = srs_fusion.with_columns(
-    (pl.col('ANALYTIQUE_MATURITE_MOIS') / 12.0).alias('ANALYTIQUE_MATURITE_IRBA')
-).with_columns(
-    pl.col('ANALYTIQUE_MATURITE_IRBA').clip(1.0, 5.0).alias('ANALYTIQUE_DURATION_IRBA')
+print("\n--- Échantillon Groupe 3 (Progressif) ---")
+df_groupe3 = (
+    dataset_valide.filter(pl.col('CD_TYPE_AMORT') == '3')
+    .select(['MATURITE', 'T_INTRT', 'NB_DURATION_IRBA'])
+    .drop_nulls()
+    .head(10)
 )
-
-# 4. Évaluation détaillée par Type d'Amortissement
-dataset_valide = srs_fusion.drop_nulls(subset=['T_INTRT', 'NB_MATURITE_IRBA'])
-
-# Création des drapeaux de réussite (Tolérance de 0.1 an)
-evaluation = dataset_valide.with_columns(
-    (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs().le(0.1).alias('Match_Maturite'),
-    (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs().le(0.1).alias('Match_Duration')
-)
-
-# Agrégation par type d'amortissement
-resultats_par_type = evaluation.group_by('CD_TYPE_AMORT').agg([
-    pl.len().alias('Total_Lignes'),
-    pl.col('Match_Maturite').sum().alias('Succes_Maturite'),
-    pl.col('Match_Duration').sum().alias('Succes_Duration')
-]).with_columns(
-    (pl.col('Succes_Maturite') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Maturite (%)'),
-    (pl.col('Succes_Duration') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Duration (%)')
-).sort('Total_Lignes', descending=True)
-
-print("\n--- Bilan de la Modélisation Théorique vs Réalité SAS ---")
-print(resultats_par_type.select([
-    'CD_TYPE_AMORT', 'Total_Lignes', 'Reussite_Maturite (%)', 'Reussite_Duration (%)'
-]))
-
-# Zoom sur le type problématique
-if resultats_par_type.height > 0:
-    type_problematique = resultats_par_type.sort('Reussite_Duration (%)').row(0)[0]
-    print(f"\n--- Zoom sur les échecs du Type = '{type_problematique}' ---")
-    print(evaluation.filter(
-        (pl.col('CD_TYPE_AMORT') == type_problematique) & (~pl.col('Match_Maturite'))
-    ).select([
-        'ID_FEM', 'MATURITE', 'T_INTRT',
-        'ANALYTIQUE_MATURITE_IRBA', 'NB_MATURITE_IRBA', 'ANALYTIQUE_DURATION_IRBA', 'NB_DURATION_IRBA'
-    ]).head(20))
+print(df_groupe3)
