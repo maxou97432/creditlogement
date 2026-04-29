@@ -1,29 +1,39 @@
-print("\n--- TEST ANALYTIQUE : Calcul théorique selon type d'amortissement ---")
+print("\n--- TEST ANALYTIQUE : Vraie formule réglementaire Bâle II ---")
 
 # 1. Variables Financières
+r_mensuel = (pl.col('T_INTRT').cast(pl.Float64).fill_null(0.0) / 100.0) / 12.0
 n_mois = pl.col('MATURITE').cast(pl.Float64)
 
-# 2. Implémentation des règles "Reverse-Engineered" de SRS
+# Pré-calcul mathématique pour le Groupe 3 : (1 + r)^N
+factor = (1.0 + r_mensuel).pow(n_mois)
+
+# 2. Résolution analytique de la somme des cash-flows (Maturité Effective)
 srs_fusion = srs_fusion.with_columns(
     pl.when(pl.col('CD_TYPE_AMORT') == '1')
     .then(
-        # GROUPE 1 (Linéaire) : SRS ignore le taux d'intérêt et divise simplement par 2
-        n_mois / 2.0
+        # GROUPE 1 (Linéaire) : Résolution mathématique de sum(t*C)/sum(C) avec un C constant
+        (n_mois + 1.0) / 2.0
     )
     .when(pl.col('CD_TYPE_AMORT') == '3')
     .then(
-        # GROUPE 3 (Progressif) : SRS utilise une approximation polynomiale de la duration de Macaulay
-        # Ratio empirique déduit de SRS : 0.505 + (MATURITE * 0.00031)
-        n_mois * (0.505 + n_mois * 0.00031)
+        # GROUPE 3 (Progressif) : Résolution de la somme avec une part de capital qui croît (A_i)
+        # Sécurité : si le taux est très proche de 0, on retombe sur la limite mathématique de la somme
+        pl.when(r_mensuel > 0.00001)
+        .then(
+            ((n_mois * r_mensuel - 1.0) * factor + 1.0) / (r_mensuel * (factor - 1.0))
+        )
+        .otherwise(
+            (n_mois + 1.0) / 2.0
+        )
     )
     .when(pl.col('CD_TYPE_AMORT').is_in(['4', '9']) | (pl.col('CD_TYPE_AMORT') == "") | pl.col('CD_TYPE_AMORT').is_null())
     .then(
-        # TYPE 4 (Bullet), 9 (Autres) ou Vide : Maturité résiduelle pleine
+        # GROUPES 4, 9 ou Vide (In fine / Bullet) : Un seul flux à la fin, M = Maturité
         n_mois
     )
     .when(pl.col('CD_TYPE_AMORT') == '2')
     .then(
-        # TYPE 2 : Dégressif
+        # GROUPE 2 (Dégressif) : Approximation conservée (ou à adapter si vous avez la règle métier)
         n_mois / 3.0
     )
     .otherwise(n_mois)
@@ -37,7 +47,7 @@ srs_fusion = srs_fusion.with_columns(
     pl.col('ANALYTIQUE_MATURITE_IRBA').clip(1.0, 5.0).alias('ANALYTIQUE_DURATION_IRBA')
 )
 
-# 4. Évaluation détaillée par Type d'Amortissement
+# 4. Évaluation détaillée
 dataset_valide = srs_fusion.drop_nulls(subset=['T_INTRT', 'NB_MATURITE_IRBA'])
 
 # Création des drapeaux de réussite (Tolérance de 0.1 an)
