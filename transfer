@@ -1,19 +1,62 @@
-import polars as pl
+print("\n--- TEST ANALYTIQUE : Calcul théorique selon type d'amortissement ---")
 
-print("\n--- Échantillon Groupe 1 (Linéaire) ---")
-df_groupe1 = (
-    dataset_valide.filter(pl.col('CD_TYPE_AMORT') == '1')
-    .select(['MATURITE', 'T_INTRT', 'NB_DURATION_IRBA'])
-    .drop_nulls()
-    .head(10)
-)
-print(df_groupe1)
+# 1. Variables Financières
+n_mois = pl.col('MATURITE').cast(pl.Float64)
 
-print("\n--- Échantillon Groupe 3 (Progressif) ---")
-df_groupe3 = (
-    dataset_valide.filter(pl.col('CD_TYPE_AMORT') == '3')
-    .select(['MATURITE', 'T_INTRT', 'NB_DURATION_IRBA'])
-    .drop_nulls()
-    .head(10)
+# 2. Implémentation des règles "Reverse-Engineered" de SRS
+srs_fusion = srs_fusion.with_columns(
+    pl.when(pl.col('CD_TYPE_AMORT') == '1')
+    .then(
+        # GROUPE 1 (Linéaire) : SRS ignore le taux d'intérêt et divise simplement par 2
+        n_mois / 2.0
+    )
+    .when(pl.col('CD_TYPE_AMORT') == '3')
+    .then(
+        # GROUPE 3 (Progressif) : SRS utilise une approximation polynomiale de la duration de Macaulay
+        # Ratio empirique déduit de SRS : 0.505 + (MATURITE * 0.00031)
+        n_mois * (0.505 + n_mois * 0.00031)
+    )
+    .when(pl.col('CD_TYPE_AMORT').is_in(['4', '9']) | (pl.col('CD_TYPE_AMORT') == "") | pl.col('CD_TYPE_AMORT').is_null())
+    .then(
+        # TYPE 4 (Bullet), 9 (Autres) ou Vide : Maturité résiduelle pleine
+        n_mois
+    )
+    .when(pl.col('CD_TYPE_AMORT') == '2')
+    .then(
+        # TYPE 2 : Dégressif
+        n_mois / 3.0
+    )
+    .otherwise(n_mois)
+    .alias('ANALYTIQUE_MATURITE_MOIS')
 )
-print(df_groupe3)
+
+# 3. Conversion en ANNÉES et application du Clip [1; 5] Bâle II
+srs_fusion = srs_fusion.with_columns(
+    (pl.col('ANALYTIQUE_MATURITE_MOIS') / 12.0).alias('ANALYTIQUE_MATURITE_IRBA')
+).with_columns(
+    pl.col('ANALYTIQUE_MATURITE_IRBA').clip(1.0, 5.0).alias('ANALYTIQUE_DURATION_IRBA')
+)
+
+# 4. Évaluation détaillée par Type d'Amortissement
+dataset_valide = srs_fusion.drop_nulls(subset=['T_INTRT', 'NB_MATURITE_IRBA'])
+
+# Création des drapeaux de réussite (Tolérance de 0.1 an)
+evaluation = dataset_valide.with_columns(
+    (pl.col('ANALYTIQUE_MATURITE_IRBA') - pl.col('NB_MATURITE_IRBA')).abs().le(0.1).alias('Match_Maturite'),
+    (pl.col('ANALYTIQUE_DURATION_IRBA') - pl.col('NB_DURATION_IRBA')).abs().le(0.1).alias('Match_Duration')
+)
+
+# Agrégation par type d'amortissement
+resultats_par_type = evaluation.group_by('CD_TYPE_AMORT').agg([
+    pl.len().alias('Total_Lignes'),
+    pl.col('Match_Maturite').sum().alias('Succes_Maturite'),
+    pl.col('Match_Duration').sum().alias('Succes_Duration')
+]).with_columns(
+    (pl.col('Succes_Maturite') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Maturite (%)'),
+    (pl.col('Succes_Duration') / pl.col('Total_Lignes') * 100).round(1).alias('Reussite_Duration (%)')
+).sort('Total_Lignes', descending=True)
+
+print("\n--- Bilan de la Modélisation Théorique vs Réalité SAS ---")
+print(resultats_par_type.select([
+    'CD_TYPE_AMORT', 'Total_Lignes', 'Reussite_Maturite (%)', 'Reussite_Duration (%)'
+]))
