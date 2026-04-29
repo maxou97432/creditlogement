@@ -1,140 +1,21 @@
 import polars as pl
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
-from sklearn.inspection import PartialDependenceDisplay
-import xgboost as xgb
-import shap
-import matplotlib.pyplot as plt
 
-# ============================================================
+# Remplacez 'srs_fusion' par le nom de votre DataFrame actuel
+df_comparaison = srs_fusion.filter(
+    (pl.col('CD_TYPE_AMORT') == '3') &
+    (pl.col('DT_ECHEANCE_FEM') == 24287.0)
+)
 
-import polars as pl
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-import shap
-import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
-from sklearn.inspection import PartialDependenceDisplay
+# On sépare les deux groupes 
+df_099 = df_comparaison.filter(pl.col('NB_MATURITE_IRBA') > 0.9)
+df_054 = df_comparaison.filter(pl.col('NB_MATURITE_IRBA') < 0.6)
 
-# ============================================================
-# 1. Préparation des données — Groupe 1 et Groupe 3 séparément
-# ============================================================
+# On affiche un exemple de chaque pour chercher la colonne qui diffère
+print("========== LIGNES À 0.9993 (Mode Sécurité) ==========")
+print(df_099.head(2).to_pandas().T) 
 
-def preparer_dataset(srs_fusion: pl.DataFrame, groupe: str) -> pd.DataFrame:
-    df = (
-        srs_fusion
-        .filter(pl.col('CD_TYPE_AMORT') == groupe)
-        .select(['MATURITE', 'T_INTRT', 'NB_MATURITE_IRBA'])
-        .drop_nulls()
-        .with_columns([
-            pl.col('MATURITE').cast(pl.Float64),
-            pl.col('T_INTRT').cast(pl.Float64).fill_null(0.0),
-            pl.col('NB_MATURITE_IRBA').cast(pl.Float64),
-        ])
-        # Feature engineering : on donne au modèle les transformations candidates
-        .with_columns([
-            (pl.col('MATURITE') / 12.0).alias('N_annees'),
-            (pl.col('T_INTRT') / 100.0 / 12.0).alias('r_mensuel'),
-            ((pl.col('MATURITE') + 1.0) / 2.0 / 12.0).alias('formule_lineaire'),
-            (pl.col('MATURITE') / 2.0 / 12.0).alias('formule_N_sur_2'),
-            (pl.col('MATURITE') / 12.0).alias('formule_bullet'),
-        ])
-        .to_pandas()
-    )
-    return df
+print("\n========== LIGNES À 0.5448 (Mode Calcul) ==========")
+print(df_054.head(2).to_pandas().T)
 
-
-# ============================================================
-# 2. Entraînement et analyse par groupe
-# ============================================================
-
-def analyser_groupe(srs_fusion: pl.DataFrame, groupe: str):
-    print(f"\n{'='*60}")
-    print(f"  ANALYSE ML — GROUPE {groupe}")
-    print(f"{'='*60}")
-
-    df = preparer_dataset(srs_fusion, groupe)
-
-    features = ['N_annees', 'r_mensuel', 'formule_lineaire', 'formule_N_sur_2', 'formule_bullet']
-    X = df[features]
-    y = df['NB_MATURITE_IRBA']
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # --- Random Forest ---
-    rf = RandomForestRegressor(n_estimators=300, max_depth=8, random_state=42, n_jobs=-1)
-    rf.fit(X_train, y_train)
-    y_pred_rf = rf.predict(X_test)
-
-    # --- XGBoost ---
-    xgb_model = xgb.XGBRegressor(n_estimators=300, max_depth=6, learning_rate=0.05,
-                                   random_state=42, n_jobs=-1)
-    xgb_model.fit(X_train, y_train)
-    y_pred_xgb = xgb_model.predict(X_test)
-
-    print(f"\n--- Scores de performance ---")
-    print(f"Random Forest  | R²: {r2_score(y_test, y_pred_rf):.6f}  | MAE: {mean_absolute_error(y_test, y_pred_rf):.6f} ans")
-    print(f"XGBoost        | R²: {r2_score(y_test, y_pred_xgb):.6f}  | MAE: {mean_absolute_error(y_test, y_pred_xgb):.6f} ans")
-
-    # --- Feature Importance RF ---
-    print(f"\n--- Importance des features (Random Forest) ---")
-    importances = pd.Series(rf.feature_importances_, index=features).sort_values(ascending=False)
-    print(importances.to_string())
-
-    # ============================================================
-    # 3. SHAP — Pour comprendre la relation mathématique
-    # ============================================================
-    print(f"\n--- Analyse SHAP (XGBoost) ---")
-    explainer = shap.Explainer(xgb_model, X_train)
-    shap_values = explainer(X_test)
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(f'Groupe {groupe} — Reverse Engineering de la formule SRS', fontsize=14)
-
-    # SHAP bar chart (importance globale)
-    shap.plots.bar(shap_values, show=False, ax=axes[0])
-    axes[0].set_title('Importance SHAP globale')
-
-    # Scatter : Prédiction RF vs Réalité SRS
-    axes[1].scatter(y_test, y_pred_rf, alpha=0.3, s=10, color='steelblue')
-    axes[1].plot([y.min(), y.max()], [y.min(), y.max()], 'r--', lw=1.5, label='Parfaite parité')
-    axes[1].set_xlabel('NB_MATURITE_IRBA SRS (réel)')
-    axes[1].set_ylabel('Prédiction Random Forest')
-    axes[1].set_title('Parité SRS vs Modèle ML')
-    axes[1].legend()
-
-    # Partial Dependence : influence de N_annees sur la target
-    PartialDependenceDisplay.from_estimator(rf, X_train, ['N_annees', 'r_mensuel'],
-                                             ax=axes[2], line_kw={"color": "steelblue"})
-    axes[2].set_title('Partial Dependence (N_annees, r_mensuel)')
-
-    plt.tight_layout()
-    plt.savefig(f'reverse_engineering_groupe_{groupe}.png', dpi=150)
-    plt.show()
-    print(f"  → Graphique sauvegardé : reverse_engineering_groupe_{groupe}.png")
-
-    # ============================================================
-    # 4. Corrélation directe avec les formules candidates
-    # ============================================================
-    print(f"\n--- Corrélation directe avec formules analytiques candidates ---")
-    for col in ['formule_lineaire', 'formule_N_sur_2', 'formule_bullet']:
-        corr = df['NB_MATURITE_IRBA'].corr(df[col])
-        mae_formule = (df['NB_MATURITE_IRBA'] - df[col]).abs().mean()
-        pct_ok = ((df['NB_MATURITE_IRBA'] - df[col]).abs() <= 0.1).mean() * 100
-        print(f"  {col:<30} | Corr: {corr:.6f} | MAE: {mae_formule:.6f} ans | Match (±0.1): {pct_ok:.1f}%")
-
-    return rf, xgb_model
-
-
-# ============================================================
-# 5. Lancement sur les deux groupes
-# ============================================================
-
-rf_g1, xgb_g1 = analyser_groupe(srs_fusion, groupe='1')
-rf_g3, xgb_g3 = analyser_groupe(srs_fusion, groupe='3')
+# Si vous préférez fouiller dans Excel, décommentez cette ligne :
+# df_comparaison.write_excel('comparaison_anomalie.xlsx')
