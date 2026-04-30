@@ -1,53 +1,36 @@
-sub_court = df_avec_pred.filter(
-    (pl.col("CD_TYPE_AMORT") == 3) & (pl.col("R") < 1)
-).sort("R").head(15)
-
-for row in sub_court.iter_rows(named=True):
-    R = row["R"]
-    NB = row["NB_MATURITE_IRBA"]
-    pred = row["pred_prog_5pct"]
-    print(f"R={R:.4f}  NB={NB:.4f}  pred={pred:.4f}  diff={NB-pred:+.4f}  T_INTRT={row['T_INTRT']*100:.2f}%")
-
-
-
-
-
-
-def m_bale_progressif_v2(R, y, freq=12):
-    """Variante : floor au lieu de round, et plancher n=1."""
-    n = max(1, int(np.floor(R * freq + 0.5)))  # arrondi standard
-    if abs(y) < 1e-12:
-        return (n + 1) / 2 / freq
-    r = y / freq
-    k = np.arange(1, n + 1)
-    w = (1 + r) ** (k - 1)
-    return float(np.sum(k * w) / np.sum(w)) / freq
-
-def m_bale_progressif_continu(R, y):
-    """Version continue : intégrale au lieu de somme."""
-    if R < 1e-6:
-        return R
-    if abs(y) < 1e-6:
-        return R / 2
-    # M = sum(k * (1+r)^(k-1)) / sum((1+r)^(k-1)) en continu sur [0, R]
-    # avec poids w(t) = (1+y)^t (exponentiel) et yield annuel y
-    # = [R*(1+y)^R / ln(1+y) - ((1+y)^R - 1) / ln(1+y)^2] / [((1+y)^R - 1) / ln(1+y)]
-    L = np.log(1 + y)
-    num = R * (1+y)**R / L - ((1+y)**R - 1) / L**2
-    den = ((1+y)**R - 1) / L
-    return num / den
-
-# Test sur la tranche courte uniquement
+# Identifier le seuil de bascule sur le type 3
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3)
 R  = sub3["R"].to_numpy()
 NB = sub3["NB_MATURITE_IRBA"].to_numpy()
 
-for lo, hi in [(0,1), (1,3), (3,5), (5,10)]:
-    mask = (R >= lo) & (R < hi)
-    if mask.sum() < 50: continue
-    R_s, NB_s = R[mask], NB[mask]
-    pred_v2  = np.array([m_bale_progressif_v2(r, 0.05) for r in R_s])
-    pred_cont = np.array([m_bale_progressif_continu(r, 0.05) for r in R_s])
-    rmse_v2  = np.sqrt(np.mean((pred_v2  - NB_s)**2))
-    rmse_cont = np.sqrt(np.mean((pred_cont - NB_s)**2))
-    print(f"[{lo},{hi}[ n={mask.sum():>6}  v2(mensuel)={rmse_v2:.5f}  continu={rmse_cont:.5f}")
+# Pour chaque ligne, est-ce que NB == R (bascule) ou NB suit la formule progressive ?
+# Critère : |NB - R| < 0.01 -> bascule
+mask_bascule = np.abs(NB - R) < 0.01
+
+# Distribution de R selon que ça bascule ou pas
+print("Lignes où NB ≈ R (bascule) :")
+R_bascule = R[mask_bascule]
+print(f"  n = {len(R_bascule)}")
+print(f"  R min = {R_bascule.min():.4f}")
+print(f"  R max = {R_bascule.max():.4f}")
+print(f"  R médian = {np.median(R_bascule):.4f}")
+print(f"  R 95e pct = {np.percentile(R_bascule, 95):.4f}")
+print(f"  R 99e pct = {np.percentile(R_bascule, 99):.4f}")
+
+print("\nLignes où NB ≠ R (formule progressive) :")
+R_prog = R[~mask_bascule]
+print(f"  n = {len(R_prog)}")
+print(f"  R min = {R_prog.min():.4f}")
+print(f"  R max = {R_prog.max():.4f}")
+print(f"  R 5e pct = {np.percentile(R_prog, 5):.4f}")
+print(f"  R 1er pct = {np.percentile(R_prog, 1):.4f}")
+
+# Histogramme de R par bin pour voir la transition
+print("\nDistribution par bin de R (bascule oui/non) :")
+print(f"{'bin R':<15} {'n_total':>8} {'n_bascule':>10} {'%_bascule':>10}")
+bins = [0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0]
+for lo, hi in zip(bins[:-1], bins[1:]):
+    m = (R >= lo) & (R < hi)
+    if m.sum() == 0: continue
+    pct = mask_bascule[m].sum() / m.sum() * 100
+    print(f"[{lo:>5.2f}, {hi:>5.2f}[ {m.sum():>8} {mask_bascule[m].sum():>10} {pct:>9.1f}%")
