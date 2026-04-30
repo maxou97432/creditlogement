@@ -1,31 +1,18 @@
-# On exclut les identifiants, les dates et les montants
-cols_a_ignorer = ["R", "NB_MATURITE_IRBA", "is_bascule", "pred_prog_5pct", "I_AUTRS_UNIQ", "CD_CONTRAT", "DT_ARRETE"]
+df = df.with_columns(
+    # 1. Calcul du nombre de mois
+    (pl.col("R") * 12).round(0).cast(pl.Int32).alias("n_mois")
+).with_columns(
+    # 2. Arbre de décision
+    pl.when(
+        pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]) | (pl.col("n_mois") <= 0)
+    ).then(
+        pl.col("R")  # Bascule brute
+    ).otherwise(
+        (pl.col("n_mois") + 1) / 24  # Formule progressive
+    ).alias("NB_MATURITE_CALCULEE")
+)
 
-# On filtre intelligemment : uniquement les colonnes avec moins de 100 modalités (pour éviter les ID)
-cols_a_tester = []
-for c in sub_mixte.columns:
-    if c not in cols_a_ignorer and sub_mixte[c].dtype in (pl.Utf8, pl.Int64, pl.Int32, pl.Boolean, pl.Categorical):
-        # Ne garder que si c'est une vraie catégorie (moins de 100 valeurs uniques)
-        if sub_mixte[c].n_unique() < 100:
-            cols_a_tester.append(c)
-
-print(f"Variables à tester : {cols_a_tester}\n")
-
-for col in cols_a_tester:
-    try:
-        tab = (
-            sub_mixte
-            .group_by(col)
-            .agg([
-                pl.len().alias("n"),
-                pl.col("is_bascule").mean().alias("pct_bascule"),
-            ])
-            .sort("pct_bascule", descending=True)
-        )
-        # N'afficher que si ça discrimine (écart > 10% entre le max et le min)
-        pcts = tab["pct_bascule"].drop_nulls().to_list()
-        if pcts and (max(pcts) - min(pcts) > 0.10):
-            print(f"\n--- {col} ---")
-            print(tab)
-    except Exception as e:
-        pass
+# 3. Le Clip réglementaire (à adapter selon tes exemptions Trade Finance)
+df = df.with_columns(
+    pl.col("NB_MATURITE_CALCULEE").clip(lower_bound=1.0, upper_bound=5.0).alias("NB_MATURITE_FINALE")
+)
