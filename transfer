@@ -1,40 +1,53 @@
-def macaulay_annuite_actu(R, y, freq=12):
-    """
-    Duration de Macaulay sur annuité constante :
-    flux totaux (capital + intérêts) constants, ACTUALISÉS.
-    """
-    n = max(1, int(round(R * freq)))
+sub_court = df_avec_pred.filter(
+    (pl.col("CD_TYPE_AMORT") == 3) & (pl.col("R") < 1)
+).sort("R").head(15)
+
+for row in sub_court.iter_rows(named=True):
+    R = row["R"]
+    NB = row["NB_MATURITE_IRBA"]
+    pred = row["pred_prog_5pct"]
+    print(f"R={R:.4f}  NB={NB:.4f}  pred={pred:.4f}  diff={NB-pred:+.4f}  T_INTRT={row['T_INTRT']*100:.2f}%")
+
+
+
+
+
+
+def m_bale_progressif_v2(R, y, freq=12):
+    """Variante : floor au lieu de round, et plancher n=1."""
+    n = max(1, int(np.floor(R * freq + 0.5)))  # arrondi standard
     if abs(y) < 1e-12:
         return (n + 1) / 2 / freq
     r = y / freq
-    v = 1.0 / (1.0 + r)
-    t = np.arange(1, n + 1)
-    pv = v ** t  # CF constants -> coefficient égal, ne compte pas
-    return float(np.sum(t * pv) / np.sum(pv)) / freq
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (k - 1)
+    return float(np.sum(k * w) / np.sum(w)) / freq
 
+def m_bale_progressif_continu(R, y):
+    """Version continue : intégrale au lieu de somme."""
+    if R < 1e-6:
+        return R
+    if abs(y) < 1e-6:
+        return R / 2
+    # M = sum(k * (1+r)^(k-1)) / sum((1+r)^(k-1)) en continu sur [0, R]
+    # avec poids w(t) = (1+y)^t (exponentiel) et yield annuel y
+    # = [R*(1+y)^R / ln(1+y) - ((1+y)^R - 1) / ln(1+y)^2] / [((1+y)^R - 1) / ln(1+y)]
+    L = np.log(1 + y)
+    num = R * (1+y)**R / L - ((1+y)**R - 1) / L**2
+    den = ((1+y)**R - 1) / L
+    return num / den
 
-# Test sur le type 3 avec taux contractuel
+# Test sur la tranche courte uniquement
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3)
 R  = sub3["R"].to_numpy()
 NB = sub3["NB_MATURITE_IRBA"].to_numpy()
-T_INTRT = sub3["T_INTRT"].to_numpy()
 
-# Variante A : Macaulay avec T_INTRT
-pred_macaulay_contr = np.array([macaulay_annuite_actu(r, y) for r, y in zip(R, T_INTRT)])
-# Variante B : Macaulay avec yield pivot 5%
-pred_macaulay_5pct  = np.array([macaulay_annuite_actu(r, 0.05) for r in R])
-
-for name, pred in [("Macaulay + T_INTRT", pred_macaulay_contr),
-                    ("Macaulay + 5%",      pred_macaulay_5pct)]:
-    err = pred - NB
-    print(f"{name:<25} RMSE={np.sqrt(np.mean(err**2)):.5f}  "
-          f"MAE={np.mean(np.abs(err)):.5f}  max={np.max(np.abs(err)):.5f}")
-
-# Stratification par R pour voir si Macaulay corrige le biais sur les courts
-print("\nStratification (Macaulay + T_INTRT) :")
-for lo, hi in [(0,1), (1,3), (3,5), (5,10), (10,15), (15,20), (20,30)]:
+for lo, hi in [(0,1), (1,3), (3,5), (5,10)]:
     mask = (R >= lo) & (R < hi)
     if mask.sum() < 50: continue
-    err = pred_macaulay_contr[mask] - NB[mask]
-    print(f"  [{lo:>2}, {hi:>2}[  n={mask.sum():>6}  "
-          f"RMSE={np.sqrt(np.mean(err**2)):.5f}")
+    R_s, NB_s = R[mask], NB[mask]
+    pred_v2  = np.array([m_bale_progressif_v2(r, 0.05) for r in R_s])
+    pred_cont = np.array([m_bale_progressif_continu(r, 0.05) for r in R_s])
+    rmse_v2  = np.sqrt(np.mean((pred_v2  - NB_s)**2))
+    rmse_cont = np.sqrt(np.mean((pred_cont - NB_s)**2))
+    print(f"[{lo},{hi}[ n={mask.sum():>6}  v2(mensuel)={rmse_v2:.5f}  continu={rmse_cont:.5f}")
