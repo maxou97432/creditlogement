@@ -1,18 +1,9 @@
-# On convertit les listes de valeurs uniques en "ensembles" (sets) mathématiques
-eng_099 = set(df_099['CD_ENGAGEMENT'].drop_nulls().unique().to_list())
-eng_054 = set(df_054['CD_ENGAGEMENT'].drop_nulls().unique().to_list())
+df_mixtes = df_comparaison.filter(pl.col('CD_ENGAGEMENT').is_in(list(mixtes)))
+df_mixtes_099 = df_mixtes.filter(pl.col('NB_MATURITE_IRBA') > 0.9)
+df_mixtes_054 = df_mixtes.filter(pl.col('NB_MATURITE_IRBA') < 0.6)
 
-# On cherche ce qui est exclusif et ce qui se chevauche
-exclusif_099 = eng_099 - eng_054
-exclusif_054 = eng_054 - eng_099
-mixtes = eng_099.intersection(eng_054)
+print("Valeurs nulles dans le groupe 0.99 :")
+print(df_mixtes_099.null_count().to_pandas().T)
 
-print("=== DIAGNOSTIC CD_ENGAGEMENT ===")
-print(f"Codes UNIQUEMENT dans le groupe 0.9993 (Règle de sécurité) : {len(exclusif_099)} codes")
-print(exclusif_099)
-print("-" * 50)
-print(f"Codes UNIQUEMENT dans le groupe 0.5448 (Règle d'amortissement) : {len(exclusif_054)} codes")
-print(exclusif_054)
-print("-" * 50)
-print(f"Codes présents dans les DEUX groupes (Mixtes) : {len(mixtes)} codes")
-print(mixtes)
+print("\nValeurs nulles dans le groupe 0.54 :")
+print(df_mixtes_054.null_count().to_pandas().T)
