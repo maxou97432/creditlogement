@@ -1,69 +1,28 @@
-import polars as pl
-
-dt_arrete = 23922.0  # Date d'arrêté en jours SAS (30/06/2025)
-
-# 1. Calcul de la duration Bâle II pure avec les vrais types d'amortissement
-srs_X_capret = srs_X_capret.with_columns([
-    ((pl.col("DT_ECHEANCE_FEM") - dt_arrete) / 365.25).alias("R")
-]).with_columns([
-    (pl.col("R") * 12).round().alias("n_mois")
-]).with_columns([
-    
-    # ── ARBRE DE DÉCISION DES DURATIONS BÂLE II ──
-    pl.when(
-        # 1. Très court terme ou Revolving/Découverts
-        pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]) | (pl.col("n_mois") <= 0)
-    ).then(
-        pl.col("R")
-        
-    ).when(
-        # 2. Amortissement In Fine (Bullet)
-        pl.col("CD_TYPE_AMORT") == "4"
-    ).then(
-        pl.col("R")
-        
-    ).when(
-        # 3. Amortissement Linéaire (Capital Constant)
-        pl.col("CD_TYPE_AMORT") == "1"
-    ).then(
-        (pl.col("n_mois") + 1) / 24
-        
-    ).when(
-        # 4. Amortissement Progressif (Annuité Constante)
-        pl.col("CD_TYPE_AMORT") == "3"
-    ).then(
-        (pl.col("n_mois") + 1) / 24
-        
-    ).otherwise(
-        # Fallback conservateur Bâle II si le type n'est pas reconnu
-        pl.col("R")
-        
-    ).alias("duration_brute_calculee")
-])
-
-# 2. Application du Clip Réglementaire [1 an, 5 ans]
-srs_X_capret = srs_X_capret.with_columns([
-    pl.col("duration_brute_calculee").clip(1.0, 5.0).alias("duration_finale_calculee"),
-    pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).alias("NB_MATURITE_IRBA_finale")
-])
-
-# 3. Calcul de l'écart final après plafonnement
-srs_X_capret = srs_X_capret.with_columns([
-    (pl.col("duration_finale_calculee") - pl.col("NB_MATURITE_IRBA_finale")).abs().alias("Ecart_Final")
-])
-
-# 4. Diagnostic
-print("=== COMPARAISON GLOBALE APRÈS LE CAP RÉGLEMENTAIRE ===")
-diagnostique = srs_X_capret.with_columns([
-    (pl.col("Ecart_Final") > 0.0001).alias("Difference_RWA_Significative")
-]).group_by("Difference_RWA_Significative").len()
-
-print(diagnostique)
-
-# Diagnostic par Type d'amortissement pour isoler d'où viennent les éventuelles différences restantes
-print("\n=== ÉCARTS RESTANTS PAR TYPE D'AMORTISSEMENT ===")
-print(
-    srs_X_capret.filter(pl.col("Ecart_Final") > 0.0001)
-    .group_by("CD_TYPE_AMORT")
-    .len()
+# 1. Analyse macro par libellé d'engagement
+print("=== ANALYSE DES ÉCARTS PAR LB_ENGAGEMENT ===")
+analyse_lb = (
+    srs_X_capret
+    .filter(pl.col("Ecart_Final") > 0.0001)  # On ne garde que les vrais écarts finaux
+    .group_by("LB_ENGAGEMENT")
+    .agg([
+        pl.len().alias("Nombre_Anomalies"),
+        pl.col("Ecart_Final").mean().round(4).alias("Ecart_Final_Moyen"),
+        # Regardons l'écart brut (avant le clip) pour comprendre la logique SAS
+        (pl.col("duration_brute_calculee") - pl.col("NB_MATURITE_IRBA")).abs().mean().round(4).alias("Ecart_Brut_Moyen"),
+        pl.col("NB_MATURITE_IRBA").mean().round(4).alias("Maturite_SAS_Moyenne")
+    ])
+    .sort("Nombre_Anomalies", descending=True)
 )
+
+# On affiche les 10 pires libellés
+print(analyse_lb.head(10))
+
+# 2. Zoom sur le pire délinquant (remplace par le premier de ta liste)
+pire_lb = analyse_lb["LB_ENGAGEMENT"][0] if analyse_lb.height > 0 else None
+if pire_lb:
+    print(f"\n=== ZOOM SUR LE PIRE : {pire_lb} ===")
+    print(
+        srs_X_capret.filter((pl.col("LB_ENGAGEMENT") == pire_lb) & (pl.col("Ecart_Final") > 0.0001))
+        .select(["DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "CD_TYPE_AMORT", "duration_brute_calculee", "NB_MATURITE_IRBA"])
+        .head(5)
+    )
