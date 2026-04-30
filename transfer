@@ -1,18 +1,89 @@
-df = df.with_columns(
-    # 1. Calcul du nombre de mois
-    (pl.col("R") * 12).round(0).cast(pl.Int32).alias("n_mois")
+# ============================================================
+# Trouver automatiquement la variable qui discrimine bascule vs progressive
+# dans la zone ambiguë [0.1, 1.0[ pour le type 3
+# ============================================================
+
+import polars as pl
+import numpy as np
+
+ZONE_LO, ZONE_HI = 0.1, 1.0
+TOL_BASCULE = 0.01
+
+# 1. Sous-population dans la zone ambiguë
+sub_zone = df_avec_pred.filter(
+    (pl.col("CD_TYPE_AMORT") == 3)
+    & (pl.col("R") >= ZONE_LO)
+    & (pl.col("R") < ZONE_HI)
 ).with_columns(
-    # 2. Arbre de décision
-    pl.when(
-        pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]) | (pl.col("n_mois") <= 0)
-    ).then(
-        pl.col("R")  # Bascule brute
-    ).otherwise(
-        (pl.col("n_mois") + 1) / 24  # Formule progressive
-    ).alias("NB_MATURITE_CALCULEE")
+    is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < TOL_BASCULE
 )
 
-# 3. Le Clip réglementaire (à adapter selon tes exemptions Trade Finance)
-df = df.with_columns(
-    pl.col("NB_MATURITE_CALCULEE").clip(lower_bound=1.0, upper_bound=5.0).alias("NB_MATURITE_FINALE")
-)
+n_total = sub_zone.height
+n_bascule = sub_zone["is_bascule"].sum()
+print(f"Zone [{ZONE_LO}, {ZONE_HI}[ type 3 : n={n_total}, "
+      f"bascule={n_bascule} ({n_bascule/n_total*100:.1f}%)")
+
+# 2. Colonnes à tester (toutes sauf identifiants/cibles/dérivées)
+cols_a_ignorer = {
+    "R", "T0", "NB_MATURITE_IRBA", "NB_DURATION_IRBA", "is_bascule",
+    "DT_ECHEANCE_FEM", "DT_DEBUT_AUTO", "DT_ARRT",
+    "pred_R", "pred_lineaire", "pred_prog_origine",
+    "pred_prog_residuel", "pred_prog_5pct",
+}
+cols_test = [c for c in sub_zone.columns if c not in cols_a_ignorer]
+
+print(f"\nColonnes testées : {cols_test}\n")
+
+# 3. Pour chaque colonne, mesurer son pouvoir discriminant
+results = []
+for c in cols_test:
+    dtype = sub_zone.schema[c]
+    # Catégoriel : compare la distribution des modalités entre bascule et non-bascule
+    if dtype in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32):
+        n_unique = sub_zone[c].n_unique()
+        if n_unique > 50 or n_unique < 2:
+            continue
+        # Pour chaque modalité, % de bascule
+        agg = sub_zone.group_by(c).agg(
+            n = pl.len(),
+            pct_bascule = pl.col("is_bascule").mean() * 100,
+        ).filter(pl.col("n") >= 30).sort("pct_bascule")
+        if agg.height < 2:
+            continue
+        # Discriminant = écart entre la modalité la plus "bascule" et la moins
+        spread = agg["pct_bascule"].max() - agg["pct_bascule"].min()
+        results.append((c, "catégoriel", n_unique, spread, agg))
+    # Numérique : compare les moyennes/médianes entre les deux groupes
+    elif dtype in (pl.Float64, pl.Float32):
+        s_b = sub_zone.filter(pl.col("is_bascule"))[c].drop_nulls().to_numpy()
+        s_p = sub_zone.filter(~pl.col("is_bascule"))[c].drop_nulls().to_numpy()
+        if len(s_b) < 30 or len(s_p) < 30:
+            continue
+        # Discriminant = (moy_b - moy_p) normalisé par std globale
+        std_g = sub_zone[c].std()
+        if std_g is None or std_g == 0:
+            continue
+        delta_norm = abs(np.mean(s_b) - np.mean(s_p)) / std_g
+        results.append((c, "numérique", "—", delta_norm * 100,
+                        (np.mean(s_b), np.median(s_b),
+                         np.mean(s_p), np.median(s_p))))
+
+# 4. Trier par pouvoir discriminant et afficher
+results.sort(key=lambda x: -x[3])
+print(f"\n{'Colonne':<25} {'Type':<12} {'n_unique':<10} {'spread':>10}")
+print("=" * 65)
+for c, t, nu, spread, _ in results[:15]:
+    print(f"{c:<25} {t:<12} {str(nu):<10} {spread:>10.2f}")
+
+# 5. Détail des 5 colonnes les plus discriminantes
+print("\n" + "=" * 65)
+print("DÉTAIL DES 5 VARIABLES LES PLUS DISCRIMINANTES")
+print("=" * 65)
+for c, t, nu, spread, detail in results[:5]:
+    print(f"\n--- {c} ({t}, spread={spread:.2f}) ---")
+    if t == "catégoriel":
+        print(detail)
+    else:
+        moy_b, med_b, moy_p, med_p = detail
+        print(f"  bascule:    moy={moy_b:.4f}  médian={med_b:.4f}")
+        print(f"  progressive: moy={moy_p:.4f}  médian={med_p:.4f}")
