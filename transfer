@@ -1,36 +1,43 @@
-# Identifier le seuil de bascule sur le type 3
-sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3)
-R  = sub3["R"].to_numpy()
-NB = sub3["NB_MATURITE_IRBA"].to_numpy()
+# Isoler la tranche mixte [0.10, 1.0[ et chercher ce qui sépare
+# les lignes "bascule" des lignes "formule"
+sub_mixte = df_avec_pred.filter(
+    (pl.col("CD_TYPE_AMORT") == 3) &
+    (pl.col("R") >= 0.10) &
+    (pl.col("R") < 1.0)
+)
 
-# Pour chaque ligne, est-ce que NB == R (bascule) ou NB suit la formule progressive ?
-# Critère : |NB - R| < 0.01 -> bascule
-mask_bascule = np.abs(NB - R) < 0.01
+R_m  = sub_mixte["R"].to_numpy()
+NB_m = sub_mixte["NB_MATURITE_IRBA"].to_numpy()
+mask_b = np.abs(NB_m - R_m) < 0.01   # True = bascule
 
-# Distribution de R selon que ça bascule ou pas
-print("Lignes où NB ≈ R (bascule) :")
-R_bascule = R[mask_bascule]
-print(f"  n = {len(R_bascule)}")
-print(f"  R min = {R_bascule.min():.4f}")
-print(f"  R max = {R_bascule.max():.4f}")
-print(f"  R médian = {np.median(R_bascule):.4f}")
-print(f"  R 95e pct = {np.percentile(R_bascule, 95):.4f}")
-print(f"  R 99e pct = {np.percentile(R_bascule, 99):.4f}")
+# Ajouter le flag à la DataFrame
+sub_mixte = sub_mixte.with_columns(
+    pl.Series("is_bascule", mask_b)
+)
 
-print("\nLignes où NB ≠ R (formule progressive) :")
-R_prog = R[~mask_bascule]
-print(f"  n = {len(R_prog)}")
-print(f"  R min = {R_prog.min():.4f}")
-print(f"  R max = {R_prog.max():.4f}")
-print(f"  R 5e pct = {np.percentile(R_prog, 5):.4f}")
-print(f"  R 1er pct = {np.percentile(R_prog, 1):.4f}")
+print(f"Tranche [0.10, 1.0[ : {len(R_m)} lignes, dont {mask_b.sum()} bascule ({mask_b.mean()*100:.1f}%)")
+print()
 
-# Histogramme de R par bin pour voir la transition
-print("\nDistribution par bin de R (bascule oui/non) :")
-print(f"{'bin R':<15} {'n_total':>8} {'n_bascule':>10} {'%_bascule':>10}")
-bins = [0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0]
-for lo, hi in zip(bins[:-1], bins[1:]):
-    m = (R >= lo) & (R < hi)
-    if m.sum() == 0: continue
-    pct = mask_bascule[m].sum() / m.sum() * 100
-    print(f"[{lo:>5.2f}, {hi:>5.2f}[ {m.sum():>8} {mask_bascule[m].sum():>10} {pct:>9.1f}%")
+# Chercher toutes les colonnes catégorielles/entières qui discriminent
+cols_a_tester = [c for c in sub_mixte.columns
+                 if c not in ("R", "NB_MATURITE_IRBA", "is_bascule", "pred_prog_5pct")
+                 and sub_mixte[c].dtype in (pl.Utf8, pl.Int64, pl.Int32, pl.Boolean, pl.Categorical)]
+
+for col in cols_a_tester[:20]:   # limiter à 20 cols
+    try:
+        tab = (
+            sub_mixte
+            .group_by(col)
+            .agg([
+                pl.len().alias("n"),
+                pl.col("is_bascule").mean().alias("pct_bascule"),
+            ])
+            .sort("pct_bascule", descending=True)
+        )
+        # N'afficher que si variance utile (pas 0% ou 100% partout)
+        pcts = tab["pct_bascule"].to_list()
+        if max(pcts) - min(pcts) > 0.05:
+            print(f"\n--- {col} ---")
+            print(tab)
+    except Exception as e:
+        pass
