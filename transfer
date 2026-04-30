@@ -2,32 +2,48 @@ import polars as pl
 
 dt_arrete = 23922.0  # Date d'arrêté en jours SAS (30/06/2025)
 
-# 1. Calcul de la duration Bâle II pure
+# 1. Calcul de la duration Bâle II pure avec les vrais types d'amortissement
 srs_X_capret = srs_X_capret.with_columns([
-    # Calcul de R en années
     ((pl.col("DT_ECHEANCE_FEM") - dt_arrete) / 365.25).alias("R")
 ]).with_columns([
-    # Calcul du nombre de mois (arrondi)
     (pl.col("R") * 12).round().alias("n_mois")
 ]).with_columns([
-    # Formule Analytique (Bâle II strict)
+    
+    # ── ARBRE DE DÉCISION DES DURATIONS BÂLE II ──
     pl.when(
-        # Règle In Fine / Revolving / Très court terme
+        # 1. Très court terme ou Revolving/Découverts
         pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]) | (pl.col("n_mois") <= 0)
     ).then(
-        pl.col("R") 
+        pl.col("R")
+        
+    ).when(
+        # 2. Amortissement In Fine (Bullet)
+        pl.col("CD_TYPE_AMORT") == "4"
+    ).then(
+        pl.col("R")
+        
+    ).when(
+        # 3. Amortissement Linéaire (Capital Constant)
+        pl.col("CD_TYPE_AMORT") == "1"
+    ).then(
+        (pl.col("n_mois") + 1) / 24
+        
+    ).when(
+        # 4. Amortissement Progressif (Annuité Constante)
+        pl.col("CD_TYPE_AMORT") == "3"
+    ).then(
+        (pl.col("n_mois") + 1) / 24
+        
     ).otherwise(
-        # Règle pour les crédits Amortissables (Type 1 et 3 confondus sans actualisation)
-        (pl.col("n_mois") + 1) / 24  
+        # Fallback conservateur Bâle II si le type n'est pas reconnu
+        pl.col("R")
+        
     ).alias("duration_brute_calculee")
 ])
 
 # 2. Application du Clip Réglementaire [1 an, 5 ans]
 srs_X_capret = srs_X_capret.with_columns([
-    # Ta duration finale
     pl.col("duration_brute_calculee").clip(1.0, 5.0).alias("duration_finale_calculee"),
-    
-    # La duration SAS finale (on lui applique le même clip pour comparer à périmètre égal)
     pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0).alias("NB_MATURITE_IRBA_finale")
 ])
 
@@ -36,18 +52,18 @@ srs_X_capret = srs_X_capret.with_columns([
     (pl.col("duration_finale_calculee") - pl.col("NB_MATURITE_IRBA_finale")).abs().alias("Ecart_Final")
 ])
 
-# 4. Verdict
-print("=== VERDICT DE LA COMPARAISON APRÈS LE CAP RÉGLEMENTAIRE ===")
+# 4. Diagnostic
+print("=== COMPARAISON GLOBALE APRÈS LE CAP RÉGLEMENTAIRE ===")
 diagnostique = srs_X_capret.with_columns([
     (pl.col("Ecart_Final") > 0.0001).alias("Difference_RWA_Significative")
 ]).group_by("Difference_RWA_Significative").len()
 
 print(diagnostique)
 
-# Si tu veux voir ce qui a été écrasé par le cap :
-print("\nExemple sur ta ligne à 6.2094 :")
+# Diagnostic par Type d'amortissement pour isoler d'où viennent les éventuelles différences restantes
+print("\n=== ÉCARTS RESTANTS PAR TYPE D'AMORTISSEMENT ===")
 print(
-    srs_X_capret.filter(pl.col("NB_MATURITE_IRBA") > 6.2)
-    .select(["DT_ECHEANCE_FEM", "NB_MATURITE_IRBA", "duration_brute_calculee", "NB_MATURITE_IRBA_finale", "duration_finale_calculee"])
-    .head(5)
+    srs_X_capret.filter(pl.col("Ecart_Final") > 0.0001)
+    .group_by("CD_TYPE_AMORT")
+    .len()
 )
