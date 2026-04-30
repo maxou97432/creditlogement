@@ -1,21 +1,18 @@
-import polars as pl
+# On convertit les listes de valeurs uniques en "ensembles" (sets) mathématiques
+eng_099 = set(df_099['CD_ENGAGEMENT'].drop_nulls().unique().to_list())
+eng_054 = set(df_054['CD_ENGAGEMENT'].drop_nulls().unique().to_list())
 
-# Remplacez 'srs_fusion' par le nom de votre DataFrame actuel
-df_comparaison = srs_fusion.filter(
-    (pl.col('CD_TYPE_AMORT') == '3') &
-    (pl.col('DT_ECHEANCE_FEM') == 24287.0)
-)
+# On cherche ce qui est exclusif et ce qui se chevauche
+exclusif_099 = eng_099 - eng_054
+exclusif_054 = eng_054 - eng_099
+mixtes = eng_099.intersection(eng_054)
 
-# On sépare les deux groupes 
-df_099 = df_comparaison.filter(pl.col('NB_MATURITE_IRBA') > 0.9)
-df_054 = df_comparaison.filter(pl.col('NB_MATURITE_IRBA') < 0.6)
-
-# On affiche un exemple de chaque pour chercher la colonne qui diffère
-print("========== LIGNES À 0.9993 (Mode Sécurité) ==========")
-print(df_099.head(2).to_pandas().T) 
-
-print("\n========== LIGNES À 0.5448 (Mode Calcul) ==========")
-print(df_054.head(2).to_pandas().T)
-
-# Si vous préférez fouiller dans Excel, décommentez cette ligne :
-# df_comparaison.write_excel('comparaison_anomalie.xlsx')
+print("=== DIAGNOSTIC CD_ENGAGEMENT ===")
+print(f"Codes UNIQUEMENT dans le groupe 0.9993 (Règle de sécurité) : {len(exclusif_099)} codes")
+print(exclusif_099)
+print("-" * 50)
+print(f"Codes UNIQUEMENT dans le groupe 0.5448 (Règle d'amortissement) : {len(exclusif_054)} codes")
+print(exclusif_054)
+print("-" * 50)
+print(f"Codes présents dans les DEUX groupes (Mixtes) : {len(mixtes)} codes")
+print(mixtes)
