@@ -1,29 +1,17 @@
-# Isoler la tranche mixte [0.10, 1.0[ et chercher ce qui sépare
-# les lignes "bascule" des lignes "formule"
-sub_mixte = df_avec_pred.filter(
-    (pl.col("CD_TYPE_AMORT") == 3) &
-    (pl.col("R") >= 0.10) &
-    (pl.col("R") < 1.0)
-)
+# On exclut les identifiants, les dates et les montants
+cols_a_ignorer = ["R", "NB_MATURITE_IRBA", "is_bascule", "pred_prog_5pct", "I_AUTRS_UNIQ", "CD_CONTRAT", "DT_ARRETE"]
 
-R_m  = sub_mixte["R"].to_numpy()
-NB_m = sub_mixte["NB_MATURITE_IRBA"].to_numpy()
-mask_b = np.abs(NB_m - R_m) < 0.01   # True = bascule
+# On filtre intelligemment : uniquement les colonnes avec moins de 100 modalités (pour éviter les ID)
+cols_a_tester = []
+for c in sub_mixte.columns:
+    if c not in cols_a_ignorer and sub_mixte[c].dtype in (pl.Utf8, pl.Int64, pl.Int32, pl.Boolean, pl.Categorical):
+        # Ne garder que si c'est une vraie catégorie (moins de 100 valeurs uniques)
+        if sub_mixte[c].n_unique() < 100:
+            cols_a_tester.append(c)
 
-# Ajouter le flag à la DataFrame
-sub_mixte = sub_mixte.with_columns(
-    pl.Series("is_bascule", mask_b)
-)
+print(f"Variables à tester : {cols_a_tester}\n")
 
-print(f"Tranche [0.10, 1.0[ : {len(R_m)} lignes, dont {mask_b.sum()} bascule ({mask_b.mean()*100:.1f}%)")
-print()
-
-# Chercher toutes les colonnes catégorielles/entières qui discriminent
-cols_a_tester = [c for c in sub_mixte.columns
-                 if c not in ("R", "NB_MATURITE_IRBA", "is_bascule", "pred_prog_5pct")
-                 and sub_mixte[c].dtype in (pl.Utf8, pl.Int64, pl.Int32, pl.Boolean, pl.Categorical)]
-
-for col in cols_a_tester[:20]:   # limiter à 20 cols
+for col in cols_a_tester:
     try:
         tab = (
             sub_mixte
@@ -34,9 +22,9 @@ for col in cols_a_tester[:20]:   # limiter à 20 cols
             ])
             .sort("pct_bascule", descending=True)
         )
-        # N'afficher que si variance utile (pas 0% ou 100% partout)
-        pcts = tab["pct_bascule"].to_list()
-        if max(pcts) - min(pcts) > 0.05:
+        # N'afficher que si ça discrimine (écart > 10% entre le max et le min)
+        pcts = tab["pct_bascule"].drop_nulls().to_list()
+        if pcts and (max(pcts) - min(pcts) > 0.10):
             print(f"\n--- {col} ---")
             print(tab)
     except Exception as e:
