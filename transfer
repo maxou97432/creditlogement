@@ -1,16 +1,243 @@
-r_annees = (pl.col('DT_ECHEANCE_FEM') - 23922) / 365.25
+"""
+Enquête : identifier la formule NB_MATURITE_IRBA de SRS par CD_TYPE_AMORT.
 
-srs_fusion = srs_fusion.with_columns(
-    pl.when(
-        # Règle de sécurité : Si le taux est nul OU que c'est un code "sans amortissement"
-        (pl.col('T_INTRT').cast(pl.Float64) == 0.0) | 
-        (pl.col('CD_ENGAGEMENT').is_in(exclusif_099)) |
-        (r_annees <= 1.0)
+Hypothèses connues à confirmer / infirmer :
+- Types 2, 4, 9  : M = R = (DT_ECHEANCE_FEM - DT_ARRT) / 365.25
+- Types 1, 3     : à identifier
+
+Variables utilisées :
+- DT_ARRT, DT_ECHEANCE_FEM (en jours SAS ou en datetime, à adapter)
+- T_INTRT (taux d'intérêt annuel, en décimal — ex 0.045 pour 4,5%)
+- CD_TYPE_AMORT
+- NB_MATURITE_IRBA (cible)
+"""
+
+import polars as pl
+import numpy as np
+
+
+# ============================================================
+# 1. Formules candidates
+# ============================================================
+
+def m_bale_lineaire(R: float, freq: int = 12) -> float:
+    """
+    M Bâle (CRR 162) sur amort linéaire :
+    le principal remboursé est constant à chaque échéance, donc
+    M = (n+1)/2 * dt — indépendant du taux d'intérêt.
+    """
+    n = max(1, int(round(R * freq)))
+    return (n + 1) / 2 / freq
+
+
+def m_bale_progressif(R: float, y: float, freq: int = 12) -> float:
+    """
+    M Bâle sur annuité constante (progressif) :
+    le k-ième remboursement de principal est proportionnel à (1+r)^(k-1)
+    avec r = y/freq. Pondération non actualisée des dates par les principal.
+
+    M = (1/freq) * sum(k * (1+r)^(k-1)) / sum((1+r)^(k-1))
+    """
+    n = max(1, int(round(R * freq)))
+    if abs(y) < 1e-12:
+        return (n + 1) / 2 / freq
+    r = y / freq
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (k - 1)
+    return float(np.sum(k * w) / np.sum(w)) / freq
+
+
+def m_bale_degressif(R: float, y: float, freq: int = 12) -> float:
+    """
+    Profil dégressif : le principal remboursé DIMINUE à chaque échéance.
+    Hypothèse : décroissance géométrique au taux y -> P_k prop. (1+r)^(n-k).
+    À adapter si la définition métier diffère.
+    """
+    n = max(1, int(round(R * freq)))
+    if abs(y) < 1e-12:
+        return (n + 1) / 2 / freq
+    r = y / freq
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (n - k)
+    return float(np.sum(k * w) / np.sum(w)) / freq
+
+
+# ============================================================
+# 2. Application à un DataFrame Polars
+# ============================================================
+
+def add_predictions(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Ajoute les colonnes de prédiction pour chaque formule candidate.
+    Suppose que df contient : R (années), T_INTRT (décimal), NB_MATURITE_IRBA.
+    """
+    R = df["R"].to_numpy()
+    Y = df["T_INTRT"].to_numpy()
+
+    pred_R           = R                                        # hypothèse types 2/4/9
+    pred_lineaire    = np.array([m_bale_lineaire(r) for r in R])
+    pred_prog_contr  = np.array([m_bale_progressif(r, y) for r, y in zip(R, Y)])
+    pred_prog_5pct   = np.array([m_bale_progressif(r, 0.05) for r in R])
+    pred_degr_contr  = np.array([m_bale_degressif(r, y) for r, y in zip(R, Y)])
+
+    return df.with_columns(
+        pred_R          = pl.Series(pred_R),
+        pred_lineaire   = pl.Series(pred_lineaire),
+        pred_prog_contr = pl.Series(pred_prog_contr),  # progressif avec T_INTRT contractuel
+        pred_prog_5pct  = pl.Series(pred_prog_5pct),   # progressif avec yield pivot 5%
+        pred_degr_contr = pl.Series(pred_degr_contr),
     )
-    .then(r_annees) # On renvoie la maturité brute
-    .otherwise(
-        # Sinon, on applique la formule actuarielle avec le taux !
-        Formule_Amortissement_Groupe_1_ou_3
-    )
-    .alias('NB_MATURITE_IRBA_CALCULE')
-)
+
+
+def diagnostic(df: pl.DataFrame, type_amort: int, target_col: str = "NB_MATURITE_IRBA"):
+    """
+    Pour un CD_TYPE_AMORT donné, affiche RMSE/MAE/max|err| de chaque candidate.
+    """
+    sub = df.filter(pl.col("CD_TYPE_AMORT") == type_amort)
+    if sub.height == 0:
+        print(f"\n[type {type_amort}] aucun ligne dans l'échantillon.")
+        return
+    target = sub[target_col].to_numpy()
+    print(f"\n{'='*70}")
+    print(f"CD_TYPE_AMORT = {type_amort}  (n = {sub.height})")
+    print(f"{'='*70}")
+    print(f"{'Formule':<32} {'RMSE':>10} {'MAE':>10} {'max|err|':>10}")
+    for col in ["pred_R", "pred_lineaire", "pred_prog_contr",
+                "pred_prog_5pct", "pred_degr_contr"]:
+        p = sub[col].to_numpy()
+        err = p - target
+        rmse = float(np.sqrt(np.mean(err ** 2)))
+        mae  = float(np.mean(np.abs(err)))
+        mx   = float(np.max(np.abs(err)))
+        flag = " ✓" if rmse < 0.05 else ""
+        print(f"  {col:<30} {rmse:>10.4f} {mae:>10.4f} {mx:>10.4f}{flag}")
+
+
+def inverser_yield_progressif(df: pl.DataFrame, type_amort: int,
+                               target_col: str = "NB_MATURITE_IRBA") -> pl.DataFrame:
+    """
+    Pour chaque ligne, trouve le yield qui reproduit exactement NB via
+    la formule progressive. Si ce yield est constant -> taux pivot fixe.
+    Si ce yield varie et corrèle avec T_INTRT -> taux contractuel.
+    """
+    from scipy.optimize import brentq
+    sub = df.filter(pl.col("CD_TYPE_AMORT") == type_amort)
+    if sub.height == 0:
+        return sub
+
+    R = sub["R"].to_numpy()
+    NB = sub[target_col].to_numpy()
+    yields = []
+    for r, nb in zip(R, NB):
+        try:
+            g = lambda y: m_bale_progressif(r, y) - nb
+            # bornes économiquement raisonnables
+            if g(-0.20) * g(0.50) > 0:
+                yields.append(np.nan)
+            else:
+                yields.append(brentq(g, -0.20, 0.50, xtol=1e-8))
+        except Exception:
+            yields.append(np.nan)
+    return sub.with_columns(yield_implicite = pl.Series(yields))
+
+
+# ============================================================
+# 3. Pipeline d'analyse
+# ============================================================
+
+def analyser(df_brut: pl.DataFrame):
+    """
+    Pipeline complet sur srs_X_capret.
+    Le DF d'entrée doit contenir :
+      DT_ARRT, DT_ECHEANCE_FEM, T_INTRT, CD_TYPE_AMORT, NB_MATURITE_IRBA
+    Avec dates en jours SAS (entiers) ou en pl.Date.
+    """
+    # Calcul de R en années
+    if df_brut["DT_ARRT"].dtype in (pl.Int32, pl.Int64, pl.Float64):
+        # format SAS -> nombre de jours
+        df = df_brut.with_columns(
+            R = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_ARRT")) / 365.25
+        )
+    else:
+        df = df_brut.with_columns(
+            R = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_ARRT")).dt.total_days() / 365.25
+        )
+
+    df = add_predictions(df)
+
+    # Récap par type
+    print("\n=== Distribution par CD_TYPE_AMORT ===")
+    print(df.group_by("CD_TYPE_AMORT").agg(
+        n = pl.len(),
+        R_min = pl.col("R").min(),
+        R_max = pl.col("R").max(),
+        NB_min = pl.col("NB_MATURITE_IRBA").min(),
+        NB_max = pl.col("NB_MATURITE_IRBA").max(),
+    ).sort("CD_TYPE_AMORT"))
+
+    # Diagnostic par type
+    for t in [1, 2, 3, 4, 9]:
+        diagnostic(df, t)
+
+    # Inversion yield pour type 3 et 1
+    for t in [1, 3]:
+        print(f"\n--- Inversion yield (formule progressive) pour type {t} ---")
+        sub_y = inverser_yield_progressif(df, t)
+        if sub_y.height > 0 and "yield_implicite" in sub_y.columns:
+            yi = sub_y["yield_implicite"].drop_nulls().to_numpy()
+            yi = yi[~np.isnan(yi)]
+            if len(yi) > 1:
+                print(f"  yield médian   : {np.median(yi)*100:.3f} %")
+                print(f"  yield moyen    : {np.mean(yi)*100:.3f} %")
+                print(f"  yield std      : {np.std(yi)*100:.3f} %")
+                # corrélation avec T_INTRT
+                t_intrt = sub_y["T_INTRT"].to_numpy()
+                mask = ~np.isnan(yi) & ~np.isnan(t_intrt[:len(yi)])
+                if mask.sum() > 5:
+                    corr = np.corrcoef(yi[mask], t_intrt[:len(yi)][mask])[0, 1]
+                    print(f"  corr(yield_implicite, T_INTRT) = {corr:.4f}")
+                    if corr > 0.95:
+                        print("  ===> formule paramétrée par le TAUX CONTRACTUEL")
+                    elif np.std(yi) < 0.005:
+                        print("  ===> taux pivot constant")
+
+    return df
+
+
+# ============================================================
+# 4. Exécution
+# ============================================================
+
+if __name__ == "__main__":
+    # À remplacer par : df = pl.read_parquet("srs_X_capret.parquet")
+    # ou               df = pl.read_csv("srs_X_capret.csv")
+
+    # Démo synthétique pour valider la mécanique du code
+    np.random.seed(42)
+    n = 200
+    types = np.random.choice([1, 2, 3, 4, 9], size=n, p=[0.3, 0.1, 0.4, 0.15, 0.05])
+    dt_arrt = np.full(n, 23922)
+    R_brut = np.random.uniform(1, 25, size=n)
+    dt_ech = dt_arrt + (R_brut * 365.25).astype(int)
+    t_intrt = np.random.uniform(0.02, 0.08, size=n)
+
+    # Génération de NB_MATURITE_IRBA selon les hypothèses (pour tester le code)
+    nb = np.zeros(n)
+    for i in range(n):
+        R = (dt_ech[i] - dt_arrt[i]) / 365.25
+        if types[i] in (2, 4, 9):
+            nb[i] = R                                      # hypothèse identifiée
+        elif types[i] == 1:
+            nb[i] = m_bale_lineaire(R)                     # hypothèse à tester
+        elif types[i] == 3:
+            nb[i] = m_bale_progressif(R, t_intrt[i])       # hypothèse à tester
+
+    df_demo = pl.DataFrame({
+        "DT_ARRT": dt_arrt,
+        "DT_ECHEANCE_FEM": dt_ech,
+        "T_INTRT": t_intrt,
+        "CD_TYPE_AMORT": types,
+        "NB_MATURITE_IRBA": nb,
+    })
+
+    analyser(df_demo)
