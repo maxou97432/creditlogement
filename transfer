@@ -1,34 +1,16 @@
-import polars as pl
+r_annees = (pl.col('DT_ECHEANCE_FEM') - 23922) / 365.25
 
-# 1. On cible notre échantillon de test
-df_mixtes = srs_X_capret.filter(
-    (pl.col('CD_TYPE_AMORT') == '3') &
-    (pl.col('DT_ECHEANCE_FEM') == 24287.0)
+srs_fusion = srs_fusion.with_columns(
+    pl.when(
+        # Règle de sécurité : Si le taux est nul OU que c'est un code "sans amortissement"
+        (pl.col('T_INTRT').cast(pl.Float64) == 0.0) | 
+        (pl.col('CD_ENGAGEMENT').is_in(exclusif_099)) |
+        (r_annees <= 1.0)
+    )
+    .then(r_annees) # On renvoie la maturité brute
+    .otherwise(
+        # Sinon, on applique la formule actuarielle avec le taux !
+        Formule_Amortissement_Groupe_1_ou_3
+    )
+    .alias('NB_MATURITE_IRBA_CALCULE')
 )
-
-# 2. On sépare les deux comportements SRS
-df_099 = df_mixtes.filter(pl.col('NB_MATURITE_IRBA') > 0.9)
-df_054 = df_mixtes.filter(pl.col('NB_MATURITE_IRBA') < 0.6)
-
-# 3. Affichage visuel des différences de "Trous" (Null)
-print("=== COMPARAISON DES VALEURS MANQUANTES (NULL) ===")
-# On convertit en pandas juste pour un affichage plus lisible
-nulls_099 = df_099.null_count().to_pandas().T
-nulls_099.columns = ['Vides_dans_0.99']
-
-nulls_054 = df_054.null_count().to_pandas().T
-nulls_054.columns = ['Vides_dans_0.54']
-
-# On accole les deux colonnes pour comparer d'un coup d'oeil
-comparaison = nulls_099.join(nulls_054)
-# On n'affiche que les colonnes où il y a une vraie différence de comportement
-print(comparaison[comparaison['Vides_dans_0.99'] != comparaison['Vides_dans_0.54']])
-
-
-# 4. Focus sur les suspects habituels (Taux et Montant)
-print("\n=== COMPARAISON DU TAUX (T_INTRT) ===")
-print("Stats Taux pour le groupe 0.99 :")
-print(df_099['T_INTRT'].cast(pl.Float64).describe())
-
-print("\nStats Taux pour le groupe 0.54 :")
-print(df_054['T_INTRT'].cast(pl.Float64).describe())
