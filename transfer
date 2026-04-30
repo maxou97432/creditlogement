@@ -1,334 +1,175 @@
 """
-Enquête : identifier la formule NB_MATURITE_IRBA de SRS par CD_TYPE_AMORT.
-
-Hypothèses connues à confirmer / infirmer :
-- Types 2, 4, 9  : M = R = (DT_ECHEANCE_FEM - DT_ARRT) / 365.25
-- Types 1, 3     : à identifier
-
-Variables utilisées :
-- DT_ARRT (constante macro, voir ci-dessous), DT_DEBUT_AUTO, DT_ECHEANCE_FEM
-- T_INTRT (taux d'intérêt annuel, en décimal — ex 0.045 pour 4,5%)
-- CD_TYPE_AMORT
-- NB_MATURITE_IRBA (cible)
+Investigation fine — phase 2 :
+- Type 1 : tester plusieurs conventions de discrétisation pour expliquer le résidu
+- Type 3 : optimiser le yield pivot global et stratifier par R pour vérifier sa stabilité
 """
 
 import polars as pl
 import numpy as np
+from scipy.optimize import minimize_scalar
+from enquete_srs import (m_bale_progressif, DT_ARRT)
 
 
 # ============================================================
-# 0. Macro-variable : date d'arrêté (constante pour tout le DF)
-# ============================================================
-# Format SAS : nombre de jours depuis le 1/1/1960
-# 23922 = 30/06/2025
-DT_ARRT = 23922
-
-
-# ============================================================
-# 1. Formules candidates
+# Variantes de formules pour le type 1 (linéaire)
 # ============================================================
 
-def m_bale_lineaire(R: float, freq: int = 12) -> float:
-    """
-    M Bâle (CRR 162) sur amort linéaire :
-    le principal remboursé est constant à chaque échéance, donc
-    M = (n+1)/2 * dt — indépendant du taux d'intérêt.
-    """
-    n = max(1, int(round(R * freq)))
-    return (n + 1) / 2 / freq
+def m_lineaire_continu(R: float) -> float:
+    """Centre de gravité d'une distribution uniforme sur [0, R] : R/2."""
+    return R / 2
+
+def m_lineaire_mensuel(R: float) -> float:
+    n = max(1, int(round(R * 12)))
+    return (n + 1) / 2 / 12
+
+def m_lineaire_annuel(R: float) -> float:
+    n = max(1, int(round(R)))
+    return (n + 1) / 2
+
+def m_lineaire_trim(R: float) -> float:
+    n = max(1, int(round(R * 4)))
+    return (n + 1) / 2 / 4
+
+def m_lineaire_semestriel(R: float) -> float:
+    n = max(1, int(round(R * 2)))
+    return (n + 1) / 2 / 2
 
 
-def m_bale_progressif(R: float, y: float, freq: int = 12) -> float:
-    """
-    M Bâle sur annuité constante (progressif), HYPOTHÈSE A :
-    le calcul suppose que le prêt commence aujourd'hui (n = R * freq).
-    Le k-ième remboursement de principal est proportionnel à (1+r)^(k-1)
-    avec r = y/freq. Pondération non actualisée des dates par les principal.
+def diagnostic_type_1(df: pl.DataFrame):
+    """Compare différentes discrétisations pour le type 1."""
+    sub = df.filter(pl.col("CD_TYPE_AMORT") == 1)
+    R = sub["R"].to_numpy()
+    NB = sub["NB_MATURITE_IRBA"].to_numpy()
 
-    M = (1/freq) * sum(k * (1+r)^(k-1)) / sum((1+r)^(k-1))
-    """
-    n = max(1, int(round(R * freq)))
-    if abs(y) < 1e-12:
-        return (n + 1) / 2 / freq
-    r = y / freq
-    k = np.arange(1, n + 1)
-    w = (1 + r) ** (k - 1)
-    return float(np.sum(k * w) / np.sum(w)) / freq
+    print("\n" + "=" * 70)
+    print(f"TYPE 1 (linéaire) — n = {len(R)} — variantes de discrétisation")
+    print("=" * 70)
+    print(f"{'Variante':<32} {'RMSE':>10} {'MAE':>10} {'max|err|':>10}")
 
-
-def m_bale_progressif_residuel(R: float, T0: float, y: float, freq: int = 12) -> float:
-    """
-    M Bâle sur annuité constante (progressif), HYPOTHÈSE B :
-    le prêt a été initié à T0 années avant maturité, et il reste R années.
-    On reconstruit l'échéancier d'origine sur n0 = T0 * freq mois,
-    puis on ne garde que les flux à venir (k = k_star+1 .. n0),
-    et on pondère par les durées résiduelles (k - k_star) / freq.
-
-    Si T0 == R (prêt à l'origine), retourne le même résultat que m_bale_progressif.
-    """
-    n0 = max(1, int(round(T0 * freq)))
-    n_residuel = max(1, int(round(R * freq)))
-    k_star = n0 - n_residuel  # nombre de mois déjà écoulés
-    if k_star < 0:
-        k_star = 0  # garde-fou si R > T0 (anomalie data)
-    if abs(y) < 1e-12:
-        # tous les remboursements de principal sont égaux
-        # M = moyenne des durées résiduelles = (n_residuel + 1) / 2 / freq
-        return (n_residuel + 1) / 2 / freq
-    r = y / freq
-    k = np.arange(k_star + 1, n0 + 1)        # indices des paiements futurs
-    w = (1 + r) ** (k - 1)                    # poids = principal au mois k
-    t = (k - k_star) / freq                   # durée jusqu'au paiement (en années)
-    return float(np.sum(t * w) / np.sum(w))
-
-
-def m_bale_lineaire_residuel(R: float, T0: float, freq: int = 12) -> float:
-    """
-    M Bâle sur amort linéaire, version résiduelle.
-    Pour le linéaire, le principal est constant -> M résiduelle = (n_residuel+1)/2/freq.
-    Donc identique à m_bale_lineaire(R) -- T0 n'a pas d'impact.
-    Cette fonction existe pour la symétrie d'écriture.
-    """
-    n_residuel = max(1, int(round(R * freq)))
-    return (n_residuel + 1) / 2 / freq
-
-
-def m_bale_degressif(R: float, y: float, freq: int = 12) -> float:
-    """
-    Profil dégressif : le principal remboursé DIMINUE à chaque échéance.
-    Hypothèse : décroissance géométrique au taux y -> P_k prop. (1+r)^(n-k).
-    À adapter si la définition métier diffère.
-    """
-    n = max(1, int(round(R * freq)))
-    if abs(y) < 1e-12:
-        return (n + 1) / 2 / freq
-    r = y / freq
-    k = np.arange(1, n + 1)
-    w = (1 + r) ** (n - k)
-    return float(np.sum(k * w) / np.sum(w)) / freq
+    for name, f in [
+        ("continu : R/2",                m_lineaire_continu),
+        ("mensuel : (n+1)/2/12",         m_lineaire_mensuel),
+        ("trimestriel : (n+1)/2/4",      m_lineaire_trim),
+        ("semestriel : (n+1)/2/2",       m_lineaire_semestriel),
+        ("annuel : (n+1)/2",             m_lineaire_annuel),
+    ]:
+        pred = np.array([f(r) for r in R])
+        err = pred - NB
+        rmse = np.sqrt(np.mean(err ** 2))
+        mae  = np.mean(np.abs(err))
+        mx   = np.max(np.abs(err))
+        flag = " ✓" if rmse < 0.01 else (" ~" if rmse < 0.05 else "")
+        print(f"  {name:<30} {rmse:>10.5f} {mae:>10.5f} {mx:>10.5f}{flag}")
 
 
 # ============================================================
-# 2. Application à un DataFrame Polars
+# Optimisation du yield pivot pour le type 3
 # ============================================================
 
-def add_predictions(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Ajoute les colonnes de prédiction pour chaque formule candidate.
-    Suppose que df contient : R (années), T0 (années), T_INTRT (décimal),
-    NB_MATURITE_IRBA.
-    """
-    R  = df["R"].to_numpy()
-    T0 = df["T0"].to_numpy()
-    Y  = df["T_INTRT"].to_numpy()
+def diagnostic_type_3(df: pl.DataFrame):
+    """Calibre le yield pivot optimal sur le type 3 et stratifie par R."""
+    sub = df.filter(pl.col("CD_TYPE_AMORT") == 3)
+    R = sub["R"].to_numpy()
+    NB = sub["NB_MATURITE_IRBA"].to_numpy()
 
-    pred_R              = R                                                    # types 2/4/9
-    pred_lineaire       = np.array([m_bale_lineaire(r) for r in R])
-    pred_prog_origine   = np.array([m_bale_progressif(r, y) for r, y in zip(R, Y)])
-    pred_prog_residuel  = np.array([m_bale_progressif_residuel(r, t0, y)
-                                    for r, t0, y in zip(R, T0, Y)])
-    pred_prog_5pct      = np.array([m_bale_progressif(r, 0.05) for r in R])
+    print("\n" + "=" * 70)
+    print(f"TYPE 3 (progressif) — n = {len(R)} — calibration du yield pivot")
+    print("=" * 70)
 
-    return df.with_columns(
-        pred_R             = pl.Series(pred_R),
-        pred_lineaire      = pl.Series(pred_lineaire),
-        pred_prog_origine  = pl.Series(pred_prog_origine),    # hypothèse A : R = T0
-        pred_prog_residuel = pl.Series(pred_prog_residuel),   # hypothèse B : prêt en cours
-        pred_prog_5pct     = pl.Series(pred_prog_5pct),       # hypothèse A avec yield pivot
-    )
+    # Optimisation globale du yield
+    def loss(y):
+        pred = np.array([m_bale_progressif(r, y) for r in R])
+        return np.mean((pred - NB) ** 2)
+
+    res = minimize_scalar(loss, bounds=(0.001, 0.20), method='bounded',
+                          options={'xatol': 1e-6})
+    y_opt = res.x
+    rmse_opt = np.sqrt(res.fun)
+    print(f"\nYield pivot optimal global : {y_opt*100:.4f} %")
+    print(f"RMSE à yield optimal       : {rmse_opt:.5f} ans")
+
+    # Comparaison à yields standards
+    print(f"\n{'Yield testé':<20} {'RMSE':>12} {'MAE':>12}")
+    for y_test in [0.040, 0.045, 0.0489, 0.049, 0.0495, 0.050,
+                    0.0505, 0.051, 0.055, 0.060, y_opt]:
+        pred = np.array([m_bale_progressif(r, y_test) for r in R])
+        err = pred - NB
+        tag = "  <-- optimum" if abs(y_test - y_opt) < 1e-5 else ""
+        print(f"  {y_test*100:>6.4f}%        {np.sqrt(np.mean(err**2)):>10.5f}    "
+              f"{np.mean(np.abs(err)):>10.5f}{tag}")
+
+    # Stratification par tranche de R, calibration locale par tranche
+    print("\nStratification par tranche de R (vérifier stabilité du yield) :")
+    print(f"{'Tranche R (ans)':<20} {'n':>10} {'y_opt':>10} {'RMSE':>10}")
+    bins = [(0, 1), (1, 3), (3, 5), (5, 10), (10, 15), (15, 20), (20, 30), (30, 60)]
+    for lo, hi in bins:
+        mask = (R >= lo) & (R < hi)
+        if mask.sum() < 50:
+            continue
+        R_sub = R[mask]
+        NB_sub = NB[mask]
+        def loss_sub(y):
+            pred = np.array([m_bale_progressif(r, y) for r in R_sub])
+            return np.mean((pred - NB_sub) ** 2)
+        res_sub = minimize_scalar(loss_sub, bounds=(0.001, 0.20),
+                                   method='bounded', options={'xatol': 1e-6})
+        rmse_sub = np.sqrt(res_sub.fun)
+        print(f"  [{lo:>2}, {hi:>2}[          {mask.sum():>10} {res_sub.x*100:>9.3f}% "
+              f"{rmse_sub:>10.5f}")
 
 
-def diagnostic(df: pl.DataFrame, type_amort: int, target_col: str = "NB_MATURITE_IRBA"):
-    """Pour un CD_TYPE_AMORT donné, affiche RMSE/MAE/max|err| de chaque candidate."""
-    sub = df.filter(pl.col("CD_TYPE_AMORT") == type_amort)
-    if sub.height == 0:
-        print(f"\n[type {type_amort}] aucune ligne dans l'échantillon.")
-        return
-    target = sub[target_col].to_numpy()
-    print(f"\n{'='*70}")
-    print(f"CD_TYPE_AMORT = {type_amort}  (n = {sub.height})")
-    print(f"{'='*70}")
-    print(f"{'Formule':<32} {'RMSE':>10} {'MAE':>10} {'max|err|':>10}")
-    for col in ["pred_R", "pred_lineaire", "pred_prog_origine",
-                "pred_prog_residuel", "pred_prog_5pct"]:
-        p = sub[col].to_numpy()
-        err = p - target
-        rmse = float(np.sqrt(np.mean(err ** 2)))
-        mae  = float(np.mean(np.abs(err)))
-        mx   = float(np.max(np.abs(err)))
-        flag = " ✓" if rmse < 0.05 else ""
-        print(f"  {col:<30} {rmse:>10.4f} {mae:>10.4f} {mx:>10.4f}{flag}")
+# ============================================================
+# Détection des outliers (max|err| élevés)
+# ============================================================
 
-
-def inverser_yield_progressif(df: pl.DataFrame, type_amort: int,
-                               target_col: str = "NB_MATURITE_IRBA") -> pl.DataFrame:
-    """
-    Pour chaque ligne, trouve le yield qui reproduit exactement NB via
-    la formule progressive RÉSIDUELLE (avec T0 = maturité d'origine).
-
-    Si ce yield est constant -> taux pivot fixe.
-    Si ce yield corrèle avec T_INTRT -> taux contractuel.
-    """
-    from scipy.optimize import brentq
-    sub = df.filter(pl.col("CD_TYPE_AMORT") == type_amort)
-    if sub.height == 0:
-        return sub
-
+def outliers_type_3(df: pl.DataFrame, y_pivot: float = 0.049, top_n: int = 20):
+    """Identifie les plus grosses erreurs résiduelles pour comprendre."""
+    sub = df.filter(pl.col("CD_TYPE_AMORT") == 3)
     R  = sub["R"].to_numpy()
-    T0 = sub["T0"].to_numpy()
-    NB = sub[target_col].to_numpy()
-    yields = []
-    for r, t0, nb in zip(R, T0, NB):
-        try:
-            g = lambda y: m_bale_progressif_residuel(r, t0, y) - nb
-            if g(-0.20) * g(0.50) > 0:
-                yields.append(np.nan)
-            else:
-                yields.append(brentq(g, -0.20, 0.50, xtol=1e-8))
-        except Exception:
-            yields.append(np.nan)
-    return sub.with_columns(yield_implicite = pl.Series(yields))
+    NB = sub["NB_MATURITE_IRBA"].to_numpy()
+    T0 = sub["T0"].to_numpy() if "T0" in sub.columns else None
+    T_INTRT = sub["T_INTRT"].to_numpy()
+
+    pred = np.array([m_bale_progressif(r, y_pivot) for r in R])
+    err = NB - pred
+    abs_err = np.abs(err)
+
+    # Top outliers
+    idx = np.argsort(-abs_err)[:top_n]
+    print(f"\nTop {top_n} outliers type 3 (yield pivot {y_pivot*100:.2f} %) :")
+    print(f"{'R':>8} {'NB obs':>8} {'NB pred':>8} {'err':>8} {'T_INTRT':>10}", end="")
+    if T0 is not None:
+        print(f" {'T0':>8} {'ancien.':>8}", end="")
+    print()
+    for i in idx:
+        line = f"{R[i]:>8.4f} {NB[i]:>8.4f} {pred[i]:>8.4f} {err[i]:>+8.4f} {T_INTRT[i]*100:>9.3f}%"
+        if T0 is not None:
+            anc = (T0[i] - R[i]) / T0[i] * 100 if T0[i] > 0 else 0
+            line += f" {T0[i]:>8.4f} {anc:>7.2f}%"
+        print(line)
 
 
 # ============================================================
-# 3. Pipeline d'analyse
-# ============================================================
-
-def analyser(df_brut: pl.DataFrame, dt_arrt: int = DT_ARRT):
-    """
-    Pipeline complet sur srs_X_capret.
-
-    Le DF d'entrée doit contenir :
-      DT_ECHEANCE_FEM, DT_DEBUT_AUTO, T_INTRT, CD_TYPE_AMORT, NB_MATURITE_IRBA
-    Avec dates en jours SAS (entiers/float) ou en pl.Date.
-
-    DT_ARRT n'est PAS une colonne — c'est une macro-variable injectée ici
-    (date d'arrêté constante pour toute la base).
-    """
-    # Calcul de R (maturité résiduelle) et T0 (maturité d'origine)
-    if df_brut["DT_ECHEANCE_FEM"].dtype in (pl.Int32, pl.Int64, pl.Float64):
-        # format SAS -> dt_arrt aussi en jours SAS (entier)
-        df = df_brut.with_columns(
-            R  = (pl.col("DT_ECHEANCE_FEM") - dt_arrt)              / 365.25,
-            T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
-        )
-    else:
-        # format Date/Datetime -> dt_arrt converti en pl.Date depuis le SAS
-        from datetime import date, timedelta
-        dt_arrt_date = date(1960, 1, 1) + timedelta(days=int(dt_arrt))
-        df = df_brut.with_columns(
-            R  = (pl.col("DT_ECHEANCE_FEM") - pl.lit(dt_arrt_date)).dt.total_days() / 365.25,
-            T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")).dt.total_days() / 365.25,
-        )
-
-    # Garde-fou : T0 doit être >= R (sinon DT_DEBUT_AUTO postérieur à DT_ARRT, anomalie)
-    n_anomalies = df.filter(pl.col("T0") < pl.col("R")).height
-    if n_anomalies > 0:
-        print(f"⚠️  {n_anomalies} lignes avec T0 < R (DT_DEBUT_AUTO > DT_ARRT) — exclues.")
-        df = df.filter(pl.col("T0") >= pl.col("R"))
-
-    df = add_predictions(df)
-
-    # Récap par type
-    print("\n=== Distribution par CD_TYPE_AMORT ===")
-    print(df.group_by("CD_TYPE_AMORT").agg(
-        n = pl.len(),
-        R_min = pl.col("R").min(),
-        R_max = pl.col("R").max(),
-        T0_min = pl.col("T0").min(),
-        T0_max = pl.col("T0").max(),
-        anciennete_pct = ((pl.col("T0") - pl.col("R")) / pl.col("T0") * 100).mean(),
-    ).sort("CD_TYPE_AMORT"))
-
-    # Diagnostic par type
-    for t in [1, 2, 3, 4, 9]:
-        diagnostic(df, t)
-
-    # Inversion yield pour types 1 et 3 (avec hypothèse résiduelle)
-    for t in [1, 3]:
-        print(f"\n--- Inversion yield (formule progressive RÉSIDUELLE) pour type {t} ---")
-        sub_y = inverser_yield_progressif(df, t)
-        if sub_y.height > 0 and "yield_implicite" in sub_y.columns:
-            yi = sub_y["yield_implicite"].to_numpy()
-            mask = ~np.isnan(yi)
-            yi_clean = yi[mask]
-            if len(yi_clean) > 1:
-                print(f"  yield médian   : {np.median(yi_clean)*100:.3f} %")
-                print(f"  yield moyen    : {np.mean(yi_clean)*100:.3f} %")
-                print(f"  yield std      : {np.std(yi_clean)*100:.3f} %")
-                t_intrt = sub_y["T_INTRT"].to_numpy()[mask]
-                if len(t_intrt) > 5:
-                    corr = np.corrcoef(yi_clean, t_intrt)[0, 1]
-                    print(f"  corr(yield_implicite, T_INTRT) = {corr:.4f}")
-                    if corr > 0.95:
-                        print("  ===> formule paramétrée par le TAUX CONTRACTUEL")
-                    elif np.std(yi_clean) < 0.005:
-                        print("  ===> taux pivot constant")
-                    else:
-                        print("  ===> ni l'un ni l'autre, autre paramètre en jeu")
-
-    return df
-
-
-# ============================================================
-# 4. Exécution
+# Exécution
 # ============================================================
 
 if __name__ == "__main__":
-    # ====================================================================
-    # CHARGEMENT DE TES DONNÉES — adapte le chemin et le format
-    # ====================================================================
-
-    # Option 1 : Parquet (recommandé si dispo)
-    # df = pl.read_parquet("/chemin/vers/srs_X_capret.parquet")
-
-    # Option 2 : CSV
-    # df = pl.read_csv("/chemin/vers/srs_X_capret.csv", separator=";")
-
-    # Option 3 : si tu as déjà un DataFrame dans ton notebook
-    # df = srs_X_capret
-
-    df = pl.read_parquet("srs_X_capret.parquet")  # <-- À ADAPTER
-
-    # ====================================================================
-    # NORMALISATION DES COLONNES (à adapter selon les noms exacts dans ta base)
-    # ====================================================================
-    # Le pipeline attend : DT_DEBUT_AUTO, DT_ECHEANCE_FEM, T_INTRT,
-    #                      CD_TYPE_AMORT (Int), NB_MATURITE_IRBA
+    # À adapter : recharger ton DataFrame avec prédictions, ou refaire analyser()
+    # df_avec_pred = pl.read_parquet("srs_X_capret_avec_predictions.parquet")
     #
-    # CD_TYPE_AMORT est en string ('1', '2', '3', '4', '9') -> conversion en Int64
-    # Version robuste : ignore espaces parasites + met en null les valeurs non convertibles
-    df = df.with_columns(
-        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False)
-    )
-    #
-    # Si T_INTRT est en pourcentage (ex 4.5 au lieu de 0.045), décommenter :
-    # df = df.with_columns(T_INTRT = pl.col("T_INTRT") / 100)
-    #
-    # Si dates en string, parser :
-    # df = df.with_columns(
-    #     DT_DEBUT_AUTO = pl.col("DT_DEBUT_AUTO").str.to_date("%Y-%m-%d"),
-    #     DT_ECHEANCE_FEM = pl.col("DT_ECHEANCE_FEM").str.to_date("%Y-%m-%d"),
+    # OU mieux, recharger la base brute et refaire le calcul de R/T0 :
+    # from enquete_srs import analyser
+    # df_brut = pl.read_parquet("srs_X_capret.parquet")
+    # df_brut = df_brut.with_columns(
+    #     CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False)
     # )
+    # df = df_brut.with_columns(
+    #     R  = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
+    #     T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
+    # ).filter(...)  # ton filtrage habituel
 
-    # ====================================================================
-    # FILTRAGE DÉFENSIF — éviter les lignes qui faussent le diagnostic
-    # ====================================================================
-    df = df.filter(
-        pl.col("DT_ECHEANCE_FEM").is_not_null()
-        & pl.col("DT_DEBUT_AUTO").is_not_null()
-        & pl.col("T_INTRT").is_not_null()
-        & pl.col("CD_TYPE_AMORT").is_not_null()
-        & pl.col("NB_MATURITE_IRBA").is_not_null()
-        & (pl.col("DT_ECHEANCE_FEM") > pl.col("DT_DEBUT_AUTO"))
-        & (pl.col("DT_ECHEANCE_FEM") > DT_ARRT)   # facilité non échue à la date d'arrêté
-    )
-    print(f"Lignes après filtrage : {df.height}")
+    df = ...  # <-- À DÉFINIR
 
-    # ====================================================================
-    # LANCEMENT DU DIAGNOSTIC
-    # ====================================================================
-    df_avec_pred = analyser(df)
-
-    # Sauvegarde optionnelle des prédictions et résidus pour analyse approfondie
-    # df_avec_pred.write_parquet("srs_X_capret_avec_predictions.parquet")
+    diagnostic_type_1(df)
+    diagnostic_type_3(df)
+    outliers_type_3(df, y_pivot=0.049)
