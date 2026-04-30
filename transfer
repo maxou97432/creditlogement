@@ -293,17 +293,21 @@ if __name__ == "__main__":
     # ====================================================================
     # NORMALISATION DES COLONNES (à adapter selon les noms exacts dans ta base)
     # ====================================================================
-    # Le pipeline attend : DT_ARRT, DT_ECHEANCE_FEM, T_INTRT, CD_TYPE_AMORT, NB_MATURITE_IRBA
+    # Le pipeline attend : DT_DEBUT_AUTO, DT_ECHEANCE_FEM, T_INTRT,
+    #                      CD_TYPE_AMORT (Int), NB_MATURITE_IRBA
+    #
+    # CD_TYPE_AMORT est en string ('1', '2', '3', '4', '9') -> conversion en Int64
+    # Version robuste : ignore espaces parasites + met en null les valeurs non convertibles
+    df = df.with_columns(
+        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False)
+    )
     #
     # Si T_INTRT est en pourcentage (ex 4.5 au lieu de 0.045), décommenter :
     # df = df.with_columns(T_INTRT = pl.col("T_INTRT") / 100)
     #
-    # Si CD_TYPE_AMORT est en string ("1", "3", ...), convertir :
-    # df = df.with_columns(CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").cast(pl.Int64))
-    #
     # Si dates en string, parser :
     # df = df.with_columns(
-    #     DT_ARRT = pl.col("DT_ARRT").str.to_date("%Y-%m-%d"),
+    #     DT_DEBUT_AUTO = pl.col("DT_DEBUT_AUTO").str.to_date("%Y-%m-%d"),
     #     DT_ECHEANCE_FEM = pl.col("DT_ECHEANCE_FEM").str.to_date("%Y-%m-%d"),
     # )
 
