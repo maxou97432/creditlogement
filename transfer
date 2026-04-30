@@ -209,35 +209,55 @@ def analyser(df_brut: pl.DataFrame):
 # ============================================================
 
 if __name__ == "__main__":
-    # À remplacer par : df = pl.read_parquet("srs_X_capret.parquet")
-    # ou               df = pl.read_csv("srs_X_capret.csv")
+    # ====================================================================
+    # CHARGEMENT DE TES DONNÉES — adapte le chemin et le format
+    # ====================================================================
 
-    # Démo synthétique pour valider la mécanique du code
-    np.random.seed(42)
-    n = 200
-    types = np.random.choice([1, 2, 3, 4, 9], size=n, p=[0.3, 0.1, 0.4, 0.15, 0.05])
-    dt_arrt = np.full(n, 23922)
-    R_brut = np.random.uniform(1, 25, size=n)
-    dt_ech = dt_arrt + (R_brut * 365.25).astype(int)
-    t_intrt = np.random.uniform(0.02, 0.08, size=n)
+    # Option 1 : Parquet (recommandé si dispo)
+    # df = pl.read_parquet("/chemin/vers/srs_X_capret.parquet")
 
-    # Génération de NB_MATURITE_IRBA selon les hypothèses (pour tester le code)
-    nb = np.zeros(n)
-    for i in range(n):
-        R = (dt_ech[i] - dt_arrt[i]) / 365.25
-        if types[i] in (2, 4, 9):
-            nb[i] = R                                      # hypothèse identifiée
-        elif types[i] == 1:
-            nb[i] = m_bale_lineaire(R)                     # hypothèse à tester
-        elif types[i] == 3:
-            nb[i] = m_bale_progressif(R, t_intrt[i])       # hypothèse à tester
+    # Option 2 : CSV
+    # df = pl.read_csv("/chemin/vers/srs_X_capret.csv", separator=";")
 
-    df_demo = pl.DataFrame({
-        "DT_ARRT": dt_arrt,
-        "DT_ECHEANCE_FEM": dt_ech,
-        "T_INTRT": t_intrt,
-        "CD_TYPE_AMORT": types,
-        "NB_MATURITE_IRBA": nb,
-    })
+    # Option 3 : si tu as déjà un DataFrame dans ton notebook
+    # df = srs_X_capret
 
-    analyser(df_demo)
+    df = pl.read_parquet("srs_X_capret.parquet")  # <-- À ADAPTER
+
+    # ====================================================================
+    # NORMALISATION DES COLONNES (à adapter selon les noms exacts dans ta base)
+    # ====================================================================
+    # Le pipeline attend : DT_ARRT, DT_ECHEANCE_FEM, T_INTRT, CD_TYPE_AMORT, NB_MATURITE_IRBA
+    #
+    # Si T_INTRT est en pourcentage (ex 4.5 au lieu de 0.045), décommenter :
+    # df = df.with_columns(T_INTRT = pl.col("T_INTRT") / 100)
+    #
+    # Si CD_TYPE_AMORT est en string ("1", "3", ...), convertir :
+    # df = df.with_columns(CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").cast(pl.Int64))
+    #
+    # Si dates en string, parser :
+    # df = df.with_columns(
+    #     DT_ARRT = pl.col("DT_ARRT").str.to_date("%Y-%m-%d"),
+    #     DT_ECHEANCE_FEM = pl.col("DT_ECHEANCE_FEM").str.to_date("%Y-%m-%d"),
+    # )
+
+    # ====================================================================
+    # FILTRAGE DÉFENSIF — éviter les lignes qui faussent le diagnostic
+    # ====================================================================
+    df = df.filter(
+        pl.col("DT_ECHEANCE_FEM").is_not_null()
+        & pl.col("DT_ARRT").is_not_null()
+        & pl.col("T_INTRT").is_not_null()
+        & pl.col("CD_TYPE_AMORT").is_not_null()
+        & pl.col("NB_MATURITE_IRBA").is_not_null()
+        & (pl.col("DT_ECHEANCE_FEM") > pl.col("DT_ARRT"))
+    )
+    print(f"Lignes après filtrage : {df.height}")
+
+    # ====================================================================
+    # LANCEMENT DU DIAGNOSTIC
+    # ====================================================================
+    df_avec_pred = analyser(df)
+
+    # Sauvegarde optionnelle des prédictions et résidus pour analyse approfondie
+    # df_avec_pred.write_parquet("srs_X_capret_avec_predictions.parquet")
