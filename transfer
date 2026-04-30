@@ -1,175 +1,40 @@
-"""
-Investigation fine — phase 2 :
-- Type 1 : tester plusieurs conventions de discrétisation pour expliquer le résidu
-- Type 3 : optimiser le yield pivot global et stratifier par R pour vérifier sa stabilité
-"""
-
-import polars as pl
-import numpy as np
-from scipy.optimize import minimize_scalar
-from enquete_srs import (m_bale_progressif, DT_ARRT)
-
-
-# ============================================================
-# Variantes de formules pour le type 1 (linéaire)
-# ============================================================
-
-def m_lineaire_continu(R: float) -> float:
-    """Centre de gravité d'une distribution uniforme sur [0, R] : R/2."""
-    return R / 2
-
-def m_lineaire_mensuel(R: float) -> float:
-    n = max(1, int(round(R * 12)))
-    return (n + 1) / 2 / 12
-
-def m_lineaire_annuel(R: float) -> float:
-    n = max(1, int(round(R)))
-    return (n + 1) / 2
-
-def m_lineaire_trim(R: float) -> float:
-    n = max(1, int(round(R * 4)))
-    return (n + 1) / 2 / 4
-
-def m_lineaire_semestriel(R: float) -> float:
-    n = max(1, int(round(R * 2)))
-    return (n + 1) / 2 / 2
+def macaulay_annuite_actu(R, y, freq=12):
+    """
+    Duration de Macaulay sur annuité constante :
+    flux totaux (capital + intérêts) constants, ACTUALISÉS.
+    """
+    n = max(1, int(round(R * freq)))
+    if abs(y) < 1e-12:
+        return (n + 1) / 2 / freq
+    r = y / freq
+    v = 1.0 / (1.0 + r)
+    t = np.arange(1, n + 1)
+    pv = v ** t  # CF constants -> coefficient égal, ne compte pas
+    return float(np.sum(t * pv) / np.sum(pv)) / freq
 
 
-def diagnostic_type_1(df: pl.DataFrame):
-    """Compare différentes discrétisations pour le type 1."""
-    sub = df.filter(pl.col("CD_TYPE_AMORT") == 1)
-    R = sub["R"].to_numpy()
-    NB = sub["NB_MATURITE_IRBA"].to_numpy()
+# Test sur le type 3 avec taux contractuel
+sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3)
+R  = sub3["R"].to_numpy()
+NB = sub3["NB_MATURITE_IRBA"].to_numpy()
+T_INTRT = sub3["T_INTRT"].to_numpy()
 
-    print("\n" + "=" * 70)
-    print(f"TYPE 1 (linéaire) — n = {len(R)} — variantes de discrétisation")
-    print("=" * 70)
-    print(f"{'Variante':<32} {'RMSE':>10} {'MAE':>10} {'max|err|':>10}")
+# Variante A : Macaulay avec T_INTRT
+pred_macaulay_contr = np.array([macaulay_annuite_actu(r, y) for r, y in zip(R, T_INTRT)])
+# Variante B : Macaulay avec yield pivot 5%
+pred_macaulay_5pct  = np.array([macaulay_annuite_actu(r, 0.05) for r in R])
 
-    for name, f in [
-        ("continu : R/2",                m_lineaire_continu),
-        ("mensuel : (n+1)/2/12",         m_lineaire_mensuel),
-        ("trimestriel : (n+1)/2/4",      m_lineaire_trim),
-        ("semestriel : (n+1)/2/2",       m_lineaire_semestriel),
-        ("annuel : (n+1)/2",             m_lineaire_annuel),
-    ]:
-        pred = np.array([f(r) for r in R])
-        err = pred - NB
-        rmse = np.sqrt(np.mean(err ** 2))
-        mae  = np.mean(np.abs(err))
-        mx   = np.max(np.abs(err))
-        flag = " ✓" if rmse < 0.01 else (" ~" if rmse < 0.05 else "")
-        print(f"  {name:<30} {rmse:>10.5f} {mae:>10.5f} {mx:>10.5f}{flag}")
+for name, pred in [("Macaulay + T_INTRT", pred_macaulay_contr),
+                    ("Macaulay + 5%",      pred_macaulay_5pct)]:
+    err = pred - NB
+    print(f"{name:<25} RMSE={np.sqrt(np.mean(err**2)):.5f}  "
+          f"MAE={np.mean(np.abs(err)):.5f}  max={np.max(np.abs(err)):.5f}")
 
-
-# ============================================================
-# Optimisation du yield pivot pour le type 3
-# ============================================================
-
-def diagnostic_type_3(df: pl.DataFrame):
-    """Calibre le yield pivot optimal sur le type 3 et stratifie par R."""
-    sub = df.filter(pl.col("CD_TYPE_AMORT") == 3)
-    R = sub["R"].to_numpy()
-    NB = sub["NB_MATURITE_IRBA"].to_numpy()
-
-    print("\n" + "=" * 70)
-    print(f"TYPE 3 (progressif) — n = {len(R)} — calibration du yield pivot")
-    print("=" * 70)
-
-    # Optimisation globale du yield
-    def loss(y):
-        pred = np.array([m_bale_progressif(r, y) for r in R])
-        return np.mean((pred - NB) ** 2)
-
-    res = minimize_scalar(loss, bounds=(0.001, 0.20), method='bounded',
-                          options={'xatol': 1e-6})
-    y_opt = res.x
-    rmse_opt = np.sqrt(res.fun)
-    print(f"\nYield pivot optimal global : {y_opt*100:.4f} %")
-    print(f"RMSE à yield optimal       : {rmse_opt:.5f} ans")
-
-    # Comparaison à yields standards
-    print(f"\n{'Yield testé':<20} {'RMSE':>12} {'MAE':>12}")
-    for y_test in [0.040, 0.045, 0.0489, 0.049, 0.0495, 0.050,
-                    0.0505, 0.051, 0.055, 0.060, y_opt]:
-        pred = np.array([m_bale_progressif(r, y_test) for r in R])
-        err = pred - NB
-        tag = "  <-- optimum" if abs(y_test - y_opt) < 1e-5 else ""
-        print(f"  {y_test*100:>6.4f}%        {np.sqrt(np.mean(err**2)):>10.5f}    "
-              f"{np.mean(np.abs(err)):>10.5f}{tag}")
-
-    # Stratification par tranche de R, calibration locale par tranche
-    print("\nStratification par tranche de R (vérifier stabilité du yield) :")
-    print(f"{'Tranche R (ans)':<20} {'n':>10} {'y_opt':>10} {'RMSE':>10}")
-    bins = [(0, 1), (1, 3), (3, 5), (5, 10), (10, 15), (15, 20), (20, 30), (30, 60)]
-    for lo, hi in bins:
-        mask = (R >= lo) & (R < hi)
-        if mask.sum() < 50:
-            continue
-        R_sub = R[mask]
-        NB_sub = NB[mask]
-        def loss_sub(y):
-            pred = np.array([m_bale_progressif(r, y) for r in R_sub])
-            return np.mean((pred - NB_sub) ** 2)
-        res_sub = minimize_scalar(loss_sub, bounds=(0.001, 0.20),
-                                   method='bounded', options={'xatol': 1e-6})
-        rmse_sub = np.sqrt(res_sub.fun)
-        print(f"  [{lo:>2}, {hi:>2}[          {mask.sum():>10} {res_sub.x*100:>9.3f}% "
-              f"{rmse_sub:>10.5f}")
-
-
-# ============================================================
-# Détection des outliers (max|err| élevés)
-# ============================================================
-
-def outliers_type_3(df: pl.DataFrame, y_pivot: float = 0.049, top_n: int = 20):
-    """Identifie les plus grosses erreurs résiduelles pour comprendre."""
-    sub = df.filter(pl.col("CD_TYPE_AMORT") == 3)
-    R  = sub["R"].to_numpy()
-    NB = sub["NB_MATURITE_IRBA"].to_numpy()
-    T0 = sub["T0"].to_numpy() if "T0" in sub.columns else None
-    T_INTRT = sub["T_INTRT"].to_numpy()
-
-    pred = np.array([m_bale_progressif(r, y_pivot) for r in R])
-    err = NB - pred
-    abs_err = np.abs(err)
-
-    # Top outliers
-    idx = np.argsort(-abs_err)[:top_n]
-    print(f"\nTop {top_n} outliers type 3 (yield pivot {y_pivot*100:.2f} %) :")
-    print(f"{'R':>8} {'NB obs':>8} {'NB pred':>8} {'err':>8} {'T_INTRT':>10}", end="")
-    if T0 is not None:
-        print(f" {'T0':>8} {'ancien.':>8}", end="")
-    print()
-    for i in idx:
-        line = f"{R[i]:>8.4f} {NB[i]:>8.4f} {pred[i]:>8.4f} {err[i]:>+8.4f} {T_INTRT[i]*100:>9.3f}%"
-        if T0 is not None:
-            anc = (T0[i] - R[i]) / T0[i] * 100 if T0[i] > 0 else 0
-            line += f" {T0[i]:>8.4f} {anc:>7.2f}%"
-        print(line)
-
-
-# ============================================================
-# Exécution
-# ============================================================
-
-if __name__ == "__main__":
-    # À adapter : recharger ton DataFrame avec prédictions, ou refaire analyser()
-    # df_avec_pred = pl.read_parquet("srs_X_capret_avec_predictions.parquet")
-    #
-    # OU mieux, recharger la base brute et refaire le calcul de R/T0 :
-    # from enquete_srs import analyser
-    # df_brut = pl.read_parquet("srs_X_capret.parquet")
-    # df_brut = df_brut.with_columns(
-    #     CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False)
-    # )
-    # df = df_brut.with_columns(
-    #     R  = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
-    #     T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
-    # ).filter(...)  # ton filtrage habituel
-
-    df = ...  # <-- À DÉFINIR
-
-    diagnostic_type_1(df)
-    diagnostic_type_3(df)
-    outliers_type_3(df, y_pivot=0.049)
+# Stratification par R pour voir si Macaulay corrige le biais sur les courts
+print("\nStratification (Macaulay + T_INTRT) :")
+for lo, hi in [(0,1), (1,3), (3,5), (5,10), (10,15), (15,20), (20,30)]:
+    mask = (R >= lo) & (R < hi)
+    if mask.sum() < 50: continue
+    err = pred_macaulay_contr[mask] - NB[mask]
+    print(f"  [{lo:>2}, {hi:>2}[  n={mask.sum():>6}  "
+          f"RMSE={np.sqrt(np.mean(err**2)):.5f}")
