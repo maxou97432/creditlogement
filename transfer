@@ -1,66 +1,19 @@
-import numpy as np
-
-# Re-créer is_bascule au cas où
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
-    is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01
+    is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01,
+    has_171    = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
 )
+print("=== Croisement has_171 × is_bascule ===")
+print(sub3.group_by("has_171").agg(
+    n           = pl.len(),
+    pct_bascule = pl.col("is_bascule").mean() * 100,
+    R_min       = pl.col("R").min(),
+    R_max       = pl.col("R").max(),
+))
 
-# Cibler une population homogène : SME_RET avec R<=1, où on a 46% bascule / 54% progressive
-# Donc une bonne séparation pour identifier la 4e variable
-sub_test = sub3.filter(
-    (pl.col("CD_PORT_PRUDENTIEL") == "SME_RET")
-    & (pl.col("R") <= 1.0)
-    & (pl.col("R") >= 0.1)  # exclure les ultra-courts triviaux
-)
-print(f"Population test SME_RET R∈[0.1, 1] : n={sub_test.height}")
-print(f"  bascule : {sub_test['is_bascule'].sum()} ({sub_test['is_bascule'].mean()*100:.1f}%)")
-
-# Tester toutes les colonnes restantes
-cols_a_ignorer = {
-    "R", "T0", "NB_MATURITE_IRBA", "NB_DURATION_IRBA", "is_bascule",
-    "DT_ECHEANCE_FEM", "DT_DEBUT_AUTO", "DT_ARRT", "CD_TYPE_AMORT",
-    "CD_PORT_PRUDENTIEL", "cd_portfolio", "Type_Credit",  # déjà testées
-    "pred_R", "pred_lineaire", "pred_prog_origine",
-    "pred_prog_residuel", "pred_prog_5pct",
-}
-cols_test = [c for c in sub_test.columns if c not in cols_a_ignorer]
-
-results = []
-for c in cols_test:
-    dtype = sub_test.schema[c]
-    if dtype in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32):
-        n_unique = sub_test[c].n_unique()
-        if n_unique > 50 or n_unique < 2: continue
-        agg = sub_test.group_by(c).agg(
-            n = pl.len(),
-            pct_bascule = pl.col("is_bascule").mean() * 100,
-        ).filter(pl.col("n") >= 30).sort("pct_bascule")
-        if agg.height < 2: continue
-        spread = agg["pct_bascule"].max() - agg["pct_bascule"].min()
-        results.append((c, "cat", n_unique, spread, agg))
-    elif dtype in (pl.Float64, pl.Float32):
-        s_b = sub_test.filter(pl.col("is_bascule"))[c].drop_nulls().to_numpy()
-        s_p = sub_test.filter(~pl.col("is_bascule"))[c].drop_nulls().to_numpy()
-        if len(s_b) < 30 or len(s_p) < 30: continue
-        std_g = sub_test[c].std()
-        if std_g is None or std_g == 0: continue
-        delta = abs(np.mean(s_b) - np.mean(s_p)) / std_g
-        results.append((c, "num", "—", delta * 100,
-                        (np.mean(s_b), np.median(s_b),
-                         np.mean(s_p), np.median(s_p))))
-
-results.sort(key=lambda x: -x[3])
-print(f"\n{'Colonne':<28} {'Type':<6} {'n_uniq':<7} {'spread':>10}")
-print("=" * 60)
-for c, t, nu, spread, _ in results[:15]:
-    print(f"{c:<28} {t:<6} {str(nu):<7} {spread:>10.2f}")
-
-print("\n=== Détail top 5 ===")
-for c, t, nu, spread, detail in results[:5]:
-    print(f"\n--- {c} (spread={spread:.2f}) ---")
-    if t == "cat":
-        print(detail)
-    else:
-        moy_b, med_b, moy_p, med_p = detail
-        print(f"  bascule:    moy={moy_b:.4f}  médian={med_b:.4f}")
-        print(f"  progressive: moy={moy_p:.4f}  médian={med_p:.4f}")
+print("\n=== Croisement has_171 × R_bin ===")
+print(sub3.with_columns(
+    R_bin = pl.when(pl.col("R") <= 1.0).then(pl.lit("R<=1")).otherwise(pl.lit("R>1"))
+).group_by(["has_171", "R_bin"]).agg(
+    n           = pl.len(),
+    pct_bascule = pl.col("is_bascule").mean() * 100,
+).sort(["has_171", "R_bin"]))
