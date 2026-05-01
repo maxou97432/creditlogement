@@ -1,28 +1,68 @@
-# 1. Analyse macro par libellé d'engagement
-print("=== ANALYSE DES ÉCARTS PAR LB_ENGAGEMENT ===")
-analyse_lb = (
-    srs_X_capret
-    .filter(pl.col("Ecart_Final") > 0.0001)  # On ne garde que les vrais écarts finaux
-    .group_by("LB_ENGAGEMENT")
-    .agg([
-        pl.len().alias("Nombre_Anomalies"),
-        pl.col("Ecart_Final").mean().round(4).alias("Ecart_Final_Moyen"),
-        # Regardons l'écart brut (avant le clip) pour comprendre la logique SAS
-        (pl.col("duration_brute_calculee") - pl.col("NB_MATURITE_IRBA")).abs().mean().round(4).alias("Ecart_Brut_Moyen"),
-        pl.col("NB_MATURITE_IRBA").mean().round(4).alias("Maturite_SAS_Moyenne")
-    ])
-    .sort("Nombre_Anomalies", descending=True)
+import numpy as np
+
+# 1. Confirmer que CD_PORT_PRUDENTIEL discrimine sur TOUTE la pop type 3
+sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
+    is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01
 )
+print("=== CD_PORT_PRUDENTIEL sur TOUT le type 3 ===")
+print(sub3.group_by("CD_PORT_PRUDENTIEL").agg(
+    n           = pl.len(),
+    pct_bascule = pl.col("is_bascule").mean() * 100,
+    R_min       = pl.col("R").min(),
+    R_max       = pl.col("R").max(),
+    R_mean      = pl.col("R").mean(),
+).sort("pct_bascule", descending=True))
 
-# On affiche les 10 pires libellés
-print(analyse_lb.head(10))
+# 2. Croisement : pour les portfolios qui basculent partiellement,
+#    est-ce que c'est uniquement R <= 1 qui déclenche la bascule ?
+print("\n=== Pour chaque portfolio, % bascule par tranche de R ===")
+sub3_with_bin = sub3.with_columns(
+    R_bin = pl.when(pl.col("R") <= 1.0).then(pl.lit("R<=1"))
+             .otherwise(pl.lit("R>1"))
+)
+print(sub3_with_bin.group_by(["CD_PORT_PRUDENTIEL", "R_bin"]).agg(
+    n           = pl.len(),
+    pct_bascule = pl.col("is_bascule").mean() * 100,
+).sort(["CD_PORT_PRUDENTIEL", "R_bin"]))
 
-# 2. Zoom sur le pire délinquant (remplace par le premier de ta liste)
-pire_lb = analyse_lb["LB_ENGAGEMENT"][0] if analyse_lb.height > 0 else None
-if pire_lb:
-    print(f"\n=== ZOOM SUR LE PIRE : {pire_lb} ===")
-    print(
-        srs_X_capret.filter((pl.col("LB_ENGAGEMENT") == pire_lb) & (pl.col("Ecart_Final") > 0.0001))
-        .select(["DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "CD_TYPE_AMORT", "duration_brute_calculee", "NB_MATURITE_IRBA"])
-        .head(5)
-    )
+# 3. Tester la règle finale
+PORTFOLIOS_BASCULE = ["QRE", "CORP"]   # ajuster selon (1)
+
+def m_bale_progressif(R, y, freq=12):
+    n = max(1, int(round(R * freq)))
+    if abs(y) < 1e-12:
+        return (n + 1) / 2 / freq
+    r = y / freq
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (k - 1)
+    return float(np.sum(k * w) / np.sum(w)) / freq
+
+def m_srs_type3(R, cd_prud, y=0.0497):
+    if cd_prud in PORTFOLIOS_BASCULE:
+        return R
+    if R <= 1.0:
+        return R
+    return m_bale_progressif(R, y)
+
+R_arr  = sub3["R"].to_numpy()
+cd_arr = sub3["CD_PORT_PRUDENTIEL"].to_numpy()
+NB_arr = sub3["NB_MATURITE_IRBA"].to_numpy()
+
+pred = np.array([m_srs_type3(r, cd) for r, cd in zip(R_arr, cd_arr)])
+err  = pred - NB_arr
+print(f"\n=== Performance règle finale type 3 (clé = CD_PORT_PRUDENTIEL) ===")
+print(f"RMSE                          : {np.sqrt(np.mean(err**2)):.5f}")
+print(f"MAE                           : {np.mean(np.abs(err)):.5f}")
+print(f"max|err|                      : {np.max(np.abs(err)):.5f}")
+print(f"% lignes avec |err| < 0.01    : {(np.abs(err) < 0.01).mean()*100:.2f}%")
+print(f"% lignes avec |err| < 0.05    : {(np.abs(err) < 0.05).mean()*100:.2f}%")
+print(f"% lignes avec |err| > 0.5     : {(np.abs(err) > 0.5).mean()*100:.2f}%")
+
+# 4. Top 20 erreurs résiduelles pour comprendre ce qui ne colle pas
+idx = np.argsort(-np.abs(err))[:20]
+print(f"\n=== Top 20 erreurs résiduelles ===")
+print(f"{'CD_PRUD':<12} {'R':>8} {'NB obs':>8} {'pred':>8} {'err':>8} {'T_INTRT':>10}")
+T_INTRT_arr = sub3["T_INTRT"].to_numpy()
+for i in idx:
+    print(f"{str(cd_arr[i]):<12} {R_arr[i]:>8.4f} {NB_arr[i]:>8.4f} "
+          f"{pred[i]:>8.4f} {err[i]:>+8.4f} {T_INTRT_arr[i]*100:>9.3f}%")
