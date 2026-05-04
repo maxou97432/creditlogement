@@ -1,59 +1,61 @@
 import numpy as np
+import polars as pl
 
-# Population type 1
-sub1 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 1)
-print(f"=== Type 1 — n = {sub1.height} ===\n")
+DT_ARRT = 23922          # 30/06/2025 en jours SAS — à ajuster pour autres dates d'arrêté
+YIELD_PIVOT_SRS = 0.0495 # Yield pivot calibré sur 158 668 facilités progressives propres
 
-R_arr  = sub1["R"].to_numpy()
-NB_arr = sub1["NB_MATURITE_IRBA"].to_numpy()
 
-# Erreur avec la formule actuelle (n+1)/24
-n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
-pred_arr = (n_arr + 1) / 2 / 12
-err = NB_arr - pred_arr  # signé : positif = NB plus long que prédit
+def m_srs_type1(R: float) -> float:
+    """Linéaire — CD_TYPE_AMORT = 1."""
+    n = max(1, int(round(R * 12)))
+    return (n + 1) / 2 / 12
 
-print(f"=== Stats globales avec (n+1)/24 ===")
-print(f"RMSE       : {np.sqrt(np.mean(err**2))*365.25:.2f} jours")
-print(f"MAE        : {np.mean(np.abs(err))*365.25:.2f} jours")
-print(f"Erreur moy : {np.mean(err)*365.25:+.2f} jours")
-print(f"Médiane    : {np.median(err)*365.25:+.2f} jours")
-print(f"% |err|<0.01: {(np.abs(err) < 0.01).mean()*100:.2f}%")
-print(f"% |err|<0.05: {(np.abs(err) < 0.05).mean()*100:.2f}%")
-print(f"% |err|>0.1 : {(np.abs(err) > 0.1).mean()*100:.2f}%")
 
-# Vérifier d'abord la règle de bascule R<=1
-print(f"\n=== Bascule R<=1 sur le type 1 ? ===")
-sub1 = sub1.with_columns(is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01)
-print(sub1.with_columns(
-    R_bin = pl.when(pl.col("R") <= 1.0).then(pl.lit("R<=1")).otherwise(pl.lit("R>1"))
-).group_by("R_bin").agg(
-    n           = pl.len(),
-    pct_bascule = pl.col("is_bascule").mean() * 100,
-).sort("R_bin"))
+def m_srs_type3(R: float, has_171: bool, seg_special: bool,
+                y: float = YIELD_PIVOT_SRS) -> float:
+    """Progressif — CD_TYPE_AMORT = 3."""
+    if has_171 or seg_special or R <= 1.0:
+        return R
+    n = max(1, int(round(R * 12)))
+    r = y / 12
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (k - 1)
+    return float(np.sum(k * w) / np.sum(w)) / 12
 
-# Stratification par tranche de R
-print(f"\n=== Erreur (n+1)/24 par tranche de R ===")
-print(f"{'tranche':<14} {'n':>8} {'RMSE jours':>12} {'biais moy':>12}")
-for lo, hi in [(0,1), (1,3), (3,5), (5,10), (10,15), (15,20), (20,30)]:
-    mask = (R_arr >= lo) & (R_arr < hi)
-    if mask.sum() < 30: continue
-    e = err[mask] * 365.25
-    rmse = np.sqrt(np.mean(e**2))
-    print(f"[{lo:>2}, {hi:>2}[      {mask.sum():>8} {rmse:>11.2f}j {np.mean(e):>+10.2f}j")
 
-# Distribution des erreurs en jours
-print(f"\n=== Distribution erreurs (jours) ===")
-err_j = err * 365.25
-bins = [-365, -180, -60, -30, -10, 0, 10, 30, 60, 180, 365, 1000]
-for lo, hi in zip(bins[:-1], bins[1:]):
-    m = (err_j >= lo) & (err_j < hi)
-    if m.sum() > 0:
-        print(f"  [{lo:>+5}, {hi:>+5}[ : {m.sum():>5} ({m.mean()*100:>5.2f}%)")
-
-# Top 15 erreurs
-print(f"\n=== Top 15 erreurs positives (NB > pred) ===")
-idx = np.argsort(-err)[:15]
-print(f"{'R':>8} {'NB':>8} {'pred':>8} {'err j':>10} {'NB/R':>8}")
-for i in idx:
-    print(f"{R_arr[i]:>8.4f} {NB_arr[i]:>8.4f} {pred_arr[i]:>8.4f} "
-          f"{err[i]*365.25:>+10.2f} {NB_arr[i]/R_arr[i]:>8.4f}"
+def calcul_maturite_irba(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Calcul vectorisé de NB_MATURITE_IRBA et NB_DURATION_IRBA sur tout un DataFrame.
+    
+    Inputs requis : DT_ECHEANCE_FEM, DT_DEBUT_AUTO, T_INTRT,
+                    CD_TYPE_AMORT (str), FACTOR (str), segment_trg (int),
+                    CD_PORT_PRUDENTIEL (str)
+    """
+    df = df.with_columns(
+        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False),
+        R  = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
+        T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
+        has_171     = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
+        seg_special = pl.col("segment_trg").is_in([44, 73, 74]),
+    )
+    
+    R_arr   = df["R"].to_numpy()
+    type_a  = df["CD_TYPE_AMORT"].to_numpy()
+    h171    = df["has_171"].to_numpy()
+    sspec   = df["seg_special"].to_numpy()
+    
+    nb = np.empty_like(R_arr)
+    for i, (R, t, h, s) in enumerate(zip(R_arr, type_a, h171, sspec)):
+        if t in (2, 4, 9):
+            nb[i] = R
+        elif t == 1:
+            nb[i] = m_srs_type1(R)
+        elif t == 3:
+            nb[i] = m_srs_type3(R, h, s)
+        else:
+            nb[i] = R
+    
+    return df.with_columns(
+        NB_MATURITE_IRBA = pl.Series(nb),
+        NB_DURATION_IRBA = pl.Series(np.clip(nb, 1.0, 5.0)),
+    )
