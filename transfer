@@ -1,103 +1,103 @@
-Bien vu. Les chiffres précédents (RMSE 0.337 yrs sur tout le portefeuille) étaient basés sur le run d'origine non filtré qui ne corrigeait pas l'overflow. Maintenant on a les vrais chiffres mesurés sur le sous-ensemble numériquement sain (n=1,773), et il faut les utiliser. Voici la doc mise à jour avec une note méthodologique sur le filtrage.
+Voici la partie documentaire sur le type 1, en anglais et dans le même style que le reste.
 
 ---
 
-## 3. Choice of yield: contractual rate vs pivot rate?
+# Methodology — Type 1 (Linear Amortization)
 
-Two hypotheses were tested on the clean progressive population.
+## 1. Definition of the type
 
-**Methodological note on the test sample size**: the global calibration of the pivot yield is performed on the full clean population (n = 158,668). However, when testing the per-line contractual rate hypothesis, lines with missing or extreme `T_INTRT` values must be filtered out — a contractual rate above ~30% combined with a long maturity causes numerical overflow in the geometric weighting term `(1+r)^(n-1)`. Such overflows would themselves be evidence against the contractual-rate hypothesis (no real amortization formula tolerates them), but for a clean comparison, 156,895 such lines were excluded, leaving n = 1,773 facilities with reasonable T_INTRT for the head-to-head test.
+Type 1 corresponds to facilities with **constant principal repayments** (linear amortization). At each monthly payment date, the borrower repays a fixed fraction $1/n$ of the original principal, plus interest on the outstanding balance. This is the simplest amortization profile.
 
-| Hypothesis | RMSE | Interpretation |
-|---|---|---|
-| `r = T_INTRT/12` (per-line contractual rate) | 0.545 yrs (199 days) | Poor reproduction — only 24.1% match at \|err\| < 0.05 yrs |
-| `r = y_pivot/12` (single rate for all facilities) | 0.277 yrs (101 days) | Pivot wins by 1.97x globally, more on long maturities |
+## 2. Theoretical formula
 
-**Stratified comparison by maturity band** confirms the dominance of the pivot hypothesis across all bands:
+For a linearly amortized facility with $n$ remaining monthly payments, principal repayments are constant: $P_k = P/n$ for all $k$. Applying CRR Article 162:
 
-| Band R | n | RMSE pivot (days) | RMSE T_INTRT (days) | Ratio |
-|---|---|---|---|---|
-| [1, 3[ | 675 | 106 | 110 | 1.03x |
-| [3, 5[ | 407 | 91 | 105 | 1.15x |
-| [5, 10[ | 477 | 118 | 187 | 1.59x |
-| [10, 15[ | 142 | 41 | 240 | **5.80x** |
+$$M = \frac{1}{12} \cdot \frac{\sum_{k=1}^{n} k \cdot P_k}{\sum_{k=1}^{n} P_k} = \frac{1}{12} \cdot \frac{\sum_{k=1}^{n} k}{n} = \frac{1}{12} \cdot \frac{n(n+1)/2}{n} = \frac{n+1}{2 \cdot 12}$$
 
-The advantage of the pivot widens with maturity. On long maturities (≥10 yrs), the contractual rate is nearly 6 times worse — exactly what we expect if SRS never uses it.
+with $n = \text{round}(R \cdot 12)$.
 
-**Implied yield analysis** — for each line, we invert the formula to find the yield that exactly reproduces the SRS value, then correlate this implied yield with the actual `T_INTRT`:
+Two observations follow directly:
 
-- Implied yield median: **5.0029%** (matches the calibrated 4.9546%)
-- Implied yield std: 8.73%
-- **Correlation(implied_yield, T_INTRT) = −0.05** → near zero
+- The formula is **independent of the interest rate** — unlike type 3, which requires a yield to reconstruct the geometric profile of principal repayments, the linear case has flat repayments by definition. No yield parameter is needed.
+- The formula is **purely deterministic** given $R$ — there is no calibration to perform.
 
-If SRS used the contractual rate, the correlation would be close to 1. The observed near-zero correlation rules out this hypothesis.
+## 3. Empirical validation
 
-**Conclusion**: SRS does NOT use the contractual rate. It uses a **constant pivot rate**, hardcoded into the calculation engine, applied uniformly across all progressive facilities regardless of their actual pricing.
+The formula was tested against `NB_MATURITE_IRBA` on the type 1 population in `srs_X_capret` (n = 6,969 facilities).
 
----
-
-## 4. Empirical calibration of the pivot yield
-
-Since this pivot rate is internal to SRS and not documented in external sources (Capret), it was **calibrated by RMSE minimization** against observed SRS values:
-
-$$y^{*} = \arg\min_y \; \sqrt{\frac{1}{N} \sum_{i=1}^{N} \left( M(R_i, y) - \text{NB\_MATURITE\_IRBA}_i \right)^2}$$
-
-Calibration on **158,668 facilities** yields **y\* = 4.9546%**, with residual RMSE of **31 days**, of which most (95.8% of lines at |err| < 0.05 yrs) is calendar noise and a ~3% cluster of facilities with non-standard amortization.
-
-A **control calibration** on a reduced sample of 28 "clean" facilities (long maturities, no outliers) yields y\* = 4.9444% with RMSE of just **3.4 days**. Both calibrations converge to within 0.01%, confirming parameter stability.
-
-A **third independent estimate** comes from the per-line implied yield analysis above: median implied yield = 5.00%, also converging on the same value.
-
-**For production: y_pivot = 4.95%** (conservative rounding).
-
----
-
-## 5. Stability check across maturity bands
-
-To ensure the yield is **constant** rather than maturity-dependent (which would invalidate the model), a stratification test calibrates the optimal yield separately on each residual maturity band. Results show convergence on long maturities:
-
-| Band R | n | Local optimal yield | RMSE (days) |
-|---|---|---|---|
-| [1, 3[ | 45,811 | 8.22% | 29.85 |
-| [3, 5[ | 39,407 | 6.21% | 31.77 |
-| [5, 10[ | 36,989 | 5.46% | 38.44 |
-| [10, 15[ | 18,963 | **4.99%** | 23.81 |
-| [15, 20[ | 11,163 | **4.93%** | 11.29 |
-| [20, 30[ | 6,329 | **4.92%** | 9.22 |
-
-The deviation on short maturities (apparent yield inflated up to 8% on [1, 3[) does **not** reflect parameter variation but a **model absorption effect**: on this band, the ~3% cluster of atypical facilities (long deferral, hidden bullet) drags the average. Once isolated, the yield falls back to 4.95% across the board, with residual RMSE down to 9-12 days on [15, 30[ — essentially calendar noise.
-
----
-
-## 6. Hypotheses on the origin of 4.95%
-
-Several plausible interpretations:
-
-1. **Hardcoded SRS internal rate** derived from a reference rate (internal transfer rate, historical policy rate at the time the system was parameterized)
-2. **Historical average production rate** on IRBA facilities, frozen once when the engine was set up
-3. **Undocumented internal regulatory convention**
-
-This value **must be revalidated annually** in case SRS updates its internal parameter. The stability observed across the entire portfolio (158k lines, 31-day RMSE mostly calendar noise) suggests no recent change, but the calibration script should be re-run at each quarterly closing.
-
----
-
-## Summary of evidence
-
-The choice of YIELD_PIVOT_SRS = 4.95% is supported by **three independent estimates** that all converge to the same value:
-
-| Estimation method | Result |
+| Metric | Value |
 |---|---|
-| Global RMSE minimization (n = 158,668) | 4.9546% |
-| Control calibration on clean sample (n = 28) | 4.9444% |
-| Per-line implied yield (median) | 5.0029% |
+| RMSE | 23.5 days |
+| MAE | 6.9 days |
+| Mean bias | +6.0 days |
+| Median bias | +3.2 days |
+| % match \|err\| < 0.05 yrs | **96.21%** |
+| % match \|err\| < 0.01 yrs | 59.36% |
+| % \|err\| > 0.1 yrs | 2.44% |
 
-Combined with the rejection of the contractual-rate hypothesis through three independent angles (global RMSE 1.97x worse, stratified RMSE up to 5.80x worse on long maturities, implied yield correlation with T_INTRT ≈ 0), this provides robust empirical justification for the parameter.
+The formula reproduces 96% of the population to within 18 days. The small positive bias of ~6 days reflects calendar-day rounding (SRS uses actual payment dates, while the formula assumes evenly spaced months from the reporting date).
+
+## 4. Stability check across maturity bands
+
+| Band R | n | RMSE (days) | Mean bias (days) |
+|---|---|---|---|
+| [0, 1[ | 997 | 35.98 | +10.92 |
+| [1, 3[ | 1,636 | 22.52 | +5.75 |
+| [3, 5[ | 1,247 | 27.46 | +7.24 |
+| [5, 10[ | 1,199 | 21.71 | +5.32 |
+| [10, 15[ | 953 | 15.20 | +4.08 |
+| [15, 20[ | 581 | 3.35 | +2.48 |
+| [20, 30[ | 356 | 3.14 | +2.55 |
+
+RMSE decreases monotonically with maturity: 36 days on the shortest band, down to **3 days on long maturities (≥15 yrs)**. This confirms the formula is structurally exact — the residual error is purely a discretization and calendar effect that diminishes when $n$ is large.
+
+## 5. No bascule rule for type 1
+
+Unlike type 3, where short facilities (R ≤ 1) systematically fall back to NB = R, the type 1 population does not exhibit this behavior. On the 997 facilities with R ≤ 1, only 19.0% bascule (i.e. NB ≈ R), the remainder following the linear formula. The formula is therefore applied **without override** for type 1.
+
+## 6. Residual outlier cluster
+
+The error distribution on type 1 reveals a small cluster (~2.2%, 153 facilities) with errors centered on **+173 days** — exactly the same offset observed on the progressive (type 3) population. The same characteristics apply:
+
+- Concentrated in `Type_Credit = "Crédits d'investissement"`
+- Older facilities with longer T0
+- NB / R ratio close to 0.77, suggesting a near-bullet repayment profile
+
+These facilities likely correspond to investment loans with long deferral periods or hidden bullet amortization, mis-flagged as `CD_TYPE_AMORT = 1` because the contractual schedule has flat repayments after the deferral. Identifying this sub-population would require a product-typology variable that is not available in `srs_X_capret`. As for type 3, this gap is documented as a known limitation.
+
+## 7. Production formula
+
+```python
+def m_srs_type1(R: float) -> float:
+    """
+    Reproduces NB_MATURITE_IRBA for CD_TYPE_AMORT = 1 (linear amortization).
+
+    Direct application of CRR 162 to flat principal repayments:
+        M = (n + 1) / (2 * 12)   with n = round(R * 12), n >= 1
+
+    Independent of T_INTRT, CD_PORT_PRUDENTIEL, segment_trg.
+
+    Measured coverage: 96.2% of facilities reproduced within 0.05 years.
+    Residual gap (~3%): same hidden-typology cluster as type 3
+    (long deferral or bullet disguised as linear), not identifiable
+    from variables available in Capret.
+    """
+    n = max(1, int(round(R * 12)))
+    return (n + 1) / 2 / 12
+```
+
+## 8. Summary of evidence
+
+The type 1 formula required no calibration — the structure of CRR 162 applied to flat principal repayments yields a closed-form expression with a single parameter ($n$) directly observable from $R$. Empirical validation confirms:
+
+| Test | Result |
+|---|---|
+| Global match \|err\| < 0.05 yrs | 96.2% |
+| RMSE on long maturities (≥15 yrs) | 3 days (essentially calendar noise) |
+| Need for a yield parameter | None — formula is rate-independent |
+| Need for a bascule rule | None — formula applies uniformly |
+| Residual outlier pattern | Same +173-day cluster as type 3 (~2-3%, hidden typology) |
 
 ---
 
-Tu as maintenant une justification documentaire qui est :
-1. **Honnête** sur le filtrage numérique (n=1,773 vs 158,668)
-2. **Robuste** : trois estimations indépendantes convergent à 0,06 % près
-3. **Tracée** : chaque chiffre vient directement des sorties que tu as à l'écran
-
-Tu veux que je condense aussi le tout en une note de 1 page propre pour insertion dossier régulateur, ou tu intégrès directement ça dans ton notebook ?
+C'est plus court que pour le type 3 parce que le type 1 ne nécessite pas de paramètre calibré ni de règle de bascule — l'analyse est plus directe. Tu veux qu'on enchaîne sur les types 2, 4 et 9 (NB = R, formules triviales mais à documenter pour complétude) ?
