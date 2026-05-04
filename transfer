@@ -12,7 +12,6 @@ sub_court = sub3.filter(
 R_arr  = sub_court["R"].to_numpy()
 NB_arr = sub_court["NB_MATURITE_IRBA"].to_numpy()
 
-# Prédiction avec yield 4,95 %
 def predict(R_arr, y=0.0495):
     r = y / 12
     n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
@@ -25,36 +24,63 @@ def predict(R_arr, y=0.0495):
     return preds
 
 pred = predict(R_arr)
-err = NB_arr - pred  # signe : positif si NB > pred, donc duration plus longue qu'attendu
+err_jours = (NB_arr - pred) * 365.25
 
-print(f"=== Tranche [1, 3[, n = {len(R_arr)} ===")
-print(f"Erreur moyenne   : {np.mean(err)*365.25:+.2f} jours")
-print(f"Erreur médiane   : {np.median(err)*365.25:+.2f} jours")
-print(f"Std erreur       : {np.std(err)*365.25:.2f} jours")
-print(f"% erreur > 0     : {(err > 0).mean()*100:.1f}%")
-print(f"% |err| < 0,01   : {(np.abs(err) < 0.01).mean()*100:.1f}%")
-print(f"% |err| < 0,05   : {(np.abs(err) < 0.05).mean()*100:.1f}%")
+# Isoler le cluster +173 jours
+sub_court = sub_court.with_columns(
+    err_jours = pl.Series(err_jours)
+)
+cluster_173 = sub_court.filter(
+    (pl.col("err_jours") > 160) & (pl.col("err_jours") < 185)
+)
+print(f"Cluster +173 jours : n = {cluster_173.height}")
 
-# Histogramme des résidus
-print(f"\nDistribution des erreurs (en jours) :")
-bins = [-365, -180, -60, -30, -10, 0, 10, 30, 60, 180, 365, 1000]
-err_jours = err * 365.25
-for lo, hi in zip(bins[:-1], bins[1:]):
-    mask = (err_jours >= lo) & (err_jours < hi)
-    if mask.sum() > 0:
-        print(f"  [{lo:>+5}, {hi:>+5}[ jours : {mask.sum():>6} ({mask.mean()*100:>5.1f}%)")
+# Population de référence : erreur "normale" (|err| < 10 jours)
+normal = sub_court.filter(pl.col("err_jours").abs() < 10)
+print(f"Population normale (<10j) : n = {normal.height}\n")
 
-# Top 15 erreurs positives (NB > pred : SRS donne plus long)
-print(f"\nTop 15 erreurs positives (NB > pred, NB plus long que prévu) :")
-idx_pos = np.argsort(-err)[:15]
-print(f"{'R':>8} {'NB':>8} {'pred':>8} {'err j':>10} {'NB/R':>8}")
-for i in idx_pos:
-    print(f"{R_arr[i]:>8.4f} {NB_arr[i]:>8.4f} {pred[i]:>8.4f} "
-          f"{err[i]*365.25:>+10.2f} {NB_arr[i]/R_arr[i]:>8.4f}")
+# Comparer toutes les colonnes catégorielles entre cluster et normal
+print("=== Comparaison cluster +173j vs normale ===")
+print(f"{'Colonne':<25} {'cluster top mod.':<25} {'normale top mod.':<25}")
+print("=" * 75)
+for c in sub_court.columns:
+    if c in ["R", "NB_MATURITE_IRBA", "err_jours", "T0",
+             "DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "DT_ARRT",
+             "pred_R", "pred_lineaire", "pred_prog_origine",
+             "pred_prog_residuel", "pred_prog_5pct"]:
+        continue
+    dt = sub_court.schema[c]
+    if dt in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32):
+        nu = sub_court[c].n_unique()
+        if nu > 30 or nu < 2: continue
+        top_c = cluster_173[c].mode()[0] if cluster_173.height > 0 else "—"
+        top_n = normal[c].mode()[0] if normal.height > 0 else "—"
+        # Pct dans le cluster
+        if cluster_173.height > 0:
+            pct_c = (cluster_173[c] == top_c).mean() * 100
+        else:
+            pct_c = 0
+        if normal.height > 0:
+            pct_n = (normal[c] == top_c).mean() * 100
+        else:
+            pct_n = 0
+        if pct_c > 80 and pct_c - pct_n > 30:
+            flag = " <<<"
+        else:
+            flag = ""
+        print(f"{c:<25} {str(top_c):<10} ({pct_c:>5.1f}%)  "
+              f"{str(top_n):<10} ({pct_n:>5.1f}%){flag}")
+    elif dt in (pl.Float64, pl.Float32):
+        moy_c = cluster_173[c].mean() if cluster_173.height > 0 else float('nan')
+        moy_n = normal[c].mean() if normal.height > 0 else float('nan')
+        std_n = normal[c].std() if normal.height > 0 else 1
+        if std_n is None or std_n == 0: continue
+        ecart_norm = abs(moy_c - moy_n) / std_n if std_n > 0 else 0
+        flag = " <<<" if ecart_norm > 1 else ""
+        print(f"{c:<25} moy={moy_c:>7.4f}        moy={moy_n:>7.4f}{flag}")
 
-# Top 15 erreurs négatives (NB < pred : SRS donne plus court)
-print(f"\nTop 15 erreurs négatives (NB < pred, NB plus court que prévu) :")
-idx_neg = np.argsort(err)[:15]
-for i in idx_neg:
-    print(f"{R_arr[i]:>8.4f} {NB_arr[i]:>8.4f} {pred[i]:>8.4f} "
-          f"{err[i]*365.25:>+10.2f} {NB_arr[i]/R_arr[i]:>8.4f}")
+# Et regarder DT_DEBUT_AUTO en différentiel
+print(f"\n--- T0 (maturité d'origine) ---")
+if "T0" in sub_court.columns:
+    print(f"  cluster +173j : T0 médian = {cluster_173['T0'].median():.4f}")
+    print(f"  normale       : T0 médian = {normal['T0'].median():.4f}")
