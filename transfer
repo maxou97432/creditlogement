@@ -1,34 +1,31 @@
-# ============================================================
-# 5. Discrimination test: contractual rate vs pivot rate
-# ============================================================
-# This test demonstrates empirically that SRS does NOT use the
-# per-line contractual rate T_INTRT to compute the maturity.
-#
-# Methodology:
-#   - For each facility, compute M using its actual contractual rate T_INTRT
-#   - For each facility, compute M using a single pivot yield y_pivot
-#   - Compare both predictions to the SRS reference NB_MATURITE_IRBA
-#   - The hypothesis with lower RMSE is the one SRS actually uses
-#
-# Expected outcome (documented finding):
-#   - RMSE with pivot yield (~0.085 yrs / 31 days) is much lower than
-#     RMSE with contractual rate (~0.337 yrs / 123 days), by a factor ~4x
-#   - This proves SRS uses a single internal pivot rate, not the
-#     facility-specific contractual rate
-# ============================================================
 def test_contractual_rate(df_calib: pl.DataFrame, y_pivot: float) -> dict:
     """
     Compare pivot yield performance against per-line contractual rate.
-
-    If RMSE_pivot < RMSE_contractual, we confirm SRS does NOT use T_INTRT
-    and instead uses a single hardcoded pivot rate.
-
-    Also runs a stratified comparison by R band to show that the contractual
-    rate underperforms across all maturity ranges (not just on average).
+    Numerically robust: filters out lines where high T_INTRT causes overflow.
     """
     R_arr  = df_calib["R"].to_numpy()
     NB_arr = df_calib["NB_MATURITE_IRBA"].to_numpy()
     Y_arr  = df_calib["T_INTRT"].to_numpy()
+
+    # Filter lines that would cause numerical overflow:
+    #   - missing or unreasonable contractual rates
+    #   - rates above ~30% with long maturities
+    # We keep only lines where (1+r)^(n-1) stays within float64 limits.
+    n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
+    safe_mask = (
+        np.isfinite(Y_arr)
+        & (Y_arr >= -0.01)
+        & (Y_arr <= 0.30)
+        & (n_arr * np.log1p(np.clip(Y_arr/12, -0.99, None)) < 100)  # exp argument bound
+    )
+    n_dropped = (~safe_mask).sum()
+    if n_dropped > 0:
+        print(f"  ({n_dropped:,} lines excluded for numerical safety: "
+              f"missing/extreme T_INTRT)")
+
+    R_arr  = R_arr[safe_mask]
+    NB_arr = NB_arr[safe_mask]
+    Y_arr  = Y_arr[safe_mask]
 
     # Predictions under both hypotheses
     pred_pivot       = predict_m_bale_progressif(R_arr, y_pivot)
@@ -43,16 +40,14 @@ def test_contractual_rate(df_calib: pl.DataFrame, y_pivot: float) -> dict:
     rmse_pivot       = np.sqrt(np.mean(err_pivot ** 2))
     rmse_contractual = np.sqrt(np.mean(err_contractual ** 2))
 
-    print(f"\n--- Global comparison ---")
+    print(f"\n--- Global comparison (n = {len(R_arr):,}) ---")
     print(f"  Hypothesis A (pivot yield {y_pivot*100:.4f}%):")
     print(f"    RMSE = {rmse_pivot:.5f} yrs ({rmse_pivot*365.25:.2f} days)")
     print(f"    MAE  = {np.mean(np.abs(err_pivot)):.5f} yrs")
-    print(f"    max|err| = {np.max(np.abs(err_pivot)):.5f} yrs")
     print(f"    %|err|<0.05 = {(np.abs(err_pivot)<0.05).mean()*100:.2f}%")
     print(f"  Hypothesis B (per-line T_INTRT contractual rate):")
     print(f"    RMSE = {rmse_contractual:.5f} yrs ({rmse_contractual*365.25:.2f} days)")
     print(f"    MAE  = {np.mean(np.abs(err_contractual)):.5f} yrs")
-    print(f"    max|err| = {np.max(np.abs(err_contractual)):.5f} yrs")
     print(f"    %|err|<0.05 = {(np.abs(err_contractual)<0.05).mean()*100:.2f}%")
 
     # Stratified comparison across R bands
@@ -77,22 +72,24 @@ def test_contractual_rate(df_calib: pl.DataFrame, y_pivot: float) -> dict:
             "ratio": ratio,
         })
 
-    # Implied yield analysis: invert the formula per line and check whether
-    # the implied yield correlates with T_INTRT. If not, T_INTRT is unused.
+    # Implied yield analysis: invert the formula per line, correlate with T_INTRT.
     from scipy.optimize import brentq
     print(f"\n--- Implied yield analysis (per-line inversion) ---")
+    sample_size = min(5000, len(R_arr))
     implied = []
-    for R, NB in zip(R_arr[:5000], NB_arr[:5000]):  # sample for speed
+    contractual_kept = []
+    for R, NB, y_contract in zip(R_arr[:sample_size], NB_arr[:sample_size], Y_arr[:sample_size]):
         try:
             g = lambda y: predict_m_bale_progressif(np.array([R]), y)[0] - NB
             if g(-0.20) * g(0.50) > 0:
                 continue
             y_impl = brentq(g, -0.20, 0.50, xtol=1e-7)
             implied.append(y_impl)
+            contractual_kept.append(y_contract)
         except Exception:
             continue
     implied = np.array(implied)
-    contractual_sample = Y_arr[:len(implied)]
+    contractual_sample = np.array(contractual_kept)
     if len(implied) > 100:
         corr = np.corrcoef(implied, contractual_sample)[0, 1]
         print(f"  Implied yield median: {np.median(implied)*100:.4f}%")
@@ -105,14 +102,24 @@ def test_contractual_rate(df_calib: pl.DataFrame, y_pivot: float) -> dict:
         else:
             print(f"  ===> Partial correlation: another factor at play.")
 
+    # Robust verdict (handles NaN safely)
+    if not np.isnan(rmse_contractual) and rmse_pivot < rmse_contractual:
+        verdict = (f"Pivot yield wins by a factor "
+                   f"{rmse_contractual/rmse_pivot:.1f}x — "
+                   f"SRS does NOT use T_INTRT")
+    elif not np.isnan(rmse_contractual):
+        verdict = "Contractual rate beats pivot — unexpected, investigate"
+    else:
+        verdict = "Contractual rate produced overflow — pivot is the only viable hypothesis"
+
     return {
         "rmse_pivot_yield_days"      : rmse_pivot * 365.25,
         "rmse_contractual_rate_days" : rmse_contractual * 365.25,
-        "ratio"                      : rmse_contractual / rmse_pivot,
+        "ratio"                      : (rmse_contractual / rmse_pivot
+                                        if rmse_pivot > 0 and not np.isnan(rmse_contractual)
+                                        else float('nan')),
         "stratified"                 : stratified,
         "implied_yield_median_pct"   : float(np.median(implied) * 100) if len(implied) > 0 else None,
         "correlation_with_T_INTRT"   : float(corr) if len(implied) > 100 else None,
-        "verdict"                    : ("Pivot yield beats contractual rate"
-                                        if rmse_pivot < rmse_contractual
-                                        else "Contractual rate is better"),
+        "verdict"                    : verdict,
     }
