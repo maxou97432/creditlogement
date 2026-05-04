@@ -1,103 +1,184 @@
-Voici la partie documentaire sur le type 1, en anglais et dans le même style que le reste.
+"""
+Empirical validation of the SRS type 1 (linear amortization) formula.
 
----
+This script is purely a posteriori — it is NOT part of the production
+calculation engine. Its sole purpose is to document and revalidate the
+formula M = (n+1) / 24 with n = round(R*12) used for CD_TYPE_AMORT = 1.
 
-# Methodology — Type 1 (Linear Amortization)
+Re-run periodically (e.g. each quarterly closing) to verify that the
+formula remains valid and to monitor the residual outlier cluster.
 
-## 1. Definition of the type
+Required DataFrame columns:
+  - DT_DEBUT_AUTO, DT_ECHEANCE_FEM (SAS days)
+  - CD_TYPE_AMORT (str or int) with value 1 = linear
+  - NB_MATURITE_IRBA (float) — SRS target to reproduce
+"""
 
-Type 1 corresponds to facilities with **constant principal repayments** (linear amortization). At each monthly payment date, the borrower repays a fixed fraction $1/n$ of the original principal, plus interest on the outstanding balance. This is the simplest amortization profile.
+import polars as pl
+import numpy as np
 
-## 2. Theoretical formula
+DT_ARRT = 23922   # 30/06/2025 in SAS days — adjust for other reporting dates
 
-For a linearly amortized facility with $n$ remaining monthly payments, principal repayments are constant: $P_k = P/n$ for all $k$. Applying CRR Article 162:
 
-$$M = \frac{1}{12} \cdot \frac{\sum_{k=1}^{n} k \cdot P_k}{\sum_{k=1}^{n} P_k} = \frac{1}{12} \cdot \frac{\sum_{k=1}^{n} k}{n} = \frac{1}{12} \cdot \frac{n(n+1)/2}{n} = \frac{n+1}{2 \cdot 12}$$
+# ============================================================
+# 1. Build the type 1 population
+# ============================================================
+def type1_population(df: pl.DataFrame) -> pl.DataFrame:
+    df = df.with_columns(
+        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False),
+        R             = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
+        T0            = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
+    )
+    return df.filter(
+        (pl.col("CD_TYPE_AMORT") == 1)
+        & pl.col("NB_MATURITE_IRBA").is_not_null()
+    )
 
-with $n = \text{round}(R \cdot 12)$.
 
-Two observations follow directly:
-
-- The formula is **independent of the interest rate** — unlike type 3, which requires a yield to reconstruct the geometric profile of principal repayments, the linear case has flat repayments by definition. No yield parameter is needed.
-- The formula is **purely deterministic** given $R$ — there is no calibration to perform.
-
-## 3. Empirical validation
-
-The formula was tested against `NB_MATURITE_IRBA` on the type 1 population in `srs_X_capret` (n = 6,969 facilities).
-
-| Metric | Value |
-|---|---|
-| RMSE | 23.5 days |
-| MAE | 6.9 days |
-| Mean bias | +6.0 days |
-| Median bias | +3.2 days |
-| % match \|err\| < 0.05 yrs | **96.21%** |
-| % match \|err\| < 0.01 yrs | 59.36% |
-| % \|err\| > 0.1 yrs | 2.44% |
-
-The formula reproduces 96% of the population to within 18 days. The small positive bias of ~6 days reflects calendar-day rounding (SRS uses actual payment dates, while the formula assumes evenly spaced months from the reporting date).
-
-## 4. Stability check across maturity bands
-
-| Band R | n | RMSE (days) | Mean bias (days) |
-|---|---|---|---|
-| [0, 1[ | 997 | 35.98 | +10.92 |
-| [1, 3[ | 1,636 | 22.52 | +5.75 |
-| [3, 5[ | 1,247 | 27.46 | +7.24 |
-| [5, 10[ | 1,199 | 21.71 | +5.32 |
-| [10, 15[ | 953 | 15.20 | +4.08 |
-| [15, 20[ | 581 | 3.35 | +2.48 |
-| [20, 30[ | 356 | 3.14 | +2.55 |
-
-RMSE decreases monotonically with maturity: 36 days on the shortest band, down to **3 days on long maturities (≥15 yrs)**. This confirms the formula is structurally exact — the residual error is purely a discretization and calendar effect that diminishes when $n$ is large.
-
-## 5. No bascule rule for type 1
-
-Unlike type 3, where short facilities (R ≤ 1) systematically fall back to NB = R, the type 1 population does not exhibit this behavior. On the 997 facilities with R ≤ 1, only 19.0% bascule (i.e. NB ≈ R), the remainder following the linear formula. The formula is therefore applied **without override** for type 1.
-
-## 6. Residual outlier cluster
-
-The error distribution on type 1 reveals a small cluster (~2.2%, 153 facilities) with errors centered on **+173 days** — exactly the same offset observed on the progressive (type 3) population. The same characteristics apply:
-
-- Concentrated in `Type_Credit = "Crédits d'investissement"`
-- Older facilities with longer T0
-- NB / R ratio close to 0.77, suggesting a near-bullet repayment profile
-
-These facilities likely correspond to investment loans with long deferral periods or hidden bullet amortization, mis-flagged as `CD_TYPE_AMORT = 1` because the contractual schedule has flat repayments after the deferral. Identifying this sub-population would require a product-typology variable that is not available in `srs_X_capret`. As for type 3, this gap is documented as a known limitation.
-
-## 7. Production formula
-
-```python
-def m_srs_type1(R: float) -> float:
+# ============================================================
+# 2. Closed-form linear formula (CRR 162 with flat principal)
+# ============================================================
+def predict_m_linear(R_arr: np.ndarray) -> np.ndarray:
     """
-    Reproduces NB_MATURITE_IRBA for CD_TYPE_AMORT = 1 (linear amortization).
-
-    Direct application of CRR 162 to flat principal repayments:
-        M = (n + 1) / (2 * 12)   with n = round(R * 12), n >= 1
-
-    Independent of T_INTRT, CD_PORT_PRUDENTIEL, segment_trg.
-
-    Measured coverage: 96.2% of facilities reproduced within 0.05 years.
-    Residual gap (~3%): same hidden-typology cluster as type 3
-    (long deferral or bullet disguised as linear), not identifiable
-    from variables available in Capret.
+    Computes M = (n+1) / (2*12) with n = round(R*12), n >= 1.
+    No yield parameter, no calibration: structurally exact for flat
+    principal repayments.
     """
-    n = max(1, int(round(R * 12)))
-    return (n + 1) / 2 / 12
-```
+    n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
+    return (n_arr + 1) / 2 / 12
 
-## 8. Summary of evidence
 
-The type 1 formula required no calibration — the structure of CRR 162 applied to flat principal repayments yields a closed-form expression with a single parameter ($n$) directly observable from $R$. Empirical validation confirms:
+# ============================================================
+# 3. Global validation
+# ============================================================
+def validate_linear_formula(df_type1: pl.DataFrame) -> dict:
+    """
+    Compare the predicted M to the SRS reference NB_MATURITE_IRBA
+    on the entire type 1 population. Returns global quality metrics.
+    """
+    R_arr  = df_type1["R"].to_numpy()
+    NB_arr = df_type1["NB_MATURITE_IRBA"].to_numpy()
+    pred   = predict_m_linear(R_arr)
+    err    = pred - NB_arr
 
-| Test | Result |
-|---|---|
-| Global match \|err\| < 0.05 yrs | 96.2% |
-| RMSE on long maturities (≥15 yrs) | 3 days (essentially calendar noise) |
-| Need for a yield parameter | None — formula is rate-independent |
-| Need for a bascule rule | None — formula applies uniformly |
-| Residual outlier pattern | Same +173-day cluster as type 3 (~2-3%, hidden typology) |
+    return {
+        "n_observations"     : len(R_arr),
+        "rmse_yrs"           : float(np.sqrt(np.mean(err**2))),
+        "rmse_days"          : float(np.sqrt(np.mean(err**2)) * 365.25),
+        "mae_days"           : float(np.mean(np.abs(err)) * 365.25),
+        "mean_bias_days"     : float(np.mean(err) * 365.25),
+        "median_bias_days"   : float(np.median(err) * 365.25),
+        "pct_match_below_005": float((np.abs(err) < 0.05).mean() * 100),
+        "pct_match_below_001": float((np.abs(err) < 0.01).mean() * 100),
+        "pct_above_01"       : float((np.abs(err) > 0.10).mean() * 100),
+    }
 
----
 
-C'est plus court que pour le type 3 parce que le type 1 ne nécessite pas de paramètre calibré ni de règle de bascule — l'analyse est plus directe. Tu veux qu'on enchaîne sur les types 2, 4 et 9 (NB = R, formules triviales mais à documenter pour complétude) ?
+# ============================================================
+# 4. Stability check across maturity bands
+# ============================================================
+def stability_by_band(df_type1: pl.DataFrame) -> pl.DataFrame:
+    """
+    Compute RMSE and bias on each R band. We expect RMSE to decrease
+    with maturity, confirming that errors are pure discretization noise.
+    """
+    R_arr  = df_type1["R"].to_numpy()
+    NB_arr = df_type1["NB_MATURITE_IRBA"].to_numpy()
+    pred   = predict_m_linear(R_arr)
+    err    = pred - NB_arr
+
+    bands = [(0, 1), (1, 3), (3, 5), (5, 10), (10, 15), (15, 20), (20, 30)]
+    rows = []
+    for lo, hi in bands:
+        mask = (R_arr >= lo) & (R_arr < hi)
+        if mask.sum() < 30:
+            continue
+        e = err[mask] * 365.25
+        rows.append({
+            "R_band"        : f"[{lo}, {hi}[",
+            "n"             : int(mask.sum()),
+            "rmse_days"     : float(np.sqrt(np.mean(e**2))),
+            "mean_bias_days": float(np.mean(e)),
+        })
+    return pl.DataFrame(rows)
+
+
+# ============================================================
+# 5. Test for a R<=1 bascule rule (as observed for type 3)
+# ============================================================
+def test_bascule_rule(df_type1: pl.DataFrame) -> pl.DataFrame:
+    """
+    For type 3, short facilities (R <= 1) systematically fall back
+    to NB = R. We verify this rule does NOT apply to type 1, which
+    follows the linear formula uniformly.
+    """
+    df = df_type1.with_columns(
+        is_bascule = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01,
+        R_bin      = pl.when(pl.col("R") <= 1.0)
+                       .then(pl.lit("R<=1"))
+                       .otherwise(pl.lit("R>1")),
+    )
+    return df.group_by("R_bin").agg(
+        n           = pl.len(),
+        pct_bascule = pl.col("is_bascule").mean() * 100,
+    ).sort("R_bin")
+
+
+# ============================================================
+# 6. Error distribution and outlier inspection
+# ============================================================
+def error_distribution(df_type1: pl.DataFrame) -> None:
+    """
+    Histogram of error in days. We look for:
+      - A central mass within ±10 days (calendar noise)
+      - A possible outlier cluster (e.g. ~+173 days, same as type 3)
+    """
+    R_arr  = df_type1["R"].to_numpy()
+    NB_arr = df_type1["NB_MATURITE_IRBA"].to_numpy()
+    pred   = predict_m_linear(R_arr)
+    err_j  = (pred - NB_arr) * 365.25
+
+    print(f"\n--- Error distribution (in days) ---")
+    bins = [-365, -180, -60, -30, -10, 0, 10, 30, 60, 180, 365, 1000]
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (err_j >= lo) & (err_j < hi)
+        if mask.sum() > 0:
+            print(f"  [{lo:>+5}, {hi:>+5}[ : {mask.sum():>6,} ({mask.mean()*100:>5.2f}%)")
+
+
+# ============================================================
+# 7. Full pipeline
+# ============================================================
+def full_validation(df: pl.DataFrame) -> dict:
+    """Run all steps and print the full validation report."""
+    df_type1 = type1_population(df)
+    print(f"Type 1 population: n = {df_type1.height:,}")
+
+    print("\n=== 1. Global validation ===")
+    report = validate_linear_formula(df_type1)
+    for k, v in report.items():
+        if isinstance(v, float):
+            print(f"  {k:<22} = {v:>10.4f}")
+        else:
+            print(f"  {k:<22} = {v}")
+
+    print("\n=== 2. Stability across R bands ===")
+    print(stability_by_band(df_type1))
+
+    print("\n=== 3. Bascule rule R<=1 (should NOT apply to type 1) ===")
+    print(test_bascule_rule(df_type1))
+
+    error_distribution(df_type1)
+
+    return report
+
+
+# ============================================================
+# Run
+# ============================================================
+if __name__ == "__main__":
+    # df = pl.read_parquet("srs_X_capret.parquet")
+    df = ...   # <-- your DataFrame
+    report = full_validation(df)
+    print(f"\n>>> Type 1 validation: "
+          f"{report['pct_match_below_005']:.1f}% match within 0.05 years")
