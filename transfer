@@ -1,10 +1,14 @@
-The CRR Article 162(2)(a) defines effective maturity as a weighted average of payment dates by total cash flows (principal + interest):
-MCRR=∑tt⋅CFt∑tCFtwith CFt=Pt+ItM_{\text{CRR}} = \frac{\sum_t t \cdot CF_t}{\sum_t CF_t} \quad \text{with } CF_t = P_t + I_tMCRR​=∑t​CFt​∑t​t⋅CFt​​with CFt​=Pt​+It​
-For a constant annuity (type 3), total cash flows are identical at each period (CFt=ACF_t = A
-CFt​=A), and the formula degenerates to M=(N+1)/2M = (N+1)/2
-M=(N+1)/2, independent of the interest rate.
-However, empirical analysis on 158,668 progressive facilities reveals that SRS applies a different convention: the weighting is performed on principal repayments only, not total cash flows:
-MSRS=∑tt⋅Pt∑tPtM_{\text{SRS}} = \frac{\sum_t t \cdot P_t}{\sum_t P_t}MSRS​=∑t​Pt​∑t​t⋅Pt​​
-For a constant annuity, Pt∝(1+r)t−1P_t \propto (1+r)^{t-1}
-Pt​∝(1+r)t−1, so this convention does depend on the interest rate rr
-r. This is what justifies the calibration of a pivot yield in the next sections.
+
+
+The CRR Article 162(2)(a) defines effective maturity as a weighted average of payment dates by **total cash flows** (principal + interest):
+
+$$M_{\text{CRR}} = \frac{\sum_t t \cdot CF_t}{\sum_t CF_t} \quad \text{with } CF_t = P_t + I_t$$
+
+For a constant annuity (type 3), total cash flows are identical at each period ($CF_t = A$), and the formula degenerates to $M = (N+1)/2$, **independent of the interest rate**.
+
+However, empirical analysis on 158,668 progressive facilities reveals that SRS applies a **different convention**: the weighting is performed on **principal repayments only**, not total cash flows:
+
+$$M_{\text{SRS}} = \frac{\sum_t t \cdot P_t}{\sum_t P_t}$$
+
+For a constant annuity, $P_t \propto (1+r)^{t-1}$, so this convention does depend on the interest rate $r$. This is what justifies the calibration of a pivot yield in the next sections.
+
