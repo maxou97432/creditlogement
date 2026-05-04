@@ -1,70 +1,36 @@
-Voici la version mise à jour avec les chiffres réels du run :
+# Pour les facilités type 3 propres, comparer 3 formules :
+import numpy as np
 
----
+sub = df_avec_pred.filter(
+    (pl.col("CD_TYPE_AMORT") == 3)
+    & (pl.col("R") > 1.0)
+    & (~pl.col("FACTOR").str.contains(r"\[1\.71\]"))
+    & (~pl.col("segment_trg").is_in([44, 73, 74]))
+)
+R_arr  = sub["R"].to_numpy()
+NB_arr = sub["NB_MATURITE_IRBA"].to_numpy()
 
-## 3. Empirical validation
+# H1 : formule CRR pure (principal+intérêt) pour annuité constante => (n+1)/24
+n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
+pred_crr = (n_arr + 1) / 2 / 12
 
-The formula was tested against `NB_MATURITE_IRBA` on the type 1 population in `srs_X_capret` (n = 7,042 facilities).
+# H2 : ma formule "principal seul" calibrée à 4.95%
+def predict_principal_seul(R_arr, y=0.0495):
+    r = y / 12
+    n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
+    preds = np.empty_like(R_arr, dtype=float)
+    for n_unique in np.unique(n_arr):
+        mask = n_arr == n_unique
+        k = np.arange(1, n_unique + 1)
+        w = (1 + r) ** (k - 1)
+        preds[mask] = np.sum(k * w) / np.sum(w) / 12
+    return preds
+pred_principal = predict_principal_seul(R_arr)
 
-| Metric | Value |
-|---|---|
-| RMSE | 29.2 days |
-| MAE | 8.6 days |
-| Mean bias | −7.7 days |
-| Median bias | −3.2 days |
-| % match \|err\| < 0.05 yrs | 95.21% |
-| % match \|err\| < 0.1 yrs | **96.55%** |
-| % \|err\| > 0.1 yrs | 3.45% |
-
-The formula reproduces 95% of the population within 18 days. The small **negative** bias of ~8 days reflects calendar-day rounding: SRS uses actual payment dates, while the formula assumes evenly spaced months from the reporting date. The bias direction is opposite to the type 3 case because the linear amortization profile front-loads more weight on early payments than the geometric profile of constant annuities.
-
-## 4. Stability check across maturity bands
-
-| Band R | n | RMSE (days) | Mean bias (days) |
-|---|---|---|---|
-| [0, 1[ | 997 | 35.98 | −10.92 |
-| [1, 3[ | 1,709 | 41.66 | −12.81 |
-| [3, 5[ | 1,247 | 27.46 | −7.24 |
-| [5, 10[ | 1,199 | 21.71 | −5.32 |
-| [10, 15[ | 953 | 15.20 | −4.08 |
-| [15, 20[ | 581 | 3.35 | −2.48 |
-| [20, 30[ | 356 | 3.14 | −2.55 |
-
-RMSE decreases monotonically with maturity above the [1, 3[ band: 42 days on the [1, 3[ band, down to **~3 days on long maturities (≥15 yrs)**. The convergence to ~3 days on long maturities confirms the formula is structurally exact — the residual error on shorter bands is a discretization and calendar effect that diminishes when $n$ is large.
-
-The slight RMSE increase between [0, 1[ and [1, 3[ (36 → 42 days) reflects the contribution of the residual outlier cluster (see section 6), which is concentrated on short-to-medium maturities.
-
-## 5. No bascule rule for type 1
-
-Unlike type 3, where short facilities (R ≤ 1) systematically fall back to NB = R, the type 1 population does not exhibit this behavior. On the 997 facilities with R ≤ 1, only **19.0% bascule** (i.e. NB ≈ R); the remainder follows the linear formula. The formula is therefore applied **without override** for type 1.
-
-## 6. Residual outlier cluster
-
-The error distribution on type 1 reveals a small cluster (~3.2%, 226 facilities) with errors centered on **−180 to −60 days** — the same hidden-typology offset observed on the progressive (type 3) population. Distribution of errors in days:
-
-| Bin (days) | n | % |
-|---|---|---|
-| [−180, −60[ | 226 | **3.21%** |
-| [−60, −30[ | 43 | 0.61% |
-| [−30, −10[ | 9 | 0.13% |
-| [−10, 0[ | 6,368 | **90.43%** |
-| [0, +10[ | 331 | 4.70% |
-| [+10, +30[ | 65 | 0.92% |
-
-90.4% of errors are within ±10 days — pure calendar noise. The 3.2% cluster on the negative tail corresponds to facilities where SRS reports a maturity **shorter** than the linear formula predicts. Cross-referencing with the type 3 analysis, these facilities share the same characteristics:
-
-- Concentrated in `Type_Credit = "Crédits d'investissement"`
-- Older facilities with longer T0
-- Repayment profile inconsistent with a flat linear amortization
-
-These facilities likely correspond to investment loans whose contractual schedule has been mis-flagged as `CD_TYPE_AMORT = 1`, but whose effective principal repayment differs from a true linear profile (e.g. front-loaded amortization, scheduled balloon adjustments). Identifying this sub-population would require a product-typology variable that is not available in `srs_X_capret`. As for type 3, this gap is documented as a known limitation.
-
----
-
-## Note sur le sens du biais
-
-Petit point important pour ta documentation : le run actuel donne un biais **négatif** (−7,7 jours en moyenne, −3 jours médian), alors que le run précédent donnait un biais positif (+6 jours). Et le cluster d'outliers est maintenant côté négatif (−180 à −60 jours) au lieu de positif (+173 jours).
-
-Cela signifie probablement que le signe du calcul d'erreur dans le code a été inversé (`pred - NB` vs `NB - pred`) entre les deux runs. C'est cohérent : le RMSE et le MAE sont les mêmes, seul le signe du biais et la direction du cluster changent. Le diagnostic sous-jacent reste identique : ~3 % des facilités s'écartent de la formule linéaire d'environ 173 jours en valeur absolue, dans la même direction que le cluster type 3.
-
-Si tu veux que la documentation soit cohérente avec le précédent run (cluster en +173 jours pour les deux types), il faudrait juste vérifier la convention de signe dans `predict_m_linear`. Sinon, ce n'est qu'une question de présentation et la version ci-dessus est correcte avec le run actuel.
+# Comparaison
+for name, pred in [("CRR pure (n+1)/24", pred_crr),
+                   ("Principal seul y=4.95%", pred_principal)]:
+    err = pred - NB_arr
+    rmse = np.sqrt(np.mean(err**2)) * 365.25
+    pct = (np.abs(err) < 0.05).mean() * 100
+    print(f"{name:<28} RMSE = {rmse:>6.2f} jours    %<0.05 = {pct:.2f}%")
