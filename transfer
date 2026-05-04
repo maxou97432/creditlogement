@@ -1,61 +1,103 @@
 import numpy as np
 import polars as pl
 
-DT_ARRT = 23922          # 30/06/2025 en jours SAS — à ajuster pour autres dates d'arrêté
-YIELD_PIVOT_SRS = 0.0495 # Yield pivot calibré sur 158 668 facilités progressives propres
+# ============================================================
+# 1. Application de la formule consolidée sur tout le DF
+# ============================================================
+df_final = calcul_maturite_irba(df)   # ta fonction renvoie maintenant
+                                       # NB_MATURITE_RECALCULE / NB_DURATION_RECALCULE
 
+# Vérification des colonnes attendues
+print("Colonnes de validation présentes :")
+for c in ["NB_MATURITE_IRBA", "NB_MATURITE_RECALCULE",
+          "NB_DURATION_IRBA", "NB_DURATION_RECALCULE",
+          "CD_TYPE_AMORT"]:
+    print(f"  {c:<28} {'✓' if c in df_final.columns else '✗ MANQUANTE'}")
 
-def m_srs_type1(R: float) -> float:
-    """Linéaire — CD_TYPE_AMORT = 1."""
-    n = max(1, int(round(R * 12)))
-    return (n + 1) / 2 / 12
+# ============================================================
+# 2. Calcul des écarts
+# ============================================================
+df_final = df_final.with_columns(
+    err_maturite = pl.col("NB_MATURITE_RECALCULE") - pl.col("NB_MATURITE_IRBA"),
+    err_duration = pl.col("NB_DURATION_RECALCULE") - pl.col("NB_DURATION_IRBA"),
+).with_columns(
+    abs_err_maturite = pl.col("err_maturite").abs(),
+    abs_err_duration = pl.col("err_duration").abs(),
+)
 
+# ============================================================
+# 3. Stats globales
+# ============================================================
+def stats_global(df, col_err, label):
+    err = df[col_err].drop_nulls().to_numpy()
+    abs_err = np.abs(err)
+    print(f"\n=== {label} (n = {len(err):,}) ===")
+    print(f"  RMSE          : {np.sqrt(np.mean(err**2)):.5f} ans  ({np.sqrt(np.mean(err**2))*365.25:.2f} jours)")
+    print(f"  MAE           : {np.mean(abs_err):.5f} ans  ({np.mean(abs_err)*365.25:.2f} jours)")
+    print(f"  Erreur moy    : {np.mean(err):+.5f} ans  ({np.mean(err)*365.25:+.2f} jours)")
+    print(f"  Erreur médian : {np.median(err):+.5f} ans  ({np.median(err)*365.25:+.2f} jours)")
+    print(f"  max|err|      : {np.max(abs_err):.5f} ans")
+    print(f"  % |err| < 0,001 (≈match parfait) : {(abs_err < 0.001).mean()*100:>6.2f}%")
+    print(f"  % |err| < 0,01                   : {(abs_err < 0.01).mean()*100:>6.2f}%")
+    print(f"  % |err| < 0,05                   : {(abs_err < 0.05).mean()*100:>6.2f}%")
+    print(f"  % |err| < 0,1                    : {(abs_err < 0.1).mean()*100:>6.2f}%")
+    print(f"  % |err| > 0,5                    : {(abs_err > 0.5).mean()*100:>6.2f}%")
 
-def m_srs_type3(R: float, has_171: bool, seg_special: bool,
-                y: float = YIELD_PIVOT_SRS) -> float:
-    """Progressif — CD_TYPE_AMORT = 3."""
-    if has_171 or seg_special or R <= 1.0:
-        return R
-    n = max(1, int(round(R * 12)))
-    r = y / 12
-    k = np.arange(1, n + 1)
-    w = (1 + r) ** (k - 1)
-    return float(np.sum(k * w) / np.sum(w)) / 12
+stats_global(df_final, "err_maturite", "MATURITÉ globale")
+stats_global(df_final, "err_duration", "DURATION globale (clip[1,5])")
 
+# ============================================================
+# 4. Stats par CD_TYPE_AMORT
+# ============================================================
+print("\n\n=== Performance par CD_TYPE_AMORT ===")
+recap = df_final.group_by("CD_TYPE_AMORT").agg(
+    n              = pl.len(),
+    rmse_maturite  = (pl.col("err_maturite") ** 2).mean().sqrt(),
+    mae_maturite   = pl.col("abs_err_maturite").mean(),
+    pct_match_001  = (pl.col("abs_err_maturite") < 0.001).mean() * 100,
+    pct_match_005  = (pl.col("abs_err_maturite") < 0.05).mean()  * 100,
+    pct_gros_ecart = (pl.col("abs_err_maturite") > 0.5).mean()   * 100,
+).sort("CD_TYPE_AMORT")
+print(recap)
 
-def calcul_maturite_irba(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Calcul vectorisé de NB_MATURITE_IRBA et NB_DURATION_IRBA sur tout un DataFrame.
-    
-    Inputs requis : DT_ECHEANCE_FEM, DT_DEBUT_AUTO, T_INTRT,
-                    CD_TYPE_AMORT (str), FACTOR (str), segment_trg (int),
-                    CD_PORT_PRUDENTIEL (str)
-    """
-    df = df.with_columns(
-        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").str.strip_chars().cast(pl.Int64, strict=False),
-        R  = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
-        T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
-        has_171     = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
-        seg_special = pl.col("segment_trg").is_in([44, 73, 74]),
-    )
-    
-    R_arr   = df["R"].to_numpy()
-    type_a  = df["CD_TYPE_AMORT"].to_numpy()
-    h171    = df["has_171"].to_numpy()
-    sspec   = df["seg_special"].to_numpy()
-    
-    nb = np.empty_like(R_arr)
-    for i, (R, t, h, s) in enumerate(zip(R_arr, type_a, h171, sspec)):
-        if t in (2, 4, 9):
-            nb[i] = R
-        elif t == 1:
-            nb[i] = m_srs_type1(R)
-        elif t == 3:
-            nb[i] = m_srs_type3(R, h, s)
-        else:
-            nb[i] = R
-    
-    return df.with_columns(
-        NB_MATURITE_IRBA = pl.Series(nb),
-        NB_DURATION_IRBA = pl.Series(np.clip(nb, 1.0, 5.0)),
-    )
+# ============================================================
+# 5. Cohérence DURATION = clip(MATURITE, 1, 5)
+# ============================================================
+print("\n=== Vérification : DURATION_IRBA = clip(MATURITE_IRBA, 1, 5) sur SRS ===")
+df_check = df_final.with_columns(
+    duration_attendue_srs = pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0),
+    diff_clip = (pl.col("NB_DURATION_IRBA") - pl.col("NB_MATURITE_IRBA").clip(1.0, 5.0)).abs(),
+)
+n_violations = df_check.filter(pl.col("diff_clip") > 0.001).height
+print(f"  Lignes où NB_DURATION_IRBA ≠ clip(NB_MATURITE_IRBA, 1, 5) : {n_violations}")
+if n_violations > 0:
+    print("  ⚠️ La règle clip[1,5] n'est pas universelle dans SRS — à investiguer.")
+
+# ============================================================
+# 6. Top 20 outliers résiduels
+# ============================================================
+print("\n=== Top 20 outliers (matrice |err| sur MATURITE) ===")
+top = df_final.sort("abs_err_maturite", descending=True).head(20)
+print(top.select([
+    "CD_TYPE_AMORT", "R", "T0", "T_INTRT",
+    "NB_MATURITE_IRBA", "NB_MATURITE_RECALCULE", "err_maturite",
+    "CD_PORT_PRUDENTIEL", "FACTOR",
+]))
+
+# ============================================================
+# 7. Distribution des écarts en jours
+# ============================================================
+print("\n=== Distribution des écarts (en jours) ===")
+err_j = (df_final["err_maturite"] * 365.25).to_numpy()
+bins = [-365, -180, -60, -30, -10, -1, 1, 10, 30, 60, 180, 365, 10000]
+n_total = len(err_j)
+for lo, hi in zip(bins[:-1], bins[1:]):
+    m = (err_j >= lo) & (err_j < hi)
+    if m.sum() > 0:
+        print(f"  [{lo:>+5}, {hi:>+5}[ jours : {m.sum():>8,} ({m.mean()*100:>5.2f}%)")
+
+# ============================================================
+# 8. Sauvegarde optionnelle
+# ============================================================
+# df_final.write_parquet("srs_X_capret_avec_recalcul.parquet")
+print("\n=> Validation terminée. df_final contient les colonnes recalculées + erreurs.")
