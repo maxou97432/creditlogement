@@ -1,36 +1,10 @@
-# Pour les facilités type 3 propres, comparer 3 formules :
-import numpy as np
-
-sub = df_avec_pred.filter(
-    (pl.col("CD_TYPE_AMORT") == 3)
-    & (pl.col("R") > 1.0)
-    & (~pl.col("FACTOR").str.contains(r"\[1\.71\]"))
-    & (~pl.col("segment_trg").is_in([44, 73, 74]))
-)
-R_arr  = sub["R"].to_numpy()
-NB_arr = sub["NB_MATURITE_IRBA"].to_numpy()
-
-# H1 : formule CRR pure (principal+intérêt) pour annuité constante => (n+1)/24
-n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
-pred_crr = (n_arr + 1) / 2 / 12
-
-# H2 : ma formule "principal seul" calibrée à 4.95%
-def predict_principal_seul(R_arr, y=0.0495):
-    r = y / 12
-    n_arr = np.maximum(1, np.round(R_arr * 12).astype(int))
-    preds = np.empty_like(R_arr, dtype=float)
-    for n_unique in np.unique(n_arr):
-        mask = n_arr == n_unique
-        k = np.arange(1, n_unique + 1)
-        w = (1 + r) ** (k - 1)
-        preds[mask] = np.sum(k * w) / np.sum(w) / 12
-    return preds
-pred_principal = predict_principal_seul(R_arr)
-
-# Comparaison
-for name, pred in [("CRR pure (n+1)/24", pred_crr),
-                   ("Principal seul y=4.95%", pred_principal)]:
-    err = pred - NB_arr
-    rmse = np.sqrt(np.mean(err**2)) * 365.25
-    pct = (np.abs(err) < 0.05).mean() * 100
-    print(f"{name:<28} RMSE = {rmse:>6.2f} jours    %<0.05 = {pct:.2f}%")
+The CRR Article 162(2)(a) defines effective maturity as a weighted average of payment dates by total cash flows (principal + interest):
+MCRR=∑tt⋅CFt∑tCFtwith CFt=Pt+ItM_{\text{CRR}} = \frac{\sum_t t \cdot CF_t}{\sum_t CF_t} \quad \text{with } CF_t = P_t + I_tMCRR​=∑t​CFt​∑t​t⋅CFt​​with CFt​=Pt​+It​
+For a constant annuity (type 3), total cash flows are identical at each period (CFt=ACF_t = A
+CFt​=A), and the formula degenerates to M=(N+1)/2M = (N+1)/2
+M=(N+1)/2, independent of the interest rate.
+However, empirical analysis on 158,668 progressive facilities reveals that SRS applies a different convention: the weighting is performed on principal repayments only, not total cash flows:
+MSRS=∑tt⋅Pt∑tPtM_{\text{SRS}} = \frac{\sum_t t \cdot P_t}{\sum_t P_t}MSRS​=∑t​Pt​∑t​t⋅Pt​​
+For a constant annuity, Pt∝(1+r)t−1P_t \propto (1+r)^{t-1}
+Pt​∝(1+r)t−1, so this convention does depend on the interest rate rr
+r. This is what justifies the calibration of a pivot yield in the next sections.
