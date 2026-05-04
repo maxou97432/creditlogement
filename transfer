@@ -1,133 +1,74 @@
-# Methodology — Justification of YIELD_PIVOT_SRS
+import polars as pl
 
-## 1. Starting point — CRR Article 162
+# =====================================================================
+# 1. PARAMÉTRAGE DES COLONNES (À ADAPTER SELON TA BASE)
+# =====================================================================
+# Colonnes issues de ton pipeline Polars/Capret
+COL_PD_CAPRET  = "tx_edf"              # ou PD_new_ndod_moc selon le cas
+COL_LGD_CAPRET = "tx_lgd"              # ou LGD_new_ndod_moc
+COL_EAD_CAPRET = "MT_EAD_FLOOR"        # ou ead_calcule
 
-CRR Article 162(2)(a) defines the effective maturity $M$ of a credit facility as a weighted average of payment dates, where the weights are the contractual cash flows:
+# Colonnes historiques issues de SRS (legacy)
+COL_PD_SRS  = "PD_IRBA"                # Remplacer par le vrai nom
+COL_LGD_SRS = "LGD_IRBA"               # Remplacer par le vrai nom
+COL_EAD_SRS = "EAD_IRBA"               # Remplacer par le vrai nom
 
-$$M = \frac{\sum_{t=1}^{N} t \cdot CF_t}{\sum_{t=1}^{N} CF_t}$$
+SEUIL_TOLERANCE = 0.0001               # Tolérance pour les arrondis (10^-4)
 
-where $CF_t$ denotes the cash flows contractually payable by the obligor in period $t$ (principal, interest payments and fees), and $N$ is the total number of remaining payment periods. The result is then capped between 1 and 5 years.
+# =====================================================================
+# 2. CALCUL DES ÉCARTS ABSOLUS
+# =====================================================================
+diag_df = srs_X_capret.with_columns([
+    (pl.col(COL_PD_CAPRET) - pl.col(COL_PD_SRS)).abs().alias("Ecart_PD"),
+    (pl.col(COL_LGD_CAPRET) - pl.col(COL_LGD_SRS)).abs().alias("Ecart_LGD"),
+    (pl.col(COL_EAD_CAPRET) - pl.col(COL_EAD_SRS)).abs().alias("Ecart_EAD")
+]).with_columns([
+    (pl.col("Ecart_PD") > SEUIL_TOLERANCE).alias("Alerte_PD"),
+    (pl.col("Ecart_LGD") > SEUIL_TOLERANCE).alias("Alerte_LGD"),
+    (pl.col("Ecart_EAD") > 1.0).alias("Alerte_EAD")  # Tolérance de 1€ pour l'EAD
+])
 
-## 2. Specialization to type 3 (constant annuity)
+# =====================================================================
+# 3. SYNTHÈSE DES ANOMALIES
+# =====================================================================
+print("=== BILAN DE LA PARITÉ PD / LGD / EAD ===")
+total_lignes = diag_df.height
+print(f"Nombre total de lignes : {total_lignes:,}")
 
-For a type 3 facility, the obligor pays a **constant monthly amount** $A$ at each period. This amount is split between principal and interest, but their sum is constant by definition:
+pd_diff = diag_df.filter(pl.col("Alerte_PD")).height
+lgd_diff = diag_df.filter(pl.col("Alerte_LGD")).height
+ead_diff = diag_df.filter(pl.col("Alerte_EAD")).height
 
-$$P_t + I_t = A \quad \forall t \in \{1, \ldots, N\}$$
+print(f"❌ Écarts sur la PD  : {pd_diff:,} lignes ({(pd_diff/total_lignes)*100:.2f}%)")
+print(f"❌ Écarts sur la LGD : {lgd_diff:,} lignes ({(lgd_diff/total_lignes)*100:.2f}%)")
+print(f"❌ Écarts sur l'EAD  : {ead_diff:,} lignes ({(ead_diff/total_lignes)*100:.2f}%)")
 
-The interest component $I_t = C_{t-1} \cdot r$ depends on the outstanding capital, which decreases over time. Consequently, $I_t$ decreases and $P_t$ increases monotonically with $t$ — but their sum remains $A$.
+# =====================================================================
+# 4. ZOOM SUR LE PREMIER PROBLÈME TROUVÉ (EXEMPLE : LGD)
+# =====================================================================
+if lgd_diff > 0:
+    print("\n--- Zoom sur les écarts LGD ---")
+    print(
+        diag_df.filter(pl.col("Alerte_LGD"))
+        .select(["I_AUTRS_UNIQ", "cd_portfolio", COL_LGD_CAPRET, COL_LGD_SRS, "Ecart_LGD"])
+        .sort("Ecart_LGD", descending=True)
+        .head(5)
+    )
 
-In SRS, the weighting is applied to **principal repayments only**, not to total cash flows. The maturity formula therefore reads:
-
-$$M = \frac{1}{12} \cdot \frac{\sum_{t=1}^{n} t \cdot P_t}{\sum_{t=1}^{n} P_t}$$
-
-with $n = \text{round}(R \cdot 12)$ the number of remaining monthly payments and $R$ the residual maturity in years. The factor $1/12$ converts the result from months to years.
-
-## 3. Reconstructing the principal profile
-
-To evaluate this formula, we need the explicit shape of $P_t$. For a constant annuity loan of initial capital $C_0$ amortized over $n$ periods at periodic rate $r$, the standard annuity formula gives:
-
-$$A = C_0 \cdot \frac{r}{1 - (1+r)^{-n}}$$
-
-The outstanding capital at the end of period $t$ is:
-
-$$C_t = C_0 \cdot \frac{1 - (1+r)^{-(n-t)}}{1 - (1+r)^{-n}}$$
-
-The principal repayment at period $t$ is the difference $P_t = C_{t-1} - C_t$. After simplification:
-
-$$P_t = C_0 \cdot \frac{r \cdot (1+r)^{-(n-t+1)}}{1 - (1+r)^{-n}}$$
-
-The denominator and the constants $C_0, r$ do not depend on $t$, so we can write:
-
-$$P_t \propto (1+r)^{t-1}$$
-
-The principal repayments grow geometrically with ratio $(1+r)$. This is the defining property used in the maturity computation.
-
-## 4. Closed-form expression
-
-Substituting $P_t \propto (1+r)^{t-1}$ in the maturity formula and noting that the proportionality constant cancels between numerator and denominator:
-
-$$M = \frac{1}{12} \cdot \frac{\sum_{t=1}^{n} t \cdot (1+r)^{t-1}}{\sum_{t=1}^{n} (1+r)^{t-1}}$$
-
-This is the formula that needs to be evaluated to reproduce SRS values. It depends on $r$ — the rate is required not for discounting purposes, but to **reconstruct the geometric shape** of the principal repayments.
-
-## 5. Choice of rate $r$ — pivot yield vs contractual rate
-
-A natural candidate for $r$ is the contractual rate of each facility, $r = \text{T\_INTRT}/12$. This hypothesis was tested empirically on the clean progressive population.
-
-**Methodological note**: lines with missing or extreme `T_INTRT` values were filtered to avoid numerical overflow in the term $(1+r)^{n-1}$. The head-to-head comparison was performed on n = 1,773 facilities with reasonable T_INTRT.
-
-| Hypothesis | RMSE | % match \|err\| < 0.05 yrs |
-|---|---|---|
-| `r = T_INTRT/12` (per-line contractual rate) | 199 days | 24.1% |
-| `r = y_pivot/12` (single rate for all facilities) | 101 days | 61.9% |
-
-**Stratified comparison by maturity band** confirms the dominance of the pivot hypothesis across all bands:
-
-| Band R | n | RMSE pivot (days) | RMSE T_INTRT (days) | Ratio |
-|---|---|---|---|---|
-| [1, 3[ | 675 | 106 | 110 | 1.03x |
-| [3, 5[ | 407 | 91 | 105 | 1.15x |
-| [5, 10[ | 477 | 118 | 187 | 1.59x |
-| [10, 15[ | 142 | 41 | 240 | **5.80x** |
-
-The advantage of the pivot widens with maturity. On long maturities (≥10 yrs), the contractual rate is nearly 6 times worse — exactly what we expect if SRS never uses it.
-
-**Implied yield analysis** — for each line, we invert the formula to find the yield that exactly reproduces the SRS value, then correlate this implied yield with the actual `T_INTRT`:
-
-- Implied yield median: **5.0029%** (matches the calibrated 4.9546%)
-- Implied yield std: 8.73%
-- **Correlation(implied_yield, T_INTRT) = −0.05** → near zero
-
-If SRS used the contractual rate, the correlation would be close to 1. The observed near-zero correlation rules out this hypothesis.
-
-**Conclusion**: SRS does NOT use the contractual rate. It uses a **constant pivot rate**, hardcoded into the calculation engine, applied uniformly across all progressive facilities regardless of their actual pricing.
-
-## 6. Empirical calibration of the pivot yield
-
-Since this pivot rate is internal to SRS and not documented in external sources (Capret), it was **calibrated by RMSE minimization** against observed SRS values:
-
-$$y^{*} = \arg\min_y \; \sqrt{\frac{1}{N} \sum_{i=1}^{N} \left( M(R_i, y) - \text{NB\_MATURITE\_IRBA}_i \right)^2}$$
-
-Calibration on **158,668 facilities** yields **y\* = 4.9546%**, with residual RMSE of **31 days**, of which most (95.8% of lines at |err| < 0.05 yrs) is calendar noise plus a ~3% cluster of facilities with non-standard amortization.
-
-A **control calibration** on a reduced sample of 28 "clean" facilities (long maturities, no outliers) yields y\* = 4.9444% with RMSE of just **3.4 days**. Both calibrations converge to within 0.01%, confirming parameter stability.
-
-A **third independent estimate** comes from the per-line implied yield analysis above: median implied yield = 5.00%, also converging on the same value.
-
-**For production: y_pivot = 4.95%** (conservative rounding).
-
-## 7. Stability check across maturity bands
-
-To ensure the yield is **constant** rather than maturity-dependent (which would invalidate the model), a stratification test calibrates the optimal yield separately on each residual maturity band. Results show convergence on long maturities:
-
-| Band R | n | Local optimal yield | RMSE (days) |
-|---|---|---|---|
-| [1, 3[ | 45,811 | 8.22% | 29.85 |
-| [3, 5[ | 39,407 | 6.21% | 31.77 |
-| [5, 10[ | 36,989 | 5.46% | 38.44 |
-| [10, 15[ | 18,963 | **4.99%** | 23.81 |
-| [15, 20[ | 11,163 | **4.93%** | 11.29 |
-| [20, 30[ | 6,329 | **4.92%** | 9.22 |
-
-The deviation on short maturities (apparent yield inflated up to 8% on [1, 3[) does **not** reflect parameter variation but a **model absorption effect**: on this band, the ~3% cluster of atypical facilities (long deferral, hidden bullet) drags the average. Once isolated, the yield falls back to 4.95% across the board, with residual RMSE down to 9-12 days on [15, 30[ — essentially calendar noise.
-
-## 8. Hypotheses on the origin of 4.95%
-
-Several plausible interpretations:
-
-1. **Hardcoded SRS internal rate** derived from a reference rate (internal transfer rate, historical policy rate at the time the system was parameterized)
-2. **Historical average production rate** on IRBA facilities, frozen once when the engine was set up
-3. **Undocumented internal regulatory convention**
-
-This value **must be revalidated annually** in case SRS updates its internal parameter. The stability observed across the entire portfolio (158k lines, 31-day RMSE mostly calendar noise) suggests no recent change, but the calibration script should be re-run at each quarterly closing.
-
-## 9. Summary of evidence
-
-The choice of YIELD_PIVOT_SRS = 4.95% is supported by **three independent estimates** that all converge to the same value:
-
-| Estimation method | Result |
-|---|---|
-| Global RMSE minimization (n = 158,668) | 4.9546% |
-| Control calibration on clean sample (n = 28) | 4.9444% |
-| Per-line implied yield (median) | 5.0029% |
-
+if pd_diff > 0:
+    print("\n--- Zoom sur les écarts PD ---")
+    print(
+        diag_df.filter(pl.col("Alerte_PD"))
+        .select(["I_AUTRS_UNIQ", "segment_pd", "modele_pd", COL_PD_CAPRET, COL_PD_SRS, "Ecart_PD"])
+        .sort("Ecart_PD", descending=True)
+        .head(5)
+    )
+    
+if ead_diff > 0:
+    print("\n--- Zoom sur les écarts EAD ---")
+    print(
+        diag_df.filter(pl.col("Alerte_EAD"))
+        .select(["I_AUTRS_UNIQ", COL_EAD_CAPRET, COL_EAD_SRS, "Ecart_EAD"])
+        .sort("Ecart_EAD", descending=True)
+        .head(5)
+    )
