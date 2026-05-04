@@ -26,61 +26,90 @@ def predict(R_arr, y=0.0495):
 pred = predict(R_arr)
 err_jours = (NB_arr - pred) * 365.25
 
-# Isoler le cluster +173 jours
-sub_court = sub_court.with_columns(
-    err_jours = pl.Series(err_jours)
-)
+sub_court = sub_court.with_columns(err_jours = pl.Series(err_jours))
 cluster_173 = sub_court.filter(
     (pl.col("err_jours") > 160) & (pl.col("err_jours") < 185)
 )
-print(f"Cluster +173 jours : n = {cluster_173.height}")
-
-# Population de référence : erreur "normale" (|err| < 10 jours)
 normal = sub_court.filter(pl.col("err_jours").abs() < 10)
-print(f"Population normale (<10j) : n = {normal.height}\n")
+print(f"Cluster +173 jours       : n = {cluster_173.height}")
+print(f"Population normale (<10j): n = {normal.height}\n")
 
-# Comparer toutes les colonnes catégorielles entre cluster et normal
-print("=== Comparaison cluster +173j vs normale ===")
-print(f"{'Colonne':<25} {'cluster top mod.':<25} {'normale top mod.':<25}")
-print("=" * 75)
-for c in sub_court.columns:
-    if c in ["R", "NB_MATURITE_IRBA", "err_jours", "T0",
+# Helper : récupère un float, gère None / nan
+def safe_float(x):
+    if x is None: return float('nan')
+    try: return float(x)
+    except: return float('nan')
+
+# Comparaison
+cols_skip = {"R", "NB_MATURITE_IRBA", "err_jours", "T0",
              "DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "DT_ARRT",
              "pred_R", "pred_lineaire", "pred_prog_origine",
-             "pred_prog_residuel", "pred_prog_5pct"]:
-        continue
+             "pred_prog_residuel", "pred_prog_5pct",
+             "is_bascule", "has_171", "seg_special",
+             "duration_brute_calculee"}
+
+print("=== Variables CATÉGORIELLES ===")
+print(f"{'Colonne':<28} {'cluster top':<22} {'normale top':<22}")
+print("=" * 75)
+for c in sub_court.columns:
+    if c in cols_skip: continue
     dt = sub_court.schema[c]
-    if dt in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32):
+    if dt not in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32):
+        continue
+    try:
         nu = sub_court[c].n_unique()
         if nu > 30 or nu < 2: continue
-        top_c = cluster_173[c].mode()[0] if cluster_173.height > 0 else "—"
-        top_n = normal[c].mode()[0] if normal.height > 0 else "—"
-        # Pct dans le cluster
+
+        # Top modalité du cluster
         if cluster_173.height > 0:
-            pct_c = (cluster_173[c] == top_c).mean() * 100
+            mode_c = cluster_173[c].mode()
+            top_c = mode_c[0] if mode_c.len() > 0 else None
+            pct_c = (cluster_173[c] == top_c).mean() * 100 if top_c is not None else 0
         else:
-            pct_c = 0
-        if normal.height > 0:
+            top_c, pct_c = None, 0
+
+        # % de la même modalité dans la pop normale
+        if normal.height > 0 and top_c is not None:
             pct_n = (normal[c] == top_c).mean() * 100
         else:
             pct_n = 0
-        if pct_c > 80 and pct_c - pct_n > 30:
-            flag = " <<<"
-        else:
-            flag = ""
-        print(f"{c:<25} {str(top_c):<10} ({pct_c:>5.1f}%)  "
-              f"{str(top_n):<10} ({pct_n:>5.1f}%){flag}")
-    elif dt in (pl.Float64, pl.Float32):
-        moy_c = cluster_173[c].mean() if cluster_173.height > 0 else float('nan')
-        moy_n = normal[c].mean() if normal.height > 0 else float('nan')
-        std_n = normal[c].std() if normal.height > 0 else 1
-        if std_n is None or std_n == 0: continue
-        ecart_norm = abs(moy_c - moy_n) / std_n if std_n > 0 else 0
-        flag = " <<<" if ecart_norm > 1 else ""
-        print(f"{c:<25} moy={moy_c:>7.4f}        moy={moy_n:>7.4f}{flag}")
 
-# Et regarder DT_DEBUT_AUTO en différentiel
-print(f"\n--- T0 (maturité d'origine) ---")
+        flag = " <<<" if pct_c > 80 and pct_c - pct_n > 30 else ""
+        print(f"{c:<28} {str(top_c):<12}({pct_c:>5.1f}%)  "
+              f"{str(top_c):<12}({pct_n:>5.1f}%){flag}")
+    except Exception as e:
+        print(f"{c:<28} [erreur : {e}]")
+
+print("\n=== Variables NUMÉRIQUES ===")
+print(f"{'Colonne':<28} {'cluster moy':>14} {'normale moy':>14} {'écart-σ':>10}")
+print("=" * 70)
+for c in sub_court.columns:
+    if c in cols_skip: continue
+    dt = sub_court.schema[c]
+    if dt not in (pl.Float64, pl.Float32):
+        continue
+    try:
+        moy_c = safe_float(cluster_173[c].mean()) if cluster_173.height > 0 else float('nan')
+        moy_n = safe_float(normal[c].mean())     if normal.height > 0     else float('nan')
+        std_n = safe_float(normal[c].std())      if normal.height > 0     else float('nan')
+        if np.isnan(moy_c) or np.isnan(moy_n) or np.isnan(std_n) or std_n == 0:
+            continue
+        ecart = abs(moy_c - moy_n) / std_n
+        flag = " <<<" if ecart > 1 else ""
+        print(f"{c:<28} {moy_c:>14.4f} {moy_n:>14.4f} {ecart:>10.2f}{flag}")
+    except Exception as e:
+        print(f"{c:<28} [erreur : {e}]")
+
+# T0 et ancienneté (calculés)
+print("\n=== T0 / ancienneté ===")
 if "T0" in sub_court.columns:
-    print(f"  cluster +173j : T0 médian = {cluster_173['T0'].median():.4f}")
-    print(f"  normale       : T0 médian = {normal['T0'].median():.4f}")
+    t0_c = cluster_173["T0"].drop_nulls().to_numpy()
+    t0_n = normal["T0"].drop_nulls().to_numpy()
+    if len(t0_c) > 0 and len(t0_n) > 0:
+        print(f"T0 cluster +173j : médian={np.median(t0_c):.4f}  moy={np.mean(t0_c):.4f}")
+        print(f"T0 normale       : médian={np.median(t0_n):.4f}  moy={np.mean(t0_n):.4f}")
+        # Ancienneté = T0 - R (en années)
+        anc_c = t0_c - cluster_173["R"].to_numpy()
+        anc_n = t0_n - normal["R"].to_numpy()
+        print(f"\nAncienneté (T0-R) cluster : médian={np.median(anc_c):.4f} an")
+        print(f"Ancienneté (T0-R) normale : médian={np.median(anc_n):.4f} an")
