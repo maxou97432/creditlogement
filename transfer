@@ -1,40 +1,37 @@
-sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
-    has_171  = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
-    is_revolving = pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]),
+import numpy as np
+
+revolv = df_avec_pred.filter(
+    (pl.col("CD_TYPE_AMORT") == 3)
+    & pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"])
 )
 
-# Cas 1 : has_171 ET Type_Credit = Revolving/CAV
-g1 = sub3.filter(pl.col("has_171") & pl.col("is_revolving"))
-# Cas 2 : has_171 ET pas Revolving/CAV  
-g2 = sub3.filter(pl.col("has_171") & ~pl.col("is_revolving"))
-# Cas 3 : pas has_171 ET Revolving/CAV
-g3 = sub3.filter(~pl.col("has_171") & pl.col("is_revolving"))
-# Cas 4 : ni l'un ni l'autre
-g4 = sub3.filter(~pl.col("has_171") & ~pl.col("is_revolving"))
+# Hypothèse : NB = clip(R + δ, 1, 5) où δ est un "ajout réglementaire"
+R = revolv["R"].to_numpy()
+NB = revolv["NB_MATURITE_IRBA"].to_numpy()
+T0 = revolv["T0"].to_numpy()
 
-import numpy as np
-for name, g in [("has_171 ET Revolving",     g1),
-                ("has_171 SEUL (pas Revolv)", g2),
-                ("Revolving SEUL (pas 171)", g3),
-                ("ni l'un ni l'autre",        g4)]:
-    if g.height == 0:
-        print(f"{name}: n=0\n")
-        continue
-    R = g["R"].to_numpy()
-    NB = g["NB_MATURITE_IRBA"].to_numpy()
-    print(f"=== {name} — n = {g.height:,} ===")
-    print(f"  R  median = {np.median(R):.4f}")
-    print(f"  NB median = {np.median(NB):.4f}")
-    print(f"  |NB-R|  < 0.01  : {(np.abs(NB-R)<0.01).mean()*100:.1f}%")
-    print(f"  NB ≈ 1 (clip)   : {(np.abs(NB-1.0)<0.01).mean()*100:.1f}%")
-    print(f"  NB ≈ R/2 progr. : {(np.abs(NB - R/2)<0.05).mean()*100:.1f}%")
-    print()
+# Test 1 : NB = clip(R, 1, 5) ?
+pred1 = np.clip(R, 1.0, 5.0)
+err1  = NB - pred1
+print(f"H1: NB = clip(R, 1, 5)         RMSE = {np.sqrt(np.mean(err1**2))*365.25:.1f} jours")
+print(f"                                  %|err|<0.05 = {(np.abs(err1)<0.05).mean()*100:.1f}%")
 
-# Top 5 lignes pour chaque cas, pour visualiser
-for name, g in [("has_171 ET Revolving", g1), ("has_171 SEUL", g2), 
-                ("Revolving SEUL", g3)]:
-    if g.height > 0:
-        print(f"--- {name} : 5 premières lignes ---")
-        print(g.select(["R", "NB_MATURITE_IRBA", "Type_Credit", 
-                         "CD_PORT_PRUDENTIEL"]).head(5))
-        print()
+# Test 2 : NB = 1 systematique
+pred2 = np.ones_like(R)
+err2  = NB - pred2
+print(f"\nH2: NB = 1 (constante)         RMSE = {np.sqrt(np.mean(err2**2))*365.25:.1f} jours")
+print(f"                                  %|err|<0.05 = {(np.abs(err2)<0.05).mean()*100:.1f}%")
+
+# Test 3 : NB = clip(R + 1, 1, 5) ? (ajoute 1 an avant de clipper)
+pred3 = np.clip(R + 1.0, 1.0, 5.0)
+err3  = NB - pred3
+print(f"\nH3: NB = clip(R + 1, 1, 5)     RMSE = {np.sqrt(np.mean(err3**2))*365.25:.1f} jours")
+print(f"                                  %|err|<0.05 = {(np.abs(err3)<0.05).mean()*100:.1f}%")
+
+# Stats : NB / 0.9993 (regarde si NB est multiple d'un certain seuil)
+print(f"\nNB stats : médiane={np.median(NB):.4f}, q25={np.quantile(NB,0.25):.4f}, q75={np.quantile(NB,0.75):.4f}")
+print(f"           min={np.min(NB):.4f}, max={np.max(NB):.4f}")
+print(f"\n% lignes avec NB exactement entre 0.99 et 1.01 : {((NB>0.99)&(NB<1.01)).mean()*100:.1f}%")
+print(f"% lignes avec NB > 5 : {(NB>5).mean()*100:.1f}%")
+print(f"% lignes avec NB < 1 : {(NB<1).mean()*100:.1f}%")
+print(f"% lignes avec 1 <= NB <= 5 : {((NB>=1)&(NB<=5)).mean()*100:.1f}%")
