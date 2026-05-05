@@ -1,65 +1,37 @@
-import polars as pl
+import numpy as np
 
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
-    has_171 = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
+    has_171      = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
+    seg_special  = pl.col("segment_trg").is_in([44, 73, 74]),
+    is_revolving = pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]),
 )
 
-# Population avec et sans le flag
-pop_171 = sub3.filter(pl.col("has_171"))
-pop_no  = sub3.filter(~pl.col("has_171"))
-print(f"has_171 = True  : n = {pop_171.height:,}")
-print(f"has_171 = False : n = {pop_no.height:,}\n")
+print("=== Comparaison des règles de bascule ===\n")
 
-# Toutes les colonnes catégorielles avec faible cardinalité
-print("=== Variables catégorielles : modalité dominante dans has_171 vs ailleurs ===\n")
-print(f"{'Colonne':<32} {'top has_171':<25} {'top sans':<25} {'discriminant':>12}")
-print("=" * 100)
+# Régle A : has_171 OR seg_special (la règle actuelle)
+sub3 = sub3.with_columns(
+    flag_actuel = pl.col("has_171") | pl.col("seg_special"),
+    is_bascule  = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01,
+)
+# Règle B : Type_Credit ∈ {Revolving, CAV} (sémantique)
+sub3 = sub3.with_columns(
+    flag_semantique = pl.col("is_revolving"),
+)
+# Règle C : combinaison des deux
+sub3 = sub3.with_columns(
+    flag_combine = pl.col("has_171") | pl.col("seg_special") | pl.col("is_revolving"),
+)
 
-cols_skip = {"FACTOR", "DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "NB_MATURITE_IRBA",
-             "T_INTRT", "R", "T0", "has_171", "seg_special",
-             "NB_DURATION_IRBA", "NB_MATURITE_RECALCULE", "NB_DURATION_RECALCULE"}
-
-for c in sub3.columns:
-    if c in cols_skip:
-        continue
-    dt = sub3.schema[c]
-    if dt not in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32, pl.Boolean):
-        continue
-    try:
-        nu = sub3[c].n_unique()
-        if nu > 50 or nu < 2:
-            continue
-        if pop_171.height == 0 or pop_no.height == 0:
-            continue
-        # Top modalité dans has_171
-        mode_171 = pop_171[c].mode()
-        if mode_171.len() == 0:
-            continue
-        top_171 = mode_171[0]
-        pct_171 = (pop_171[c] == top_171).mean() * 100
-        # Même modalité dans la pop sans flag
-        pct_no = (pop_no[c] == top_171).mean() * 100
-        # Discriminant : à quel point cette modalité "vit dans has_171"
-        discr = pct_171 - pct_no
-        flag = " <<<" if discr > 50 and pct_171 > 80 else ""
-        print(f"{c:<32} {str(top_171)[:22]:<25}({pct_171:>5.1f}%) "
-              f"{str(top_171)[:22]:<10}({pct_no:>5.1f}%) {discr:>+11.1f}%{flag}")
-    except Exception as e:
-        print(f"{c:<32} [erreur: {e}]")
-
-# Pour les colonnes qui ressortent fortement, on regarde les top modalités complètes
-print("\n=== Variable la plus discriminante : analyse de toutes les modalités ===")
-print("(à compléter avec le nom de la colonne qui ressort de l'analyse ci-dessus)\n")
-
-# Exemple de drill-down sur cd_portfolio si on suspecte que ça contient l'info
-for col_test in ["cd_portfolio", "Type_Credit", "CD_PORT_PRUDENTIEL",
-                 "FLG_RETAIL_CORP", "CD_NOTE_TIERS", "top_Retail_MC_PD"]:
-    if col_test not in sub3.columns:
-        continue
-    print(f"\n--- Drill-down sur {col_test} ---")
-    breakdown = sub3.group_by(col_test).agg(
-        n_total      = pl.len(),
-        n_has_171    = pl.col("has_171").sum(),
-        pct_has_171  = pl.col("has_171").mean() * 100,
-    ).filter(pl.col("n_total") > 50).sort("pct_has_171", descending=True)
-    print(breakdown.head(20))
+for nom, col in [("A: has_171 OR seg_special",       "flag_actuel"),
+                  ("B: Type_Credit ∈ {Revolv,CAV}",   "flag_semantique"),
+                  ("C: A OR B (combiné)",              "flag_combine")]:
+    print(f"--- {nom} ---")
+    print(sub3.group_by(col).agg(
+        n           = pl.len(),
+        pct_bascule = pl.col("is_bascule").mean() * 100,
+    ).sort(col))
+    # Dans la pop progressive (R>1, flag=False), combien de bascules résiduelles ?
+    pop_prog = sub3.filter((pl.col("R") > 1.0) & (~pl.col(col)))
+    print(f"  Pop progressive non-flaggée : n={pop_prog.height:,}, "
+          f"bascules résiduelles = {pop_prog['is_bascule'].sum():,} "
+          f"({pop_prog['is_bascule'].mean()*100:.2f}%)\n")
