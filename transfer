@@ -1,37 +1,172 @@
+"""
+Computation of NB_MATURITE_IRBA and NB_DURATION_IRBA — SRS replication.
+
+Coverage by amortization type:
+  - Type 1 (linear)        : undiscounted M Bâle formula (n+1)/24
+  - Type 2 (degressive)    : NB = R (postulated, to be validated if rows present)
+  - Type 3 (progressive)   : undiscounted M Bâle formula with pivot yield 4.95%
+  - Type 4 (bullet)        : NB = R
+  - Type 9 (other)         : NB = R
+
+Known limitation: for Crédits Revolving and CAV & autres facilities
+(~7.5% of the type 3 portfolio), SRS applies a heterogeneous logic that
+cannot be reproduced from the variables available in srs_X_capret.
+These facilities are processed here with the same formula as other
+progressive facilities; the resulting deviations are documented as an
+expected residual gap.
+"""
+
 import numpy as np
+import polars as pl
 
-revolv = df_avec_pred.filter(
-    (pl.col("CD_TYPE_AMORT") == 3)
-    & pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"])
-)
+# ============================================================
+# Constants
+# ============================================================
+DT_ARRT         = 23922   # 30/06/2025 in SAS days — adjust per reporting date
+YIELD_PIVOT_SRS = 0.0495  # Pivot yield calibrated on 158,668 clean progressive
+                          # facilities. Re-validate at each closing via the
+                          # calibration script.
 
-# Hypothèse : NB = clip(R + δ, 1, 5) où δ est un "ajout réglementaire"
-R = revolv["R"].to_numpy()
-NB = revolv["NB_MATURITE_IRBA"].to_numpy()
-T0 = revolv["T0"].to_numpy()
 
-# Test 1 : NB = clip(R, 1, 5) ?
-pred1 = np.clip(R, 1.0, 5.0)
-err1  = NB - pred1
-print(f"H1: NB = clip(R, 1, 5)         RMSE = {np.sqrt(np.mean(err1**2))*365.25:.1f} jours")
-print(f"                                  %|err|<0.05 = {(np.abs(err1)<0.05).mean()*100:.1f}%")
+# ============================================================
+# Formulas per amortization type
+# ============================================================
+def m_srs_type1(R: float) -> float:
+    """
+    Linear (CD_TYPE_AMORT = 1).
 
-# Test 2 : NB = 1 systematique
-pred2 = np.ones_like(R)
-err2  = NB - pred2
-print(f"\nH2: NB = 1 (constante)         RMSE = {np.sqrt(np.mean(err2**2))*365.25:.1f} jours")
-print(f"                                  %|err|<0.05 = {(np.abs(err2)<0.05).mean()*100:.1f}%")
+    Direct application of CRR 162 to a flat principal repayment profile:
+        M = (n + 1) / (2 * 12)   with n = round(R * 12)
 
-# Test 3 : NB = clip(R + 1, 1, 5) ? (ajoute 1 an avant de clipper)
-pred3 = np.clip(R + 1.0, 1.0, 5.0)
-err3  = NB - pred3
-print(f"\nH3: NB = clip(R + 1, 1, 5)     RMSE = {np.sqrt(np.mean(err3**2))*365.25:.1f} jours")
-print(f"                                  %|err|<0.05 = {(np.abs(err3)<0.05).mean()*100:.1f}%")
+    Independent of interest rate and portfolio.
+    """
+    n = max(1, int(round(R * 12)))
+    return (n + 1) / 2 / 12
 
-# Stats : NB / 0.9993 (regarde si NB est multiple d'un certain seuil)
-print(f"\nNB stats : médiane={np.median(NB):.4f}, q25={np.quantile(NB,0.25):.4f}, q75={np.quantile(NB,0.75):.4f}")
-print(f"           min={np.min(NB):.4f}, max={np.max(NB):.4f}")
-print(f"\n% lignes avec NB exactement entre 0.99 et 1.01 : {((NB>0.99)&(NB<1.01)).mean()*100:.1f}%")
-print(f"% lignes avec NB > 5 : {(NB>5).mean()*100:.1f}%")
-print(f"% lignes avec NB < 1 : {(NB<1).mean()*100:.1f}%")
-print(f"% lignes avec 1 <= NB <= 5 : {((NB>=1)&(NB<=5)).mean()*100:.1f}%")
+
+def m_srs_type3(R: float, y: float = YIELD_PIVOT_SRS) -> float:
+    """
+    Progressive / constant annuity (CD_TYPE_AMORT = 3).
+
+    Undiscounted M Bâle formula weighted by the principal repayments of
+    a monthly constant annuity:
+        M = (1/12) * sum(k * (1+r)^(k-1)) / sum((1+r)^(k-1))
+    with r = y/12 and n = round(R * 12).
+    """
+    n = max(1, int(round(R * 12)))
+    if abs(y) < 1e-12:
+        return (n + 1) / 2 / 12
+    r = y / 12
+    k = np.arange(1, n + 1)
+    w = (1 + r) ** (k - 1)
+    return float(np.sum(k * w) / np.sum(w)) / 12
+
+
+def m_srs_bullet_or_other(R: float) -> float:
+    """
+    Bullet (CD_TYPE_AMORT = 4) or Other (CD_TYPE_AMORT = 9).
+    Degenerate cases: effective maturity equals residual maturity.
+    """
+    return R
+
+
+def m_srs_degressive(R: float) -> float:
+    """
+    Degressive (CD_TYPE_AMORT = 2). Postulated NB = R, to validate empirically.
+    """
+    return R
+
+
+# ============================================================
+# Main vectorized function
+# ============================================================
+def compute_maturite_irba(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Apply the IRBA maturity and duration computation on a Polars DataFrame.
+
+    Required inputs:
+      - DT_ECHEANCE_FEM, DT_DEBUT_AUTO (SAS days)
+      - CD_TYPE_AMORT (str or int)
+
+    Output columns added:
+      - R                        : residual maturity (years)
+      - T0                       : original maturity (years)
+      - NB_MATURITE_RECALCULE    : recomputed effective maturity
+      - NB_DURATION_RECALCULE    : NB_MATURITE_RECALCULE clipped between 1 and 5
+    """
+    df = df.with_columns(
+        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT")
+                          .cast(pl.Utf8, strict=False)
+                          .str.strip_chars()
+                          .cast(pl.Int64, strict=False),
+        R  = (pl.col("DT_ECHEANCE_FEM") - DT_ARRT) / 365.25,
+        T0 = (pl.col("DT_ECHEANCE_FEM") - pl.col("DT_DEBUT_AUTO")) / 365.25,
+    )
+
+    R_arr  = df["R"].to_numpy()
+    type_a = df["CD_TYPE_AMORT"].to_numpy()
+
+    nb = np.empty_like(R_arr, dtype=float)
+    for i, (R, t) in enumerate(zip(R_arr, type_a)):
+        if t == 1:
+            nb[i] = m_srs_type1(R)
+        elif t == 2:
+            nb[i] = m_srs_degressive(R)
+        elif t == 3:
+            nb[i] = m_srs_type3(R)
+        elif t in (4, 9):
+            nb[i] = m_srs_bullet_or_other(R)
+        else:
+            # Unknown type: conservative fallback to NB = R
+            nb[i] = R
+
+    return df.with_columns(
+        NB_MATURITE_RECALCULE = pl.Series(nb),
+        NB_DURATION_RECALCULE = pl.Series(np.clip(nb, 1.0, 5.0)),
+    )
+
+
+# ============================================================
+# Validation: comparison against original SRS values
+# ============================================================
+def compare_to_srs(df: pl.DataFrame) -> dict:
+    """
+    Compare recomputed values against original SRS values.
+    Returns a dictionary of global quality metrics.
+    """
+    df = df.with_columns(
+        err_maturite = pl.col("NB_MATURITE_RECALCULE") - pl.col("NB_MATURITE_IRBA"),
+        err_duration = pl.col("NB_DURATION_RECALCULE") - pl.col("NB_DURATION_IRBA"),
+    ).with_columns(
+        abs_err_maturite = pl.col("err_maturite").abs(),
+        abs_err_duration = pl.col("err_duration").abs(),
+    )
+
+    err_m = df["err_maturite"].drop_nulls().to_numpy()
+    err_d = df["err_duration"].drop_nulls().to_numpy()
+
+    return {
+        "n_observations"           : len(err_m),
+        "rmse_maturite_days"       : float(np.sqrt(np.mean(err_m**2)) * 365.25),
+        "rmse_duration_days"       : float(np.sqrt(np.mean(err_d**2)) * 365.25),
+        "mae_maturite_days"        : float(np.mean(np.abs(err_m)) * 365.25),
+        "mae_duration_days"        : float(np.mean(np.abs(err_d)) * 365.25),
+        "pct_match_maturite_005"   : float((np.abs(err_m) < 0.05).mean() * 100),
+        "pct_match_duration_005"   : float((np.abs(err_d) < 0.05).mean() * 100),
+        "pct_match_maturite_01"    : float((np.abs(err_m) < 0.10).mean() * 100),
+        "pct_match_duration_01"    : float((np.abs(err_d) < 0.10).mean() * 100),
+    }
+
+
+# ============================================================
+# Run
+# ============================================================
+if __name__ == "__main__":
+    # df_avec_pred = pl.read_parquet("srs_X_capret.parquet")
+    df_avec_pred = ...   # <-- your source DataFrame
+    df_final = compute_maturite_irba(df_avec_pred)
+    report = compare_to_srs(df_final)
+
+    print("=== Global comparison against original SRS values ===")
+    for k, v in report.items():
+        print(f"  {k:<32} = {v:>10.4f}")
