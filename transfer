@@ -1,74 +1,65 @@
 import polars as pl
 
-# =====================================================================
-# 1. PARAMÉTRAGE DES COLONNES (À ADAPTER SELON TA BASE)
-# =====================================================================
-# Colonnes issues de ton pipeline Polars/Capret
-COL_PD_CAPRET  = "tx_edf"              # ou PD_new_ndod_moc selon le cas
-COL_LGD_CAPRET = "tx_lgd"              # ou LGD_new_ndod_moc
-COL_EAD_CAPRET = "MT_EAD_FLOOR"        # ou ead_calcule
+sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
+    has_171 = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
+)
 
-# Colonnes historiques issues de SRS (legacy)
-COL_PD_SRS  = "PD_IRBA"                # Remplacer par le vrai nom
-COL_LGD_SRS = "LGD_IRBA"               # Remplacer par le vrai nom
-COL_EAD_SRS = "EAD_IRBA"               # Remplacer par le vrai nom
+# Population avec et sans le flag
+pop_171 = sub3.filter(pl.col("has_171"))
+pop_no  = sub3.filter(~pl.col("has_171"))
+print(f"has_171 = True  : n = {pop_171.height:,}")
+print(f"has_171 = False : n = {pop_no.height:,}\n")
 
-SEUIL_TOLERANCE = 0.0001               # Tolérance pour les arrondis (10^-4)
+# Toutes les colonnes catégorielles avec faible cardinalité
+print("=== Variables catégorielles : modalité dominante dans has_171 vs ailleurs ===\n")
+print(f"{'Colonne':<32} {'top has_171':<25} {'top sans':<25} {'discriminant':>12}")
+print("=" * 100)
 
-# =====================================================================
-# 2. CALCUL DES ÉCARTS ABSOLUS
-# =====================================================================
-diag_df = srs_X_capret.with_columns([
-    (pl.col(COL_PD_CAPRET) - pl.col(COL_PD_SRS)).abs().alias("Ecart_PD"),
-    (pl.col(COL_LGD_CAPRET) - pl.col(COL_LGD_SRS)).abs().alias("Ecart_LGD"),
-    (pl.col(COL_EAD_CAPRET) - pl.col(COL_EAD_SRS)).abs().alias("Ecart_EAD")
-]).with_columns([
-    (pl.col("Ecart_PD") > SEUIL_TOLERANCE).alias("Alerte_PD"),
-    (pl.col("Ecart_LGD") > SEUIL_TOLERANCE).alias("Alerte_LGD"),
-    (pl.col("Ecart_EAD") > 1.0).alias("Alerte_EAD")  # Tolérance de 1€ pour l'EAD
-])
+cols_skip = {"FACTOR", "DT_DEBUT_AUTO", "DT_ECHEANCE_FEM", "NB_MATURITE_IRBA",
+             "T_INTRT", "R", "T0", "has_171", "seg_special",
+             "NB_DURATION_IRBA", "NB_MATURITE_RECALCULE", "NB_DURATION_RECALCULE"}
 
-# =====================================================================
-# 3. SYNTHÈSE DES ANOMALIES
-# =====================================================================
-print("=== BILAN DE LA PARITÉ PD / LGD / EAD ===")
-total_lignes = diag_df.height
-print(f"Nombre total de lignes : {total_lignes:,}")
+for c in sub3.columns:
+    if c in cols_skip:
+        continue
+    dt = sub3.schema[c]
+    if dt not in (pl.Utf8, pl.Categorical, pl.Int64, pl.Int32, pl.Boolean):
+        continue
+    try:
+        nu = sub3[c].n_unique()
+        if nu > 50 or nu < 2:
+            continue
+        if pop_171.height == 0 or pop_no.height == 0:
+            continue
+        # Top modalité dans has_171
+        mode_171 = pop_171[c].mode()
+        if mode_171.len() == 0:
+            continue
+        top_171 = mode_171[0]
+        pct_171 = (pop_171[c] == top_171).mean() * 100
+        # Même modalité dans la pop sans flag
+        pct_no = (pop_no[c] == top_171).mean() * 100
+        # Discriminant : à quel point cette modalité "vit dans has_171"
+        discr = pct_171 - pct_no
+        flag = " <<<" if discr > 50 and pct_171 > 80 else ""
+        print(f"{c:<32} {str(top_171)[:22]:<25}({pct_171:>5.1f}%) "
+              f"{str(top_171)[:22]:<10}({pct_no:>5.1f}%) {discr:>+11.1f}%{flag}")
+    except Exception as e:
+        print(f"{c:<32} [erreur: {e}]")
 
-pd_diff = diag_df.filter(pl.col("Alerte_PD")).height
-lgd_diff = diag_df.filter(pl.col("Alerte_LGD")).height
-ead_diff = diag_df.filter(pl.col("Alerte_EAD")).height
+# Pour les colonnes qui ressortent fortement, on regarde les top modalités complètes
+print("\n=== Variable la plus discriminante : analyse de toutes les modalités ===")
+print("(à compléter avec le nom de la colonne qui ressort de l'analyse ci-dessus)\n")
 
-print(f"❌ Écarts sur la PD  : {pd_diff:,} lignes ({(pd_diff/total_lignes)*100:.2f}%)")
-print(f"❌ Écarts sur la LGD : {lgd_diff:,} lignes ({(lgd_diff/total_lignes)*100:.2f}%)")
-print(f"❌ Écarts sur l'EAD  : {ead_diff:,} lignes ({(ead_diff/total_lignes)*100:.2f}%)")
-
-# =====================================================================
-# 4. ZOOM SUR LE PREMIER PROBLÈME TROUVÉ (EXEMPLE : LGD)
-# =====================================================================
-if lgd_diff > 0:
-    print("\n--- Zoom sur les écarts LGD ---")
-    print(
-        diag_df.filter(pl.col("Alerte_LGD"))
-        .select(["I_AUTRS_UNIQ", "cd_portfolio", COL_LGD_CAPRET, COL_LGD_SRS, "Ecart_LGD"])
-        .sort("Ecart_LGD", descending=True)
-        .head(5)
-    )
-
-if pd_diff > 0:
-    print("\n--- Zoom sur les écarts PD ---")
-    print(
-        diag_df.filter(pl.col("Alerte_PD"))
-        .select(["I_AUTRS_UNIQ", "segment_pd", "modele_pd", COL_PD_CAPRET, COL_PD_SRS, "Ecart_PD"])
-        .sort("Ecart_PD", descending=True)
-        .head(5)
-    )
-    
-if ead_diff > 0:
-    print("\n--- Zoom sur les écarts EAD ---")
-    print(
-        diag_df.filter(pl.col("Alerte_EAD"))
-        .select(["I_AUTRS_UNIQ", COL_EAD_CAPRET, COL_EAD_SRS, "Ecart_EAD"])
-        .sort("Ecart_EAD", descending=True)
-        .head(5)
-    )
+# Exemple de drill-down sur cd_portfolio si on suspecte que ça contient l'info
+for col_test in ["cd_portfolio", "Type_Credit", "CD_PORT_PRUDENTIEL",
+                 "FLG_RETAIL_CORP", "CD_NOTE_TIERS", "top_Retail_MC_PD"]:
+    if col_test not in sub3.columns:
+        continue
+    print(f"\n--- Drill-down sur {col_test} ---")
+    breakdown = sub3.group_by(col_test).agg(
+        n_total      = pl.len(),
+        n_has_171    = pl.col("has_171").sum(),
+        pct_has_171  = pl.col("has_171").mean() * 100,
+    ).filter(pl.col("n_total") > 50).sort("pct_has_171", descending=True)
+    print(breakdown.head(20))
