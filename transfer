@@ -1,44 +1,40 @@
-import numpy as np
-
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
+    has_171  = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
     is_revolving = pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]),
 )
 
-# Inspection des lignes Crédits Revolving — qu'est-ce que NB et R valent ?
-revolv = sub3.filter(pl.col("Type_Credit") == "Crédits Revolving")
-print(f"=== Crédits Revolving — n = {revolv.height:,} ===\n")
+# Cas 1 : has_171 ET Type_Credit = Revolving/CAV
+g1 = sub3.filter(pl.col("has_171") & pl.col("is_revolving"))
+# Cas 2 : has_171 ET pas Revolving/CAV  
+g2 = sub3.filter(pl.col("has_171") & ~pl.col("is_revolving"))
+# Cas 3 : pas has_171 ET Revolving/CAV
+g3 = sub3.filter(~pl.col("has_171") & pl.col("is_revolving"))
+# Cas 4 : ni l'un ni l'autre
+g4 = sub3.filter(~pl.col("has_171") & ~pl.col("is_revolving"))
 
-print("Stats descriptives :")
-print(f"  R           median = {revolv['R'].median():.4f}, mean = {revolv['R'].mean():.4f}")
-print(f"  NB          median = {revolv['NB_MATURITE_IRBA'].median():.4f}")
-print(f"  |NB - R|    median = {(revolv['NB_MATURITE_IRBA'] - revolv['R']).abs().median():.4f}")
-print(f"  NB / R      median = {(revolv['NB_MATURITE_IRBA'] / revolv['R']).median():.4f}")
+import numpy as np
+for name, g in [("has_171 ET Revolving",     g1),
+                ("has_171 SEUL (pas Revolv)", g2),
+                ("Revolving SEUL (pas 171)", g3),
+                ("ni l'un ni l'autre",        g4)]:
+    if g.height == 0:
+        print(f"{name}: n=0\n")
+        continue
+    R = g["R"].to_numpy()
+    NB = g["NB_MATURITE_IRBA"].to_numpy()
+    print(f"=== {name} — n = {g.height:,} ===")
+    print(f"  R  median = {np.median(R):.4f}")
+    print(f"  NB median = {np.median(NB):.4f}")
+    print(f"  |NB-R|  < 0.01  : {(np.abs(NB-R)<0.01).mean()*100:.1f}%")
+    print(f"  NB ≈ 1 (clip)   : {(np.abs(NB-1.0)<0.01).mean()*100:.1f}%")
+    print(f"  NB ≈ R/2 progr. : {(np.abs(NB - R/2)<0.05).mean()*100:.1f}%")
+    print()
 
-print(f"\n10 premières lignes :")
-print(revolv.select(["R", "NB_MATURITE_IRBA", "T_INTRT", "Type_Credit"]).head(10))
-
-# Quelle proportion satisfait |NB-R|<0.01 ? <0.1 ? <1 ?
-diff = (revolv["NB_MATURITE_IRBA"] - revolv["R"]).abs().to_numpy()
-print(f"\nDistribution de |NB - R| sur les Revolvers :")
-for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
-    pct = (diff < tol).mean() * 100
-    print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
-
-# Idem pour CAV
-cav = sub3.filter(pl.col("Type_Credit") == "CAV & autres")
-print(f"\n=== CAV & autres — n = {cav.height:,} ===")
-diff_cav = (cav["NB_MATURITE_IRBA"] - cav["R"]).abs().to_numpy()
-print(f"Distribution de |NB - R| :")
-for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
-    pct = (diff_cav < tol).mean() * 100
-    print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
-
-# Inspection cd_portfolio QRE — devrait basculer aussi
-qre = sub3.filter(pl.col("cd_portfolio") == "QRE") if "cd_portfolio" in sub3.columns else None
-if qre is not None and qre.height > 0:
-    print(f"\n=== cd_portfolio = QRE — n = {qre.height:,} ===")
-    diff_qre = (qre["NB_MATURITE_IRBA"] - qre["R"]).abs().to_numpy()
-    print(f"Distribution de |NB - R| :")
-    for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
-        pct = (diff_qre < tol).mean() * 100
-        print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
+# Top 5 lignes pour chaque cas, pour visualiser
+for name, g in [("has_171 ET Revolving", g1), ("has_171 SEUL", g2), 
+                ("Revolving SEUL", g3)]:
+    if g.height > 0:
+        print(f"--- {name} : 5 premières lignes ---")
+        print(g.select(["R", "NB_MATURITE_IRBA", "Type_Credit", 
+                         "CD_PORT_PRUDENTIEL"]).head(5))
+        print()
