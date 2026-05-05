@@ -4,34 +4,43 @@ sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
     has_171      = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
     seg_special  = pl.col("segment_trg").is_in([44, 73, 74]),
     is_revolving = pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]),
+).with_columns(
+    # On force les booléens à False quand l'expression sous-jacente vaut null
+    has_171      = pl.col("has_171").fill_null(False),
+    seg_special  = pl.col("seg_special").fill_null(False),
+    is_revolving = pl.col("is_revolving").fill_null(False),
+    is_bascule   = ((pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01).fill_null(False),
 )
 
-print("=== Comparaison des règles de bascule ===\n")
-
-# Régle A : has_171 OR seg_special (la règle actuelle)
+# Définir les 3 règles
 sub3 = sub3.with_columns(
-    flag_actuel = pl.col("has_171") | pl.col("seg_special"),
-    is_bascule  = (pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01,
-)
-# Règle B : Type_Credit ∈ {Revolving, CAV} (sémantique)
-sub3 = sub3.with_columns(
+    flag_actuel     = pl.col("has_171") | pl.col("seg_special"),
     flag_semantique = pl.col("is_revolving"),
-)
-# Règle C : combinaison des deux
-sub3 = sub3.with_columns(
-    flag_combine = pl.col("has_171") | pl.col("seg_special") | pl.col("is_revolving"),
+    flag_combine    = pl.col("has_171") | pl.col("seg_special") | pl.col("is_revolving"),
 )
 
-for nom, col in [("A: has_171 OR seg_special",       "flag_actuel"),
-                  ("B: Type_Credit ∈ {Revolv,CAV}",   "flag_semantique"),
-                  ("C: A OR B (combiné)",              "flag_combine")]:
-    print(f"--- {nom} ---")
-    print(sub3.group_by(col).agg(
+print("=== Comparaison des règles de bascule (CD_TYPE_AMORT = 3) ===\n")
+print(f"Population totale type 3 : n = {sub3.height:,}\n")
+
+for nom, col in [("A: has_171 OR seg_special",     "flag_actuel"),
+                  ("B: Type_Credit Revolv/CAV",    "flag_semantique"),
+                  ("C: A OR B (combine)",          "flag_combine")]:
+    print(f"--- Regle {nom} ---")
+    breakdown = sub3.group_by(col).agg(
         n           = pl.len(),
         pct_bascule = pl.col("is_bascule").mean() * 100,
-    ).sort(col))
-    # Dans la pop progressive (R>1, flag=False), combien de bascules résiduelles ?
+    ).sort(col)
+    print(breakdown)
+    
+    # Dans la pop progressive (R>1, flag=False), combien de bascules residuelles ?
     pop_prog = sub3.filter((pl.col("R") > 1.0) & (~pl.col(col)))
-    print(f"  Pop progressive non-flaggée : n={pop_prog.height:,}, "
-          f"bascules résiduelles = {pop_prog['is_bascule'].sum():,} "
-          f"({pop_prog['is_bascule'].mean()*100:.2f}%)\n")
+    if pop_prog.height > 0:
+        n_bascules = int(pop_prog["is_bascule"].sum())
+        pct_resid  = float(pop_prog["is_bascule"].mean() * 100)
+        print(f"  -> Pop progressive non-flaggee : n={pop_prog.height:,}, "
+              f"bascules residuelles = {n_bascules:,} ({pct_resid:.2f}%)")
+    print()
+
+# Verification specifique : combien de Type_Credit en null ?
+n_null = sub3["Type_Credit"].null_count()
+print(f"\nNote: Type_Credit a {n_null:,} valeurs nulles dans la population type 3.")
