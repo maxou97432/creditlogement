@@ -1,46 +1,44 @@
 import numpy as np
 
 sub3 = df_avec_pred.filter(pl.col("CD_TYPE_AMORT") == 3).with_columns(
-    has_171      = pl.col("FACTOR").str.contains(r"\[1\.71\]"),
-    seg_special  = pl.col("segment_trg").is_in([44, 73, 74]),
     is_revolving = pl.col("Type_Credit").is_in(["Crédits Revolving", "CAV & autres"]),
-).with_columns(
-    # On force les booléens à False quand l'expression sous-jacente vaut null
-    has_171      = pl.col("has_171").fill_null(False),
-    seg_special  = pl.col("seg_special").fill_null(False),
-    is_revolving = pl.col("is_revolving").fill_null(False),
-    is_bascule   = ((pl.col("NB_MATURITE_IRBA") - pl.col("R")).abs() < 0.01).fill_null(False),
 )
 
-# Définir les 3 règles
-sub3 = sub3.with_columns(
-    flag_actuel     = pl.col("has_171") | pl.col("seg_special"),
-    flag_semantique = pl.col("is_revolving"),
-    flag_combine    = pl.col("has_171") | pl.col("seg_special") | pl.col("is_revolving"),
-)
+# Inspection des lignes Crédits Revolving — qu'est-ce que NB et R valent ?
+revolv = sub3.filter(pl.col("Type_Credit") == "Crédits Revolving")
+print(f"=== Crédits Revolving — n = {revolv.height:,} ===\n")
 
-print("=== Comparaison des règles de bascule (CD_TYPE_AMORT = 3) ===\n")
-print(f"Population totale type 3 : n = {sub3.height:,}\n")
+print("Stats descriptives :")
+print(f"  R           median = {revolv['R'].median():.4f}, mean = {revolv['R'].mean():.4f}")
+print(f"  NB          median = {revolv['NB_MATURITE_IRBA'].median():.4f}")
+print(f"  |NB - R|    median = {(revolv['NB_MATURITE_IRBA'] - revolv['R']).abs().median():.4f}")
+print(f"  NB / R      median = {(revolv['NB_MATURITE_IRBA'] / revolv['R']).median():.4f}")
 
-for nom, col in [("A: has_171 OR seg_special",     "flag_actuel"),
-                  ("B: Type_Credit Revolv/CAV",    "flag_semantique"),
-                  ("C: A OR B (combine)",          "flag_combine")]:
-    print(f"--- Regle {nom} ---")
-    breakdown = sub3.group_by(col).agg(
-        n           = pl.len(),
-        pct_bascule = pl.col("is_bascule").mean() * 100,
-    ).sort(col)
-    print(breakdown)
-    
-    # Dans la pop progressive (R>1, flag=False), combien de bascules residuelles ?
-    pop_prog = sub3.filter((pl.col("R") > 1.0) & (~pl.col(col)))
-    if pop_prog.height > 0:
-        n_bascules = int(pop_prog["is_bascule"].sum())
-        pct_resid  = float(pop_prog["is_bascule"].mean() * 100)
-        print(f"  -> Pop progressive non-flaggee : n={pop_prog.height:,}, "
-              f"bascules residuelles = {n_bascules:,} ({pct_resid:.2f}%)")
-    print()
+print(f"\n10 premières lignes :")
+print(revolv.select(["R", "NB_MATURITE_IRBA", "T_INTRT", "Type_Credit"]).head(10))
 
-# Verification specifique : combien de Type_Credit en null ?
-n_null = sub3["Type_Credit"].null_count()
-print(f"\nNote: Type_Credit a {n_null:,} valeurs nulles dans la population type 3.")
+# Quelle proportion satisfait |NB-R|<0.01 ? <0.1 ? <1 ?
+diff = (revolv["NB_MATURITE_IRBA"] - revolv["R"]).abs().to_numpy()
+print(f"\nDistribution de |NB - R| sur les Revolvers :")
+for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
+    pct = (diff < tol).mean() * 100
+    print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
+
+# Idem pour CAV
+cav = sub3.filter(pl.col("Type_Credit") == "CAV & autres")
+print(f"\n=== CAV & autres — n = {cav.height:,} ===")
+diff_cav = (cav["NB_MATURITE_IRBA"] - cav["R"]).abs().to_numpy()
+print(f"Distribution de |NB - R| :")
+for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
+    pct = (diff_cav < tol).mean() * 100
+    print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
+
+# Inspection cd_portfolio QRE — devrait basculer aussi
+qre = sub3.filter(pl.col("cd_portfolio") == "QRE") if "cd_portfolio" in sub3.columns else None
+if qre is not None and qre.height > 0:
+    print(f"\n=== cd_portfolio = QRE — n = {qre.height:,} ===")
+    diff_qre = (qre["NB_MATURITE_IRBA"] - qre["R"]).abs().to_numpy()
+    print(f"Distribution de |NB - R| :")
+    for tol in [0.001, 0.01, 0.05, 0.1, 0.5, 1.0]:
+        pct = (diff_qre < tol).mean() * 100
+        print(f"  |NB-R| < {tol:>5} : {pct:>5.1f}%")
