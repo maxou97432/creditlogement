@@ -1,19 +1,81 @@
-## Final Validation Results
+import polars as pl
+import numpy as np
+from datetime import datetime
 
-The replication engine was applied to the full type 1, 3, 4 and 9 portfolio (n = 266,112 facilities) and compared against the original SRS values `NB_MATURITE_IRBA` and `NB_DURATION_IRBA`.
+YIELD_PIVOT_SRS = 0.0495
 
-### Overall reproduction quality
 
-The duration — the regulatory quantity used in the IRB capital formula — is reproduced within ±0.1 years on **96.7%** of the portfolio, with an RMSE of 26.4 days. The raw maturity is reproduced less tightly (90.1% within ±0.1 years) because the regulatory clip [1, 5] absorbs part of the deviation when computing the duration.
+def date_to_sas(date_col: str) -> pl.Expr:
+    """Convert a regular date to SAS format (float days since 1960-01-01)."""
+    sas_reference = datetime(1960, 1, 1)
+    return (
+        pl.col(date_col)
+        .cast(pl.Datetime)
+        .map_batches(lambda s: (s - sas_reference).dt.total_days())
+    )
 
-### Performance by amortization type
 
-Types 4 (bullet) and 9 (other) are reproduced exactly through the rule `NB = R`, with residual error of less than 1 day. Type 1 (linear) reaches 99% match within ±0.1 years through the closed-form formula `(n+1)/24`. Type 3 (progressive) carries the bulk of the residual gap (95.8% match), concentrated on Crédits Revolving and CAV & autres facilities, which follow an internal SRS logic that cannot be inferred from the variables available in `srs_X_capret`.
+def m_srs_type1_expr(R_col: str = "R") -> pl.Expr:
+    """
+    Linear (CD_TYPE_AMORT = 1): M = (n+1) / 24, n = round(R*12), n >= 1.
+    Pure Polars expression — no Python callback.
+    """
+    n = pl.max_horizontal(pl.lit(1), (pl.col(R_col) * 12).round().cast(pl.Int64))
+    return (n + 1) / 2 / 12
 
-### Error distribution
 
-85% of facilities have a duration error within ±10 days, which is calendar-rounding noise. The remaining 15% are split between a +10 to +30 day band (~11%, attributable to month-discretization effects) and a tail beyond ±60 days (~4%, attributable to the Revolvers/CAV residual perimeter).
+def m_srs_type3_expr(R_col: str = "R", y: float = YIELD_PIVOT_SRS) -> pl.Expr:
+    """
+    Progressive (CD_TYPE_AMORT = 3): undiscounted M Bâle weighted by principal,
+    constant annuity, pivot yield y.
 
-### Summary
+    Closed-form formula:
+        M = (1/12) * [(n*(1+r)^n)/((1+r)^n - 1) - 1/r]
+    where r = y/12 and n = round(R*12), n >= 1.
 
-The replication engine reproduces SRS duration values to within 0.1 years on 96.7% of the IRBA credit risk portfolio. Residual deviations are documented and traceable to either calendar-day rounding (the dominant component) or the Revolvers/CAV product family, for which a deterministic rule could not be identified from the source data and which is documented as a known scope limitation.
+    This is the analytical sum of the geometric series — no Python loop required.
+    """
+    r = y / 12
+    n = pl.max_horizontal(pl.lit(1), (pl.col(R_col) * 12).round().cast(pl.Int64))
+    one_plus_r_n = (1 + r) ** n
+    # M (months) = n * (1+r)^n / ((1+r)^n - 1) - 1/r
+    M_months = (n.cast(pl.Float64) * one_plus_r_n) / (one_plus_r_n - 1) - 1 / r
+    return M_months / 12
+
+
+def compute_maturite_irba(df: pl.LazyFrame, dt_arrt_col: str = "DT_ARRT",
+                           dt_echn_col: str = "D_ECHNC_AUTRS2") -> pl.LazyFrame:
+    """
+    Compute NB_MATURITE_RECALCULE and NB_DURATION_RECALCULE on a Polars LazyFrame.
+    
+    Required columns:
+      - DT_ARRT (or column passed via dt_arrt_col): reporting date
+      - D_ECHNC_AUTRS2 (or column passed via dt_echn_col): final maturity date
+      - CD_TYPE_AMORT: amortization type ('1', '2', '3', '4', '9')
+    """
+    df = df.with_columns(
+        date_to_sas(dt_arrt_col).alias("DT_ARRT_sas"),
+        CD_TYPE_AMORT = pl.col("CD_TYPE_AMORT").cast(pl.Utf8, strict=False),
+    ).with_columns(
+        R = (pl.col(dt_echn_col) - pl.col("DT_ARRT_sas")) / 365.25,
+    )
+
+    # NB_MATURITE_RECALCULE — branchement par type via expressions natives
+    df = df.with_columns(
+        pl.when(pl.col("CD_TYPE_AMORT") == "1").then(m_srs_type1_expr("R"))
+          .when(pl.col("CD_TYPE_AMORT") == "2").then(pl.col("R"))
+          .when(pl.col("CD_TYPE_AMORT") == "3").then(m_srs_type3_expr("R"))
+          .when(pl.col("CD_TYPE_AMORT").is_in(["4", "9"])).then(pl.col("R"))
+          .otherwise(pl.col("R"))
+          .alias("NB_MATURITE_RECALCULE")
+    )
+
+    # Clip final [1, 5]
+    df = df.with_columns(
+        pl.when(pl.col("NB_MATURITE_RECALCULE") < 1).then(1.0)
+          .when(pl.col("NB_MATURITE_RECALCULE") > 5).then(5.0)
+          .otherwise(pl.col("NB_MATURITE_RECALCULE"))
+          .alias("NB_DURATION_RECALCULE")
+    )
+
+    return df
