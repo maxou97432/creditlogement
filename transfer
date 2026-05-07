@@ -1,20 +1,21 @@
 import polars as pl
 
-# Adapte si tes noms de colonnes diffèrent (utilise tes variables DURATION, EAD, etc.)
 INPUTS = {
-    "id":           "I_AUTRS_UNIQ",          # ou ton identifiant unique
-    "cd_portfolio": CD_PORTFOLIO,            # "CD_PORT_PRUDENTIEL"
-    "duration":     DURATION,                # "NB_DURATION_IRBA"
-    "EAD":          EAD,                     # "EAD"
-    "tx_edf":       TX_EDF,                  # "TX_PD_IRBA"
-    "tx_lgd":       TX_LGD,                  # "LGD_IRBA"
+    "id":           "I_AUTRS_UNIQ",
+    "cd_portfolio": CD_PORTFOLIO,
+    "duration":     DURATION,
+    "EAD":          EAD,
+    "tx_edf":       TX_EDF,
+    "tx_lgd":       TX_LGD,
 }
+
+# RWA de référence présent dans le parquet (à adapter au nom réel)
+RWA_REF = "MT_RWA"        # ← mets ici le nom de la colonne RWA d'origine
+
 OUTPUTS = ["RW_init", "RWA_init", "EL_init"]
 
-# Récupère le DataFrame complet (résultat du pipeline)
 df = base_lf.collect()
 
-# Sélection + renommage propre pour la lecture
 sel = df.select([
     pl.col(INPUTS["id"]).alias("id"),
     pl.col(INPUTS["cd_portfolio"]).alias("cd_portfolio"),
@@ -22,16 +23,18 @@ sel = df.select([
     pl.col(INPUTS["EAD"]).cast(pl.Float64).alias("EAD"),
     pl.col(INPUTS["tx_edf"]).cast(pl.Float64).alias("tx_edf"),
     pl.col(INPUTS["tx_lgd"]).cast(pl.Float64).alias("tx_lgd"),
+    pl.col(RWA_REF).cast(pl.Float64).alias("RWA_ref"),
     *[pl.col(c).cast(pl.Float64) for c in OUTPUTS if c in df.columns],
-])
+]).with_columns(
+    (pl.col("RWA_init") - pl.col("RWA_ref")).alias("ecart_abs"),
+    ((pl.col("RWA_init") - pl.col("RWA_ref")) / pl.col("RWA_ref")).alias("ecart_rel"),
+)
 
-# Une ligne représentative par portefeuille (la première qu'on trouve)
+# Une ligne représentative par portefeuille
 sample = (
     sel.unique(subset=["cd_portfolio"], keep="first")
        .sort("cd_portfolio")
 )
 
 print(sample)
-
-# Optionnel : sauve en CSV pour me coller le contenu facilement
 sample.write_csv("rwa_sample_check.csv")
