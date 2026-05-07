@@ -1,40 +1,21 @@
 import polars as pl
 
-INPUTS = {
-    "id":           "I_AUTRS_UNIQ",
-    "cd_portfolio": CD_PORTFOLIO,
-    "duration":     DURATION,
-    "EAD":          EAD,
-    "tx_edf":       TX_EDF,
-    "tx_lgd":       TX_LGD,
-}
+# Récupère les ids du sample (les 21 lignes)
+ids = sample.select("id").to_series().to_list()
 
-# RWA de référence présent dans le parquet (à adapter au nom réel)
-RWA_REF = "MT_RWA"        # ← mets ici le nom de la colonne RWA d'origine
-
-OUTPUTS = ["RW_init", "RWA_init", "EL_init"]
-
-df = base_lf.collect()
-
-sel = df.select([
-    pl.col(INPUTS["id"]).alias("id"),
-    pl.col(INPUTS["cd_portfolio"]).alias("cd_portfolio"),
-    pl.col(INPUTS["duration"]).alias("duration"),
-    pl.col(INPUTS["EAD"]).cast(pl.Float64).alias("EAD"),
-    pl.col(INPUTS["tx_edf"]).cast(pl.Float64).alias("tx_edf"),
-    pl.col(INPUTS["tx_lgd"]).cast(pl.Float64).alias("tx_lgd"),
-    pl.col(RWA_REF).cast(pl.Float64).alias("RWA_ref"),
-    *[pl.col(c).cast(pl.Float64) for c in OUTPUTS if c in df.columns],
-]).with_columns(
-    (pl.col("RWA_init") - pl.col("RWA_ref")).alias("ecart_abs"),
-    ((pl.col("RWA_init") - pl.col("RWA_ref")) / pl.col("RWA_ref")).alias("ecart_rel"),
+# Filtre la base brute et montre id + RWA
+view = (
+    base.filter(pl.col(INPUTS["id"]).is_in(ids))
+        .select(
+            pl.col(INPUTS["id"]).alias("id"),
+            pl.col("cd_portfolio") if "cd_portfolio" in base.columns
+                else pl.col(CD_PORTFOLIO).alias("cd_portfolio"),
+            pl.col("RWA"),
+            pl.col("RWA").list.len().alias("len"),
+            pl.col("RWA").list.sum().alias("sum_RWA"),
+            pl.col("RWA").list.first().alias("first_RWA"),
+        )
+        .sort("cd_portfolio")
 )
 
-# Une ligne représentative par portefeuille
-sample = (
-    sel.unique(subset=["cd_portfolio"], keep="first")
-       .sort("cd_portfolio")
-)
-
-print(sample)
-sample.write_csv("rwa_sample_check.csv")
+print(view)
