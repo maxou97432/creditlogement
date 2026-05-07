@@ -1,52 +1,37 @@
-def build_pipeline(
-    cap_pret_lf: pl.LazyFrame,
-    drop_tmp: bool = True,
-    DURATION_MODE = None,
-    duration            = 'DURATION',
-    ead                 = 'EAD',
-    cd_portfolio        = 'cd_portfolio',
-    cd_type_amort       = 'C_TYPE_AMORT',
-    ind_facteur_reduct  = 'IND_FACTEUR_REDUCT',
-    tx_edf              = 'TX_EDF',
-    tx_lgd              = 'TX_LGD',
-    dt_arrt_col         = 'DT_ARRT',
-    dt_echn_col         = 'DT_ECHEANCE',
-) -> pl.LazyFrame:
-    """Pipeline complet pour le calcul RWA avec tous les paramètres configurables."""
+import polars as pl
 
-    # ── 1) Normaliser les colonnes utilisateur vers les noms par défaut ──
-    rename = {
-        duration:           'DURATION',
-        ead:                'EAD',
-        cd_portfolio:       'cd_portfolio',
-        cd_type_amort:      'C_TYPE_AMORT',
-        ind_facteur_reduct: 'IND_FACTEUR_REDUCT',
-        tx_edf:             'TX_EDF',
-        tx_lgd:             'TX_LGD',
-        dt_arrt_col:        'DT_ARRT',
-        dt_echn_col:        'DT_ECHEANCE',
-    }
-    rename = {k: v for k, v in rename.items() if k != v}
-    lf = cap_pret_lf.rename(rename) if rename else cap_pret_lf
+# Adapte si tes noms de colonnes diffèrent (utilise tes variables DURATION, EAD, etc.)
+INPUTS = {
+    "id":           "I_AUTRS_UNIQ",          # ou ton identifiant unique
+    "cd_portfolio": CD_PORTFOLIO,            # "CD_PORT_PRUDENTIEL"
+    "duration":     DURATION,                # "NB_DURATION_IRBA"
+    "EAD":          EAD,                     # "EAD"
+    "tx_edf":       TX_EDF,                  # "TX_PD_IRBA"
+    "tx_lgd":       TX_LGD,                  # "LGD_IRBA"
+}
+OUTPUTS = ["RW_init", "RWA_init", "EL_init"]
 
-    # ── 2) Construction de la base avec les noms canoniques ──
-    lf = build_base(
-        lf,
-        DURATION_MODE=DURATION_MODE,
-        duration='DURATION',
-        ead='EAD',
-        cd_portfolio='cd_portfolio',
-        cd_type_amort='C_TYPE_AMORT',
-        ind_facteur_reduct='IND_FACTEUR_REDUCT',
-        dt_arrt_col='DT_ARRT',
-        dt_echn_col='DT_ECHEANCE',
-    )
+# Récupère le DataFrame complet (résultat du pipeline)
+df = base_lf.collect()
 
-    # ── 3) Calcul des scénarios RWA ──
-    lf = add_all_rwa_scenarios(lf, tx_edf='TX_EDF', tx_lgd='TX_LGD')
+# Sélection + renommage propre pour la lecture
+sel = df.select([
+    pl.col(INPUTS["id"]).alias("id"),
+    pl.col(INPUTS["cd_portfolio"]).alias("cd_portfolio"),
+    pl.col(INPUTS["duration"]).alias("duration"),
+    pl.col(INPUTS["EAD"]).cast(pl.Float64).alias("EAD"),
+    pl.col(INPUTS["tx_edf"]).cast(pl.Float64).alias("tx_edf"),
+    pl.col(INPUTS["tx_lgd"]).cast(pl.Float64).alias("tx_lgd"),
+    *[pl.col(c).cast(pl.Float64) for c in OUTPUTS if c in df.columns],
+])
 
-    # ── 4) Nettoyage des colonnes temporaires si demandé ──
-    if drop_tmp:
-        lf = drop_tmp_cols(lf)
+# Une ligne représentative par portefeuille (la première qu'on trouve)
+sample = (
+    sel.unique(subset=["cd_portfolio"], keep="first")
+       .sort("cd_portfolio")
+)
 
-    return lf
+print(sample)
+
+# Optionnel : sauve en CSV pour me coller le contenu facilement
+sample.write_csv("rwa_sample_check.csv")
