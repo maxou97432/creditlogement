@@ -1,31 +1,67 @@
-def build_base(cap_pret_lf: pl.LazyFrame, *, DURATION_MODE=None) -> pl.LazyFrame:
-    base = cap_pret_lf
-    if DURATION_MODE == 'NEW':
-        base = compute_maturite_irba(
-            base,
-            dt_arrt_col='DT_ARRT',
-            dt_echn_col='DT_ECHEANCE',
-            cd_type_amort='CD_TYPE_AMORT',     # ← string en dur, nom canonique
-        )
-        duration_expr = _clip_duration('NB_DURATION_RECALCULE').alias("__tmp_maturity")
-    else:
-        duration_expr = _clip_duration('duration').alias("__tmp_maturity")
+def build_pipeline(
+    cap_pret_lf: pl.LazyFrame,
+    *,
+    # Toujours requis
+    cd_portfolio: str = "cd_portfolio",
+    ead:          str = "MT_EAD_FLOOR",
+    tx_edf:       str = "tx_edf",
+    tx_lgd:       str = "tx_lgd",
+    # Requis si DURATION_MODE=None
+    duration:     str | None = "duration",
+    # Requis si DURATION_MODE="recomputed"
+    dt_echeance:   str | None = None,
+    dt_arrt:       str | None = None,
+    cd_type_amort: str | None = None,
+    # Mode
+    DURATION_MODE: str | None = None,   # None ou "NEW"
+    drop_tmp:      bool = True,
+) -> pl.LazyFrame:
+    """
+    Pipeline RWA_init.
 
-    base = base.with_columns(
-        [
-            duration_expr,
-            pl.col('MT_EAD_FLOOR').cast(pl.Float64).alias("__tmp_ead"),  # ← canonique
-            pl.col('cd_portfolio').alias("cd_port_prudentiel"),          # ← canonique
-            
-            pl.when(pl.col('cd_portfolio').is_in(["CORP", "SME_CORP"]))
-            .then(pl.lit("0"))
-            .otherwise(pl.lit("1"))
-            .alias("perim"),
-            
-            pl.when(pl.col('cd_portfolio') == "SME_CORP")
-            .then(pl.lit("1"))
-            .otherwise(None)
-            .alias("IND_FACTEUR_REDUCT"),     # ← string en dur aussi
-        ]
-    )
-    return base
+    DURATION_MODE :
+      - None  → utilise la colonne `duration` (kwarg `duration`)
+      - "NEW" → recalcule depuis dt_echeance, dt_arrt, cd_type_amort
+                (les 3 kwargs deviennent obligatoires)
+    """
+    if DURATION_MODE == "NEW":
+        if not all([dt_echeance, dt_arrt, cd_type_amort]):
+            raise ValueError(
+                "DURATION_MODE='NEW' nécessite dt_echeance, dt_arrt, cd_type_amort"
+            )
+        # 1) Normalisation (duration ignorée dans ce mode)
+        lf = _normalize(
+            cap_pret_lf,
+            cd_portfolio=cd_portfolio,
+            ead=ead,
+            tx_edf=tx_edf,
+            tx_lgd=tx_lgd,
+            dt_echeance=dt_echeance,
+            dt_arrt=dt_arrt,
+            cd_type_amort=cd_type_amort,
+        )
+        # 2) Recalcul de maturité
+        lf = add_recomputed_maturity(lf)
+        # 3) Préparation base (utilise NB_DURATION_RECALCULE comme source)
+        lf = build_base(lf, duration_source="NB_DURATION_RECALCULE")
+    else:
+        if duration is None:
+            raise ValueError("`duration` est requis quand DURATION_MODE est None")
+        lf = _normalize(
+            cap_pret_lf,
+            cd_portfolio=cd_portfolio,
+            ead=ead,
+            tx_edf=tx_edf,
+            tx_lgd=tx_lgd,
+            duration=duration,
+        )
+        lf = build_base(lf, duration_source="duration")
+
+    # 4) Calcul RWA_init
+    lf = add_rwa_init_scenario(lf)
+
+    # 5) Nettoyage
+    if drop_tmp:
+        lf = drop_tmp_cols(lf)
+
+    return lf
