@@ -1,21 +1,34 @@
-import polars as pl
+_CANON = {
+    "cd_portfolio": "cd_portfolio",
+    "duration":     "duration",
+    "ead":          "MT_EAD_FLOOR",
+    "tx_edf":       "tx_edf",
+    "tx_lgd":       "tx_lgd",
+}
+def _normalize(
+    lf: pl.LazyFrame,
+    *,
+    cd_portfolio: str,
+    duration:     str,
+    ead:          str,
+    tx_edf:       str,
+    tx_lgd:       str,
+) -> pl.LazyFrame:
+    """Renomme les colonnes utilisateur vers les noms canoniques internes."""
+    rename = {
+        cd_portfolio: _CANON["cd_portfolio"],
+        duration:     _CANON["duration"],
+        ead:          _CANON["ead"],
+        tx_edf:       _CANON["tx_edf"],
+        tx_lgd:       _CANON["tx_lgd"],
+    }
+    rename = {k: v for k, v in rename.items() if k != v}
 
-# Récupère les ids du sample (les 21 lignes)
-ids = sample.select("id").to_series().to_list()
-
-# Filtre la base brute et montre id + RWA
-view = (
-    base.filter(pl.col(INPUTS["id"]).is_in(ids))
-        .select(
-            pl.col(INPUTS["id"]).alias("id"),
-            pl.col("cd_portfolio") if "cd_portfolio" in base.columns
-                else pl.col(CD_PORTFOLIO).alias("cd_portfolio"),
-            pl.col("RWA"),
-            pl.col("RWA").list.len().alias("len"),
-            pl.col("RWA").list.sum().alias("sum_RWA"),
-            pl.col("RWA").list.first().alias("first_RWA"),
+    available = lf.collect_schema().names()
+    missing   = [k for k in rename if k not in available]
+    if missing:
+        raise ValueError(
+            f"Colonnes introuvables dans la base : {missing}. "
+            f"Colonnes disponibles : {available}"
         )
-        .sort("cd_portfolio")
-)
-
-print(view)
+    return lf.rename(rename) if rename else lf
