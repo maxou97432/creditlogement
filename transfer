@@ -1,18 +1,3 @@
-# 1) Vérifie le schéma initial
-print("AVANT rename :", sorted(base.columns))
-
-# 2) Lance _normalize seul et regarde ce que tu obtiens
-from rwa_init import _normalize
-
-lf_normalized = _normalize(
-    base.lazy(),
-    cd_portfolio  = CD_PORTFOLIO,
-    duration      = DURATION,         # "NB_DURATION_IRBA"
-    ead           = EAD,
-    tx_edf        = TX_EDF,
-    tx_lgd        = TX_LGD,
-    dt_echeance   = DT_ECHEANCE,
-    dt_arrt       = DT_ARRT,
-    cd_type_amort = CD_TYPE_AMORT,
-)
-print("APRÈS rename :", sorted(lf_normalized.collect_schema().names()))
+print("AVANT:", sorted(base.columns))
+lf_norm = _normalize(base.lazy(), ...)
+print("APRÈS:", sorted(lf_norm.collect_schema().names()))
