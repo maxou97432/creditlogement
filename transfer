@@ -1,34 +1,34 @@
-_CANON = {
-    "cd_portfolio": "cd_portfolio",
-    "duration":     "duration",
-    "ead":          "MT_EAD_FLOOR",
-    "tx_edf":       "tx_edf",
-    "tx_lgd":       "tx_lgd",
-}
-def _normalize(
-    lf: pl.LazyFrame,
-    *,
-    cd_portfolio: str,
-    duration:     str,
-    ead:          str,
-    tx_edf:       str,
-    tx_lgd:       str,
-) -> pl.LazyFrame:
-    """Renomme les colonnes utilisateur vers les noms canoniques internes."""
-    rename = {
-        cd_portfolio: _CANON["cd_portfolio"],
-        duration:     _CANON["duration"],
-        ead:          _CANON["ead"],
-        tx_edf:       _CANON["tx_edf"],
-        tx_lgd:       _CANON["tx_lgd"],
-    }
-    rename = {k: v for k, v in rename.items() if k != v}
+def add_recomputed_maturity(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """
+    Ajoute NB_MATURITE_RECALCULE et NB_DURATION_RECALCULE.
 
-    available = lf.collect_schema().names()
-    missing   = [k for k in rename if k not in available]
-    if missing:
-        raise ValueError(
-            f"Colonnes introuvables dans la base : {missing}. "
-            f"Colonnes disponibles : {available}"
+    Suppose que les noms canoniques DT_ECHEANCE, DT_ARRT, CD_TYPE_AMORT
+    sont déjà en place dans le LazyFrame.
+    Les colonnes de dates doivent être de type Date ou Datetime.
+    """
+    lf = lf.with_columns(
+        R=(pl.col("DT_ECHEANCE") - pl.col("DT_ARRT"))
+            .dt.total_days()
+            .cast(pl.Float64) / 365.25,
+        _amort_str=pl.col("CD_TYPE_AMORT").cast(pl.Utf8, strict=False).str.strip_chars(),
+    )
+
+    lf = lf.with_columns(
+        NB_MATURITE_RECALCULE=(
+            pl.when(pl.col("_amort_str") == "1").then(_m_srs_type1_expr("R"))
+              .when(pl.col("_amort_str") == "3").then(_m_srs_type3_expr("R"))
+              .when(pl.col("_amort_str").is_in(["2", "4", "9"])).then(pl.col("R"))
+              .otherwise(pl.col("R"))
         )
-    return lf.rename(rename) if rename else lf
+    )
+
+    # Clip réglementaire [1, 5]
+    lf = lf.with_columns(
+        NB_DURATION_RECALCULE=(
+            pl.when(pl.col("NB_MATURITE_RECALCULE") < 1.0).then(1.0)
+              .when(pl.col("NB_MATURITE_RECALCULE") > 5.0).then(5.0)
+              .otherwise(pl.col("NB_MATURITE_RECALCULE"))
+        )
+    )
+
+    return lf.drop("_amort_str")
