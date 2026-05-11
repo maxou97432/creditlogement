@@ -1,42 +1,25 @@
-def build_pipeline(
-    cap_pret_lf,
-    *,
-    cd_portfolio: str,
-    duration:     str,
-    ead:          str,
-    tx_edf:       str,
-    tx_lgd:       str,
-    dt_echeance:  str,
-    dt_arrt:      str,
-    cd_type_amort: str,
-    DURATION_MODE: str | None = None,
-    drop_tmp:     bool = True,
-) -> pl.LazyFrame:
-    # 1) Rename des colonnes utilisateur vers les noms canoniques
-    lf = _normalize(
-        cap_pret_lf,
-        cd_portfolio=cd_portfolio,
-        duration=duration,
-        ead=ead,
-        tx_edf=tx_edf,
-        tx_lgd=tx_lgd,
-        dt_echeance=dt_echeance,
-        dt_arrt=dt_arrt,
-        cd_type_amort=cd_type_amort,
-    )
+def _normalize(lf, *, cd_portfolio, ead, tx_edf, tx_lgd,
+               duration=None, dt_echeance=None, dt_arrt=None, cd_type_amort=None):
+    rename = {
+        cd_portfolio: _CANON["cd_portfolio"],
+        ead:          _CANON["ead"],
+        tx_edf:       _CANON["tx_edf"],
+        tx_lgd:       _CANON["tx_lgd"],
+    }
+    if duration      is not None: rename[duration]      = _CANON["duration"]
+    if dt_echeance   is not None: rename[dt_echeance]   = _CANON["dt_echeance"]
+    if dt_arrt       is not None: rename[dt_arrt]       = _CANON["dt_arrt"]
+    if cd_type_amort is not None: rename[cd_type_amort] = _CANON["cd_type_amort"]
 
-    # 2) Recalcul de maturité si mode "NEW"
-    if DURATION_MODE == "NEW":
-        lf = compute_maturite_irba(lf)   # nom de ta fonction
+    rename = {k: v for k, v in rename.items() if k != v}
+    print(">>> _normalize rename dict =", rename)               # ← AJOUTE
+    print(">>> duration param value   =", repr(duration))       # ← AJOUTE
 
-    # 3) Préparation base — pas de noms de colonnes, juste DURATION_MODE
-    lf = build_base(lf, DURATION_MODE=DURATION_MODE)
-
-    # 4) Calcul RWA_init
-    lf = add_all_rwa_scenarios(lf)       # ou add_rwa_init_scenario selon ton nom
-
-    # 5) Cleanup
-    if drop_tmp:
-        lf = drop_tmp_cols(lf)
-
-    return lf
+    available = lf.collect_schema().names()
+    missing   = [k for k in rename if k not in available]
+    if missing:
+        raise ValueError(
+            f"Colonnes introuvables dans la base : {missing}. "
+            f"Colonnes disponibles : {available}"
+        )
+    return lf.rename(rename) if rename else lf
