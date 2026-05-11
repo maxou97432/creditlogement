@@ -1,3 +1,34 @@
-print("AVANT:", sorted(base.columns))
-lf_norm = _normalize(base.lazy(), ...)
-print("APRÈS:", sorted(lf_norm.collect_schema().names()))
+def build_base(
+    cap_pret_lf: pl.LazyFrame,
+    *,
+    DURATION_MODE: str | None = None,
+) -> pl.LazyFrame:
+    """
+    Prépare la base pour le calcul RWA.
+    Suppose que les colonnes canoniques (cd_portfolio, duration, MT_EAD_FLOOR)
+    sont déjà en place via _normalize.
+    Si DURATION_MODE="NEW", suppose en plus que NB_DURATION_RECALCULE existe.
+    """
+    if DURATION_MODE == "NEW":
+        duration_expr = pl.col("NB_DURATION_RECALCULE").cast(pl.Float64).alias("__tmp_maturity")
+    else:
+        duration_expr = _clip_duration("duration").alias("__tmp_maturity")
+
+    return cap_pret_lf.with_columns(
+        [
+            duration_expr,
+            pl.col("MT_EAD_FLOOR").cast(pl.Float64).alias("__tmp_ead"),
+
+            # perim = 0 pour CORP/SME_CORP, 1 sinon
+            pl.when(pl.col("cd_portfolio").is_in(["CORP", "SME_CORP"]))
+            .then(pl.lit("0"))
+            .otherwise(pl.lit("1"))
+            .alias("perim"),
+
+            # IND_FACTEUR_REDUCT = 1 pour SME_CORP
+            pl.when(pl.col("cd_portfolio") == "SME_CORP")
+            .then(pl.lit("1"))
+            .otherwise(None)
+            .alias("IND_FACTEUR_REDUCT"),
+        ]
+    )
