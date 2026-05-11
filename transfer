@@ -1,34 +1,42 @@
-def build_base(
-    cap_pret_lf: pl.LazyFrame,
+def build_pipeline(
+    cap_pret_lf,
     *,
+    cd_portfolio: str,
+    duration:     str,
+    ead:          str,
+    tx_edf:       str,
+    tx_lgd:       str,
+    dt_echeance:  str,
+    dt_arrt:      str,
+    cd_type_amort: str,
     DURATION_MODE: str | None = None,
+    drop_tmp:     bool = True,
 ) -> pl.LazyFrame:
-    """
-    Prépare la base pour le calcul RWA.
-    Suppose que les colonnes canoniques (cd_portfolio, duration, MT_EAD_FLOOR)
-    sont déjà en place via _normalize.
-    Si DURATION_MODE="NEW", suppose en plus que NB_DURATION_RECALCULE existe.
-    """
-    if DURATION_MODE == "NEW":
-        duration_expr = pl.col("NB_DURATION_RECALCULE").cast(pl.Float64).alias("__tmp_maturity")
-    else:
-        duration_expr = _clip_duration("duration").alias("__tmp_maturity")
-
-    return cap_pret_lf.with_columns(
-        [
-            duration_expr,
-            pl.col("MT_EAD_FLOOR").cast(pl.Float64).alias("__tmp_ead"),
-
-            # perim = 0 pour CORP/SME_CORP, 1 sinon
-            pl.when(pl.col("cd_portfolio").is_in(["CORP", "SME_CORP"]))
-            .then(pl.lit("0"))
-            .otherwise(pl.lit("1"))
-            .alias("perim"),
-
-            # IND_FACTEUR_REDUCT = 1 pour SME_CORP
-            pl.when(pl.col("cd_portfolio") == "SME_CORP")
-            .then(pl.lit("1"))
-            .otherwise(None)
-            .alias("IND_FACTEUR_REDUCT"),
-        ]
+    # 1) Rename des colonnes utilisateur vers les noms canoniques
+    lf = _normalize(
+        cap_pret_lf,
+        cd_portfolio=cd_portfolio,
+        duration=duration,
+        ead=ead,
+        tx_edf=tx_edf,
+        tx_lgd=tx_lgd,
+        dt_echeance=dt_echeance,
+        dt_arrt=dt_arrt,
+        cd_type_amort=cd_type_amort,
     )
+
+    # 2) Recalcul de maturité si mode "NEW"
+    if DURATION_MODE == "NEW":
+        lf = compute_maturite_irba(lf)   # nom de ta fonction
+
+    # 3) Préparation base — pas de noms de colonnes, juste DURATION_MODE
+    lf = build_base(lf, DURATION_MODE=DURATION_MODE)
+
+    # 4) Calcul RWA_init
+    lf = add_all_rwa_scenarios(lf)       # ou add_rwa_init_scenario selon ton nom
+
+    # 5) Cleanup
+    if drop_tmp:
+        lf = drop_tmp_cols(lf)
+
+    return lf
