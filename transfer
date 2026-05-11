@@ -1,67 +1,38 @@
-def build_pipeline(
-    cap_pret_lf: pl.LazyFrame,
-    *,
-    # Toujours requis
-    cd_portfolio: str = "cd_portfolio",
-    ead:          str = "MT_EAD_FLOOR",
-    tx_edf:       str = "tx_edf",
-    tx_lgd:       str = "tx_lgd",
-    # Requis si DURATION_MODE=None
-    duration:     str | None = "duration",
-    # Requis si DURATION_MODE="recomputed"
-    dt_echeance:   str | None = None,
-    dt_arrt:       str | None = None,
-    cd_type_amort: str | None = None,
-    # Mode
-    DURATION_MODE: str | None = None,   # None ou "NEW"
-    drop_tmp:      bool = True,
-) -> pl.LazyFrame:
+def compute_maturite_irba(lf: pl.LazyFrame) -> pl.LazyFrame:
     """
-    Pipeline RWA_init.
-
-    DURATION_MODE :
-      - None  → utilise la colonne `duration` (kwarg `duration`)
-      - "NEW" → recalcule depuis dt_echeance, dt_arrt, cd_type_amort
-                (les 3 kwargs deviennent obligatoires)
+    Ajoute NB_MATURITE_RECALCULE et NB_DURATION_RECALCULE.
+    DT_ECHEANCE est attendue en format SAS (jours depuis 1960-01-01).
+    DT_ARRT est attendue en Date/Datetime Polars (convertie en SAS ici).
     """
-    if DURATION_MODE == "NEW":
-        if not all([dt_echeance, dt_arrt, cd_type_amort]):
-            raise ValueError(
-                "DURATION_MODE='NEW' nécessite dt_echeance, dt_arrt, cd_type_amort"
-            )
-        # 1) Normalisation (duration ignorée dans ce mode)
-        lf = _normalize(
-            cap_pret_lf,
-            cd_portfolio=cd_portfolio,
-            ead=ead,
-            tx_edf=tx_edf,
-            tx_lgd=tx_lgd,
-            dt_echeance=dt_echeance,
-            dt_arrt=dt_arrt,
-            cd_type_amort=cd_type_amort,
+    # 1) Convertir DT_ARRT en jours SAS (depuis 1960-01-01)
+    lf = lf.with_columns(
+        date_to_sas('DT_ARRT').alias('DT_ARRT_sas')
+    )
+
+    # 2) R en années, à partir des deux dates en format SAS
+    lf = lf.with_columns(
+        R=(pl.col("DT_ECHEANCE") - pl.col("DT_ARRT_sas"))
+            .cast(pl.Float64) / 365.25,
+        _amort_str=pl.col("CD_TYPE_AMORT").cast(pl.Utf8, strict=False).str.strip_chars(),
+    )
+
+    # 3) Branche par type d'amortissement
+    lf = lf.with_columns(
+        NB_MATURITE_RECALCULE=(
+            pl.when(pl.col("_amort_str") == "1").then(_m_srs_type1_expr("R"))
+              .when(pl.col("_amort_str") == "3").then(_m_srs_type3_expr("R"))
+              .when(pl.col("_amort_str").is_in(["2", "4", "9"])).then(pl.col("R"))
+              .otherwise(pl.col("R"))
         )
-        # 2) Recalcul de maturité
-        lf = add_recomputed_maturity(lf)
-        # 3) Préparation base (utilise NB_DURATION_RECALCULE comme source)
-        lf = build_base(lf, duration_source="NB_DURATION_RECALCULE")
-    else:
-        if duration is None:
-            raise ValueError("`duration` est requis quand DURATION_MODE est None")
-        lf = _normalize(
-            cap_pret_lf,
-            cd_portfolio=cd_portfolio,
-            ead=ead,
-            tx_edf=tx_edf,
-            tx_lgd=tx_lgd,
-            duration=duration,
+    )
+
+    # 4) Clip réglementaire [1, 5]
+    lf = lf.with_columns(
+        NB_DURATION_RECALCULE=(
+            pl.when(pl.col("NB_MATURITE_RECALCULE") < 1.0).then(1.0)
+              .when(pl.col("NB_MATURITE_RECALCULE") > 5.0).then(5.0)
+              .otherwise(pl.col("NB_MATURITE_RECALCULE"))
         )
-        lf = build_base(lf, duration_source="duration")
+    )
 
-    # 4) Calcul RWA_init
-    lf = add_rwa_init_scenario(lf)
-
-    # 5) Nettoyage
-    if drop_tmp:
-        lf = drop_tmp_cols(lf)
-
-    return lf
+    return lf.drop(["_amort_str", "DT_ARRT_sas"])  # cleanup
