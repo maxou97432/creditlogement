@@ -1,38 +1,18 @@
-def compute_maturite_irba(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    Ajoute NB_MATURITE_RECALCULE et NB_DURATION_RECALCULE.
-    DT_ECHEANCE est attendue en format SAS (jours depuis 1960-01-01).
-    DT_ARRT est attendue en Date/Datetime Polars (convertie en SAS ici).
-    """
-    # 1) Convertir DT_ARRT en jours SAS (depuis 1960-01-01)
-    lf = lf.with_columns(
-        date_to_sas('DT_ARRT').alias('DT_ARRT_sas')
-    )
+# 1) Vérifie le schéma initial
+print("AVANT rename :", sorted(base.columns))
 
-    # 2) R en années, à partir des deux dates en format SAS
-    lf = lf.with_columns(
-        R=(pl.col("DT_ECHEANCE") - pl.col("DT_ARRT_sas"))
-            .cast(pl.Float64) / 365.25,
-        _amort_str=pl.col("CD_TYPE_AMORT").cast(pl.Utf8, strict=False).str.strip_chars(),
-    )
+# 2) Lance _normalize seul et regarde ce que tu obtiens
+from rwa_init import _normalize
 
-    # 3) Branche par type d'amortissement
-    lf = lf.with_columns(
-        NB_MATURITE_RECALCULE=(
-            pl.when(pl.col("_amort_str") == "1").then(_m_srs_type1_expr("R"))
-              .when(pl.col("_amort_str") == "3").then(_m_srs_type3_expr("R"))
-              .when(pl.col("_amort_str").is_in(["2", "4", "9"])).then(pl.col("R"))
-              .otherwise(pl.col("R"))
-        )
-    )
-
-    # 4) Clip réglementaire [1, 5]
-    lf = lf.with_columns(
-        NB_DURATION_RECALCULE=(
-            pl.when(pl.col("NB_MATURITE_RECALCULE") < 1.0).then(1.0)
-              .when(pl.col("NB_MATURITE_RECALCULE") > 5.0).then(5.0)
-              .otherwise(pl.col("NB_MATURITE_RECALCULE"))
-        )
-    )
-
-    return lf.drop(["_amort_str", "DT_ARRT_sas"])  # cleanup
+lf_normalized = _normalize(
+    base.lazy(),
+    cd_portfolio  = CD_PORTFOLIO,
+    duration      = DURATION,         # "NB_DURATION_IRBA"
+    ead           = EAD,
+    tx_edf        = TX_EDF,
+    tx_lgd        = TX_LGD,
+    dt_echeance   = DT_ECHEANCE,
+    dt_arrt       = DT_ARRT,
+    cd_type_amort = CD_TYPE_AMORT,
+)
+print("APRÈS rename :", sorted(lf_normalized.collect_schema().names()))
