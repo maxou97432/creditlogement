@@ -1,5 +1,8 @@
-print(f"LGD_DT_1 nulls : {base['LGD_DT_1'].null_count()} / {len(base)}")
-trg_vals = set(base['modele_trg'].unique().to_list())
-seg_vals = set(downturn['Segment'].unique().to_list())
-print('Dans base mais pas dans downturn :', trg_vals - seg_vals)
-print('Dans downturn mais pas dans base :', seg_vals - trg_vals)
+for scen_id in range(1, 5):
+    lgd_scen = downturn.filter(pl.col("SCENARIO") == scen_id).select(["Segment", "LGD downturn"])
+    base = base.join(
+        lgd_scen,
+        left_on=f"SCENARIO_{scen_id}",   # ← était modele_trg, doit être le label
+        right_on="Segment",
+        how="left"
+    ).rename({"LGD downturn": f"LGD_DT_{scen_id}"})
