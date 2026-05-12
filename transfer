@@ -1,13 +1,5 @@
-# Taux de nulls sur LGD_DT_1 après join
-print(f"LGD_DT_1 nulls : {base['LGD_DT_1'].null_count()} / {len(base)}")
-# Valeurs uniques de modele_trg dans la base
-print(base['modele_trg'].unique().sort())
+rwa_scen = build_pipeline(base_scen.lazy(), ...).collect()
 
-# Valeurs uniques de Segment dans le fichier downturn
-print(downturn['Segment'].unique().sort())
-
-# Valeurs dans modele_trg qui ne matchent PAS dans downturn
-trg_vals = set(base['modele_trg'].unique().to_list())
-seg_vals = set(downturn['Segment'].unique().to_list())
-print('Dans base mais pas dans downturn :', trg_vals - seg_vals)
-print('Dans downturn mais pas dans base :', seg_vals - trg_vals)
+# Debug
+print(f"Scénario {scen_id}")
+print(rwa_scen.select(["tx_edf", "tx_lgd", "MT_EAD_FLOOR", "RWA_recalculed"]).describe())
