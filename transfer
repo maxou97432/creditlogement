@@ -21,11 +21,25 @@ for scen_id in range(1, 5):
         .rename({"LGD downturn": f"LGD_DT_{scen_id}"})
     )
 
-# Calcul du RWA pour chaque scénario
+# Calcul du RWA reboot via build_pipeline (tx_lgd original) — base de comparaison cohérente
+rwa_reboot = build_pipeline(
+    base.lazy(),
+    cd_portfolio  = CD_PORTFOLIO,
+    duration      = DURATION,
+    ead           = EAD,
+    tx_edf        = TX_EDF,
+    tx_lgd        = TX_LGD,
+    dt_echeance   = DT_ECHEANCE,
+    dt_arrt       = DT_ARRT,
+    cd_type_amort = CD_TYPE_AMORT,
+    DURATION_MODE = None,
+).collect()
+rwa_reboot_total = rwa_reboot["RWA_recalculed"].sum()
+
+# Calcul du RWA pour chaque scénario (LGD Downturn)
 scenario_results = {}
 for scen_id in range(1, 5):
     lgd_col   = f"LGD_DT_{scen_id}"
-    # Fallback sur tx_lgd original si pas de LGD Downturn pour ce segment
     base_scen = base.with_columns(
         pl.coalesce([pl.col(lgd_col), pl.col("tx_lgd")]).alias(TX_LGD)
     )
@@ -44,7 +58,6 @@ for scen_id in range(1, 5):
     scenario_results[scen_id] = rwa_scen
 
 # Comparaison des totaux
-rwa_reboot_total = base["RWA_recalculed"].sum()
 comparison = []
 for scen_id, df in scenario_results.items():
     rwa_total = df["RWA_recalculed"].sum()
