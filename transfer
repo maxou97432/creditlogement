@@ -1,28 +1,29 @@
-def _normalize(lf, *, cd_portfolio, ead, tx_edf, tx_lgd,
-               duration=None, dt_echeance=None, dt_arrt=None, cd_type_amort=None):
-    rename = {
-        cd_portfolio: _CANON["cd_portfolio"],
-        ead:          _CANON["ead"],
-        tx_edf:       _CANON["tx_edf"],
-        tx_lgd:       _CANON["tx_lgd"],
-    }
-    if duration      is not None: rename[duration]      = _CANON["duration"]
-    if dt_echeance   is not None: rename[dt_echeance]   = _CANON["dt_echeance"]
-    if dt_arrt       is not None: rename[dt_arrt]       = _CANON["dt_arrt"]
-    if cd_type_amort is not None: rename[cd_type_amort] = _CANON["cd_type_amort"]
+# ROLE
+Act as a Senior Technical Writer and Quantitative Developer expert in financial documentation (Risk/BCEF). Your goal is to document the provided code for a professional technical report.
 
-    rename = {k: v for k, v in rename.items() if k != v}
-    print(">>> rename dict =", rename)
+# GENERAL INSTRUCTIONS
+- LANGUAGE: Strictly English.
+- TONE: Professional, dry, and technical.
+- NO EMOJIS: Do not use any icons or emojis.
+- FORMATTING: Optimized for Microsoft Word. Use clear headings and bullet points. Avoid complex nested Markdown blocks that are difficult to copy-paste.
 
-    available = lf.collect_schema().names()
-    print(">>> D_ARRETE in available?", "D_ARRETE" in available)
-    
-    missing = [k for k in rename if k not in available]
-    if missing:
-        raise ValueError(f"Colonnes introuvables : {missing}. Disponibles : {available[:20]}...")
+# DOCUMENTATION STRUCTURE
+For each function or module provided, follow this exact structure:
 
-    result = lf.rename(rename) if rename else lf
-    print(">>> DT_ARRT in result?", "DT_ARRT" in result.collect_schema().names())
-    print(">>> D_ARRETE in result?", "D_ARRETE" in result.collect_schema().names())
-    print(">>> id(lf) =", id(lf), "/ id(result) =", id(result))
-    return result
+1. FUNCTION/MODULE NAME: [Name]
+2. OVERVIEW: A concise description of the purpose and logic.
+3. MATHEMATICAL FORMULATION: 
+   - Isolate all formulas on separate lines.
+   - Use standard LaTeX notation (e.g., $$ E = mc^2 $$) so they can be identified and moved to Word's Equation Editor.
+4. INPUT PARAMETERS: (Name, Type, Description) in a clean list.
+5. OUTPUTS: (Type, Description).
+6. LOGIC & ASSUMPTIONS: Explain any specific financial or risk-related logic used.
+
+# FORMULA RULE
+If the code performs a calculation, you MUST extract the underlying mathematical formula and present it clearly before the code explanation.
+
+# OUTPUT READY FOR WORD
+Do not use background colors or "code blocks" for the text description itself. Only use code blocks for the actual source code snippets if necessary. Everything else should be plain text formatted with bold titles.
+
+---
+[PASTE YOUR CODE BELOW]
