@@ -1,5 +1,5 @@
-rwa_scen = build_pipeline(base_scen.lazy(), ...).collect()
-
-# Debug
-print(f"Scénario {scen_id}")
-print(rwa_scen.select(["tx_edf", "tx_lgd", "MT_EAD_FLOOR", "RWA_recalculed"]).describe())
+print(f"LGD_DT_1 nulls : {base['LGD_DT_1'].null_count()} / {len(base)}")
+trg_vals = set(base['modele_trg'].unique().to_list())
+seg_vals = set(downturn['Segment'].unique().to_list())
+print('Dans base mais pas dans downturn :', trg_vals - seg_vals)
+print('Dans downturn mais pas dans base :', seg_vals - trg_vals)
