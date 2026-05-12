@@ -1,79 +1,29 @@
+# ROLE
+Act as a Senior Technical Writer and Quantitative Developer expert in financial documentation (Risk/BCEF). Your goal is to document the provided code for a professional technical report.
 
-# Chargement du fichier Downturn
-downturn = pl.read_csv(
-    r"C:\Users\j21338\OneDrive - BNP Paribas\python - Documents\Pack Python\branche_polars\RiskQuant\Downturn\resultats_downturn.csv"
-)
+# GENERAL INSTRUCTIONS
+- LANGUAGE: Strictly English.
+- TONE: Professional, dry, and technical.
+- NO EMOJIS: Do not use any icons or emojis.
+- FORMATTING: Optimized for Microsoft Word. Use clear headings and bullet points. Avoid complex nested Markdown blocks that are difficult to copy-paste.
 
-# Enrichissement LGD Downturn — join sur le label (Immo/CL/etc.), pas modele_trg
-# LGD downturn est en % (ex: 25.42) → on divise par 100 pour aligner avec tx_lgd décimal
-for scen_id in range(1, 5):
-    lgd_scen = (
-        downturn
-        .filter(pl.col("SCENARIO") == scen_id)
-        .select([
-            "Segment",
-            (pl.col("LGD downturn") / 100).alias("LGD downturn"),
-        ])
-    )
-    base = (
-        base
-        .join(lgd_scen, left_on=f"SCENARIO_{scen_id}", right_on="Segment", how="left")
-        .rename({"LGD downturn": f"LGD_DT_{scen_id}"})
-    )
+# DOCUMENTATION STRUCTURE
+For each function or module provided, follow this exact structure:
 
-# Calcul du RWA reboot via build_pipeline (tx_lgd original) — base de comparaison cohérente
-rwa_reboot = build_pipeline(
-    base.lazy(),
-    cd_portfolio  = CD_PORTFOLIO,
-    duration      = DURATION,
-    ead           = EAD,
-    tx_edf        = TX_EDF,
-    tx_lgd        = TX_LGD,
-    dt_echeance   = DT_ECHEANCE,
-    dt_arrt       = DT_ARRT,
-    cd_type_amort = CD_TYPE_AMORT,
-    DURATION_MODE = None,
-).collect()
-rwa_reboot_total = rwa_reboot["RWA_recalculed"].sum() * 1000
+1. FUNCTION/MODULE NAME: [Name]
+2. OVERVIEW: A concise description of the purpose and logic.
+3. MATHEMATICAL FORMULATION: 
+   - Isolate all formulas on separate lines.
+   - Use standard LaTeX notation (e.g., $$ E = mc^2 $$) so they can be identified and moved to Word's Equation Editor.
+4. INPUT PARAMETERS: (Name, Type, Description) in a clean list.
+5. OUTPUTS: (Type, Description).
+6. LOGIC & ASSUMPTIONS: Explain any specific financial or risk-related logic used.
 
-# Calcul du RWA pour chaque scénario (LGD Downturn)
-scenario_results = {}
-for scen_id in range(1, 5):
-    lgd_col   = f"LGD_DT_{scen_id}"
-    base_scen = base.with_columns(
-        pl.coalesce([pl.col(lgd_col), pl.col("tx_lgd")]).alias(TX_LGD)
-    )
-    rwa_scen  = build_pipeline(
-        base_scen.lazy(),
-        cd_portfolio  = CD_PORTFOLIO,
-        duration      = DURATION,
-        ead           = EAD,
-        tx_edf        = TX_EDF,
-        tx_lgd        = TX_LGD,
-        dt_echeance   = DT_ECHEANCE,
-        dt_arrt       = DT_ARRT,
-        cd_type_amort = CD_TYPE_AMORT,
-        DURATION_MODE = None,
-    ).collect()
-    scenario_results[scen_id] = rwa_scen
+# FORMULA RULE
+If the code performs a calculation, you MUST extract the underlying mathematical formula and present it clearly before the code explanation.
 
-# Comparaison des totaux
-comparison = []
-for scen_id, df in scenario_results.items():
-    rwa_total = df["RWA_recalculed"].sum() * 1000
-    delta     = rwa_total - rwa_reboot_total
-    comparison.append({
-        "Scenario"        : f"Scenario_{scen_id}",
-        "RWA_Total"       : rwa_total,
-        "Delta_vs_Reboot" : delta,
-        "Is_Lower"        : delta < 0,
-    })
+# OUTPUT READY FOR WORD
+Do not use background colors or "code blocks" for the text description itself. Only use code blocks for the actual source code snippets if necessary. Everything else should be plain text formatted with bold titles.
 
-print("\n=== RWA TOTAL COMPARISON | FORMULE OFFICIELLE ===")
-print(pl.DataFrame(comparison))
-
-# Scénario recommandé
-results_df    = pl.DataFrame(comparison)
-best_scenario = results_df.filter(pl.col("RWA_Total") == pl.col("RWA_Total").min())
-print("\n=== RECOMMENDED SCENARIO ===")
-print(best_scenario)
+---
+[PASTE YOUR CODE BELOW]
