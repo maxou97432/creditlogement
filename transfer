@@ -1,8 +1,58 @@
+# Chargement du fichier Downturn
+downturn = pl.read_csv(
+    r"C:\Users\j21338\OneDrive - BNP Paribas\python - Documents\Pack Python\branche_polars\RiskQuant\Downturn\resultats_downturn.csv"
+)
+
+# Enrichissement LGD Downturn — join sur le label (Immo/CL/etc.), pas modele_trg
 for scen_id in range(1, 5):
-    lgd_scen = downturn.filter(pl.col("SCENARIO") == scen_id).select(["Segment", "LGD downturn"])
-    base = base.join(
-        lgd_scen,
-        left_on=f"SCENARIO_{scen_id}",   # ← était modele_trg, doit être le label
-        right_on="Segment",
-        how="left"
-    ).rename({"LGD downturn": f"LGD_DT_{scen_id}"})
+    lgd_scen = (
+        downturn
+        .filter(pl.col("SCENARIO") == scen_id)
+        .select(["Segment", "LGD downturn"])
+    )
+    base = (
+        base
+        .join(lgd_scen, left_on=f"SCENARIO_{scen_id}", right_on="Segment", how="left")
+        .rename({"LGD downturn": f"LGD_DT_{scen_id}"})
+    )
+
+# Calcul du RWA pour chaque scénario
+scenario_results = {}
+for scen_id in range(1, 5):
+    lgd_col   = f"LGD_DT_{scen_id}"
+    base_scen = base.with_columns(pl.col(lgd_col).alias(TX_LGD))
+    rwa_scen  = build_pipeline(
+        base_scen.lazy(),
+        cd_portfolio  = CD_PORTFOLIO,
+        duration      = DURATION,
+        ead           = EAD,
+        tx_edf        = TX_EDF,
+        tx_lgd        = TX_LGD,
+        dt_echeance   = DT_ECHEANCE,
+        dt_arrt       = DT_ARRT,
+        cd_type_amort = CD_TYPE_AMORT,
+        DURATION_MODE = None,
+    ).collect()
+    scenario_results[scen_id] = rwa_scen
+
+# Comparaison des totaux
+rwa_reboot_total = base["RWA_recalculed"].sum()
+comparison = []
+for scen_id, df in scenario_results.items():
+    rwa_total = df["RWA_recalculed"].sum()
+    delta     = rwa_total - rwa_reboot_total
+    comparison.append({
+        "Scenario"        : f"Scenario_{scen_id}",
+        "RWA_Total"       : rwa_total,
+        "Delta_vs_Reboot" : delta,
+        "Is_Lower"        : delta < 0,
+    })
+
+print("\n=== RWA TOTAL COMPARISON | FORMULE OFFICIELLE ===")
+print(pl.DataFrame(comparison))
+
+# Scénario recommandé
+results_df    = pl.DataFrame(comparison)
+best_scenario = results_df.filter(pl.col("RWA_Total") == pl.col("RWA_Total").min())
+print("\n=== RECOMMENDED SCENARIO ===")
+print(best_scenario)
