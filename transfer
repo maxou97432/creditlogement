@@ -1,29 +1,92 @@
-# ROLE
-Act as a Senior Technical Writer and Quantitative Developer expert in financial documentation (Risk/BCEF). Your goal is to document the provided code for a professional technical report.
+## 5. IRB Formula — Full Mathematical Description
 
-# GENERAL INSTRUCTIONS
-- LANGUAGE: Strictly English.
-- TONE: Professional, dry, and technical.
-- NO EMOJIS: Do not use any icons or emojis.
-- FORMATTING: Optimized for Microsoft Word. Use clear headings and bullet points. Avoid complex nested Markdown blocks that are difficult to copy-paste.
+### 5.1 Correlation R
 
-# DOCUMENTATION STRUCTURE
-For each function or module provided, follow this exact structure:
+The asset correlation `R` follows the Basel II single-factor model and varies by portfolio type. The mixing parameter `x` controls the transition between `R_min` and `R_max` as a function of PD:
 
-1. FUNCTION/MODULE NAME: [Name]
-2. OVERVIEW: A concise description of the purpose and logic.
-3. MATHEMATICAL FORMULATION: 
-   - Isolate all formulas on separate lines.
-   - Use standard LaTeX notation (e.g., $$ E = mc^2 $$) so they can be identified and moved to Word's Equation Editor.
-4. INPUT PARAMETERS: (Name, Type, Description) in a clean list.
-5. OUTPUTS: (Type, Description).
-6. LOGIC & ASSUMPTIONS: Explain any specific financial or risk-related logic used.
+```
+x   = (1 − exp(−c × PD)) / (1 − exp(−c))
+R   = R_min × x + R_max × (1 − x)
+```
 
-# FORMULA RULE
-If the code performs a calculation, you MUST extract the underlying mathematical formula and present it clearly before the code explanation.
+Where `c = 35` for retail portfolios (`MTGE_S`, `OTHER_RET`, `SME_RET`) and `c = 50` for all others.
 
-# OUTPUT READY FOR WORD
-Do not use background colors or "code blocks" for the text description itself. Only use code blocks for the actual source code snippets if necessary. Everything else should be plain text formatted with bold titles.
+| Portfolio Code(s) | R_min | R_max | Notes |
+|-------------------|-------|-------|-------|
+| `CORP`, `SME_CORP` | 0.12 | 0.24 | Corporate — standard |
+| `MTGE_NON_S`, `MTGE_S` | 0.15 | 0.24* | Mortgage — *see §11.1 (SAS bug) |
+| `OTHER_RET`, `SME_RET` | 0.03 | 0.24* | Other retail — *see §11.1 (SAS bug) |
+| `QRE` | 0.04 | 0.24* | Qualifying revolving — *see §11.1 (SAS bug) |
+| `SL_HRE`, `SL_HRE_R2` | 0.12 | **0.30** | SAS bug reproduced — see §11.1 |
+
+For any portfolio whose `cd_portfolio` ends with the suffix `R2`, the correlation `R` is further multiplied by 1.25:
+
+```
+If cd_portfolio ends with "R2":  R_final = R × 1.25
+```
+
+### 5.2 Maturity Adjustment b
+
+```
+b = (0.11852 − 0.05478 × ln(PD))²
+```
+
+`b` is the supervisory smoothing parameter linking maturity sensitivity to PD. It equals zero when `PD ≈ 1` (defaulted exposure) and is largest for low-PD counterparties.
+
+### 5.3 Gordy z-Score (99.9% Quantile)
+
+```
+z = (1 − R)^(−0.5) × Φ⁻¹(PD) + (R / (1 − R))^0.5 × Φ⁻¹(0.999)
+```
+
+Where:
+- `Φ⁻¹` is the standard normal quantile function (inverse CDF)
+- `Φ⁻¹(0.999)` ≈ 3.0902 is fixed at the Basel 99.9% regulatory confidence level
+
+### 5.4 Capital Requirement K (Base)
+
+```
+K_base = LGD × Φ(z) − LGD × PD
+```
+
+Where `Φ(z)` is the standard normal CDF evaluated at `z`. This is the unexpected loss component of the IRB formula.
+
+### 5.5 Risk Weight RW
+
+**For retail portfolios (perim = "1") without maturity adjustment** (i.e., `OTHER_RET`, `QRE`, `MTGE`, when not CORP/SME_CORP):
+
+```
+RW = K_base × 12.5 × 1.06
+```
+
+**For non-retail portfolios and retail CORP/SME_CORP** (with maturity adjustment):
+
+```
+MA  = (1 + (M − 2.5) × b) / (1 − 1.5 × b)
+RW  = K_base × MA × 1.25 × 1.06 × 10
+```
+
+Where `M` is the effective maturity (years), clipped to `[1, 5]`.
+
+Note: both expressions yield the same scaling result — the decomposition `1.25 × 1.06 × 10` vs `12.5 × 1.06` is a SAS implementation artefact reproduced faithfully.
+
+### 5.6 SME Reduction Factor
+
+For SME-flagged portfolios (`MTGE_S`, `SME_CORP`, `SME_RET`), the risk weight is reduced by the Basel II SME supporting factor:
+
+```
+RW_final = RW × 0.7619
+```
+
+This factor is approximately `1 / 1.3125`, reflecting the preferential capital treatment for SME exposures under CRR Article 501.
+
+### 5.7 RWA and Expected Loss
+
+```
+RWA = RW_final × EAD         (if PD ≠ 1)
+EL  = PD × LGD × EAD         (if PD ≠ 1)
+```
+
+Exposures with `PD = 1` (defaulted) are excluded from RWA and EL computation (result set to `null`).
 
 ---
-[PASTE YOUR CODE BELOW]
