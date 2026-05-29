@@ -1,19 +1,37 @@
-df_diag_class = (
-    df_obligor
-    .group_by("Jenks_Submodel")
-    .agg(
-        pl.col("lgd_obligor").mean().alias("lgd_class"),
-        pl.col("lgd_obligor").median().alias("median"),
-        pl.col("lgd_obligor").quantile(0.25).alias("q25"),
-        pl.col("lgd_obligor").quantile(0.75).alias("q75"),
-        pl.col("lgd_obligor").std().alias("std"),
-        pl.col("lgd_obligor").len().alias("n_obligor"),
-    )
-    .collect()
-    .with_columns(
-        pl.col("Jenks_Submodel").str.extract(r"([A-Za-z]+)$", 1).alias("segment"),
-        pl.col("Jenks_Submodel").str.extract(r"^(\d+)", 1).cast(pl.Int32).alias("class_idx"),
-    )
-    .sort(["segment", "class_idx"])
-)
-df_diag_class
+def prepare_data_for_rwa_calculation(config: dict) -> pl.LazyFrame:
+    """
+    Prépare les données pour le calcul de la RWA en ajoutant une colonne de score moyen.
+    NB : on NE renomme PAS la colonne cible — choose_test relit le parquet sur disque,
+    donc le nom doit rester celui du fichier (Score_LGD_calc).
+    """
+    try:
+        # 1. Chargement des données
+        lf = pl.scan_parquet(config["RELATIVE_PATH_PARQUET_DATA"])
+
+        # 2. Résolution de la colonne cible (case-insensitive) SANS renommage
+        names = lf.collect_schema().names()
+        actual_target = next(
+            (c for c in names if c.lower() == config["TARGET"].lower()), None
+        )
+        if actual_target is None:
+            raise ValueError(
+                f"Colonne {config['TARGET']} non trouvée. Colonnes disponibles: {names}"
+            )
+        print(f"Colonne cible résolue: {actual_target} (non renommée)")
+
+        # 3. Tri par colonne d'identification
+        lf = lf.sort(config["ID_COLUMN"])
+
+        # 4. Calcul du score moyen par groupe (sur le vrai nom de colonne)
+        lf = lf.with_columns(
+            pl.col(actual_target)
+            .mean()
+            .over(config["GROUP_COLUMN"])
+            .alias("SCORE_LGD_CALC_MEAN")
+        )
+
+        return lf
+
+    except Exception as e:
+        print(f"Erreur dans prepare_data_for_rwa_calculation: {str(e)}")
+        raise
