@@ -1,20 +1,24 @@
-# A) Vrai max de lgd_obligor — ma logique prédit <= 144. À falsifier.
-diag_obligor = (
-    lf_LGD
-    .group_by([config['Obligor'], config['Date_defaut']])
-    .agg(
-        (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("num"),
-        pl.col(config['EAD']).sum().alias("denom"),
-    )
-    .with_columns((pl.col("num") / pl.col("denom")).alias("lgd_obligor"))
+# 1) La pire classe
+pire = df_ob_class.sort("lgd_obligor_hlc", descending=True).head(3)
+print(pire)
+classe_ko = pire.select("Jenks_Submodel").row(0)[0]
+
+# 2) Ce que contient RÉELLEMENT cette classe dans lf_LGD2
+detail = (
+    lf_LGD2
+    .filter(pl.col("Jenks_Submodel") == classe_ko)
+    .select(["Jenks_Submodel", config['Obligor'], "lgd_obligor"])
     .collect()
 )
-
-diag_obligor.select(
-    pl.col("lgd_obligor").min().alias("min"),
-    pl.col("lgd_obligor").max().alias("max"),
-    pl.col("lgd_obligor").is_infinite().sum().alias("nb_inf"),
-    pl.col("lgd_obligor").is_nan().sum().alias("nb_nan"),
+print("classe :", classe_ko)
+print("nb lignes (facilités) :", detail.height)
+print("nb obligors distincts :", detail.select(config['Obligor']).n_unique())
+print(detail.select(
+    pl.col("lgd_obligor").min().alias("lgd_min"),
+    pl.col("lgd_obligor").max().alias("lgd_max"),
+    pl.col("lgd_obligor").mean().alias("lgd_mean_attendu"),
     pl.col("lgd_obligor").is_null().sum().alias("nb_null"),
-    (pl.col("denom").abs() < 1).sum().alias("nb_denom_quasi_nul"),
-)
+))
+# counts a-t-il bien UNE seule ligne par classe ?
+print("nb lignes dans counts :", counts.collect().height)
+print("nb classes distinctes :", counts.collect().select("Jenks_Submodel").n_unique())
