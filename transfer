@@ -1,17 +1,7 @@
-# LGD pondérée par EAD, 1 ligne par (obligor, date_défaut, classe).
-# Si la classe varie entre facilités d'un même obligor, il est scindé par classe (voulu).
-df_obligor = (
-    lf_LGD
-    .group_by([config['Obligor'], config['Date_defaut'], "Jenks_Submodel"])
-    .agg(
-        (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("_num"),
-        pl.col(config['EAD']).sum().alias("_den"),
-        pl.len().alias("nb_facilites"),
-    )
-    .with_columns(
-        pl.when(pl.col("_den") != 0)              # garde-fou : pas de division par 0 exact
-          .then(pl.col("_num") / pl.col("_den"))
-          .otherwise(None)
-          .alias("lgd_obligor")
-    )
-)
+# EAD_FIN est négatif quasi partout (cf. diagnostics). Pondérer une LGD par un encours
+# de FIN négatif n'est pas la default-weighted LGD attendue, même si le résultat reste borné.
+df_obligor.select(
+    (pl.col("_den") <  0).sum().alias("obligors_EAD_negatif"),
+    (pl.col("_den") == 0).sum().alias("obligors_EAD_nul_exclus"),
+    (pl.col("_den") >  0).sum().alias("obligors_EAD_positif"),
+).collect()
