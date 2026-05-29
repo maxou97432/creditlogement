@@ -1,13 +1,3 @@
-# lgd_class doit être borné par [min, max] de lgd_obligor → fini les 1036
-print(df_class.select(
-    pl.col("lgd_class").min().alias("min"),
-    pl.col("lgd_class").max().alias("max"),
-).collect())
-
-# un obligor traverse-t-il plusieurs classes ? (décide si la clé à 3 colonnes était nécessaire)
-print(
-    df_obligor.group_by([config['Obligor'], config['Date_defaut']])
-    .agg(pl.col("Jenks_Submodel").n_unique().alias("nb_classes"))
-    .filter(pl.col("nb_classes") > 1).select(pl.len().alias("obligors_multi_classes"))
-    .collect()
-)
+print("lignes lf_LGD :", lf_LGD.select(pl.len()).collect().item())
+print("lignes lf_LGD2:", lf_LGD2.select(pl.len()).collect().item())
+# doivent être égaux. Sinon, fan-out de jointure.
