@@ -1,48 +1,38 @@
-diag_obligor = (
+# 1) Signe de EAD_FIN au grain facilité
+lf_LGD.select(
+    (pl.col(config['EAD']) < 0).sum().alias("fac_ead_neg"),
+    (pl.col(config['EAD']) == 0).sum().alias("fac_ead_nul"),
+    (pl.col(config['EAD']) > 0).sum().alias("fac_ead_pos"),
+    pl.len().alias("fac_total"),
+).collect()
+
+# 2) Échelle réelle de la LGD
+lf_LGD.select(
+    pl.col('LGD').min().alias("min"),
+    pl.col('LGD').quantile(0.5).alias("med"),
+    pl.col('LGD').quantile(0.95).alias("p95"),
+    pl.col('LGD').max().alias("max"),
+).collect()
+
+# 3) D'où viennent les explosions : signe mixte vs denom quasi-nul
+diag_signe = (
     lf_LGD
     .group_by([config['Obligor'], config['Date_defaut']])
     .agg(
+        (pl.col(config['EAD']) > 0).any().alias("a_pos"),
+        (pl.col(config['EAD']) < 0).any().alias("a_neg"),
+        pl.col(config['EAD']).sum().alias("denom"),
         (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("num"),
-        pl.col(config['EAD']).sum().alias("denom_ead"),
-        pl.len().alias("nb_facilites"),
-        pl.col(config['EAD']).min().alias("ead_min"),
-        pl.col(config['EAD']).max().alias("ead_max"),
-        pl.col('LGD').min().alias("lgd_min"),
-        pl.col('LGD').max().alias("lgd_max"),
     )
-    .with_columns((pl.col("num") / pl.col("denom_ead")).alias("lgd_obligor"))
-    .collect()
-)
-
-# Tri par LGD obligor décroissant pour voir les pires cas
-diag_obligor.sort("lgd_obligor", descending=True).head(20)
-
-# Combien d'obligors dans chaque pathologie ?
-diag_obligor.select(
-    (pl.col("denom_ead") <= 0).sum().alias("ead_negatif_ou_nul"),
-    ((pl.col("denom_ead") > 0) & (pl.col("denom_ead") < 1)).sum().alias("ead_quasi_nul"),
-    (pl.col("ead_min") < 0).sum().alias("a_une_facilite_ead_negatif"),
-    (pl.col("lgd_max") > 1).sum().alias("a_une_LGD_brute_sup_1"),
-    (pl.col("lgd_min") < 0).sum().alias("a_une_LGD_brute_negative"),
-    (pl.col("lgd_obligor") > 1).sum().alias("lgd_obligor_sup_1_total"),
-)
-
-# Liste des obligors avec LGD aberrante
-obligors_ko = (
-    diag_obligor
-    .filter(pl.col("lgd_obligor") > 1)
-    .select([config['Obligor'], config['Date_defaut']])
-)
-
-# Toutes les facilités brutes de ces obligors
-detail_ko = (
-    lf_LGD
-    .join(obligors_ko.lazy(), on=[config['Obligor'], config['Date_defaut']], how="inner")
-    .select([
-        config['Obligor'], config['Date_defaut'],
-        'LGD', config['EAD'],
+    .with_columns([
+        (pl.col("a_pos") & pl.col("a_neg")).alias("signe_mixte"),
+        (pl.col("num") / pl.col("denom")).alias("lgd_obligor"),
     ])
-    .sort([config['Obligor'], config['Date_defaut']])
     .collect()
 )
-detail_ko
+
+diag_signe.select(
+    pl.col("signe_mixte").sum().alias("nb_signe_mixte"),
+    ((pl.col("lgd_obligor").abs() > 100) &  pl.col("signe_mixte")).sum().alias("explose_ET_mixte"),
+    ((pl.col("lgd_obligor").abs() > 100) & ~pl.col("signe_mixte")).sum().alias("explose_SANS_mixte"),
+)
