@@ -1,11 +1,14 @@
-df_class = (
-    df_obligor
-    .group_by("Jenks_Submodel")
-    .agg(
-        pl.col("lgd_obligor").mean().alias("lgd_class"),
-        pl.col("lgd_obligor").len().alias("n_obligor"),   # taille de classe = robustesse
+lf_LGD2 = (
+    lf_LGD
+    .join(
+        df_obligor.select([config['Obligor'], config['Date_defaut'],
+                           "Jenks_Submodel", "lgd_obligor"]),
+        on=[config['Obligor'], config['Date_defaut'], "Jenks_Submodel"],
+        how="left",
+    )
+    .join(
+        df_class.select(["Jenks_Submodel", "lgd_class"]),
+        on="Jenks_Submodel",
+        how="left",
     )
 )
-
-df_ob_class = df_class.sort("lgd_class", descending=True).collect()  # 1 LGD par classe
-df_ob_class
