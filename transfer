@@ -1,3 +1,19 @@
-print("lignes lf_LGD :", lf_LGD.select(pl.len()).collect().item())
-print("lignes lf_LGD2:", lf_LGD2.select(pl.len()).collect().item())
-# doivent être égaux. Sinon, fan-out de jointure.
+df_diag_class = (
+    df_obligor
+    .group_by("Jenks_Submodel")
+    .agg(
+        pl.col("lgd_obligor").mean().alias("lgd_class"),
+        pl.col("lgd_obligor").median().alias("median"),
+        pl.col("lgd_obligor").quantile(0.25).alias("q25"),
+        pl.col("lgd_obligor").quantile(0.75).alias("q75"),
+        pl.col("lgd_obligor").std().alias("std"),
+        pl.col("lgd_obligor").len().alias("n_obligor"),
+    )
+    .collect()
+    .with_columns(
+        pl.col("Jenks_Submodel").str.extract(r"([A-Za-z]+)$", 1).alias("segment"),
+        pl.col("Jenks_Submodel").str.extract(r"^(\d+)", 1).cast(pl.Int32).alias("class_idx"),
+    )
+    .sort(["segment", "class_idx"])
+)
+df_diag_class
