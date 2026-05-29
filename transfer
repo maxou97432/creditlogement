@@ -1,24 +1,17 @@
-# 1) La pire classe
-pire = df_ob_class.sort("lgd_obligor_hlc", descending=True).head(3)
-print(pire)
-classe_ko = pire.select("Jenks_Submodel").row(0)[0]
-
-# 2) Ce que contient RÉELLEMENT cette classe dans lf_LGD2
-detail = (
-    lf_LGD2
-    .filter(pl.col("Jenks_Submodel") == classe_ko)
-    .select(["Jenks_Submodel", config['Obligor'], "lgd_obligor"])
-    .collect()
+# LGD pondérée par EAD, 1 ligne par (obligor, date_défaut, classe).
+# Si la classe varie entre facilités d'un même obligor, il est scindé par classe (voulu).
+df_obligor = (
+    lf_LGD
+    .group_by([config['Obligor'], config['Date_defaut'], "Jenks_Submodel"])
+    .agg(
+        (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("_num"),
+        pl.col(config['EAD']).sum().alias("_den"),
+        pl.len().alias("nb_facilites"),
+    )
+    .with_columns(
+        pl.when(pl.col("_den") != 0)              # garde-fou : pas de division par 0 exact
+          .then(pl.col("_num") / pl.col("_den"))
+          .otherwise(None)
+          .alias("lgd_obligor")
+    )
 )
-print("classe :", classe_ko)
-print("nb lignes (facilités) :", detail.height)
-print("nb obligors distincts :", detail.select(config['Obligor']).n_unique())
-print(detail.select(
-    pl.col("lgd_obligor").min().alias("lgd_min"),
-    pl.col("lgd_obligor").max().alias("lgd_max"),
-    pl.col("lgd_obligor").mean().alias("lgd_mean_attendu"),
-    pl.col("lgd_obligor").is_null().sum().alias("nb_null"),
-))
-# counts a-t-il bien UNE seule ligne par classe ?
-print("nb lignes dans counts :", counts.collect().height)
-print("nb classes distinctes :", counts.collect().select("Jenks_Submodel").n_unique())
