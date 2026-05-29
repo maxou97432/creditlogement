@@ -1,92 +1,48 @@
-## 5. IRB Formula — Full Mathematical Description
+diag_obligor = (
+    lf_LGD
+    .group_by([config['Obligor'], config['Date_defaut']])
+    .agg(
+        (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("num"),
+        pl.col(config['EAD']).sum().alias("denom_ead"),
+        pl.len().alias("nb_facilites"),
+        pl.col(config['EAD']).min().alias("ead_min"),
+        pl.col(config['EAD']).max().alias("ead_max"),
+        pl.col('LGD').min().alias("lgd_min"),
+        pl.col('LGD').max().alias("lgd_max"),
+    )
+    .with_columns((pl.col("num") / pl.col("denom_ead")).alias("lgd_obligor"))
+    .collect()
+)
 
-### 5.1 Correlation R
+# Tri par LGD obligor décroissant pour voir les pires cas
+diag_obligor.sort("lgd_obligor", descending=True).head(20)
 
-The asset correlation `R` follows the Basel II single-factor model and varies by portfolio type. The mixing parameter `x` controls the transition between `R_min` and `R_max` as a function of PD:
+# Combien d'obligors dans chaque pathologie ?
+diag_obligor.select(
+    (pl.col("denom_ead") <= 0).sum().alias("ead_negatif_ou_nul"),
+    ((pl.col("denom_ead") > 0) & (pl.col("denom_ead") < 1)).sum().alias("ead_quasi_nul"),
+    (pl.col("ead_min") < 0).sum().alias("a_une_facilite_ead_negatif"),
+    (pl.col("lgd_max") > 1).sum().alias("a_une_LGD_brute_sup_1"),
+    (pl.col("lgd_min") < 0).sum().alias("a_une_LGD_brute_negative"),
+    (pl.col("lgd_obligor") > 1).sum().alias("lgd_obligor_sup_1_total"),
+)
 
-```
-x   = (1 − exp(−c × PD)) / (1 − exp(−c))
-R   = R_min × x + R_max × (1 − x)
-```
+# Liste des obligors avec LGD aberrante
+obligors_ko = (
+    diag_obligor
+    .filter(pl.col("lgd_obligor") > 1)
+    .select([config['Obligor'], config['Date_defaut']])
+)
 
-Where `c = 35` for retail portfolios (`MTGE_S`, `OTHER_RET`, `SME_RET`) and `c = 50` for all others.
-
-| Portfolio Code(s) | R_min | R_max | Notes |
-|-------------------|-------|-------|-------|
-| `CORP`, `SME_CORP` | 0.12 | 0.24 | Corporate — standard |
-| `MTGE_NON_S`, `MTGE_S` | 0.15 | 0.24* | Mortgage — *see §11.1 (SAS bug) |
-| `OTHER_RET`, `SME_RET` | 0.03 | 0.24* | Other retail — *see §11.1 (SAS bug) |
-| `QRE` | 0.04 | 0.24* | Qualifying revolving — *see §11.1 (SAS bug) |
-| `SL_HRE`, `SL_HRE_R2` | 0.12 | **0.30** | SAS bug reproduced — see §11.1 |
-
-For any portfolio whose `cd_portfolio` ends with the suffix `R2`, the correlation `R` is further multiplied by 1.25:
-
-```
-If cd_portfolio ends with "R2":  R_final = R × 1.25
-```
-
-### 5.2 Maturity Adjustment b
-
-```
-b = (0.11852 − 0.05478 × ln(PD))²
-```
-
-`b` is the supervisory smoothing parameter linking maturity sensitivity to PD. It equals zero when `PD ≈ 1` (defaulted exposure) and is largest for low-PD counterparties.
-
-### 5.3 Gordy z-Score (99.9% Quantile)
-
-```
-z = (1 − R)^(−0.5) × Φ⁻¹(PD) + (R / (1 − R))^0.5 × Φ⁻¹(0.999)
-```
-
-Where:
-- `Φ⁻¹` is the standard normal quantile function (inverse CDF)
-- `Φ⁻¹(0.999)` ≈ 3.0902 is fixed at the Basel 99.9% regulatory confidence level
-
-### 5.4 Capital Requirement K (Base)
-
-```
-K_base = LGD × Φ(z) − LGD × PD
-```
-
-Where `Φ(z)` is the standard normal CDF evaluated at `z`. This is the unexpected loss component of the IRB formula.
-
-### 5.5 Risk Weight RW
-
-**For retail portfolios (perim = "1") without maturity adjustment** (i.e., `OTHER_RET`, `QRE`, `MTGE`, when not CORP/SME_CORP):
-
-```
-RW = K_base × 12.5 × 1.06
-```
-
-**For non-retail portfolios and retail CORP/SME_CORP** (with maturity adjustment):
-
-```
-MA  = (1 + (M − 2.5) × b) / (1 − 1.5 × b)
-RW  = K_base × MA × 1.25 × 1.06 × 10
-```
-
-Where `M` is the effective maturity (years), clipped to `[1, 5]`.
-
-Note: both expressions yield the same scaling result — the decomposition `1.25 × 1.06 × 10` vs `12.5 × 1.06` is a SAS implementation artefact reproduced faithfully.
-
-### 5.6 SME Reduction Factor
-
-For SME-flagged portfolios (`MTGE_S`, `SME_CORP`, `SME_RET`), the risk weight is reduced by the Basel II SME supporting factor:
-
-```
-RW_final = RW × 0.7619
-```
-
-This factor is approximately `1 / 1.3125`, reflecting the preferential capital treatment for SME exposures under CRR Article 501.
-
-### 5.7 RWA and Expected Loss
-
-```
-RWA = RW_final × EAD         (if PD ≠ 1)
-EL  = PD × LGD × EAD         (if PD ≠ 1)
-```
-
-Exposures with `PD = 1` (defaulted) are excluded from RWA and EL computation (result set to `null`).
-
----
+# Toutes les facilités brutes de ces obligors
+detail_ko = (
+    lf_LGD
+    .join(obligors_ko.lazy(), on=[config['Obligor'], config['Date_defaut']], how="inner")
+    .select([
+        config['Obligor'], config['Date_defaut'],
+        'LGD', config['EAD'],
+    ])
+    .sort([config['Obligor'], config['Date_defaut']])
+    .collect()
+)
+detail_ko
