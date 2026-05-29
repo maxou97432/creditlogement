@@ -1,38 +1,16 @@
-# 1) Signe de EAD_FIN au grain facilité
-lf_LGD.select(
-    (pl.col(config['EAD']) < 0).sum().alias("fac_ead_neg"),
-    (pl.col(config['EAD']) == 0).sum().alias("fac_ead_nul"),
-    (pl.col(config['EAD']) > 0).sum().alias("fac_ead_pos"),
-    pl.len().alias("fac_total"),
-).collect()
-
-# 2) Échelle réelle de la LGD
+# 1) Distribution de la LGD BRUTE (la colonne d'entrée)
 lf_LGD.select(
     pl.col('LGD').min().alias("min"),
     pl.col('LGD').quantile(0.5).alias("med"),
     pl.col('LGD').quantile(0.95).alias("p95"),
+    pl.col('LGD').quantile(0.99).alias("p99"),
     pl.col('LGD').max().alias("max"),
+    (pl.col('LGD') > 100).sum().alias("nb_sup_100"),
+    (pl.col('LGD') > 200).sum().alias("nb_sup_200"),
+    pl.len().alias("n"),
 ).collect()
 
-# 3) D'où viennent les explosions : signe mixte vs denom quasi-nul
-diag_signe = (
-    lf_LGD
-    .group_by([config['Obligor'], config['Date_defaut']])
-    .agg(
-        (pl.col(config['EAD']) > 0).any().alias("a_pos"),
-        (pl.col(config['EAD']) < 0).any().alias("a_neg"),
-        pl.col(config['EAD']).sum().alias("denom"),
-        (pl.col('LGD') * pl.col(config['EAD'])).sum().alias("num"),
-    )
-    .with_columns([
-        (pl.col("a_pos") & pl.col("a_neg")).alias("signe_mixte"),
-        (pl.col("num") / pl.col("denom")).alias("lgd_obligor"),
-    ])
-    .collect()
-)
-
-diag_signe.select(
-    pl.col("signe_mixte").sum().alias("nb_signe_mixte"),
-    ((pl.col("lgd_obligor").abs() > 100) &  pl.col("signe_mixte")).sum().alias("explose_ET_mixte"),
-    ((pl.col("lgd_obligor").abs() > 100) & ~pl.col("signe_mixte")).sum().alias("explose_SANS_mixte"),
-)
+# 2) Les 20 pires facilités brutes : on doit y voir ~1036
+lf_LGD.sort('LGD', descending=True).select(
+    [config['Obligor'], config['Date_defaut'], 'LGD', config['EAD']]
+).head(20).collect()
