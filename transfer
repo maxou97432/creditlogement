@@ -1,8 +1,52 @@
 import polars as pl
-w = df.select(pl.col("ead_fin")).collect().to_series()
-print("min:", w.min(), "max:", w.max(), "% <= 0:", (w <= 0).mean(), "% == 0:", (w == 0).mean())
-filtered_lf_lgd = filtered_lf_lgd.with_columns(
-    pl.col("ead_fin").abs().alias("ead_poids")
+
+# df peut être un LazyFrame ou un DataFrame -> on normalise en LazyFrame
+lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+
+# ---- 1. Convention de signe de ead_fin : tout négatif (convention) ou signe mixte (solde net) ?
+print("=== 1. Signe de ead_fin ===")
+print(lf.select(
+    pl.col("ead_fin").min().alias("min"),
+    pl.col("ead_fin").max().alias("max"),
+    pl.col("ead_fin").median().alias("median"),
+    (pl.col("ead_fin") < 0).mean().alias("pct_neg"),
+    (pl.col("ead_fin") == 0).mean().alias("pct_nul"),
+    (pl.col("ead_fin") > 0).mean().alias("pct_pos"),
+    pl.len().alias("n"),
+).collect())
+# Lecture : si max <= 0 (ou pct_pos ~ 0) -> convention de signe, abs() légitime.
+#           si pct_pos non négligeable -> signe mixte = solde net, abs() serait FAUX.
+
+# ---- 2. Effet de abs() : le poids corrigé doit être positif et de total positif
+print("\n=== 2. Poids corrigé = abs(ead_fin) ===")
+print(lf.select(
+    pl.col("ead_fin").abs().min().alias("min_abs"),
+    pl.col("ead_fin").abs().max().alias("max_abs"),
+    pl.col("ead_fin").abs().sum().alias("total_abs"),
+    (pl.col("ead_fin").abs() > 0).mean().alias("pct_pos_abs"),
+    (pl.col("ead_fin").abs() == 0).mean().alias("pct_nul_abs"),
+).collect())
+# Attendu : total_abs > 0, pct_pos_abs ~ 1.0. Les lignes à 0 restent à 0 (à surveiller).
+
+# ---- 3. Faisabilité Jenks PAR CLASSE : la contrainte de poids min (2.5%) est-elle tenable ?
+#         On reproduit la logique w_min = 2.5% * total_w, par Jenks_Submodel.
+print("\n=== 3. Poids par classe vs seuil 2.5% (faisabilité Jenks) ===")
+min_weight_pct = 2.5  # même valeur que _build_weighted_jenks_cache
+diag = (
+    lf
+    .group_by("Jenks_Submodel")
+    .agg(
+        pl.col("ead_fin").abs().sum().alias("poids_classe"),
+        pl.len().alias("n_lignes"),
+    )
+    .with_columns(
+        (pl.col("poids_classe").sum().over(pl.lit(1)) * min_weight_pct / 100.0).alias("w_min_global")
+    )
+    .with_columns(
+        (pl.col("poids_classe") >= pl.col("w_min_global")).alias("au_dessus_seuil")
+    )
+    .sort("poids_classe")
 )
-w = filtered_lf_lgd.select(pl.col("ead_poids")).collect().to_series()
-print("total:", w.sum(), "min:", w.min(), "% > 0:", (w > 0).mean())  # total > 0, % > 0 ≈ 100%
+print(diag.collect())
+# Lecture : si certaines classes ont poids_classe < w_min_global, elles sont trop petites
+#           pour respecter la contrainte -> source possible du ValueError résiduel.
