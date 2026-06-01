@@ -1,8 +1,8 @@
-n = filtered_lf_lgd.select(pl.len()).collect().item()
-print(f"[{submodel_label}] lignes après filtre : {n}")
-print("filtre appliqué :", modified_filter)
+print([c for c in filtered_lf_lgd.collect_schema().names()
+       if any(k in c.lower() for k in ["ead","encours","expo","mont","declbc","ret_"])])
+import polars as pl
+cands = [...]  # remplis avec la sortie ci-dessus
 print(filtered_lf_lgd.select(
-    pl.col("LGD").n_unique().alias("valeurs_distinctes"),
-    pl.col("LGD").min().alias("min"),
-    pl.col("LGD").max().alias("max"),
+    [(pl.col(c) > 0).mean().alias(f"{c}_%pos") for c in cands]
+    + [pl.col(c).min().alias(f"{c}_min") for c in cands]
 ).collect())
