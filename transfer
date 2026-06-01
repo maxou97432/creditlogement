@@ -1,108 +1,44 @@
 import polars as pl
+import pandas as pd
 from pathlib import Path
 import jenks_calculator   # adapte l'import à ton module
 
-# --- 0. Base de départ : ton df (LazyFrame de préférence) ---
+# --- 0. Base déjà prête : score = LGD calculée ---
 lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-# --- 1. Poids corrigé : convention de signe ead_fin (toutes valeurs < 0) ---
-#     abs() est légitime ICI car on a vérifié pct_pos=0, pct_neg=1 (pas de signe mixte).
-lf = lf.with_columns(pl.col("ead_fin").abs().alias("ead_poids"))
+# --- 1. Noms de colonnes (adapte aux vrais noms de TA base) ---
+SCORE_COL  = "score"   # le score calculé (= ta LGD)
+TARGET_COL = "LGD"     # la cible de l'algo Jenks
+TIME_COL   = "year"    # colonne temporelle
+OUTPUT_DIR = "chemin/vers/sortie_jenks"   # dossier où écrire les parquets Jenks
 
-# --- 2. Résolution robuste des noms de colonnes (casse/underscore) ---
-def resolve_col(candidates, available):
-    norm = {c.lower().replace("_", ""): c for c in available}
-    for cand in candidates:
-        k = cand.lower().replace("_", "")
-        if k in norm:
-            return norm[k]
-    return None
+# --- 2. Calcul Jenks sur la base entière (pondération de base = effectif) ---
+run = jenks_calculator.compute_jenks_run(
+    lf,
+    SCORE_COL,
+    TARGET_COL,
+    TIME_COL,
+    OUTPUT_DIR,
+    0,            # homogeneity
+)
+nb_class = run["nb_class"]
+jenks_calculator.write_excel_jenks_from_run(run, OUTPUT_DIR)
+print("nb_class calculé :", nb_class)
 
-cols = lf.collect_schema().names()
-SCORE_COL  = resolve_col(["score", "score_brut"], cols)   # adapte les candidats
-TARGET_COL = resolve_col(["LGD"], cols)
-TIME_COL   = resolve_col(["year", "annee", "datdef_ej"], cols)
-TYPE_COL   = resolve_col(["TypeContrat", "TypeContrat2"], cols)
-for nom, val in [("score", SCORE_COL), ("target", TARGET_COL),
-                 ("time", TIME_COL), ("type_contrat", TYPE_COL)]:
-    if val is None:
-        raise ValueError(f"Colonne '{nom}' introuvable. Dispo: {cols}")
-print("Colonnes résolues :", SCORE_COL, TARGET_COL, TIME_COL, TYPE_COL)
+# --- 3. Récupérer le meilleur nb de classes et coller Jenks_class sur la base ---
+out = Path(OUTPUT_DIR)
+df_summary = pd.read_parquet(
+    out / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet"
+)
+best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
 
-# --- 3. Itération par sous-segment NONCURE (même logique que ton notebook) ---
-config, segment_path, input_path, output_path = load_config()   # ta fonction
-segments = read_segments_from_excel(segment_path)
-jenks_path = Path(output_path, "jenks")
-jenks_path.mkdir(parents=True, exist_ok=True)
+jenks_class = (
+    pl.scan_parquet(out / "jenks" / f"jenks_{best_idx}_class.parquet")
+      .select(pl.first())
+)
+df_jenks = lf.with_columns(
+    jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
+).collect()
 
-scores_by_submodel = []
-
-for seg in [s for s in segments if s["Type"] == "NONCURE"]:
-    submodel_label = seg["Nom"].split("_NC")[0] if "_NC" in seg["Nom"] else seg["Nom"]
-    seg_path = Path(jenks_path, submodel_label)
-    seg_path.mkdir(parents=True, exist_ok=True)
-
-    # filtre Excel : on remplace le placeholder par la vraie colonne (toutes casses)
-    modified_filter = (
-        seg["Filtre"]
-        .replace("TypeContrat2", TYPE_COL)
-        .replace("TypeContrat",  TYPE_COL)
-        .replace("TYPECONTRAT",  TYPE_COL)
-    )
-    filtered_lf = lf.filter(eval(modified_filter))
-
-    # GARDE-FOU 1 : assez de données + poids positif (sinon Jenks plante)
-    chk = filtered_lf.select(
-        pl.len().alias("n"),
-        pl.col(TARGET_COL).n_unique().alias("lgd_distinctes"),
-        pl.col("ead_poids").sum().alias("poids_total"),
-        (pl.col("ead_poids") > 0).mean().alias("pct_poids_pos"),
-    ).collect().row(0, named=True)
-    print(f"[{submodel_label}] n={chk['n']} | LGD distinctes={chk['lgd_distinctes']} "
-          f"| poids_total={chk['poids_total']:.3e} | %poids>0={chk['pct_poids_pos']:.3f}")
-    if chk["n"] < 100 or chk["lgd_distinctes"] < 2 or chk["poids_total"] <= 0:
-        print(f"   -> segment ignoré (trop petit/dégénéré).")
-        continue
-
-    # --- Calcul Jenks ---
-    try:
-        run = jenks_calculator.compute_jenks_run(
-            filtered_lf,
-            SCORE_COL,        # score
-            TARGET_COL,       # target (LGD)
-            TIME_COL,         # time_col
-            str(seg_path),    # output_path
-            0,                # homogeneity
-        )
-    except ValueError as e:
-        print(f"   -> Jenks a échoué sur {submodel_label}: {e}")
-        continue
-
-    nb_class = run["nb_class"]
-    run["suffixe"] = submodel_label
-    jenks_calculator.write_excel_jenks_from_run(run, str(seg_path))
-
-    # --- Application : récupérer le meilleur nb de classes et coller Jenks_class ---
-    import pandas as pd
-    df_summary = pd.read_parquet(
-        seg_path / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet"
-    )
-    best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
-    jenks_class = (
-        pl.scan_parquet(seg_path / "jenks" / f"jenks_{best_idx}_class.parquet")
-          .select(pl.first())
-    )
-    scores = filtered_lf.with_columns(
-        jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
-    )
-    scores = scores.with_columns(
-        pl.lit(submodel_label).alias("Submodel"),
-    ).with_columns(
-        pl.concat_str(["Jenks_class", "Submodel"], separator="_").alias("Jenks_Submodel")
-    )
-    scores_by_submodel.append(scores)
-
-# --- 4. Concat de tous les sous-modèles ---
-lf_jenks = pl.concat(scores_by_submodel)
-df_jenks = lf_jenks.collect()
 print("Base avec Jenks_class :", df_jenks.shape)
+print(df_jenks["Jenks_class"].value_counts().sort("Jenks_class"))
