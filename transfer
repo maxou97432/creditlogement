@@ -1,42 +1,27 @@
-import polars as pl, pandas as pd
-from pathlib import Path
-import jenks_calculator
+import polars as pl, numpy as np
 
-lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+LGD_COL = "LGD_3ANS_finale"   # casse exacte
 
-# --- Paramètres à adapter ---
-LGD_COL    = "LGD_3ANS_finale"           # ta LGD finale
-TIME_COL   = "year"                      # nom de ta colonne temporelle (à vérifier)
-OUTPUT_DIR = "chemin/vers/sortie_jenks"  # ton dossier de sortie
-
-# --- Variable de découpe : score = 100 - LGD (réplique du notebook 1) ---
-scores = lf.with_columns(
-    pl.col(LGD_COL).alias("score_brut"),
-    (100 - pl.col(LGD_COL)).alias("score"),
+# reproduit make_df_algo : agrégation par score
+agg = (
+    lf.select((100 - pl.col(LGD_COL)).alias("score"))
+      .group_by("score")
+      .agg(pl.len().alias("w"))
+      .sort("score")
+      .collect()
 )
+w = agg["w"].to_numpy().astype(float)
+total_w = w.sum()
+w_min = 2.5 * total_w / 100
 
-# --- Vérif rapide avant calcul ---
-print(scores.select(
-    pl.col("score").n_unique().alias("score_distincts"),
-    pl.col("score").min().alias("min"),
-    pl.col("score").max().alias("max"),
-    pl.len().alias("n"),
-).collect())
-
-# --- Calcul Jenks (pondération de base = effectif) ---
-run = jenks_calculator.compute_jenks_run(scores, "score", LGD_COL, TIME_COL, OUTPUT_DIR, 0)
-nb_class = run["nb_class"]
-jenks_calculator.write_excel_jenks_from_run(run, OUTPUT_DIR)
-print("nb_class :", nb_class)
-
-# --- Récupérer le meilleur découpage et coller Jenks_class ---
-out = Path(OUTPUT_DIR)
-df_summary = pd.read_parquet(out / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet")
-best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
-jenks_class = pl.scan_parquet(out / "jenks" / f"jenks_{best_idx}_class.parquet").select(pl.first())
-
-df_jenks = scores.with_columns(
-    jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
-).collect()
-
-print(df_jenks["Jenks_class"].value_counts().sort("Jenks_class"))
+print("n points agrégés :", len(w))
+print("total_w (somme des poids) :", total_w)
+print("w_min (2.5%) :", w_min)
+print("nb de NaN dans le score :", agg["score"].is_nan().sum() if agg["score"].dtype.is_float() else "n/a")
+print("nb de NaN dans la LGD source :",
+      lf.select(pl.col(LGD_COL).is_nan().sum()).collect().item())
+print("nb de NULL dans la LGD source :",
+      lf.select(pl.col(LGD_COL).null_count()).collect().item())
+print("poids cumulé croissant ?", bool(np.all(np.diff(np.cumsum(w)) >= 0)))
+print("le 1er point dépasse-t-il déjà w_min ?", w[0] >= w_min)
+print("cumul atteint-il w_min avant la fin ?", np.cumsum(w)[-1] >= w_min)
