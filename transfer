@@ -1,27 +1,21 @@
-import polars as pl, numpy as np
+import jenks_calculator as jc
 
-LGD_COL = "LGD_3ANS_finale"   # casse exacte
-
-# reproduit make_df_algo : agrégation par score
-agg = (
-    lf.select((100 - pl.col(LGD_COL)).alias("score"))
-      .group_by("score")
-      .agg(pl.len().alias("w"))
-      .sort("score")
-      .collect()
+# table préparée exactement comme le moteur l'attend
+df_order = (
+    lf.select(
+        (100 - pl.col("LGD_3ANS_finale")).alias(jc._SCORE),
+        pl.col("LGD_3ANS_finale").alias(jc._TARGET),
+    )
+    .group_by(jc._SCORE)
+    .agg(
+        pl.len().alias(jc._WEIGHT),
+        pl.col(jc._TARGET).mean().alias(jc._TARGET_MEAN),
+    )
+    .sort(jc._SCORE)
+    .collect()
+    .to_pandas()
 )
-w = agg["w"].to_numpy().astype(float)
-total_w = w.sum()
-w_min = 2.5 * total_w / 100
-
-print("n points agrégés :", len(w))
-print("total_w (somme des poids) :", total_w)
-print("w_min (2.5%) :", w_min)
-print("nb de NaN dans le score :", agg["score"].is_nan().sum() if agg["score"].dtype.is_float() else "n/a")
-print("nb de NaN dans la LGD source :",
-      lf.select(pl.col(LGD_COL).is_nan().sum()).collect().item())
-print("nb de NULL dans la LGD source :",
-      lf.select(pl.col(LGD_COL).null_count()).collect().item())
-print("poids cumulé croissant ?", bool(np.all(np.diff(np.cumsum(w)) >= 0)))
-print("le 1er point dépasse-t-il déjà w_min ?", w[0] >= w_min)
-print("cumul atteint-il w_min avant la fin ?", np.cumsum(w)[-1] >= w_min)
+cache = jc._build_weighted_jenks_cache(df_order, 20)
+print("k_feasible =", jc._max_possible_k(cache))
+print("dp[1, -1] fini ?", np.isfinite(cache["dp"][1, -1]))
+print("dp[2, -1] fini ?", np.isfinite(cache["dp"][2, -1]))
