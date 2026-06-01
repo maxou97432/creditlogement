@@ -1,43 +1,42 @@
-import polars as pl
-import pandas as pd
+import polars as pl, pandas as pd
 from pathlib import Path
-import jenks_calculator   # adapte l'import
+import jenks_calculator
 
-# --- 0. Base déjà prête ---
 lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-# --- 1. Noms de colonnes (À ADAPTER aux vrais noms de ta base) ---
-SCORE_COL  = "score"
-TARGET_COL = "LGD"
-TIME_COL   = "year"
-OUTPUT_DIR = "chemin/vers/sortie_jenks"   # un dossier, en str
+# --- Paramètres à adapter ---
+LGD_COL    = "LGD_3ANS_finale"           # ta LGD finale
+TIME_COL   = "year"                      # nom de ta colonne temporelle (à vérifier)
+OUTPUT_DIR = "chemin/vers/sortie_jenks"  # ton dossier de sortie
 
-# --- 2. Vérif avant calcul : distribution du score de découpe ---
-print("colonnes:", lf.collect_schema().names())
-print(lf.select(
-    pl.col(SCORE_COL).n_unique().alias("score_distincts"),
-    pl.col(SCORE_COL).min().alias("score_min"),
-    pl.col(SCORE_COL).max().alias("score_max"),
-    pl.col(TARGET_COL).n_unique().alias("lgd_distinctes"),
+# --- Variable de découpe : score = 100 - LGD (réplique du notebook 1) ---
+scores = lf.with_columns(
+    pl.col(LGD_COL).alias("score_brut"),
+    (100 - pl.col(LGD_COL)).alias("score"),
+)
+
+# --- Vérif rapide avant calcul ---
+print(scores.select(
+    pl.col("score").n_unique().alias("score_distincts"),
+    pl.col("score").min().alias("min"),
+    pl.col("score").max().alias("max"),
     pl.len().alias("n"),
 ).collect())
 
-# --- 3. Calcul Jenks (pondération de base = effectif) ---
-run = jenks_calculator.compute_jenks_run(
-    lf, SCORE_COL, TARGET_COL, TIME_COL, OUTPUT_DIR, 0
-)
+# --- Calcul Jenks (pondération de base = effectif) ---
+run = jenks_calculator.compute_jenks_run(scores, "score", LGD_COL, TIME_COL, OUTPUT_DIR, 0)
 nb_class = run["nb_class"]
 jenks_calculator.write_excel_jenks_from_run(run, OUTPUT_DIR)
-print("nb_class calculé :", nb_class)
+print("nb_class :", nb_class)
 
-# --- 4. Coller Jenks_class sur la base ---
+# --- Récupérer le meilleur découpage et coller Jenks_class ---
 out = Path(OUTPUT_DIR)
 df_summary = pd.read_parquet(out / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet")
 best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
-jenks_class = (
-    pl.scan_parquet(out / "jenks" / f"jenks_{best_idx}_class.parquet").select(pl.first())
-)
-df_jenks = lf.with_columns(
+jenks_class = pl.scan_parquet(out / "jenks" / f"jenks_{best_idx}_class.parquet").select(pl.first())
+
+df_jenks = scores.with_columns(
     jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
 ).collect()
-print("Base avec Jenks_class :", df_jenks.shape)
+
+print(df_jenks["Jenks_class"].value_counts().sort("Jenks_class"))
