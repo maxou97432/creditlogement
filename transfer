@@ -1,45 +1,108 @@
-Voici un brief que tu peux transmettre tel quel à l'IA qui a accès au code. Je l'ai écrit pour être autosuffisant — contexte, cause racine, correction, vérifications — sans supposer qu'elle a vu notre échange.
+import polars as pl
+from pathlib import Path
+import jenks_calculator   # adapte l'import à ton module
 
----
+# --- 0. Base de départ : ton df (LazyFrame de préférence) ---
+lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-**Contexte**
+# --- 1. Poids corrigé : convention de signe ead_fin (toutes valeurs < 0) ---
+#     abs() est légitime ICI car on a vérifié pct_pos=0, pct_neg=1 (pas de signe mixte).
+lf = lf.with_columns(pl.col("ead_fin").abs().alias("ead_poids"))
 
-Pipeline IRB de calcul de LGD et de classes de risque (Polars). Deux notebooks concernés : `2 - Calcul_Classes_Jenks.ipynb` (création des classes Jenks par segment) et `2 - Calcul_LRA.ipynb` (LGD pondérée par EAD → moyenne par classe). Le module sous-jacent contient `_build_weighted_jenks_cache`, `compute_jenks_run`, `_max_possible_k`.
+# --- 2. Résolution robuste des noms de colonnes (casse/underscore) ---
+def resolve_col(candidates, available):
+    norm = {c.lower().replace("_", ""): c for c in available}
+    for cand in candidates:
+        k = cand.lower().replace("_", "")
+        if k in norm:
+            return norm[k]
+    return None
 
-**Cause racine identifiée**
+cols = lf.collect_schema().names()
+SCORE_COL  = resolve_col(["score", "score_brut"], cols)   # adapte les candidats
+TARGET_COL = resolve_col(["LGD"], cols)
+TIME_COL   = resolve_col(["year", "annee", "datdef_ej"], cols)
+TYPE_COL   = resolve_col(["TypeContrat", "TypeContrat2"], cols)
+for nom, val in [("score", SCORE_COL), ("target", TARGET_COL),
+                 ("time", TIME_COL), ("type_contrat", TYPE_COL)]:
+    if val is None:
+        raise ValueError(f"Colonne '{nom}' introuvable. Dispo: {cols}")
+print("Colonnes résolues :", SCORE_COL, TARGET_COL, TIME_COL, TYPE_COL)
 
-La colonne d'exposition `ead_fin` est stockée en **convention de signe négative** : sur 1 044 827 lignes, 100 % sont négatives (min = -1.35e7, max = -0.0067, pct_pos = 0). La vraie exposition est `abs(ead_fin)`. Ceci a été confirmé statistiquement (toutes négatives, pas de signe mixte → ce n'est pas un solde net). **Cette convention reste à confirmer formellement via le dictionnaire de données** — la traiter comme une hypothèse validée empiriquement, non comme un fait acquis.
+# --- 3. Itération par sous-segment NONCURE (même logique que ton notebook) ---
+config, segment_path, input_path, output_path = load_config()   # ta fonction
+segments = read_segments_from_excel(segment_path)
+jenks_path = Path(output_path, "jenks")
+jenks_path.mkdir(parents=True, exist_ok=True)
 
-Conséquences de l'EAD négatif non corrigé :
-- Dans `_build_weighted_jenks_cache`, le poids `w` négatif rend `total_w` négatif, `w_min` (= `min_weight_pct * total_w / 100`) négatif, et surtout `prefix_w = cumsum(w)` **décroissant**. Or le code suppose `prefix_w` croissant (`np.searchsorted` l'exige). Résultat : `dp[2, n-1]` reste à `inf`, `_max_possible_k` renvoie < 2, et `compute_jenks_run` lève `ValueError: Impossible de construire au moins 2 classes avec la contrainte de poids minimal`.
-- Dans le notebook LRA, la pondération `Σ(LGD·EAD)/Σ(EAD)` avec EAD négatif reste mathématiquement bornée (combinaison convexe : les signes se simplifient), donc **pas de crash ni de valeur aberrante**, mais les poids relatifs sont faussés. Les `lgd_class` déjà produits (plage 16–70) ont été calculés avec ce poids non corrigé.
+scores_by_submodel = []
 
-**Corrections demandées**
+for seg in [s for s in segments if s["Type"] == "NONCURE"]:
+    submodel_label = seg["Nom"].split("_NC")[0] if "_NC" in seg["Nom"] else seg["Nom"]
+    seg_path = Path(jenks_path, submodel_label)
+    seg_path.mkdir(parents=True, exist_ok=True)
 
-1. Créer une colonne de poids corrigée en amont, sans modifier le moteur Jenks :
-```python
-df = df.with_columns(pl.col("ead_fin").abs().alias("ead_poids"))
-```
-Puis faire pointer la constante `_WEIGHT` du calculateur Jenks vers `"ead_poids"` (ou passer `ead_poids` comme colonne de poids à `_build_weighted_jenks_cache`).
+    # filtre Excel : on remplace le placeholder par la vraie colonne (toutes casses)
+    modified_filter = (
+        seg["Filtre"]
+        .replace("TypeContrat2", TYPE_COL)
+        .replace("TypeContrat",  TYPE_COL)
+        .replace("TYPECONTRAT",  TYPE_COL)
+    )
+    filtered_lf = lf.filter(eval(modified_filter))
 
-2. Appliquer la **même** correction dans le notebook LRA : la colonne `config['EAD']` doit utiliser `abs(ead_fin)`, pas `ead_fin`. Recalculer `df_obligor` → `df_class` et comparer les `lgd_class` aux valeurs précédentes (plage 16–70) pour mesurer l'impact du correctif. C'est le point le plus important : la LRA était biaisée, pas seulement bloquée.
+    # GARDE-FOU 1 : assez de données + poids positif (sinon Jenks plante)
+    chk = filtered_lf.select(
+        pl.len().alias("n"),
+        pl.col(TARGET_COL).n_unique().alias("lgd_distinctes"),
+        pl.col("ead_poids").sum().alias("poids_total"),
+        (pl.col("ead_poids") > 0).mean().alias("pct_poids_pos"),
+    ).collect().row(0, named=True)
+    print(f"[{submodel_label}] n={chk['n']} | LGD distinctes={chk['lgd_distinctes']} "
+          f"| poids_total={chk['poids_total']:.3e} | %poids>0={chk['pct_poids_pos']:.3f}")
+    if chk["n"] < 100 or chk["lgd_distinctes"] < 2 or chk["poids_total"] <= 0:
+        print(f"   -> segment ignoré (trop petit/dégénéré).")
+        continue
 
-3. Relancer le notebook Jenks avec restart kernel + run all dans l'ordre (le notebook est stateful ; des exécutions dans le désordre ont déjà causé des incohérences d'état par le passé — toujours repartir d'un kernel propre).
+    # --- Calcul Jenks ---
+    try:
+        run = jenks_calculator.compute_jenks_run(
+            filtered_lf,
+            SCORE_COL,        # score
+            TARGET_COL,       # target (LGD)
+            TIME_COL,         # time_col
+            str(seg_path),    # output_path
+            0,                # homogeneity
+        )
+    except ValueError as e:
+        print(f"   -> Jenks a échoué sur {submodel_label}: {e}")
+        continue
 
-**Vérifications à produire après correction**
+    nb_class = run["nb_class"]
+    run["suffixe"] = submodel_label
+    jenks_calculator.write_excel_jenks_from_run(run, str(seg_path))
 
-- Poids corrigé : `total > 0`, `pct_pos ≈ 1.0`, surveiller `pct_nul` (lignes à EAD exactement nul → poids nul, ne contribuent pas).
-- Jenks : confirmer que `_max_possible_k` repasse ≥ 2 sur chaque segment et que `compute_jenks_run` ne lève plus le `ValueError`.
-- LRA : comparer `lgd_class` avant/après `abs()`, par classe, et chiffrer l'écart.
+    # --- Application : récupérer le meilleur nb de classes et coller Jenks_class ---
+    import pandas as pd
+    df_summary = pd.read_parquet(
+        seg_path / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet"
+    )
+    best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
+    jenks_class = (
+        pl.scan_parquet(seg_path / "jenks" / f"jenks_{best_idx}_class.parquet")
+          .select(pl.first())
+    )
+    scores = filtered_lf.with_columns(
+        jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
+    )
+    scores = scores.with_columns(
+        pl.lit(submodel_label).alias("Submodel"),
+    ).with_columns(
+        pl.concat_str(["Jenks_class", "Submodel"], separator="_").alias("Jenks_Submodel")
+    )
+    scores_by_submodel.append(scores)
 
-**Objectif final de l'utilisateur**
-
-Recalculer les `Jenks_class` (la base de départ ne contient que les classes HLC existantes, pas encore les Jenks_class) puis comparer les deux découpages. Pour la comparaison, ne pas faire d'égalité stricte `HLC == Jenks_class` sans vérifier d'abord que les deux partitions portent sur la même variable et le même grain. Privilégier une table de contingence (`group_by(["HLC", "Jenks_class"]).agg(pl.len())`) qui montre la correspondance entre partitions, plutôt qu'un simple taux d'égalité.
-
-**Question ouverte à clarifier avant de figer**
-
-Sur quelle variable et quel poids les classes **HLC** existantes ont-elles été construites ? Si HLC repose sur une autre variable que la LGD ou un autre poids, la comparaison HLC vs Jenks doit être interprétée comme une correspondance de partitions, pas comme une mesure d'erreur.
-
----
-
-Un mot pour toi, hors brief : l'élément que cette IA ne pourra pas trancher, c'est la confirmation métier de la convention de signe et l'origine des classes HLC. Garde ces deux points pour toi / ton boss / le dico de données — ce sont des décisions, pas du code. Le reste, elle peut l'exécuter.
+# --- 4. Concat de tous les sous-modèles ---
+lf_jenks = pl.concat(scores_by_submodel)
+df_jenks = lf_jenks.collect()
+print("Base avec Jenks_class :", df_jenks.shape)
