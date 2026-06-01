@@ -1,21 +1,31 @@
-import jenks_calculator as jc
+import polars as pl
+import numpy as np
+from jenks_calculator import _build_weighted_jenks_cache, _max_possible_k
 
-# table préparée exactement comme le moteur l'attend
+# Noms internes (constantes du module, écrites en clair)
+SCORE_INTERNE       = "__score__"
+TARGET_INTERNE      = "__target__"
+WEIGHT_INTERNE      = "__weight__"
+TARGET_MEAN_INTERNE = "__target_mean__"
+
+# Table préparée exactement comme make_df_algo la produit
 df_order = (
     lf.select(
-        (100 - pl.col("LGD_3ANS_finale")).alias(jc._SCORE),
-        pl.col("LGD_3ANS_finale").alias(jc._TARGET),
+        (100 - pl.col("LGD_3ANS_finale")).alias(SCORE_INTERNE),
+        pl.col("LGD_3ANS_finale").alias(TARGET_INTERNE),
     )
-    .group_by(jc._SCORE)
+    .group_by(SCORE_INTERNE)
     .agg(
-        pl.len().alias(jc._WEIGHT),
-        pl.col(jc._TARGET).mean().alias(jc._TARGET_MEAN),
+        pl.len().alias(WEIGHT_INTERNE),
+        pl.col(TARGET_INTERNE).mean().alias(TARGET_MEAN_INTERNE),
     )
-    .sort(jc._SCORE)
+    .sort(SCORE_INTERNE)
     .collect()
     .to_pandas()
 )
-cache = jc._build_weighted_jenks_cache(df_order, 20)
-print("k_feasible =", jc._max_possible_k(cache))
+
+cache = _build_weighted_jenks_cache(df_order, 20)
+
+print("k_feasible =", _max_possible_k(cache))
 print("dp[1, -1] fini ?", np.isfinite(cache["dp"][1, -1]))
 print("dp[2, -1] fini ?", np.isfinite(cache["dp"][2, -1]))
