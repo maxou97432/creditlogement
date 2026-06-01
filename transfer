@@ -1,31 +1,22 @@
-import polars as pl
-import numpy as np
-from jenks_calculator import _build_weighted_jenks_cache, _max_possible_k
-
-# Noms internes (constantes du module, écrites en clair)
-SCORE_INTERNE       = "__score__"
-TARGET_INTERNE      = "__target__"
-WEIGHT_INTERNE      = "__weight__"
-TARGET_MEAN_INTERNE = "__target_mean__"
-
-# Table préparée exactement comme make_df_algo la produit
-df_order = (
+# Agrégation en lazy, collect uniquement le résultat agrégé (~111k lignes, léger)
+df_order_pl = (
     lf.select(
-        (100 - pl.col("LGD_3ANS_finale")).alias(SCORE_INTERNE),
-        pl.col("LGD_3ANS_finale").alias(TARGET_INTERNE),
+        (100 - pl.col("LGD_3ANS_finale")).alias(_SCORE),
+        pl.col("LGD_3ANS_finale").alias(_TARGET),
     )
-    .group_by(SCORE_INTERNE)
+    .group_by(_SCORE)
     .agg(
-        pl.len().alias(WEIGHT_INTERNE),
-        pl.col(TARGET_INTERNE).mean().alias(TARGET_MEAN_INTERNE),
+        pl.len().alias(_WEIGHT),
+        pl.col(_TARGET).mean().alias(_TARGET_MEAN),
     )
-    .sort(SCORE_INTERNE)
-    .collect()
-    .to_pandas()
+    .sort(_SCORE)
+    .collect()          # 111 840 lignes -> rapide
 )
 
-cache = _build_weighted_jenks_cache(df_order, 20)
+# conversion de la petite table seulement (instantané sur 111k lignes)
+df_order = df_order_pl.to_pandas()
 
+cache = _build_weighted_jenks_cache(df_order, 20)
 print("k_feasible =", _max_possible_k(cache))
 print("dp[1, -1] fini ?", np.isfinite(cache["dp"][1, -1]))
 print("dp[2, -1] fini ?", np.isfinite(cache["dp"][2, -1]))
