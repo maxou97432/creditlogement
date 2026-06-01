@@ -1,44 +1,17 @@
+print(lf.select(
+    pl.col(SCORE_COL).n_unique().alias("scores_distincts"),
+    pl.col(TARGET_COL).n_unique().alias("lgd_distinctes"),
+    pl.len().alias("n_lignes"),
+).collect())
+compute_jenks_run(filtered_lf, "score", "LGD", "year", seg_path)
 import polars as pl
-import pandas as pd
-from pathlib import Path
-import jenks_calculator   # adapte l'import à ton module
+cols = lf.collect_schema().names()
+print("colonnes:", cols)
 
-# --- 0. Base déjà prête : score = LGD calculée ---
-lf = df.lazy() if isinstance(df, pl.DataFrame) else df
-
-# --- 1. Noms de colonnes (adapte aux vrais noms de TA base) ---
-SCORE_COL  = "score"   # le score calculé (= ta LGD)
-TARGET_COL = "LGD"     # la cible de l'algo Jenks
-TIME_COL   = "year"    # colonne temporelle
-OUTPUT_DIR = "chemin/vers/sortie_jenks"   # dossier où écrire les parquets Jenks
-
-# --- 2. Calcul Jenks sur la base entière (pondération de base = effectif) ---
-run = jenks_calculator.compute_jenks_run(
-    lf,
-    SCORE_COL,
-    TARGET_COL,
-    TIME_COL,
-    OUTPUT_DIR,
-    0,            # homogeneity
-)
-nb_class = run["nb_class"]
-jenks_calculator.write_excel_jenks_from_run(run, OUTPUT_DIR)
-print("nb_class calculé :", nb_class)
-
-# --- 3. Récupérer le meilleur nb de classes et coller Jenks_class sur la base ---
-out = Path(OUTPUT_DIR)
-df_summary = pd.read_parquet(
-    out / "jenks" / f"df_summary_tests_jenks_{nb_class}_class.parquet"
-)
-best_idx = jenks_calculator.index_with_max_green(df_summary) + 2
-
-jenks_class = (
-    pl.scan_parquet(out / "jenks" / f"jenks_{best_idx}_class.parquet")
-      .select(pl.first())
-)
-df_jenks = lf.with_columns(
-    jenks_class.collect()["Jenks_class"].cast(pl.Int8).alias("Jenks_class")
-).collect()
-
-print("Base avec Jenks_class :", df_jenks.shape)
-print(df_jenks["Jenks_class"].value_counts().sort("Jenks_class"))
+# distribution de ce que tu passes en SCORE_COL (la colonne de découpe)
+print(lf.select(
+    pl.col(SCORE_COL).n_unique().alias("score_distincts"),
+    pl.col(SCORE_COL).min().alias("score_min"),
+    pl.col(SCORE_COL).max().alias("score_max"),
+    pl.len().alias("n"),
+).collect())
