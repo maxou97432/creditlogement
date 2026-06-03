@@ -1,22 +1,86 @@
-# Agrégation en lazy, collect uniquement le résultat agrégé (~111k lignes, léger)
-df_order_pl = (
-    lf.select(
-        (100 - pl.col("LGD_3ANS_finale")).alias(_SCORE),
-        pl.col("LGD_3ANS_finale").alias(_TARGET),
-    )
-    .group_by(_SCORE)
+import polars as pl
+import numpy as np
+from scipy import stats
+
+# =====================================================================
+# HYPOTHÈSES À CONFIRMER (sinon le calcul est faux silencieusement) :
+#  - lgd_obligor_table : grain obligor [ID_obligor, date_defaut], portant
+#       * "lgd_obligor"  = LGD réalisée CONTINUE (EAD-weighted, AVANT Jenks)
+#       * "Jenks_class"  = label de classe
+#       * "date_defaut"  = date exploitable pour .dt.year()
+#  - on moyenne la LGD CONTINUE, jamais lgd_obligor_hlc (LGD de classe)
+# =====================================================================
+
+ID_OBLIGOR  = "ID_obligor"
+DATE_DEFAUT = "date_defaut"
+LGD_OBLIGOR = "lgd_obligor"   # CONTINUE, pas la LGD de classe
+CLASS       = "Jenks_class"
+
+# ---------------------------------------------------------------------
+# ÉTAPE 1 — LRA annuelle = LGD continue moyennée par [classe, année]
+#   La classe est la CLÉ de regroupement ; la valeur moyennée reste continue.
+# ---------------------------------------------------------------------
+lra_annuelle = (
+    lgd_obligor_table
+    .with_columns(pl.col(DATE_DEFAUT).dt.year().alias("annee_defaut"))
+    .group_by([CLASS, "annee_defaut"])
     .agg(
-        pl.len().alias(_WEIGHT),
-        pl.col(_TARGET).mean().alias(_TARGET_MEAN),
+        pl.col(LGD_OBLIGOR).mean().alias("lra_annuelle"),   # CONTINUE moyennée
+        pl.col(LGD_OBLIGOR).std(ddof=1).alias("STD_intra_annee"),  # dispersion intra-année (info, PAS la MoC)
+        pl.len().alias("nb_defauts"),
     )
-    .sort(_SCORE)
-    .collect()          # 111 840 lignes -> rapide
+    .sort([CLASS, "annee_defaut"])
 )
 
-# conversion de la petite table seulement (instantané sur 111k lignes)
-df_order = df_order_pl.to_pandas()
+# Si lazy : lra_annuelle = lra_annuelle.collect()  (petit, qq centaines de lignes)
 
-cache = _build_weighted_jenks_cache(df_order, 20)
-print("k_feasible =", _max_possible_k(cache))
-print("dp[1, -1] fini ?", np.isfinite(cache["dp"][1, -1]))
-print("dp[2, -1] fini ?", np.isfinite(cache["dp"][2, -1]))
+# ---------------------------------------------------------------------
+# ÉTAPE 2 — MoC C par classe : IC de Student sur la moyenne des LRA annuelles
+#   sigma = écart-type INTER-année des lra_annuelle  (variabilité dans le temps)
+#   se    = sigma / sqrt(nb_annees)
+#   MoC_C = t_{n-1, 0.975} * se      (forme ADDITIVE, en points de LGD)
+# ---------------------------------------------------------------------
+ALPHA = 0.95   # IC bilatéral 95% -> ppf(0.975)
+
+moc_results = []
+for jc in lra_annuelle.select(CLASS).unique().to_series().to_list():
+    serie = (
+        lra_annuelle
+        .filter(pl.col(CLASS) == jc)
+        .select("lra_annuelle")
+        .to_series()
+        .to_numpy()
+    )
+
+    n_annees = len(serie)
+    mu = float(serie.mean())                       # LRA time-weighted (moyenne des années)
+
+    if n_annees < 2:
+        # 1 seule année : MoC C de Student non estimable -> repli à définir
+        sigma = np.nan
+        se = np.nan
+        t_crit = np.nan
+        moc_c = np.nan                              # TODO: floor réglementaire / MoC forfaitaire
+        lra_prudente = mu                           # provisoire, en attendant la règle de repli
+    else:
+        sigma = float(serie.std(ddof=1))           # écart-type INTER-année (LRA entre elles)
+        se = sigma / np.sqrt(n_annees)
+        t_crit = float(stats.t.ppf(1 - (1 - ALPHA) / 2, df=n_annees - 1))
+        moc_c = t_crit * se                         # ADDITIF, homogène à la LGD
+        lra_prudente = mu + moc_c
+
+    moc_results.append({
+        CLASS: jc,
+        "n_annees": n_annees,
+        "LRA": mu,
+        "sigma_inter_annuel": sigma,
+        "se": se,
+        "t_crit": t_crit,
+        "MoC_C": moc_c,
+        "LRA_prudente": lra_prudente,
+    })
+
+moc_df = pl.DataFrame(moc_results).sort(CLASS)
+
+print("Résultats MoC C par classe de Jenks :")
+print(moc_df.to_pandas().round(6))
