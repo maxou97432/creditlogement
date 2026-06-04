@@ -1,32 +1,10 @@
-import polars as pl
-import numpy as np
-
-stats = (
-    df_obligor
-    .group_by("CHR_model")
+# combien de classes par segment a l'issue de Jenks ?
+print(
+    df_jenks
+    .group_by("Submodel")          # ou la colonne qui identifie A-F
     .agg(
-        pl.len().alias("n"),
-        pl.col("lgd_obligor").mean().alias("mean"),
-        pl.col("lgd_obligor").std().alias("std"),
+        pl.col("Jenks_class").n_unique().alias("nb_classes"),
+        pl.len().alias("n_lignes"),
     )
-    .sort("mean")
+    .sort("Submodel")
 )
-
-s = stats.to_numpy()
-cols = stats.columns
-i_c, i_n, i_m, i_s = (cols.index(x) for x in ["CHR_model", "n", "mean", "std"])
-
-print("paire | ecart | std_pooled | cohen_d | interpretation")
-for i in range(len(s) - 1):
-    g1, g2 = s[i], s[i+1]
-    n1, n2 = int(g1[i_n]), int(g2[i_n])
-    m1, m2 = g1[i_m], g2[i_m]
-    sd1, sd2 = g1[i_s], g2[i_s]
-    # ecart-type poole (pooled SD)
-    sp = np.sqrt(((n1-1)*sd1**2 + (n2-1)*sd2**2) / (n1+n2-2))
-    d = abs(m2 - m1) / sp if sp > 0 else np.inf
-    if   d < 0.2: interp = "negligeable -> FUSION candidate"
-    elif d < 0.5: interp = "petit"
-    elif d < 0.8: interp = "moyen"
-    else:         interp = "grand -> garder separe"
-    print(f"{g1[i_c]:.0f}-{g2[i_c]:.0f} | {abs(m2-m1):.3f} | {sp:.3f} | {d:.3f} | {interp}")
