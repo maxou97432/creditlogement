@@ -2,98 +2,32 @@ import polars as pl
 import numpy as np
 from scipy.stats import ttest_ind_from_stats, kruskal
 
-def _test_paire(df, class_col, lgd_col, c1, c2, methode, alpha):
-    """Teste si deux classes sont indistinguables. Retourne (p_value, fusionnable)."""
-    v1 = df.filter(pl.col(class_col) == c1)[lgd_col].to_numpy()
-    v2 = df.filter(pl.col(class_col) == c2)[lgd_col].to_numpy()
-
-    if methode == "welch":
-        _, p = ttest_ind_from_stats(
-            mean1=v1.mean(), std1=v1.std(ddof=1), nobs1=len(v1),
-            mean2=v2.mean(), std2=v2.std(ddof=1), nobs2=len(v2),
-            equal_var=False,
-        )
-    elif methode == "kruskal":
-        _, p = kruskal(v1, v2)
-    return p, (p > alpha)   # p > alpha => indistinguables => fusionnables
-
-
-def fusion_iterative(df, class_col, lgd_col, methode="welch", alpha=0.05, max_iter=20, verbose=True):
-    """
-    Fusionne les classes adjacentes indistinguables, AVEC contrôle de transitivité :
-    avant de valider un groupe, on re-teste ses extrémités.
-    Itère jusqu'à stabilité (aucune fusion possible) ou max_iter.
-    """
-    # mapping classe -> groupe courant (au départ chaque classe est seule)
-    work = df.select([class_col, lgd_col]).clone()
-    work = work.with_columns(pl.col(class_col).cast(pl.Utf8).alias("_grp"))
-
-    for it in range(max_iter):
-        # 1. stats par groupe courant, triées par LGD moyenne (= adjacence)
-        stats = (
-            work.group_by("_grp")
-            .agg(pl.len().alias("n"), pl.col(lgd_col).mean().alias("mean"))
-            .sort("mean")
-        )
-        groupes = stats["_grp"].to_list()
-        means   = stats["mean"].to_list()
-
-        if len(groupes) <= 1:
-            break
-
-        # 2. tester toutes les paires adjacentes
-        fusion_faite = False
-        i = 0
-        while i < len(groupes) - 1:
-            g1, g2 = groupes[i], groupes[i + 1]
-            p, fusionnable = _test_paire(work, "_grp", lgd_col, g1, g2, methode, alpha)
-
-            if fusionnable:
-                # CONTROLE DE TRANSITIVITE : si g1 est deja un groupe fusionne,
-                # re-tester l'extremite basse de g1 contre g2 (le futur extreme haut).
-                # Ici on teste directement g1 vs g2 sur donnees brutes = deja les extremites
-                # reelles puisque _grp regroupe toutes les obs. Donc le test PORTE deja
-                # sur les distributions completes des deux groupes -> transitivite respectee.
-                if verbose:
-                    print(f"[it{it}] {g1} (m={means[i]:.2f}) + {g2} (m={means[i+1]:.2f}) "
-                          f"-> p={p:.4f} > {alpha} -> FUSION")
-                # fusionner : reassigner g2 -> g1
-                work = work.with_columns(
-                    pl.when(pl.col("_grp") == g2).then(pl.lit(g1)).otherwise(pl.col("_grp")).alias("_grp")
-                )
-                fusion_faite = True
-                break   # on recalcule les stats des le prochain tour (transitivite)
-            else:
-                if verbose:
-                    print(f"[it{it}] {g1} (m={means[i]:.2f}) vs {g2} (m={means[i+1]:.2f}) "
-                          f"-> p={p:.4f} <= {alpha} -> garder separe")
-                i += 1
-
-        if not fusion_faite:
-            if verbose:
-                print(f"Stabilite atteinte a l'iteration {it} : aucune fusion possible.")
-            break
-
-    # resultat final
-    resultat = (
-        work.group_by("_grp")
-        .agg(pl.len().alias("n"), pl.col(lgd_col).mean().alias("lgd_moyenne"))
-        .sort("lgd_moyenne")
+stats = (
+    df_obligor
+    .group_by("CHR_model")
+    .agg(
+        pl.len().alias("n"),
+        pl.col("lgd_obligor").mean().alias("mean"),
+        pl.col("lgd_obligor").std().alias("std"),
     )
-    return work, resultat
+    .sort("mean")
+)
+print(stats)
 
-# Welch
-work_w, res_w = fusion_iterative(df, "Jenks_class", "LGD_3ANS_finale",
-                                  methode="welch", alpha=0.05, verbose=True)
-print("\n=== WELCH : classes finales ===")
-print(res_w)
+s = stats.to_numpy()
+cols = stats.columns
+i_c, i_n, i_m, i_s = (cols.index(x) for x in ["CHR_model", "n", "mean", "std"])
 
-# Kruskal
-work_k, res_k = fusion_iterative(df, "Jenks_class", "LGD_3ANS_finale",
-                                  methode="kruskal", alpha=0.05, verbose=True)
-print("\n=== KRUSKAL : classes finales ===")
-print(res_k)
-
-# comparaison du nombre de classes finales
-print(f"\nWelch  -> {res_w.height} classes")
-print(f"Kruskal -> {res_k.height} classes")
+print("\npaire | ecart_moyenne | n1 | n2 | p_welch | p_kruskal")
+for i in range(len(s) - 1):
+    g1, g2 = s[i], s[i+1]
+    ecart = abs(g2[i_m] - g1[i_m])
+    _, p_w = ttest_ind_from_stats(
+        mean1=g1[i_m], std1=g1[i_s], nobs1=int(g1[i_n]),
+        mean2=g2[i_m], std2=g2[i_s], nobs2=int(g2[i_n]),
+        equal_var=False,
+    )
+    v1 = df_obligor.filter(pl.col("CHR_model") == g1[i_c])["lgd_obligor"].to_numpy()
+    v2 = df_obligor.filter(pl.col("CHR_model") == g2[i_c])["lgd_obligor"].to_numpy()
+    _, p_k = kruskal(v1, v2)
+    print(f"{g1[i_c]}-{g2[i_c]} | {ecart:.3f} | {int(g1[i_n])} | {int(g2[i_n])} | {p_w:.2e} | {p_k:.2e}")
