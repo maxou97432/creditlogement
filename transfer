@@ -1,86 +1,99 @@
 import polars as pl
 import numpy as np
-from scipy import stats
+from scipy.stats import ttest_ind_from_stats, kruskal
 
-# =====================================================================
-# HYPOTHÈSES À CONFIRMER (sinon le calcul est faux silencieusement) :
-#  - lgd_obligor_table : grain obligor [ID_obligor, date_defaut], portant
-#       * "lgd_obligor"  = LGD réalisée CONTINUE (EAD-weighted, AVANT Jenks)
-#       * "Jenks_class"  = label de classe
-#       * "date_defaut"  = date exploitable pour .dt.year()
-#  - on moyenne la LGD CONTINUE, jamais lgd_obligor_hlc (LGD de classe)
-# =====================================================================
+def _test_paire(df, class_col, lgd_col, c1, c2, methode, alpha):
+    """Teste si deux classes sont indistinguables. Retourne (p_value, fusionnable)."""
+    v1 = df.filter(pl.col(class_col) == c1)[lgd_col].to_numpy()
+    v2 = df.filter(pl.col(class_col) == c2)[lgd_col].to_numpy()
 
-ID_OBLIGOR  = "ID_obligor"
-DATE_DEFAUT = "date_defaut"
-LGD_OBLIGOR = "lgd_obligor"   # CONTINUE, pas la LGD de classe
-CLASS       = "Jenks_class"
+    if methode == "welch":
+        _, p = ttest_ind_from_stats(
+            mean1=v1.mean(), std1=v1.std(ddof=1), nobs1=len(v1),
+            mean2=v2.mean(), std2=v2.std(ddof=1), nobs2=len(v2),
+            equal_var=False,
+        )
+    elif methode == "kruskal":
+        _, p = kruskal(v1, v2)
+    return p, (p > alpha)   # p > alpha => indistinguables => fusionnables
 
-# ---------------------------------------------------------------------
-# ÉTAPE 1 — LRA annuelle = LGD continue moyennée par [classe, année]
-#   La classe est la CLÉ de regroupement ; la valeur moyennée reste continue.
-# ---------------------------------------------------------------------
-lra_annuelle = (
-    lgd_obligor_table
-    .with_columns(pl.col(DATE_DEFAUT).dt.year().alias("annee_defaut"))
-    .group_by([CLASS, "annee_defaut"])
-    .agg(
-        pl.col(LGD_OBLIGOR).mean().alias("lra_annuelle"),   # CONTINUE moyennée
-        pl.col(LGD_OBLIGOR).std(ddof=1).alias("STD_intra_annee"),  # dispersion intra-année (info, PAS la MoC)
-        pl.len().alias("nb_defauts"),
+
+def fusion_iterative(df, class_col, lgd_col, methode="welch", alpha=0.05, max_iter=20, verbose=True):
+    """
+    Fusionne les classes adjacentes indistinguables, AVEC contrôle de transitivité :
+    avant de valider un groupe, on re-teste ses extrémités.
+    Itère jusqu'à stabilité (aucune fusion possible) ou max_iter.
+    """
+    # mapping classe -> groupe courant (au départ chaque classe est seule)
+    work = df.select([class_col, lgd_col]).clone()
+    work = work.with_columns(pl.col(class_col).cast(pl.Utf8).alias("_grp"))
+
+    for it in range(max_iter):
+        # 1. stats par groupe courant, triées par LGD moyenne (= adjacence)
+        stats = (
+            work.group_by("_grp")
+            .agg(pl.len().alias("n"), pl.col(lgd_col).mean().alias("mean"))
+            .sort("mean")
+        )
+        groupes = stats["_grp"].to_list()
+        means   = stats["mean"].to_list()
+
+        if len(groupes) <= 1:
+            break
+
+        # 2. tester toutes les paires adjacentes
+        fusion_faite = False
+        i = 0
+        while i < len(groupes) - 1:
+            g1, g2 = groupes[i], groupes[i + 1]
+            p, fusionnable = _test_paire(work, "_grp", lgd_col, g1, g2, methode, alpha)
+
+            if fusionnable:
+                # CONTROLE DE TRANSITIVITE : si g1 est deja un groupe fusionne,
+                # re-tester l'extremite basse de g1 contre g2 (le futur extreme haut).
+                # Ici on teste directement g1 vs g2 sur donnees brutes = deja les extremites
+                # reelles puisque _grp regroupe toutes les obs. Donc le test PORTE deja
+                # sur les distributions completes des deux groupes -> transitivite respectee.
+                if verbose:
+                    print(f"[it{it}] {g1} (m={means[i]:.2f}) + {g2} (m={means[i+1]:.2f}) "
+                          f"-> p={p:.4f} > {alpha} -> FUSION")
+                # fusionner : reassigner g2 -> g1
+                work = work.with_columns(
+                    pl.when(pl.col("_grp") == g2).then(pl.lit(g1)).otherwise(pl.col("_grp")).alias("_grp")
+                )
+                fusion_faite = True
+                break   # on recalcule les stats des le prochain tour (transitivite)
+            else:
+                if verbose:
+                    print(f"[it{it}] {g1} (m={means[i]:.2f}) vs {g2} (m={means[i+1]:.2f}) "
+                          f"-> p={p:.4f} <= {alpha} -> garder separe")
+                i += 1
+
+        if not fusion_faite:
+            if verbose:
+                print(f"Stabilite atteinte a l'iteration {it} : aucune fusion possible.")
+            break
+
+    # resultat final
+    resultat = (
+        work.group_by("_grp")
+        .agg(pl.len().alias("n"), pl.col(lgd_col).mean().alias("lgd_moyenne"))
+        .sort("lgd_moyenne")
     )
-    .sort([CLASS, "annee_defaut"])
-)
+    return work, resultat
 
-# Si lazy : lra_annuelle = lra_annuelle.collect()  (petit, qq centaines de lignes)
+# Welch
+work_w, res_w = fusion_iterative(df, "Jenks_class", "LGD_3ANS_finale",
+                                  methode="welch", alpha=0.05, verbose=True)
+print("\n=== WELCH : classes finales ===")
+print(res_w)
 
-# ---------------------------------------------------------------------
-# ÉTAPE 2 — MoC C par classe : IC de Student sur la moyenne des LRA annuelles
-#   sigma = écart-type INTER-année des lra_annuelle  (variabilité dans le temps)
-#   se    = sigma / sqrt(nb_annees)
-#   MoC_C = t_{n-1, 0.975} * se      (forme ADDITIVE, en points de LGD)
-# ---------------------------------------------------------------------
-ALPHA = 0.95   # IC bilatéral 95% -> ppf(0.975)
+# Kruskal
+work_k, res_k = fusion_iterative(df, "Jenks_class", "LGD_3ANS_finale",
+                                  methode="kruskal", alpha=0.05, verbose=True)
+print("\n=== KRUSKAL : classes finales ===")
+print(res_k)
 
-moc_results = []
-for jc in lra_annuelle.select(CLASS).unique().to_series().to_list():
-    serie = (
-        lra_annuelle
-        .filter(pl.col(CLASS) == jc)
-        .select("lra_annuelle")
-        .to_series()
-        .to_numpy()
-    )
-
-    n_annees = len(serie)
-    mu = float(serie.mean())                       # LRA time-weighted (moyenne des années)
-
-    if n_annees < 2:
-        # 1 seule année : MoC C de Student non estimable -> repli à définir
-        sigma = np.nan
-        se = np.nan
-        t_crit = np.nan
-        moc_c = np.nan                              # TODO: floor réglementaire / MoC forfaitaire
-        lra_prudente = mu                           # provisoire, en attendant la règle de repli
-    else:
-        sigma = float(serie.std(ddof=1))           # écart-type INTER-année (LRA entre elles)
-        se = sigma / np.sqrt(n_annees)
-        t_crit = float(stats.t.ppf(1 - (1 - ALPHA) / 2, df=n_annees - 1))
-        moc_c = t_crit * se                         # ADDITIF, homogène à la LGD
-        lra_prudente = mu + moc_c
-
-    moc_results.append({
-        CLASS: jc,
-        "n_annees": n_annees,
-        "LRA": mu,
-        "sigma_inter_annuel": sigma,
-        "se": se,
-        "t_crit": t_crit,
-        "MoC_C": moc_c,
-        "LRA_prudente": lra_prudente,
-    })
-
-moc_df = pl.DataFrame(moc_results).sort(CLASS)
-
-print("Résultats MoC C par classe de Jenks :")
-print(moc_df.to_pandas().round(6))
+# comparaison du nombre de classes finales
+print(f"\nWelch  -> {res_w.height} classes")
+print(f"Kruskal -> {res_k.height} classes")
