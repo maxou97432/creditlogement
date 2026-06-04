@@ -1,6 +1,5 @@
 import polars as pl
 import numpy as np
-from scipy.stats import ttest_ind_from_stats, kruskal
 
 stats = (
     df_obligor
@@ -12,22 +11,22 @@ stats = (
     )
     .sort("mean")
 )
-print(stats)
 
 s = stats.to_numpy()
 cols = stats.columns
 i_c, i_n, i_m, i_s = (cols.index(x) for x in ["CHR_model", "n", "mean", "std"])
 
-print("\npaire | ecart_moyenne | n1 | n2 | p_welch | p_kruskal")
+print("paire | ecart | std_pooled | cohen_d | interpretation")
 for i in range(len(s) - 1):
     g1, g2 = s[i], s[i+1]
-    ecart = abs(g2[i_m] - g1[i_m])
-    _, p_w = ttest_ind_from_stats(
-        mean1=g1[i_m], std1=g1[i_s], nobs1=int(g1[i_n]),
-        mean2=g2[i_m], std2=g2[i_s], nobs2=int(g2[i_n]),
-        equal_var=False,
-    )
-    v1 = df_obligor.filter(pl.col("CHR_model") == g1[i_c])["lgd_obligor"].to_numpy()
-    v2 = df_obligor.filter(pl.col("CHR_model") == g2[i_c])["lgd_obligor"].to_numpy()
-    _, p_k = kruskal(v1, v2)
-    print(f"{g1[i_c]}-{g2[i_c]} | {ecart:.3f} | {int(g1[i_n])} | {int(g2[i_n])} | {p_w:.2e} | {p_k:.2e}")
+    n1, n2 = int(g1[i_n]), int(g2[i_n])
+    m1, m2 = g1[i_m], g2[i_m]
+    sd1, sd2 = g1[i_s], g2[i_s]
+    # ecart-type poole (pooled SD)
+    sp = np.sqrt(((n1-1)*sd1**2 + (n2-1)*sd2**2) / (n1+n2-2))
+    d = abs(m2 - m1) / sp if sp > 0 else np.inf
+    if   d < 0.2: interp = "negligeable -> FUSION candidate"
+    elif d < 0.5: interp = "petit"
+    elif d < 0.8: interp = "moyen"
+    else:         interp = "grand -> garder separe"
+    print(f"{g1[i_c]:.0f}-{g2[i_c]:.0f} | {abs(m2-m1):.3f} | {sp:.3f} | {d:.3f} | {interp}")
