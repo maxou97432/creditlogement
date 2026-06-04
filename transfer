@@ -1,10 +1,68 @@
-# combien de classes par segment a l'issue de Jenks ?
-print(
-    df_jenks
-    .group_by("Submodel")          # ou la colonne qui identifie A-F
-    .agg(
-        pl.col("Jenks_class").n_unique().alias("nb_classes"),
-        pl.len().alias("n_lignes"),
-    )
-    .sort("Submodel")
+import polars as pl
+import numpy as np
+from scipy.stats import ttest_ind_from_stats, kruskal
+
+# --- Extraction des LGD obligor brutes des deux classes ---
+v22 = df_obligor.filter(pl.col("CHR_model") == 22)["lgd_obligor"].to_numpy()
+v23 = df_obligor.filter(pl.col("CHR_model") == 23)["lgd_obligor"].to_numpy()
+
+# --- Statistiques de base (ce qui alimente Welch a la main) ---
+n1, n2 = len(v22), len(v23)
+m1, m2 = v22.mean(), v23.mean()
+s1, s2 = v22.std(ddof=1), v23.std(ddof=1)      # ecart-type echantillon (ddof=1)
+var1, var2 = v22.var(ddof=1), v23.var(ddof=1)
+
+print("=== STATS PAR CLASSE (grain obligor) ===")
+print(f"Classe 22 : n={n1} | moyenne={m1:.6f} | std={s1:.6f} | var={var1:.6f}")
+print(f"Classe 23 : n={n2} | moyenne={m2:.6f} | std={s2:.6f} | var={var2:.6f}")
+print(f"ecart de moyenne |m2-m1| = {abs(m2-m1):.6f}")
+
+# --- WELCH a la main (pour que tu refasses le calcul) ---
+print("\n=== WELCH : ingredients du calcul manuel ===")
+se1 = var1 / n1                                  # variance de la moyenne, groupe 1
+se2 = var2 / n2                                  # variance de la moyenne, groupe 2
+se_diff = np.sqrt(se1 + se2)                     # erreur-type de la difference
+t_stat = (m1 - m2) / se_diff                     # statistique t de Welch
+# degres de liberte de Welch-Satterthwaite
+df_welch = (se1 + se2)**2 / (se1**2/(n1-1) + se2**2/(n2-1))
+print(f"var1/n1 = {se1:.8f}")
+print(f"var2/n2 = {se2:.8f}")
+print(f"se_diff = sqrt(var1/n1 + var2/n2) = {se_diff:.8f}")
+print(f"t = (m1-m2)/se_diff = {t_stat:.6f}")
+print(f"df_Welch (Satterthwaite) = {df_welch:.4f}")
+
+# --- Verification avec scipy (doit coller a ton calcul manuel) ---
+t_scipy, p_welch = ttest_ind_from_stats(
+    mean1=m1, std1=s1, nobs1=n1,
+    mean2=m2, std2=s2, nobs2=n2,
+    equal_var=False,
 )
+print(f"[scipy] t={t_scipy:.6f} | p_welch={p_welch:.3e}")
+
+# --- KRUSKAL a la main (ingredients) ---
+print("\n=== KRUSKAL-WALLIS : ingredients ===")
+combined = np.concatenate([v22, v23])
+ranks = combined.argsort().argsort() + 1          # rangs (1-indexes ; gestion ex-aequo approximative)
+R1 = ranks[:n1].sum()                             # somme des rangs groupe 1
+R2 = ranks[n1:].sum()
+N = n1 + n2
+H = 12/(N*(N+1)) * (R1**2/n1 + R2**2/n2) - 3*(N+1)   # statistique H (sans correction ex-aequo)
+print(f"N total = {N}")
+print(f"somme rangs classe 22 = {R1} | classe 23 = {R2}")
+print(f"H (approx, sans correction ties) = {H:.6f}")
+h_scipy, p_kruskal = kruskal(v22, v23)
+print(f"[scipy] H={h_scipy:.6f} | p_kruskal={p_kruskal:.3e}")
+
+# --- COHEN'S D (taille d'effet, independant de n) ---
+print("\n=== COHEN'S D (materialite) ===")
+sp = np.sqrt(((n1-1)*var1 + (n2-1)*var2) / (n1+n2-2))   # ecart-type poole
+d = abs(m1 - m2) / sp
+print(f"std_pooled = {sp:.6f}")
+print(f"Cohen's d = |m1-m2|/std_pooled = {d:.4f}")
+print("  interpretation :", 
+      "negligeable" if d<0.2 else "petit" if d<0.5 else "moyen" if d<0.8 else "grand")
+
+# --- Quantiles pour voir le chevauchement reel des distributions ---
+print("\n=== CHEVAUCHEMENT DES DISTRIBUTIONS ===")
+for q in [0.05, 0.25, 0.5, 0.75, 0.95]:
+    print(f"q{int(q*100):02d} : classe22={np.quantile(v22,q):.3f} | classe23={np.quantile(v23,q):.3f}")
