@@ -1,6 +1,9 @@
 paire, dbg = meilleur_candidat_fusion(lra_prov_model3, log=False)
-mauvais = dbg.filter(
-    pl.col("submodel_class").str.split("_").list.first()
-    != pl.col("next_class").str.split("_").list.first()
-)
-print("paires inter-segments :", mauvais.height)   # doit être 0
+if dbg is None:
+    print("Aucune paire candidate sur la base initiale -> 0 paire inter-segments par construction.")
+else:
+    mauvais = dbg.filter(
+        pl.col("submodel_class").str.split("_").list.first()
+        != pl.col("next_class").str.split("_").list.first()
+    )
+    print("paires inter-segments :", mauvais.height)
