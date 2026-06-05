@@ -1,4 +1,9 @@
-print("classes avant :", df.select("CHR_model").n_unique())
-print("groupes après :", mapping.select("merged_group").n_unique())
-print(trace["decision"].value_counts())
-print(f"eta² {avant:.6f} -> {apres:.6f} | perte relative {(avant-apres)/avant:.4%}")
+# 1. une classe doit appartenir à UN seul segment
+print(df.group_by("CHR_model").agg(pl.col("segment").n_unique().alias("nseg"))
+        .filter(pl.col("nseg") > 1))
+
+# 2. une classe doit recevoir UN seul merged_group
+print(mapping.group_by("CHR_model").agg(pl.len()).filter(pl.col("len") > 1))
+
+# 3. combien de segments, et combien de classes chacun
+print(df.group_by("segment").agg(pl.col("CHR_model").n_unique()).sort("segment"))
