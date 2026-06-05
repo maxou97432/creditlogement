@@ -1,16 +1,4 @@
-cfg = MergeConfig(
-    lgd_col="lgd_obligor",
-    class_col="CHR_model",
-    segment_col="segment",        # ou segment_col=None, segment_from_class=lambda c: str(c)[0]
-    mode="materiality",
-    delta_mean=1.0,
-    d_max=0.50,                   # garde-fou anti-recouvrement (optionnel)
-)
-
-diag = evaluate_adjacent_pairs(df, cfg)     # à inspecter d'abord
-mapping, trace = greedy_merge(df, cfg)      # le mapping + la trace auditable
-
-df2 = df.join(mapping, on=["segment", "CHR_model"])
-avant = eta_squared(df2, "CHR_model", cfg)
-apres = eta_squared(df2, "merged_group", cfg)
-print(f"eta^2 avant={avant:.4f} après={apres:.4f} perte={(avant-apres)/avant:.2%}")
+print("classes avant :", df.select("CHR_model").n_unique())
+print("groupes après :", mapping.select("merged_group").n_unique())
+print(trace["decision"].value_counts())
+print(f"eta² {avant:.6f} -> {apres:.6f} | perte relative {(avant-apres)/avant:.4%}")
