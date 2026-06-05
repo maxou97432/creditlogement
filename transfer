@@ -1,19 +1,18 @@
-DELTA_LGD = 1.0   # points de LGD — le seuil de matérialité, modifiable à la volée
+from scipy.stats import wasserstein_distance
+import numpy as np
 
-def meilleur_candidat_fusion(
+# ============================================================================
+# APPROCHE 1 : ÉCART DE MOYENNES SEUL (ce que vous faites)
+# ============================================================================
+def meilleur_candidat_fusion_v1_mean(
     df: pl.LazyFrame,
-    nb_croisements_max: int = 0,      # conservés pour compat : ignorés
-    ans_strict: int = 0,              # idem
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
     lgd_col: str = "lgd_obligor",
     jenks_col: str = "submodel_class",
     log: bool = False,
 ) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
-    """
-    Critère MATÉRIALITÉ (intra-segment) : fusionne la paire adjacente (par LRA)
-    la plus proche dont l'écart de LGD moyenne est < DELTA_LGD.
-    Signature et contrat de sortie IDENTIQUES à l'original (dbg expose
-    'severite_totale' = -ecart_lgd, donc head(1) prend bien la plus proche).
-    """
+    """Critère : |mean_A - mean_B| < DELTA_LGD (plus proche = sévérité max)"""
     ordre_global = (
         df.group_by([jenks_col, "year"])
         .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
@@ -31,14 +30,14 @@ def meilleur_candidat_fusion(
         .filter(pl.col("next_class").is_not_null())
         .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
         .filter(pl.col("ecart_lgd") < DELTA_LGD)
-        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))   # <<< plus proche = sévérité max
+        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))
         .sort("severite_totale", descending=True)
         .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
         .collect()
     )
 
     if log:
-        print("=== Paires sous le seuil de matérialité ===")
+        print("=== V1: Écart de moyennes ===")
         print("Aucune paire." if paires.height == 0 else paires)
 
     if paires.height == 0:
@@ -47,11 +46,249 @@ def meilleur_candidat_fusion(
     meilleur = paires.head(1)
     return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
 
-DELTA_LGD = 1.0   # changez ici pour tester d'autres seuils
-df_fusionne_glouton, mapping_glouton = fusion_glouton(lra_prov_model3, log=True)
 
-for d in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
-    DELTA_LGD = d
+# ============================================================================
+# APPROCHE 2 : ÉCART DE MOYENNES + COHEN'S D + OVERLAP
+# ============================================================================
+def meilleur_candidat_fusion_v2_robust(
+    df: pl.LazyFrame,
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
+    lgd_col: str = "lgd_obligor",
+    jenks_col: str = "submodel_class",
+    log: bool = False,
+) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
+    """
+    Critère : fusion si:
+      1. |mean_A - mean_B| < DELTA_LGD (matérialité)
+      2. |Cohen's d| < D_MAX (faible effet)
+      3. OVL > OVL_MIN (fort recouvrement)
+    Tous les trois doivent passer (AND logic).
+    """
+    ordre_global = (
+        df.group_by([jenks_col, "year"])
+        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
+        .group_by([jenks_col])
+        .agg(
+            pl.col("mean_LGD_year").mean().alias("mean_LGD_global"),
+            pl.col("mean_LGD_year").std(ddof=1).alias("std_LGD_global"),
+            pl.len().alias("n_years"),
+        )
+        .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
+        .sort(["seg", "mean_LGD_global"])
+    )
+
+    # Récupérer les obligors pour chaque classe (pour OVL et Cohen's d)
+    obligors_per_class = {}
+    for row in (
+        df.select([jenks_col, lgd_col])
+        .collect()
+        .group_by(jenks_col)
+    ):
+        cls_name = row[jenks_col][0]
+        obligors_per_class[cls_name] = row[lgd_col].to_numpy()
+
+    paires_list = []
+    for row in ordre_global.collect().iter_rows(named=True):
+        seg = row["seg"]
+        cls_1 = row[jenks_col]
+        mean_1 = row["mean_LGD_global"]
+        std_1 = row["std_LGD_global"] or 0.001
+
+        # Trouver le voisin intra-segment suivant
+        next_rows = (
+            ordre_global
+            .filter((pl.col("seg") == seg) & (pl.col("mean_LGD_global") > mean_1))
+            .sort("mean_LGD_global")
+            .limit(1)
+            .collect()
+        )
+
+        if next_rows.height == 0:
+            continue
+
+        cls_2 = next_rows[jenks_col][0]
+        mean_2 = next_rows["mean_LGD_global"][0]
+        std_2 = next_rows["std_LGD_global"][0] or 0.001
+
+        # Critère 1 : écart de moyennes
+        ecart_mean = abs(mean_2 - mean_1)
+        if ecart_mean >= DELTA_LGD:
+            continue
+
+        # Critère 2 : Cohen's d
+        n1, n2 = len(obligors_per_class[cls_1]), len(obligors_per_class[cls_2])
+        sp = np.sqrt(((n1 - 1) * std_1**2 + (n2 - 1) * std_2**2) / (n1 + n2 - 2))
+        cohens_d = ecart_mean / sp if sp > 0 else 0
+        if abs(cohens_d) >= D_MAX:
+            continue
+
+        # Critère 3 : OVL (histogram-based)
+        arr1, arr2 = obligors_per_class[cls_1], obligors_per_class[cls_2]
+        lo, hi = min(arr1.min(), arr2.min()), max(arr1.max(), arr2.max())
+        n_bins = max(1, int(np.ceil((hi - lo) / 0.25)))
+        p, _ = np.histogram(arr1, bins=np.linspace(lo, hi, n_bins + 1))
+        q, _ = np.histogram(arr2, bins=np.linspace(lo, hi, n_bins + 1))
+        p, q = p / p.sum(), q / q.sum()
+        ovl = np.minimum(p, q).sum()
+        if ovl < OVL_MIN:
+            continue
+
+        # Score : priorité à la plus proche (par écart de mean)
+        paires_list.append({
+            jenks_col: cls_1,
+            "next_class": cls_2,
+            "ecart_lgd": ecart_mean,
+            "cohens_d": cohens_d,
+            "ovl": ovl,
+            "severite_totale": -ecart_mean,  # plus proche = plus haute sévérité
+        })
+
+    paires = pl.DataFrame(paires_list) if paires_list else pl.DataFrame()
+
+    if log:
+        print("=== V2: Moyen + Cohen's d + OVL ===")
+        print("Aucune paire." if paires.height == 0 else paires)
+
+    if paires.height == 0:
+        return None, None
+
+    paires = paires.sort("severite_totale", descending=True).collect()
+    meilleur = paires.head(1)
+    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
+
+
+# ============================================================================
+# APPROCHE 3 : ÉCART DE MOYENNES + WASSERSTEIN
+# ============================================================================
+def meilleur_candidat_fusion_v3_wasserstein(
+    df: pl.LazyFrame,
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
+    lgd_col: str = "lgd_obligor",
+    jenks_col: str = "submodel_class",
+    log: bool = False,
+) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
+    """
+    Critère : fusion si:
+      1. |mean_A - mean_B| < DELTA_LGD (matérialité)
+      2. Wasserstein_1(A, B) < W_MAX (distributions proches, en points LGD)
+    """
+    ordre_global = (
+        df.group_by([jenks_col, "year"])
+        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
+        .group_by([jenks_col])
+        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
+        .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
+        .sort(["seg", "mean_LGD_global"])
+    )
+
+    obligors_per_class = {}
+    for row in df.select([jenks_col, lgd_col]).collect().group_by(jenks_col):
+        cls_name = row[jenks_col][0]
+        obligors_per_class[cls_name] = row[lgd_col].to_numpy()
+
+    paires_list = []
+    for row in ordre_global.collect().iter_rows(named=True):
+        seg = row["seg"]
+        cls_1 = row[jenks_col]
+        mean_1 = row["mean_LGD_global"]
+
+        next_rows = (
+            ordre_global
+            .filter((pl.col("seg") == seg) & (pl.col("mean_LGD_global") > mean_1))
+            .sort("mean_LGD_global")
+            .limit(1)
+            .collect()
+        )
+
+        if next_rows.height == 0:
+            continue
+
+        cls_2 = next_rows[jenks_col][0]
+        mean_2 = next_rows["mean_LGD_global"][0]
+
+        ecart_mean = abs(mean_2 - mean_1)
+        if ecart_mean >= DELTA_LGD:
+            continue
+
+        # Wasserstein
+        arr1, arr2 = obligors_per_class[cls_1], obligors_per_class[cls_2]
+        w = wasserstein_distance(arr1, arr2)
+        if w >= W_MAX:
+            continue
+
+        paires_list.append({
+            jenks_col: cls_1,
+            "next_class": cls_2,
+            "ecart_lgd": ecart_mean,
+            "wasserstein": w,
+            "severite_totale": -ecart_mean,
+        })
+
+    paires = pl.DataFrame(paires_list) if paires_list else pl.DataFrame()
+
+    if log:
+        print("=== V3: Moyen + Wasserstein ===")
+        print("Aucune paire." if paires.height == 0 else paires)
+
+    if paires.height == 0:
+        return None, None
+
+    paires = paires.sort("severite_totale", descending=True).collect()
+    meilleur = paires.head(1)
+    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
+
+
+# ============================================================================
+# TEST COMPARATIF DES 3 APPROCHES
+# ============================================================================
+print("\n" + "="*80)
+print("COMPARAISON DES 3 APPROCHES : écart de moyennes | taille d'effet | robustesse")
+print("="*80 + "\n")
+
+# Paramètres par défaut
+DELTA_LGD = 1.0    # écart de moyennes
+D_MAX = 0.3        # Cohen's d (approche 2)
+OVL_MIN = 0.8      # Overlap (approche 2)
+W_MAX = 0.5        # Wasserstein en points LGD (approche 3)
+
+resultats = {}
+
+# V1 : Écart de moyennes seul
+print("V1 : Écart de moyennes (DELTA_LGD = 1.0)")
+print("-" * 40)
+for delta in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
+    DELTA_LGD = delta
+    meilleur_candidat_fusion = meilleur_candidat_fusion_v1_mean
     dff, _ = fusion_glouton(lra_prov_model3, log=False)
     n = dff.collect().select("submodel_class").n_unique()
-    print(f"delta={d:>4}  ->  {n} classes")
+    print(f"  delta={delta:>4}  ->  {n:>3} classes")
+    resultats[f"V1_delta{delta}"] = n
+
+print("\nV2 : Moyen + Cohen's d + OVL (delta=1.0, d<0.3, OVL>0.8)")
+print("-" * 40)
+DELTA_LGD = 1.0
+for d_max in [0.2, 0.3, 0.5]:
+    for ovl_min in [0.75, 0.8, 0.85]:
+        D_MAX = d_max
+        OVL_MIN = ovl_min
+        meilleur_candidat_fusion = meilleur_candidat_fusion_v2_robust
+        dff, _ = fusion_glouton(lra_prov_model3, log=False)
+        n = dff.collect().select("submodel_class").n_unique()
+        print(f"  d<{d_max}, OVL>{ovl_min}  ->  {n:>3} classes")
+
+print("\nV3 : Moyen + Wasserstein (delta=1.0)")
+print("-" * 40)
+DELTA_LGD = 1.0
+for w_max in [0.3, 0.5, 0.75, 1.0]:
+    W_MAX = w_max
+    meilleur_candidat_fusion = meilleur_candidat_fusion_v3_wasserstein
+    dff, _ = fusion_glouton(lra_prov_model3, log=False)
+    n = dff.collect().select("submodel_class").n_unique()
+    print(f"  W<{w_max}  ->  {n:>3} classes")
+    resultats[f"V3_w{w_max}"] = n
+
+print("\n" + "="*80)
+print("Résumé : V1 (simple) vs V2 (conservateur) vs V3 (robuste à la forme)")
+print("="*80)
