@@ -1,9 +1,12 @@
-# 1. une classe doit appartenir à UN seul segment
-print(df.group_by("CHR_model").agg(pl.col("segment").n_unique().alias("nseg"))
-        .filter(pl.col("nseg") > 1))
+stats_annuelles = (
+        df.group_by([jenks_col, "year"])
+        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
+        .join(ordre_global, on=jenks_col)
+        .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))  # + AJOUT
+        .sort(["seg", "year", "mean_LGD_global"])                                  # ~ MODIF (ajout "seg")
+    )
 
-# 2. une classe doit recevoir UN seul merged_group
-print(mapping.group_by("CHR_model").agg(pl.len()).filter(pl.col("len") > 1))
-
-# 3. combien de segments, et combien de classes chacun
-print(df.group_by("segment").agg(pl.col("CHR_model").n_unique()).sort("segment"))
+    df_shift = stats_annuelles.with_columns([
+        pl.col(jenks_col).shift(-1).over(["seg", "year"]).alias("next_class"),     # ~ MODIF
+        pl.col("mean_LGD_year").shift(-1).over(["seg", "year"]).alias("next_lgd"), # ~ MODIF
+    ])
