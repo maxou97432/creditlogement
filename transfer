@@ -1,76 +1,326 @@
-import polars as pl
+"""
+lgd_class_merging.py — fusion de classes adjacentes (LGD IRB), par segment.
+Dépendances : polars, numpy, scipy.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Callable, Optional
+
 import numpy as np
+import polars as pl
+from scipy import stats
 
-def fusion_par_materialite(
-    df_obligor,
-    class_col="CHR_model",
-    lgd_col="lgd_obligor",
-    seuil_ecart_lgd=1.0,      # points de LGD : en dessous, ecart juge non materiel
-    seuil_cohen_d=0.2,        # taille d'effet : en dessous, chevauchement juge fort
-    max_passes=50,
-):
-    """
-    Balayage sequentiel des classes adjacentes (triees par LGD moyenne).
-    Fusionne deux classes si ELLES SONT PROCHES sur les DEUX criteres :
-      - ecart de moyenne LGD < seuil_ecart_lgd  (materialite RWA)
-      - Cohen's d           < seuil_cohen_d     (chevauchement)
-    Re-teste apres chaque fusion (transitivite) jusqu'a stabilite.
-    """
-    work = df_obligor.select([class_col, lgd_col]).clone()
-    work = work.with_columns(pl.col(class_col).cast(pl.Utf8).alias("_grp"))
+# numpy 2.x : trapz -> trapezoid
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
-    for passe in range(max_passes):
-        # stats par groupe courant, triees par LGD moyenne = adjacence
-        stats = (
-            work.group_by("_grp")
-            .agg(
-                pl.len().alias("n"),
-                pl.col(lgd_col).mean().alias("mean"),
-                pl.col(lgd_col).var().alias("var"),
-            )
-            .sort("mean")
-        )
-        s = stats.to_numpy()
-        cols = stats.columns
-        i_g, i_n, i_m, i_v = (cols.index(x) for x in ["_grp","n","mean","var"])
 
-        if len(s) <= 1:
-            break
+# --------------------------------------------------------------------------- #
+# Configuration                                                               #
+# --------------------------------------------------------------------------- #
+@dataclass
+class MergeConfig:
+    # --- noms de colonnes (A ADAPTER) -------------------------------------- #
+    lgd_col: str = "lgd_obligor"
+    class_col: str = "CHR_model"
+    segment_col: Optional[str] = "segment"
+    # Si le segment est encodé dans CHR_model : segment_col=None + une fonction,
+    #   ex. segment_from_class = lambda c: str(c)[0]
+    segment_from_class: Optional[Callable] = None
 
-        fusion_faite = False
-        for i in range(len(s) - 1):
-            g1, g2 = s[i], s[i+1]
-            n1, n2 = int(g1[i_n]), int(g2[i_n])
-            m1, m2 = g1[i_m], g2[i_m]
-            v1, v2 = g1[i_v], g2[i_v]
+    # --- règle de décision ------------------------------------------------- #
+    # "materiality" : fusion si |gap moyennes| < delta_mean
+    # "tost"        : fusion si l'IC (1-2*alpha) du gap est inclus dans (-delta, +delta)
+    mode: str = "materiality"
+    delta_mean: float = 1.0      # points de LGD : LA marge métier documentée
+    alpha: float = 0.05          # pour le mode "tost" uniquement
 
-            ecart = abs(m2 - m1)
-            sp = np.sqrt(((n1-1)*v1 + (n2-1)*v2) / (n1+n2-2))
-            d = ecart / sp if sp > 0 else np.inf
+    # --- garde-fous OPTIONNELS (ET avec la règle ci-dessus) ---------------- #
+    # None = désactivé. Protègent contre "même moyenne, forme différente".
+    ovl_min: Optional[float] = None     # ex. 0.80 -> exiger >=80% de recouvrement
+    d_max: Optional[float] = None       # ex. 0.50 -> exiger |d| <= 0.50
 
-            proche = (ecart < seuil_ecart_lgd) and (d < seuil_cohen_d)
-            decision = "FUSION" if proche else "garder"
-            print(f"[passe {passe}] {g1[i_g]} (m={m1:.2f}) vs {g2[i_g]} (m={m2:.2f}) "
-                  f"| ecart={ecart:.3f} | d={d:.3f} -> {decision}")
+    # --- granularité réglementaire ----------------------------------------- #
+    # Classe sous ce seuil = fusion forcée (concentration/estimabilité). Tracé.
+    min_class_size: Optional[int] = None
 
-            if proche:
-                # fusionner g2 dans g1, puis on recommence (transitivite)
-                work = work.with_columns(
-                    pl.when(pl.col("_grp") == g2[i_g])
-                      .then(pl.lit(g1[i_g]))
-                      .otherwise(pl.col("_grp"))
-                      .alias("_grp")
-                )
-                fusion_faite = True
-                break   # recalcul des stats avant la fusion suivante
+    # --- numérique ----------------------------------------------------------#
+    ovl_bin_width: float = 0.25  # points de LGD : largeur de bin pour l'OVL
+    ddof: int = 1                # écart-type échantillon, cohérent avec Polars
 
-        if not fusion_faite:
-            print(f"\nStabilite atteinte (passe {passe}) : plus aucune fusion.")
-            break
 
-    resultat = (
-        work.group_by("_grp")
-        .agg(pl.len().alias("n"), pl.col(lgd_col).mean().alias("lgd_moyenne"))
-        .sort("lgd_moyenne")
+# --------------------------------------------------------------------------- #
+# Métriques pairées (numpy / scipy)                                           #
+# --------------------------------------------------------------------------- #
+def welch_and_tost(x: np.ndarray, y: np.ndarray, delta: float, alpha: float) -> dict:
+    """Welch (informatif) + TOST d'équivalence. gap = mean(y) - mean(x)."""
+    n1, n2 = x.size, y.size
+    m1, m2 = x.mean(), y.mean()
+    v1, v2 = x.var(ddof=1), y.var(ddof=1)
+    se = np.sqrt(v1 / n1 + v2 / n2)
+    gap = m2 - m1
+
+    df = (v1 / n1 + v2 / n2) ** 2 / (
+        (v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1)
     )
-    return work, resultat
+    t_welch = gap / se
+    p_welch = 2 * stats.t.sf(abs(t_welch), df)
+
+    t_low = (gap + delta) / se
+    t_high = (gap - delta) / se
+    p_low = stats.t.sf(t_low, df)
+    p_high = stats.t.cdf(t_high, df)
+    p_tost = max(p_low, p_high)
+    tcrit = stats.t.ppf(1 - alpha, df)
+    ci_low, ci_high = gap - tcrit * se, gap + tcrit * se
+    equivalent = (ci_low > -delta) and (ci_high < delta)
+
+    return {
+        "gap": gap, "se": se, "df": df, "t_welch": t_welch, "p_welch": p_welch,
+        "ci_low": ci_low, "ci_high": ci_high, "p_tost": p_tost,
+        "equivalent": equivalent,
+    }
+
+
+def cohens_d(x: np.ndarray, y: np.ndarray) -> float:
+    """Gap standardisé, écart-type poolé. Magnitude de séparation, indépendant de n."""
+    n1, n2 = x.size, y.size
+    v1, v2 = x.var(ddof=1), y.var(ddof=1)
+    sp = np.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2))
+    return (y.mean() - x.mean()) / sp if sp > 0 else 0.0
+
+
+def overlap_coefficient(x: np.ndarray, y: np.ndarray, bin_width: float) -> float:
+    """OVL = sum_i min(p_i, q_i) sur un histogramme commun à largeur fixe.
+    Distribution-free, dans [0,1]. ~1 => même distribution => candidat fusion.
+    Garder bin_width fixe sur toutes les paires pour comparabilité."""
+    lo = min(x.min(), y.min())
+    hi = max(x.max(), y.max())
+    if hi <= lo:
+        return 1.0
+    n_bins = max(1, int(np.ceil((hi - lo) / bin_width)))
+    edges = np.linspace(lo, hi, n_bins + 1)
+    px, _ = np.histogram(x, bins=edges)
+    qy, _ = np.histogram(y, bins=edges)
+    px = px / px.sum()
+    qy = qy / qy.sum()
+    return float(np.minimum(px, qy).sum())
+
+
+def overlap_normal(x: np.ndarray, y: np.ndarray) -> float:
+    """Recouvrement gaussien fermé, contrôle de cohérence de overlap_coefficient."""
+    m1, m2 = x.mean(), y.mean()
+    s1, s2 = x.std(ddof=1), y.std(ddof=1)
+    if s1 <= 0 or s2 <= 0:
+        return float(m1 == m2)
+    if abs(s1 - s2) < 1e-12:
+        return float(2 * stats.norm.cdf(-abs(m2 - m1) / (2 * s1)))
+    lo = min(m1 - 6 * s1, m2 - 6 * s2)
+    hi = max(m1 + 6 * s1, m2 + 6 * s2)
+    grid = np.linspace(lo, hi, 4000)
+    f = stats.norm.pdf(grid, m1, s1)
+    g = stats.norm.pdf(grid, m2, s2)
+    return float(_trapz(np.minimum(f, g), grid))
+
+
+def wasserstein1(x: np.ndarray, y: np.ndarray) -> float:
+    """Distance earth-mover, en points de LGD. Insensible à n, lecture directe."""
+    return float(stats.wasserstein_distance(x, y))
+
+
+def prob_superiority_normal(x: np.ndarray, y: np.ndarray) -> float:
+    """P(Y > X) sous normalité = common-language effect size (approx)."""
+    m1, m2 = x.mean(), y.mean()
+    s1, s2 = x.std(ddof=1), y.std(ddof=1)
+    denom = np.sqrt(s1**2 + s2**2)
+    return float(stats.norm.cdf((m2 - m1) / denom)) if denom > 0 else 0.5
+
+
+def pair_metrics(x: np.ndarray, y: np.ndarray, cfg: MergeConfig) -> dict:
+    """Tous les diagnostics pour une paire (basse, haute)."""
+    t = welch_and_tost(x, y, cfg.delta_mean, cfg.alpha)
+    return {
+        "n_lo": x.size, "n_hi": y.size,
+        "mean_lo": float(x.mean()), "mean_hi": float(y.mean()),
+        "std_lo": float(x.std(ddof=cfg.ddof)), "std_hi": float(y.std(ddof=cfg.ddof)),
+        "gap": t["gap"], "ci_low": t["ci_low"], "ci_high": t["ci_high"],
+        "t_welch": t["t_welch"], "p_welch": t["p_welch"],
+        "tost_equivalent": t["equivalent"],
+        "cohens_d": cohens_d(x, y),
+        "ovl_hist": overlap_coefficient(x, y, cfg.ovl_bin_width),
+        "ovl_normal": overlap_normal(x, y),
+        "wasserstein": wasserstein1(x, y),
+        "prob_superiority": prob_superiority_normal(x, y),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Résumé par classe et extraction obligor                                     #
+# --------------------------------------------------------------------------- #
+def _with_segment(df: pl.DataFrame, cfg: MergeConfig) -> pl.DataFrame:
+    if cfg.segment_col is not None and cfg.segment_col in df.columns:
+        return df.rename({cfg.segment_col: "segment"}) if cfg.segment_col != "segment" else df
+    if cfg.segment_from_class is not None:
+        return df.with_columns(
+            pl.col(cfg.class_col)
+            .map_elements(cfg.segment_from_class, return_dtype=pl.String)
+            .alias("segment")
+        )
+    raise ValueError(
+        "Pas d'info segment : renseigner segment_col (colonne existante) "
+        "ou segment_from_class."
+    )
+
+
+def class_summary(df: pl.DataFrame, cfg: MergeConfig) -> pl.DataFrame:
+    """Stats par classe, triées par segment puis LGD moyenne croissante."""
+    df = _with_segment(df, cfg)
+    return (
+        df.group_by("segment", cfg.class_col)
+        .agg(
+            pl.len().alias("n"),
+            pl.col(cfg.lgd_col).mean().alias("mean"),
+            pl.col(cfg.lgd_col).std(ddof=cfg.ddof).alias("std"),
+        )
+        .sort(["segment", "mean"])
+    )
+
+
+def _class_arrays(df: pl.DataFrame, cfg: MergeConfig) -> dict:
+    """{(segment, classe): np.ndarray de LGD} pour les métriques distributionnelles."""
+    df = _with_segment(df, cfg)
+    out = {}
+    for (seg, cls), sub in df.group_by(["segment", cfg.class_col]):
+        out[(seg, cls)] = sub.get_column(cfg.lgd_col).drop_nulls().to_numpy()
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 1) Diagnostic indépendant de l'ordre : toutes les paires adjacentes         #
+# --------------------------------------------------------------------------- #
+def evaluate_adjacent_pairs(df: pl.DataFrame, cfg: MergeConfig) -> pl.DataFrame:
+    """Pour chaque paire adjacente dans chaque segment, toutes les métriques.
+    Table d'audit à inspecter AVANT le balayage glouton : indépendante de
+    l'ordre de fusion, elle montre où sont les ruptures naturelles."""
+    summary = class_summary(df, cfg)
+    arrays = _class_arrays(df, cfg)
+    rows = []
+    for seg in summary.get_column("segment").unique(maintain_order=True):
+        classes = (
+            summary.filter(pl.col("segment") == seg)
+            .get_column(cfg.class_col).to_list()
+        )
+        for lo, hi in zip(classes[:-1], classes[1:]):
+            m = pair_metrics(arrays[(seg, lo)], arrays[(seg, hi)], cfg)
+            rows.append({"segment": seg, "class_lo": lo, "class_hi": hi, **m})
+    return pl.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------- #
+# 2) Balayage séquentiel glouton avec fusion                                  #
+# --------------------------------------------------------------------------- #
+def _merge_decision(x: np.ndarray, y: np.ndarray, cfg: MergeConfig) -> tuple[bool, str]:
+    """(fusion?, raison). Encode la règle documentée + garde-fous optionnels."""
+    m = pair_metrics(x, y, cfg)
+
+    if cfg.min_class_size is not None and y.size < cfg.min_class_size:
+        return True, f"min_class_size: n_hi={y.size} < {cfg.min_class_size}"
+
+    if cfg.mode == "materiality":
+        primary = abs(m["gap"]) < cfg.delta_mean
+        reason = f"|gap|={abs(m['gap']):.3f} {'<' if primary else '>='} delta={cfg.delta_mean}"
+    elif cfg.mode == "tost":
+        primary = m["tost_equivalent"]
+        reason = (
+            f"TOST CI=[{m['ci_low']:.3f},{m['ci_high']:.3f}] "
+            f"{'within' if primary else 'outside'} +/-{cfg.delta_mean}"
+        )
+    else:
+        raise ValueError(f"mode inconnu {cfg.mode!r}")
+
+    if primary and cfg.ovl_min is not None and m["ovl_hist"] < cfg.ovl_min:
+        return False, reason + f"; bloqué: OVL={m['ovl_hist']:.3f}<{cfg.ovl_min}"
+    if primary and cfg.d_max is not None and abs(m["cohens_d"]) > cfg.d_max:
+        return False, reason + f"; bloqué: |d|={abs(m['cohens_d']):.3f}>{cfg.d_max}"
+
+    return primary, reason
+
+
+def greedy_merge(df: pl.DataFrame, cfg: MergeConfig) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Balayage séquentiel par segment.
+    Ancre = groupe en accumulation (= classe de plus basse moyenne au départ).
+    Compare ancre vs classe suivante : fusion -> on agrandit l'ancre ;
+    séparation -> on fige l'ancre et on en démarre une nouvelle.
+
+    Renvoie :
+      mapping_df : segment, CHR_model, merged_group
+      trace_df   : une ligne par comparaison (métriques + décision + raison)"""
+    summary = class_summary(df, cfg)
+    arrays = _class_arrays(df, cfg)
+    mapping_rows, trace_rows = [], []
+
+    for seg in summary.get_column("segment").unique(maintain_order=True):
+        classes = (
+            summary.filter(pl.col("segment") == seg)
+            .get_column(cfg.class_col).to_list()
+        )
+        if not classes:
+            continue
+
+        group_id = 0
+        anchor_classes = [classes[0]]
+        anchor_arr = arrays[(seg, classes[0])]
+
+        for nxt in classes[1:]:
+            y = arrays[(seg, nxt)]
+            merge, reason = _merge_decision(anchor_arr, y, cfg)
+            m = pair_metrics(anchor_arr, y, cfg)
+            trace_rows.append({
+                "segment": seg,
+                "anchor": "+".join(map(str, anchor_classes)),
+                "candidate": nxt,
+                "decision": "MERGE" if merge else "SEPARATE",
+                "reason": reason,
+                **{k: m[k] for k in (
+                    "n_lo", "n_hi", "gap", "ci_low", "ci_high",
+                    "cohens_d", "ovl_hist", "wasserstein",
+                    "prob_superiority", "tost_equivalent", "p_welch",
+                )},
+            })
+            if merge:
+                anchor_classes.append(nxt)
+                anchor_arr = np.concatenate([anchor_arr, y])
+            else:
+                for c in anchor_classes:
+                    mapping_rows.append(
+                        {"segment": seg, cfg.class_col: c,
+                         "merged_group": f"{seg}_{group_id}"}
+                    )
+                group_id += 1
+                anchor_classes = [nxt]
+                anchor_arr = y
+
+        for c in anchor_classes:
+            mapping_rows.append(
+                {"segment": seg, cfg.class_col: c,
+                 "merged_group": f"{seg}_{group_id}"}
+            )
+
+    return pl.DataFrame(mapping_rows), pl.DataFrame(trace_rows)
+
+
+# --------------------------------------------------------------------------- #
+# 3) Perte de discrimination : eta^2 avant vs après                           #
+# --------------------------------------------------------------------------- #
+def eta_squared(df: pl.DataFrame, class_col: str, cfg: MergeConfig) -> float:
+    """Variance inter-classes / variance totale de la LGD, par segment, poolée.
+    Proxy de pouvoir discriminant ; comparer CHR_model vs merged_group."""
+    df = _with_segment(df, cfg)
+    ss_between, ss_total = 0.0, 0.0
+    for seg, sub in df.group_by("segment"):
+        v = sub.get_column(cfg.lgd_col).drop_nulls().to_numpy()
+        grand = v.mean()
+        ss_total += ((v - grand) ** 2).sum()
+        for _, g in sub.group_by(class_col):
+            gv = g.get_column(cfg.lgd_col).drop_nulls().to_numpy()
+            ss_between += gv.size * (gv.mean() - grand) ** 2
+    return ss_between / ss_total if ss_total > 0 else 0.0
