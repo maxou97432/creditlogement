@@ -1,15 +1,19 @@
-def meilleur_candidat_fusion_materialite(
+DELTA_LGD = 1.0   # points de LGD — le seuil de matérialité, modifiable à la volée
+
+def meilleur_candidat_fusion(
     df: pl.LazyFrame,
-    delta_lgd: float = 1.0,          # points de LGD : LA marge métier documentée
+    nb_croisements_max: int = 0,      # conservés pour compat : ignorés
+    ans_strict: int = 0,              # idem
     lgd_col: str = "lgd_obligor",
     jenks_col: str = "submodel_class",
     log: bool = False,
 ) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
     """
-    Fusionne la paire de classes ADJACENTES (par LRA, intra-segment) la plus
-    proche, si leur écart de LGD moyenne est < delta_lgd. Sinon (None, None).
+    Critère MATÉRIALITÉ (intra-segment) : fusionne la paire adjacente (par LRA)
+    la plus proche dont l'écart de LGD moyenne est < DELTA_LGD.
+    Signature et contrat de sortie IDENTIQUES à l'original (dbg expose
+    'severite_totale' = -ecart_lgd, donc head(1) prend bien la plus proche).
     """
-    # LRA par classe (moyenne des moyennes annuelles) + segment = préfixe du nom
     ordre_global = (
         df.group_by([jenks_col, "year"])
         .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
@@ -19,17 +23,17 @@ def meilleur_candidat_fusion_materialite(
         .sort(["seg", "mean_LGD_global"])
     )
 
-    # voisin adjacent INTRA-segment (par LRA croissante) + écart
     paires = (
         ordre_global.with_columns([
             pl.col(jenks_col).shift(-1).over("seg").alias("next_class"),
             pl.col("mean_LGD_global").shift(-1).over("seg").alias("next_lgd"),
         ])
-        .filter(pl.col("next_class").is_not_null())          # haut de chaque segment : pas de voisin
+        .filter(pl.col("next_class").is_not_null())
         .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
-        .filter(pl.col("ecart_lgd") < delta_lgd)             # matérialité : trop proches
-        .sort("ecart_lgd")                                   # la plus proche d'abord
-        .select([jenks_col, "next_class", "mean_LGD_global", "next_lgd", "ecart_lgd"])
+        .filter(pl.col("ecart_lgd") < DELTA_LGD)
+        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))   # <<< plus proche = sévérité max
+        .sort("severite_totale", descending=True)
+        .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
         .collect()
     )
 
@@ -43,6 +47,11 @@ def meilleur_candidat_fusion_materialite(
     meilleur = paires.head(1)
     return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
 
-paire, debug_df = meilleur_candidat_fusion_materialite(
-            df, delta_lgd=delta_lgd, lgd_col=lgd_col, jenks_col=jenks_col, log=log
-        )
+DELTA_LGD = 1.0   # changez ici pour tester d'autres seuils
+df_fusionne_glouton, mapping_glouton = fusion_glouton(lra_prov_model3, log=True)
+
+for d in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
+    DELTA_LGD = d
+    dff, _ = fusion_glouton(lra_prov_model3, log=False)
+    n = dff.collect().select("submodel_class").n_unique()
+    print(f"delta={d:>4}  ->  {n} classes")
