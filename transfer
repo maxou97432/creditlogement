@@ -1,76 +1,27 @@
-import polars as pl
-from typing import Tuple, List, Optional
-
-# ---- CONFIG ----
-CLASS_COL = "CHR_model"
-LGD_COL   = "lgd_obligor"
-df_base   = base
-# ----------------
-
-# Seuil de matérialité au niveau MODÈLE (points de LGD).
-# À caler sur la distribution réelle des gaps vue dans le diagnostic (code 2).
-DELTA_LGD_MODELE = 2.0
-
-def meilleur_candidat_fusion_modele(
-    df: pl.LazyFrame,
-    nb_croisements_max: int = 0,      # conservé pour compat, ignoré
-    ans_strict: int = 0,              # idem
-    lgd_col: str = LGD_COL,
-    jenks_col: str = CLASS_COL,
-    log: bool = False,
-) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
-    """
-    Niveau MODÈLE : fusionne la paire de CHR_model ADJACENTES (ordre LRA GLOBAL,
-    SANS cloisonnement par segment) la plus proche dont l'écart de LGD moyenne
-    de long terme est < DELTA_LGD_MODELE.
-
-    Différence clé vs niveau sous-modèle : pas de colonne 'seg', shift global.
-    On RECHERCHE les fusions inter-segments (F<->B, etc.).
-    """
-    ordre_global = (
-        df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
-        .group_by([jenks_col])
-        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
-        .sort("mean_LGD_global")                      # <-- ordre GLOBAL, pas de seg
-    )
-
-    paires = (
-        ordre_global.with_columns([
-            pl.col(jenks_col).shift(-1).alias("next_class"),          # <-- shift global
-            pl.col("mean_LGD_global").shift(-1).alias("next_lgd"),    # <-- pas de .over("seg")
-        ])
-        .filter(pl.col("next_class").is_not_null())
-        .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
-        .filter(pl.col("ecart_lgd") < DELTA_LGD_MODELE)
-        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))
-        .sort("severite_totale", descending=True)
-        .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
-        .collect()
-    )
-
-    if log:
-        print("=== Paires sous le seuil de matérialité (niveau modèle) ===")
-        print("Aucune paire." if paires.height == 0 else paires)
-
-    if paires.height == 0:
-        return None, None
-
-    meilleur = paires.head(1)
-    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
-
-
 # ============================================================================
-# CALIBRAGE : nombre de CHR_model finales selon delta (niveau modèle)
+# CALIBRAGE MATÉRIALITÉ — niveau modèle
 # ============================================================================
-print("Calibrage du seuil de matérialité — niveau MODÈLE (fusion inter-segments autorisée)")
+print("Calibrage seuil matérialité — niveau MODÈLE (avec diagnostic tailles d'effet)")
 print("-" * 70)
 
-# IMPORTANT : on branche le candidate finder niveau modèle dans fusion_glouton
 meilleur_candidat_fusion = meilleur_candidat_fusion_modele
 
-for d in [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]:
+résultats = []
+for d in [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0]:
     DELTA_LGD_MODELE = d
     dff, _ = fusion_glouton(df_base, log=False)
-    n = dff.collect().select(CLASS_COL).n_unique()
-    print(f"  delta={d:>4}  ->  {n:>3} CHR_model")
+    n_final = dff.collect().select(CLASS_COL).n_unique()
+    résultats.append({"delta": d, "n_chr": n_final})
+    print(f"  delta={d:>4}  ->  {n_final:>3} CHR_model")
+
+print("\n" + "-" * 70)
+print("Croisement avec TAILLES D'EFFET (du diagnostic):")
+print("-" * 70)
+print("d<0.5, OVL>0.3, W<2.0   -> 16 paires fusionnables -> ~49 CHR_model")
+print("d<0.8, OVL>0.2, W<3.0   -> 25 paires fusionnables -> ~40 CHR_model")
+print("d<1.0, OVL>0.15, W<4.0  -> 35 paires fusionnables -> ~30 CHR_model")
+print("-" * 70)
+
+df_res = pl.DataFrame(résultats)
+print("\nMatérialité seule (pour comparaison) :")
+print(df_res)
