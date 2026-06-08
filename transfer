@@ -1,4 +1,4 @@
-def meilleur_candidat_fusion_v6_welch(
+def meilleur_candidat_fusion_tost(
     df: pl.LazyFrame,
     nb_croisements_max: int = 0,
     ans_strict: int = 0,
@@ -7,15 +7,15 @@ def meilleur_candidat_fusion_v6_welch(
     log: bool = False,
 ) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
     """
-    WELCH-BASED : fusionne la paire adjacente la plus PROCHE,
-    SAUF si test de Welch rejette l'équivalence (p < alpha).
+    TOST (Two One-Sided Tests) :
     
-    Logique :
-      - Welch H0 : "les deux distributions ont la même moyenne"
-      - p >= alpha : on ne rejette pas H0 → équivalentes → FUSIONNER
-      - p < alpha  : on rejette H0 → différentes → BLOQUER
+    Fusionne si l'IC (1-2*alpha) du gap est dans (-delta, +delta).
     
-    Plus simple que TOST, plus robuste que juste écart de moyennes.
+    Avec grand n : IC très étroit → le gap doit être VRAIMENT proche de 0
+    pour rentrer dans la bande. C'est exactement ce qu'on veut.
+    
+    delta = la marge de matérialité en pts LGD (décision métier documentée)
+    alpha = 0.05 → IC à 90%
     """
     from scipy import stats as sp_stats
     
@@ -23,10 +23,7 @@ def meilleur_candidat_fusion_v6_welch(
         df.group_by([jenks_col, "year"])
         .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
         .group_by([jenks_col])
-        .agg(
-            pl.col("mean_LGD_year").mean().alias("mean_LGD_global"),
-            pl.col("mean_LGD_year").std(ddof=1).alias("std_LGD_global"),
-        )
+        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
         .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
         .sort(["seg", "mean_LGD_global"])
         .collect()
@@ -50,14 +47,10 @@ def meilleur_candidat_fusion_v6_welch(
         cls_1 = row_i[jenks_col].item()
         mean_1 = row_i["mean_LGD_global"].item()
 
-        # Chercher voisin intra-segment
-        cls_2 = None
-        mean_2 = None
-        
+        cls_2, mean_2 = None, None
         for j in range(i + 1, len(ordre_global)):
             row_j = ordre_global[j]
             seg_j = row_j[jenks_col].str.split("_").list.first().item()
-            
             if seg_j == seg_i:
                 cls_2 = row_j[jenks_col].item()
                 mean_2 = row_j["mean_LGD_global"].item()
@@ -68,85 +61,96 @@ def meilleur_candidat_fusion_v6_welch(
 
         arr1 = obligors_per_class[cls_1]
         arr2 = obligors_per_class[cls_2]
+        n1, n2 = len(arr1), len(arr2)
         gap = mean_2 - mean_1
-        
-        # --- TEST DE WELCH ---
-        t_stat, p_value = sp_stats.ttest_ind(arr1, arr2, equal_var=False)
-        
-        # VETO : si p < alpha, rejeter l'équivalence → ne pas fusionner
-        if p_value < ALPHA_WELCH:
-            continue  # BLOQUÉ : distributions significativement différentes
-        
-        # VETO (optionnel) : Wasserstein comme guard-rail supplémentaire
-        w = wasserstein_distance(arr1, arr2)
-        if w > W_MAX:
-            continue  # BLOQUÉ : distributions trop éloignées même si Welch passe
-        
-        # Si Welch ne rejette pas (p >= alpha) : FUSION !
+
+        # --- TOST : calcul de l'IC (1-2*alpha) du gap ---
+        s1, s2 = arr1.std(ddof=1), arr2.std(ddof=1)
+        se = np.sqrt(s1**2 / n1 + s2**2 / n2)
+
+        # Welch-Satterthwaite df
+        df_w = (s1**2/n1 + s2**2/n2)**2 / (
+            (s1**2/n1)**2/(n1-1) + (s2**2/n2)**2/(n2-1)
+        )
+        tcrit = sp_stats.t.ppf(1 - ALPHA_TOST, df_w)
+        ci_low  = gap - tcrit * se
+        ci_high = gap + tcrit * se
+
+        # Équivalent si IC entièrement dans (-delta, +delta)
+        tost_pass = (ci_low > -DELTA_LGD) and (ci_high < DELTA_LGD)
+
+        if not tost_pass:
+            continue
+
         paires_list.append({
             jenks_col: cls_1,
             "next_class": cls_2,
             "gap": gap,
-            "t_stat": t_stat,
-            "p_welch": p_value,
-            "welch_pass": p_value >= ALPHA_WELCH,
-            "wasserstein": w,
-            "n_lo": len(arr1),
-            "n_hi": len(arr2),
-            "severite_totale": abs(gap),  # Plus proche = score bas = priorité
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "se": se,
+            "n_lo": n1,
+            "n_hi": n2,
+            "severite_totale": -abs(gap),
         })
 
     paires = pl.DataFrame(paires_list) if paires_list else pl.DataFrame()
 
     if log:
-        print("=== V6: Welch + Wasserstein (guard-rail) ===")
+        print("=== TOST : équivalence de moyennes ===")
         print(f"Paires candidates : {paires.height}")
         if paires.height > 0:
-            print(paires.sort("severite_totale").head(5))
+            print(paires.sort("severite_totale", descending=True).head(10))
 
     if paires.height == 0:
         return None, None
 
-    # Fusionner la PLUS PROCHE (écart minimal)
-    paires = paires.sort("severite_totale")
+    paires = paires.sort("severite_totale", descending=True)
     meilleur = paires.head(1)
     return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
 
 
 # ============================================================================
-# TEST V6 - WELCH FINAL
+# TEST TOST
 # ============================================================================
-print("\n" + "="*80)
-print("V6 : WELCH (test de significativité + Wasserstein guard-rail)")
-print("="*80 + "\n")
+print("="*80)
+print("TOST : Two One-Sided Tests (la méthode correcte à grand n)")
+print("="*80)
 
-ALPHA_WELCH = 0.05        # Welch : rejeter si p < 0.05
-W_MAX = 2.0               # Wasserstein guard-rail : rejeter si W > 2.0
+ALPHA_TOST = 0.05
+meilleur_candidat_fusion = meilleur_candidat_fusion_tost
 
-meilleur_candidat_fusion = meilleur_candidat_fusion_v6_welch
-
-print("V6 : En variant alpha Welch (W_guard=2.0)")
+print("\nEn variant delta (alpha=0.05) :")
 print("-" * 40)
-W_MAX = 2.0
-for alpha in [0.01, 0.05, 0.1, 0.2]:
-    ALPHA_WELCH = alpha
+for delta in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
+    DELTA_LGD = delta
     dff, _ = fusion_glouton(lra_prov_model3, log=False)
     n = dff.collect().select("submodel_class").n_unique()
-    print(f"  alpha={alpha:>4}  ->  {n:>3} classes")
+    print(f"  delta={delta:>4}  ->  {n:>3} classes")
 
-print("\nV6 : En variant Wasserstein guard-rail (alpha=0.05)")
+print("\nEn variant alpha (delta=1.0) :")
 print("-" * 40)
-ALPHA_WELCH = 0.05
-for w in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
-    W_MAX = w
+DELTA_LGD = 1.0
+for alpha in [0.01, 0.05, 0.10, 0.20]:
+    ALPHA_TOST = alpha
     dff, _ = fusion_glouton(lra_prov_model3, log=False)
     n = dff.collect().select("submodel_class").n_unique()
-    print(f"  W_max={w}  ->  {n:>3} classes")
+    print(f"  alpha={alpha}  ->  {n:>3} classes")
 
-print("\nV6 : Sans guard-rail (alpha=0.05, W_max=inf)")
+# Diagnostic : regarder les IC pour quelques paires
+print("\nDiagnostic IC sur les premières paires (delta=1.0, alpha=0.05) :")
 print("-" * 40)
-ALPHA_WELCH = 0.05
-W_MAX = float('inf')  # Pas de guard-rail
-dff, _ = fusion_glouton(lra_prov_model3, log=False)
-n = dff.collect().select("submodel_class").n_unique()
-print(f"  Welch seul  ->  {n:>3} classes")
+DELTA_LGD = 1.0
+ALPHA_TOST = 0.05
+paire, dbg = meilleur_candidat_fusion_tost(lra_prov_model3, log=False)
+if dbg is not None:
+    print(dbg.head(10))
+else:
+    print("Aucune paire équivalente -> regardez le diagnostic ci-dessous")
+    
+    # Diagnostic : calculer les IC sans filtre pour voir pourquoi rien ne passe
+    print("\n--- IC de TOUTES les paires adjacentes (sans filtre) ---")
+    DELTA_LGD = 999  # désactiver le filtre temporairement
+    paire_dbg, dbg_all = meilleur_candidat_fusion_tost(lra_prov_model3, log=False)
+    if dbg_all is not None:
+        print(dbg_all.sort("gap").head(20))
