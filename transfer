@@ -1,62 +1,75 @@
-from scipy.stats import wasserstein_distance
-import numpy as np
 import polars as pl
+import numpy as np
+from scipy import stats as sp_stats
 
-def cohen_d(arr1, arr2):
-    n1, n2 = len(arr1), len(arr2)
-    s1, s2 = arr1.std(ddof=1), arr2.std(ddof=1)
-    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
-    return (arr2.mean() - arr1.mean()) / sp if sp > 0 else 0
+# ---- CONFIG (ajustez si vos noms diffèrent) ----
+CLASS_COL = "CHR_model"        # colonne de classe dans le fichier rassemblé
+LGD_COL   = "lgd_obligor"
+df_base   = base               # votre fichier rassemblé (65 classes), grain obligor
+# -------------------------------------------------
 
-def overlap(arr1, arr2, n_bins=50):
-    lo = min(arr1.min(), arr2.min()); hi = max(arr1.max(), arr2.max())
-    bins = np.linspace(lo, hi, n_bins)
-    p, _ = np.histogram(arr1, bins=bins); q, _ = np.histogram(arr2, bins=bins)
-    p, q = p / p.sum(), q / q.sum()
-    return float(np.minimum(p, q).sum())
+def diagnostics_welch_kruskal_modele(
+    df,
+    class_col: str = CLASS_COL,
+    lgd_col: str = LGD_COL,
+) -> pl.DataFrame:
+    """
+    Paires de CHR_model ADJACENTES dans l'ordre LRA GLOBAL (PAS de cloisonnement
+    par segment : les fusions inter-segments sont recherchées au niveau modèle).
+    Welch (moyennes) + Kruskal-Wallis (distributions par rangs) avec p-values.
+    USAGE DESCRIPTIF : à grand n les p-values saturent, le tableau documente.
+    """
+    lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-# LRA + segment pour l'adjacence
-ordre = (
-    lra_prov_model3
-    .group_by(["submodel_class", "year"]).agg(pl.col("lgd_obligor").mean().alias("m"))
-    .group_by(["submodel_class"]).agg(pl.col("m").mean().alias("mean_LGD"))
-    .with_columns(pl.col("submodel_class").str.split("_").list.first().alias("seg"))
-    .sort(["seg", "mean_LGD"])
-    .collect()
-)
+    # LRA par classe, ordre GLOBAL croissant (tous segments confondus)
+    ordre = (
+        lf.group_by([class_col, "year"]).agg(pl.col(lgd_col).mean().alias("m"))
+          .group_by([class_col]).agg(pl.col("m").mean().alias("mean_LGD_global"))
+          .sort("mean_LGD_global")
+          .collect()
+    )
 
-obligors = {}
-base = lra_prov_model3.select(["submodel_class", "lgd_obligor"]).collect()
-for cls in base.select("submodel_class").unique().to_series():
-    obligors[cls] = base.filter(pl.col("submodel_class") == cls).get_column("lgd_obligor").to_numpy()
+    # Obligors bruts par classe
+    obligors = {}
+    base_col = lf.select([class_col, lgd_col]).collect()
+    for cls in base_col.select(class_col).unique().to_series():
+        obligors[cls] = base_col.filter(pl.col(class_col) == cls).get_column(lgd_col).to_numpy()
 
-rows = []
-for i in range(len(ordre) - 1):
-    cls_1 = ordre["submodel_class"][i]; seg_1 = cls_1.split("_")[0]
-    cls_2 = None
-    for j in range(i + 1, len(ordre)):
-        if ordre["submodel_class"][j].split("_")[0] == seg_1:
-            cls_2 = ordre["submodel_class"][j]; break
-    if cls_2 is None:
-        continue
-    a1, a2 = obligors[cls_1], obligors[cls_2]
-    rows.append({
-        "class_1": cls_1, "class_2": cls_2,
-        "gap": float(abs(a2.mean() - a1.mean())),
-        "cohen_d": float(abs(cohen_d(a1, a2))),
-        "ovl": overlap(a1, a2),
-        "wasserstein": float(wasserstein_distance(a1, a2)),
-    })
+    rows = []
+    classes = ordre.get_column(class_col).to_list()
+    means   = ordre.get_column("mean_LGD_global").to_list()
+    for i in range(len(classes) - 1):
+        c1, c2 = classes[i], classes[i + 1]      # voisin global, sans filtre segment
+        a1, a2 = obligors[c1], obligors[c2]
+        t_w, p_w = sp_stats.ttest_ind(a1, a2, equal_var=False)
+        h_k, p_k = sp_stats.kruskal(a1, a2)
+        rows.append({
+            "class_1": c1, "class_2": c2,
+            "n_1": len(a1), "n_2": len(a2),
+            "mean_1": float(a1.mean()), "mean_2": float(a2.mean()),
+            "gap_lgd": float(a2.mean() - a1.mean()),
+            "welch_p": float(p_w), "kruskal_p": float(p_k),
+        })
+    return pl.DataFrame(rows)
 
-eff = pl.DataFrame(rows)
 
-# Distribution réelle de chaque métrique
-print("Distribution des tailles d'effet sur les", eff.height, "paires adjacentes :\n")
-for col in ["gap", "cohen_d", "ovl", "wasserstein"]:
-    s = eff.get_column(col)
-    print(f"{col:12s}  min={s.min():.3f}  q25={s.quantile(.25):.3f}  med={s.median():.3f}  "
-          f"q75={s.quantile(.75):.3f}  max={s.max():.3f}")
+# ---- Exécution ----
+ALPHA = 0.05
+diag = diagnostics_welch_kruskal_modele(df_base)
 
-print("\nLes 10 paires les plus PROCHES (Wasserstein croissant) :")
-with pl.Config(tbl_rows=10, float_precision=4):
-    print(eff.sort("wasserstein").head(10))
+print("=" * 90)
+print("DIAGNOSTIC niveau MODÈLE — Welch & Kruskal sur CHR_model adjacentes (ordre LRA global)")
+print("=" * 90)
+with pl.Config(tbl_rows=100, tbl_cols=-1, tbl_width_chars=220, float_precision=6):
+    print(diag.sort("mean_1"))
+
+n_tot      = diag.height
+n_welch_eq = diag.filter(pl.col("welch_p")   >= ALPHA).height
+n_krusk_eq = diag.filter(pl.col("kruskal_p") >= ALPHA).height
+print("\n" + "-" * 90)
+print(f"Paires adjacentes testées            : {n_tot}  (= {n_tot + 1} classes - 1, ordre global)")
+print(f"Welch   p>={ALPHA} (non sig. diff.)   : {n_welch_eq}/{n_tot}   p-value max : {diag['welch_p'].max():.2e}")
+print(f"Kruskal p>={ALPHA} (non sig. diff.)   : {n_krusk_eq}/{n_tot}   p-value max : {diag['kruskal_p'].max():.2e}")
+print("-" * 90)
+print("Rappel : à grand n ces tests ne servent que de documentation, pas de critère\n"
+      "de fusion. La décision se prend sur les tailles d'effet (code 2) + matérialité.")
