@@ -1,78 +1,101 @@
 import polars as pl
-from typing import Tuple, List, Optional
+import numpy as np
+from scipy import stats as sp_stats
 
-# ============================================================================
-# Seuil de matérialité (points de LGD). Vos gaps réels vont de 1.2 à 2.4 pt,
-# donc en-dessous de ~1.2 rien ne fusionne, au-dessus de ~2.5 presque tout.
-# ============================================================================
-DELTA_LGD = 2.0
-
-def meilleur_candidat_fusion(
+def diagnostics_welch_kruskal(
     df: pl.LazyFrame,
-    nb_croisements_max: int = 0,      # conservé pour compat, ignoré
-    ans_strict: int = 0,              # idem
     lgd_col: str = "lgd_obligor",
     jenks_col: str = "submodel_class",
-    log: bool = False,
-) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
+) -> pl.DataFrame:
     """
-    Fusionne la paire de classes ADJACENTES (par LRA, intra-segment) la plus
-    proche dont l'écart de LGD moyenne de long terme est < DELTA_LGD.
+    Pour chaque paire de classes ADJACENTES intra-segment (ordre LRA croissant) :
+    test de Welch (égalité des moyennes) et Kruskal-Wallis (égalité des
+    distributions par les rangs), avec leurs p-values.
 
-    - Segment = préfixe du nom de classe ("A_8" -> "A"). Aucune fusion inter-segment.
-    - Signature et contrat de sortie identiques à l'original : dbg expose
-      'severite_totale' = -ecart_lgd, donc head(1) sélectionne la plus proche.
+    Objet : DÉMONTRER qu'à n élevé (2k-686k obligors/classe) ces tests rejettent
+    l'égalité quasi systématiquement, et ne peuvent donc pas servir de critère
+    de fusion. La décision se fera sur la MATÉRIALITÉ (gap_lgd).
     """
-    ordre_global = (
+    ordre = (
         df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
+        .agg(pl.col(lgd_col).mean().alias("m"))
         .group_by([jenks_col])
-        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
+        .agg(pl.col("m").mean().alias("mean_LGD_global"))
         .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
         .sort(["seg", "mean_LGD_global"])
-    )
-
-    paires = (
-        ordre_global.with_columns([
-            pl.col(jenks_col).shift(-1).over("seg").alias("next_class"),
-            pl.col("mean_LGD_global").shift(-1).over("seg").alias("next_lgd"),
-        ])
-        .filter(pl.col("next_class").is_not_null())          # haut de segment : pas de voisin
-        .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
-        .filter(pl.col("ecart_lgd") < DELTA_LGD)             # matérialité
-        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))  # plus proche = sévérité max
-        .sort("severite_totale", descending=True)
-        .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
         .collect()
     )
 
-    if log:
-        print("=== Paires sous le seuil de matérialité ===")
-        print("Aucune paire." if paires.height == 0 else paires)
+    obligors = {}
+    base = df.select([jenks_col, lgd_col]).collect()
+    for cls in base.select(jenks_col).unique().to_series():
+        obligors[cls] = base.filter(pl.col(jenks_col) == cls).get_column(lgd_col).to_numpy()
 
-    if paires.height == 0:
-        return None, None
+    rows = []
+    for i in range(len(ordre) - 1):
+        cls_1 = ordre[jenks_col][i]
+        seg_1 = cls_1.split("_")[0]
+        cls_2 = None
+        for j in range(i + 1, len(ordre)):
+            if ordre[jenks_col][j].split("_")[0] == seg_1:
+                cls_2 = ordre[jenks_col][j]
+                break
+        if cls_2 is None:
+            continue
 
-    meilleur = paires.head(1)
-    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
+        a1, a2 = obligors[cls_1], obligors[cls_2]
+        t_w, p_w = sp_stats.ttest_ind(a1, a2, equal_var=False)
+        h_k, p_k = sp_stats.kruskal(a1, a2)
+
+        rows.append({
+            "segment": seg_1,
+            "class_1": cls_1,
+            "class_2": cls_2,
+            "n_1": len(a1),
+            "n_2": len(a2),
+            "gap_lgd": float(a2.mean() - a1.mean()),
+            "welch_p": float(p_w),
+            "kruskal_p": float(p_k),
+        })
+
+    return pl.DataFrame(rows).sort(["segment", "class_1"])
 
 
 # ============================================================================
-# Calibrage : nombre de classes finales selon delta
+# Exécution + démonstration
 # ============================================================================
-print("Calibrage du seuil de matérialité")
-print("-" * 40)
-for d in [1.5, 2.0, 2.5, 3.0, 4.0, 5.0]:
-    DELTA_LGD = d
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  delta={d:>4}  ->  {n:>3} classes")
+ALPHA = 0.05
+diag = diagnostics_welch_kruskal(lra_prov_model3)
 
+print("=" * 90)
+print("DIAGNOSTIC : tests d'hypothèse comme critère de fusion (Welch & Kruskal-Wallis)")
+print("=" * 90)
 
-# ============================================================================
-# Production : fixez votre delta final, récupérez le df fusionné + le mapping
-# ============================================================================
-DELTA_LGD = 5.0   # <-- votre choix final
-df_fusionne_glouton, mapping_glouton = fusion_glouton(lra_prov_model3, log=True)
-n_final = df_fusionne_glouton.collect().select("submodel_class").n_unique()
-print(f"\nRésultat final : {n_final} classes avec delta={DELTA_LGD}")
+with pl.Config(tbl_rows=100, tbl_cols=-1, tbl_width_chars=220, float_precision=6):
+    print(diag)
+
+n_tot = diag.height
+n_welch_eq  = diag.filter(pl.col("welch_p")   >= ALPHA).height
+n_krusk_eq  = diag.filter(pl.col("kruskal_p") >= ALPHA).height
+p_welch_max  = diag.select(pl.col("welch_p").max()).item()
+p_krusk_max  = diag.select(pl.col("kruskal_p").max()).item()
+gap_min, gap_max = diag.select(pl.col("gap_lgd").abs().min()).item(), diag.select(pl.col("gap_lgd").abs().max()).item()
+
+print("\n" + "=" * 90)
+print("SYNTHÈSE")
+print("=" * 90)
+print(f"Paires adjacentes testées (intra-segment)        : {n_tot}")
+print(f"Effectifs par classe                             : {diag['n_1'].min()} à {diag['n_1'].max()} obligors")
+print(f"Écart de LGD entre voisines (matériel)           : {gap_min:.3f} à {gap_max:.3f} pts")
+print("-" * 90)
+print(f"Welch   -- paires NON sig. différentes (p>={ALPHA}) : {n_welch_eq}/{n_tot}   (p-value max observée : {p_welch_max:.2e})")
+print(f"Kruskal -- paires NON sig. différentes (p>={ALPHA}) : {n_krusk_eq}/{n_tot}   (p-value max observée : {p_krusk_max:.2e})")
+print("-" * 90)
+if n_welch_eq == 0 and n_krusk_eq == 0:
+    print("CONCLUSION : aucune paire n'est jugée équivalente. À ces effectifs, Welch et")
+    print("Kruskal-Wallis rejettent l'égalité même pour des écarts de LGD < 1.3 pt, donc")
+    print("ils ne peuvent pas servir de critère de fusion (ils donneraient toujours 80")
+    print("classes). La décision est portée sur la MATÉRIALITÉ : fusion si l'écart de LGD")
+    print("moyenne entre classes adjacentes est inférieur à un seuil delta documenté.")
+else:
+    print("CONCLUSION : certains tests ne rejettent pas l'égalité -- à examiner au cas par cas.")
