@@ -1,117 +1,14 @@
-import polars as pl
-import numpy as np
-from scipy import stats as sp_stats
+# Reprend `diag` (déjà trié par perte_eta croissant) et `eta_full`
+diag_cum = diag.with_columns([
+    pl.col("perte_eta").cum_sum().alias("perte_eta_cumulee"),
+    (100 * pl.col("perte_eta").cum_sum() / eta_full).alias("perte_cum_pct"),
+    (pl.int_range(1, diag.height + 1)).alias("n_fusions"),
+])
 
-# ---- CONFIG ----
-CLASS_COL = "CHR_model"
-LGD_COL   = "lgd_obligor"
-df_base   = base
-# ----------------
+with pl.Config(tbl_rows=64, tbl_cols=-1, tbl_width_chars=160, float_precision=5):
+    print(diag_cum.select(["class_1","class_2","perte_relative_pct","perte_cum_pct","n_fusions"]))
 
-def eta_squared(values: np.ndarray, labels: np.ndarray) -> float:
-    """
-    eta² : fraction de variance de la LGD expliquée par les classes.
-    SS_inter / SS_total. Borné [0,1], INSENSIBLE à n.
-    """
-    grand_mean = values.mean()
-    ss_total = ((values - grand_mean) ** 2).sum()
-    if ss_total == 0:
-        return 0.0
-    ss_inter = 0.0
-    for lab in np.unique(labels):
-        grp = values[labels == lab]
-        ss_inter += len(grp) * (grp.mean() - grand_mean) ** 2
-    return float(ss_inter / ss_total)
-
-def epsilon_squared_kw(values: np.ndarray, labels: np.ndarray) -> float:
-    """
-    epsilon² basé sur Kruskal-Wallis (version rangs, robuste aux formes).
-    eps² = (H - k + 1) / (n - k). Borné [0,1], INSENSIBLE à n.
-    """
-    groups = [values[labels == lab] for lab in np.unique(labels)]
-    k = len(groups)
-    n = len(values)
-    if k < 2 or n <= k:
-        return 0.0
-    H, _ = sp_stats.kruskal(*groups)
-    return float(max(0.0, (H - k + 1) / (n - k)))
-
-
-# ============================================================================
-# Test d'hétérogénéité : perte de pouvoir explicatif quand on fusionne
-# ============================================================================
-print("=" * 90)
-print("TEST D'HÉTÉROGÉNÉITÉ ROBUSTE AU GRAND n (eta² / epsilon² Kruskal)")
-print("=" * 90)
-
-# Données au grain obligor
-col = df_base.select([CLASS_COL, LGD_COL]).collect() if isinstance(df_base, pl.LazyFrame) \
-      else df_base.select([CLASS_COL, LGD_COL])
-values = col.get_column(LGD_COL).to_numpy()
-labels = col.get_column(CLASS_COL).to_numpy()
-
-# Pouvoir explicatif AVANT toute fusion
-eta_full = eta_squared(values, labels)
-eps_full = epsilon_squared_kw(values, labels)
-k_full   = len(np.unique(labels))
-
-print(f"\nÉtat actuel : {k_full} CHR_model")
-print(f"  eta²      (variance expliquée)       = {eta_full:.5f}")
-print(f"  epsilon²  (Kruskal, rangs)           = {eps_full:.5f}")
-
-# ----------------------------------------------------------------------------
-# Pour chaque paire ADJACENTE (ordre LRA global), mesurer la perte d'eta²
-# si on la fusionnait. Perte faible = paire hétérogène de façon négligeable.
-# ----------------------------------------------------------------------------
-ordre = (
-    (df_base.lazy() if isinstance(df_base, pl.DataFrame) else df_base)
-    .group_by([CLASS_COL, "year"]).agg(pl.col(LGD_COL).mean().alias("m"))
-    .group_by([CLASS_COL]).agg(pl.col("m").mean().alias("mean_LGD_global"))
-    .sort("mean_LGD_global")
-    .collect()
-)
-classes_ord = ordre.get_column(CLASS_COL).to_list()
-
-rows = []
-for i in range(len(classes_ord) - 1):
-    c1, c2 = classes_ord[i], classes_ord[i + 1]
-    # labels après fusion fictive de c1 et c2
-    merged = np.where(np.isin(labels, [c1, c2]), f"{c1}|{c2}", labels)
-    eta_after = eta_squared(values, merged)
-    rows.append({
-        "class_1": c1,
-        "class_2": c2,
-        "eta_after": eta_after,
-        "perte_eta": eta_full - eta_after,
-        "perte_relative_pct": 100.0 * (eta_full - eta_after) / eta_full,
-    })
-
-diag = pl.DataFrame(rows).sort("perte_eta")
-
-print("\nPerte d'eta² par fusion de paire adjacente (croissant = fusion la moins coûteuse) :")
-with pl.Config(tbl_rows=20, tbl_cols=-1, tbl_width_chars=140, float_precision=6):
-    print(diag.head(20))
-
-# ============================================================================
-# VERDICT : la méthode est-elle concluante ?
-# ============================================================================
-SEUIL_PERTE_REL = 1.0   # % : on tolère une fusion si elle coûte < 1% du pouvoir explicatif
-
-n_negligeables = diag.filter(pl.col("perte_relative_pct") < SEUIL_PERTE_REL).height
-perte_min = diag.get_column("perte_relative_pct").min()
-
-print("\n" + "=" * 90)
-print("VERDICT")
-print("=" * 90)
-print(f"Pouvoir explicatif global eta²        : {eta_full:.4f}")
-print(f"Perte relative MINIMALE sur une paire : {perte_min:.3f} %")
-print(f"Paires dont la fusion coûte < {SEUIL_PERTE_REL}% d'eta² : {n_negligeables} / {diag.height}")
-print("-" * 90)
-if n_negligeables == 0:
-    print("NON CONCLUANT : aucune paire ne peut être fusionnée sans perte notable")
-    print("d'information (toutes les classes contribuent à expliquer la LGD).")
-    print(">>> Bascule sur le critère de MATÉRIALITÉ (gap < delta), déjà implémenté.")
-else:
-    print(f"CONCLUANT : {n_negligeables} paire(s) fusionnable(s) sans perte notable.")
-    print("Le test d'hétérogénéité statistique suffit, la matérialité n'est pas requise.")
-print("=" * 90)
+# Budget de perte TOTALE autorisé (sur l'eta² global) — choix métier
+for budget_pct in [0.5, 1.0, 2.0, 5.0]:
+    n_fus = diag_cum.filter(pl.col("perte_cum_pct") <= budget_pct).height
+    print(f"budget {budget_pct:>4}% d'eta² total  ->  {n_fus} fusions  ->  {65 - n_fus} CHR_model")
