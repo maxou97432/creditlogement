@@ -1,27 +1,97 @@
-# ============================================================================
-# CALIBRAGE MATÉRIALITÉ — niveau modèle
-# ============================================================================
-print("Calibrage seuil matérialité — niveau MODÈLE (avec diagnostic tailles d'effet)")
-print("-" * 70)
+import polars as pl
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ---- CONFIG ----
+CLASS_COL = "CHR_model"
+LGD_COL   = "lgd_obligor"
+df_base   = base
+# ----------------
 
 meilleur_candidat_fusion = meilleur_candidat_fusion_modele
 
-résultats = []
-for d in [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0]:
+# ============================================================================
+# Calibrage DENSE : delta de 0.5 à 3.0 avec pas de 0.1
+# ============================================================================
+print("Calcul de la courbe nombre de classes vs delta (0.1 par 0.1)...")
+print("-" * 70)
+
+resultats = []
+deltas = np.arange(0.5, 3.05, 0.1)  # 0.5, 0.6, ..., 3.0
+
+for d in deltas:
     DELTA_LGD_MODELE = d
     dff, _ = fusion_glouton(df_base, log=False)
-    n_final = dff.collect().select(CLASS_COL).n_unique()
-    résultats.append({"delta": d, "n_chr": n_final})
-    print(f"  delta={d:>4}  ->  {n_final:>3} CHR_model")
+    n = dff.collect().select(CLASS_COL).n_unique()
+    resultats.append({"delta": round(d, 2), "n_chr": n})
+    print(f"  delta={d:.1f}  ->  {n:>3} CHR_model")
 
-print("\n" + "-" * 70)
-print("Croisement avec TAILLES D'EFFET (du diagnostic):")
-print("-" * 70)
-print("d<0.5, OVL>0.3, W<2.0   -> 16 paires fusionnables -> ~49 CHR_model")
-print("d<0.8, OVL>0.2, W<3.0   -> 25 paires fusionnables -> ~40 CHR_model")
-print("d<1.0, OVL>0.15, W<4.0  -> 35 paires fusionnables -> ~30 CHR_model")
-print("-" * 70)
+df_res = pl.DataFrame(resultats)
+deltas_array = np.array(df_res.get_column("delta").to_list())
+n_array = np.array(df_res.get_column("n_chr").to_list())
 
-df_res = pl.DataFrame(résultats)
-print("\nMatérialité seule (pour comparaison) :")
+# ============================================================================
+# Détection du COUDE (méthode : pente maximale)
+# ============================================================================
+# Pente entre points consécutifs
+pentes = np.diff(n_array) / np.diff(deltas_array)
+
+# Indice où la pente est la plus négative (changement le plus abrupt)
+idx_coude = np.argmin(pentes) + 1  # +1 car diff décale l'indice
+delta_coude = deltas_array[idx_coude]
+n_coude = n_array[idx_coude]
+pente_coude = pentes[idx_coude - 1]
+
+print("\n" + "=" * 70)
+print(f"COUDE DÉTECTÉ : delta ≈ {delta_coude:.2f}  →  {n_coude} CHR_model")
+print(f"Pente au coude : {pente_coude:.1f} CHR/delta")
+print("=" * 70)
+
+# ============================================================================
+# GRAPHIQUE
+# ============================================================================
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+# Courbe nombre de classes
+ax1.plot(deltas_array, n_array, 'o-', linewidth=2, markersize=6, color='#1f77b4', label='Nombre CHR_model')
+ax1.axvline(delta_coude, color='red', linestyle='--', linewidth=2, label=f'Coude (delta={delta_coude:.2f})')
+ax1.plot(delta_coude, n_coude, 'r*', markersize=20, label=f'Optimal : {n_coude} CHR')
+ax1.set_xlabel('Seuil de matérialité (delta, pts de LGD)', fontsize=11, fontweight='bold')
+ax1.set_ylabel('Nombre de CHR_model finales', fontsize=11, fontweight='bold')
+ax1.set_title('Calibrage : nombre de classes vs seuil de matérialité', fontsize=12, fontweight='bold')
+ax1.grid(True, alpha=0.3)
+ax1.legend(fontsize=10, loc='upper right')
+
+# Pentes (pour voir où le changement est maximal)
+ax2.bar(deltas_array[:-1], -pentes, width=0.08, color='#ff7f0e', alpha=0.7, edgecolor='black')
+ax2.axvline(delta_coude, color='red', linestyle='--', linewidth=2, label=f'Coude')
+ax2.set_xlabel('Seuil de matérialité (delta)', fontsize=11, fontweight='bold')
+ax2.set_ylabel('Pente (Δ CHR / Δ delta)', fontsize=11, fontweight='bold')
+ax2.set_title('Variation de la pente : où la fusion accélère/ralentit', fontsize=12, fontweight='bold')
+ax2.grid(True, alpha=0.3, axis='y')
+ax2.legend(fontsize=10)
+
+plt.tight_layout()
+plt.savefig('/mnt/user-data/outputs/calibrage_delta_coude.png', dpi=150, bbox_inches='tight')
+print("\n✓ Graphique sauvegardé : calibrage_delta_coude.png")
+plt.show()
+
+# ============================================================================
+# Tableau RÉCAPITULATIF avec points stratégiques
+# ============================================================================
+print("\nTABLEAU RÉCAPITULATIF :")
 print(df_res)
+
+print("\n" + "=" * 70)
+print("RECOMMANDATIONS :")
+print("=" * 70)
+print(f"1. OPTIMAL (Coude) : delta = {delta_coude:.2f}  →  {n_coude} CHR_model")
+print(f"   → C'est où la courbe « plie » le plus, où chaque delta supplémentaire")
+print(f"     réduit moins. Bon équilibre entre réduction et risque.")
+print()
+print(f"2. CONSERVATEUR   : delta = 1.0  →  {df_res.filter(pl.col('delta')==1.0).get_column('n_chr')[0]} CHR_model")
+print(f"   → Si vous voulez minimiser le risque réglementaire.")
+print()
+print(f"3. AGRESSIF       : delta = 2.0  →  {df_res.filter(pl.col('delta')==2.0).get_column('n_chr')[0]} CHR_model")
+print(f"   → Si la granularité cible l'exige (mais moins défendable).")
+print("=" * 70)
