@@ -1,6 +1,5 @@
 import polars as pl
-import numpy as np
-from scipy.stats import wasserstein_distance
+from typing import Tuple, List, Optional
 
 # ---- CONFIG ----
 CLASS_COL = "CHR_model"
@@ -8,81 +7,70 @@ LGD_COL   = "lgd_obligor"
 df_base   = base
 # ----------------
 
-def cohen_d(a1, a2):
-    n1, n2 = len(a1), len(a2)
-    s1, s2 = a1.std(ddof=1), a2.std(ddof=1)
-    sp = np.sqrt(((n1 - 1) * s1**2 + (n2 - 1) * s2**2) / (n1 + n2 - 2))
-    return (a2.mean() - a1.mean()) / sp if sp > 0 else 0.0
+# Seuil de matérialité au niveau MODÈLE (points de LGD).
+# À caler sur la distribution réelle des gaps vue dans le diagnostic (code 2).
+DELTA_LGD_MODELE = 2.0
 
-def overlap(a1, a2, n_bins=50):
-    lo, hi = min(a1.min(), a2.min()), max(a1.max(), a2.max())
-    if hi <= lo:
-        return 1.0
-    bins = np.linspace(lo, hi, n_bins)
-    p, _ = np.histogram(a1, bins=bins); q, _ = np.histogram(a2, bins=bins)
-    p, q = p / p.sum(), q / q.sum()
-    return float(np.minimum(p, q).sum())
-
-def diagnostics_tailles_effet_modele(
-    df,
-    class_col: str = CLASS_COL,
+def meilleur_candidat_fusion_modele(
+    df: pl.LazyFrame,
+    nb_croisements_max: int = 0,      # conservé pour compat, ignoré
+    ans_strict: int = 0,              # idem
     lgd_col: str = LGD_COL,
-) -> pl.DataFrame:
+    jenks_col: str = CLASS_COL,
+    log: bool = False,
+) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
     """
-    Paires de CHR_model ADJACENTES en ordre LRA GLOBAL (pas de cloisonnement).
-    Tailles d'effet INDÉPENDANTES de n : Cohen's d, OVL, Wasserstein-1.
-    Ce sont elles qui disent si un rassemblement supplémentaire est justifiable.
-    """
-    lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+    Niveau MODÈLE : fusionne la paire de CHR_model ADJACENTES (ordre LRA GLOBAL,
+    SANS cloisonnement par segment) la plus proche dont l'écart de LGD moyenne
+    de long terme est < DELTA_LGD_MODELE.
 
-    ordre = (
-        lf.group_by([class_col, "year"]).agg(pl.col(lgd_col).mean().alias("m"))
-          .group_by([class_col]).agg(pl.col("m").mean().alias("mean_LGD_global"))
-          .sort("mean_LGD_global")
-          .collect()
+    Différence clé vs niveau sous-modèle : pas de colonne 'seg', shift global.
+    On RECHERCHE les fusions inter-segments (F<->B, etc.).
+    """
+    ordre_global = (
+        df.group_by([jenks_col, "year"])
+        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
+        .group_by([jenks_col])
+        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
+        .sort("mean_LGD_global")                      # <-- ordre GLOBAL, pas de seg
     )
 
-    obligors = {}
-    base_col = lf.select([class_col, lgd_col]).collect()
-    for cls in base_col.select(class_col).unique().to_series():
-        obligors[cls] = base_col.filter(pl.col(class_col) == cls).get_column(lgd_col).to_numpy()
+    paires = (
+        ordre_global.with_columns([
+            pl.col(jenks_col).shift(-1).alias("next_class"),          # <-- shift global
+            pl.col("mean_LGD_global").shift(-1).alias("next_lgd"),    # <-- pas de .over("seg")
+        ])
+        .filter(pl.col("next_class").is_not_null())
+        .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
+        .filter(pl.col("ecart_lgd") < DELTA_LGD_MODELE)
+        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))
+        .sort("severite_totale", descending=True)
+        .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
+        .collect()
+    )
 
-    rows = []
-    classes = ordre.get_column(class_col).to_list()
-    for i in range(len(classes) - 1):
-        c1, c2 = classes[i], classes[i + 1]
-        a1, a2 = obligors[c1], obligors[c2]
-        rows.append({
-            "class_1": c1, "class_2": c2,
-            "n_1": len(a1), "n_2": len(a2),
-            "gap": float(abs(a2.mean() - a1.mean())),
-            "cohen_d": float(abs(cohen_d(a1, a2))),
-            "ovl": overlap(a1, a2),
-            "wasserstein": float(wasserstein_distance(a1, a2)),
-        })
-    return pl.DataFrame(rows)
+    if log:
+        print("=== Paires sous le seuil de matérialité (niveau modèle) ===")
+        print("Aucune paire." if paires.height == 0 else paires)
+
+    if paires.height == 0:
+        return None, None
+
+    meilleur = paires.head(1)
+    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
 
 
-# ---- Exécution ----
-eff = diagnostics_tailles_effet_modele(df_base)
+# ============================================================================
+# CALIBRAGE : nombre de CHR_model finales selon delta (niveau modèle)
+# ============================================================================
+print("Calibrage du seuil de matérialité — niveau MODÈLE (fusion inter-segments autorisée)")
+print("-" * 70)
 
-print("=" * 90)
-print("DIAGNOSTIC niveau MODÈLE — tailles d'effet (indépendantes de n) sur CHR_model adjacentes")
-print("=" * 90)
+# IMPORTANT : on branche le candidate finder niveau modèle dans fusion_glouton
+meilleur_candidat_fusion = meilleur_candidat_fusion_modele
 
-print(f"\nDistribution sur les {eff.height} paires adjacentes :\n")
-for col in ["gap", "cohen_d", "ovl", "wasserstein"]:
-    s = eff.get_column(col)
-    print(f"{col:12s}  min={s.min():.3f}  q25={s.quantile(.25):.3f}  med={s.median():.3f}  "
-          f"q75={s.quantile(.75):.3f}  max={s.max():.3f}")
-
-print("\nLes 15 paires les plus PROCHES (Wasserstein croissant) — candidates au rassemblement :")
-with pl.Config(tbl_rows=15, tbl_cols=-1, tbl_width_chars=220, float_precision=4):
-    print(eff.sort("wasserstein").head(15))
-
-# Combien de paires passeraient des seuils d'effet "fusionnables" ?
-for d_max, ovl_min, w_max in [(0.5, 0.30, 2.0), (0.8, 0.20, 3.0), (1.0, 0.15, 4.0)]:
-    n_ok = eff.filter(
-        (pl.col("cohen_d") < d_max) & (pl.col("ovl") > ovl_min) & (pl.col("wasserstein") < w_max)
-    ).height
-    print(f"\nSeuils  d<{d_max}, OVL>{ovl_min}, W<{w_max}  ->  {n_ok} paires fusionnables / {eff.height}")
+for d in [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]:
+    DELTA_LGD_MODELE = d
+    dff, _ = fusion_glouton(df_base, log=False)
+    n = dff.collect().select(CLASS_COL).n_unique()
+    print(f"  delta={d:>4}  ->  {n:>3} CHR_model")
