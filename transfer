@@ -1,39 +1,233 @@
-# ============================================================================
-# ENREGISTREMENT : appliquer la fusion au delta optimal et sauver
-# ============================================================================
+import polars as pl
+import numpy as np
+from scipy.stats import wasserstein_distance
+from typing import Tuple, List, Optional
+import itertools
 
-# Fixez votre delta final (à partir du graphique du coude)
-DELTA_LGD_MODELE = 1.5   # ← votre choix, par exemple
+# ---- CONFIG ----
+CLASS_COL = "CHR_model"
+LGD_COL   = "lgd_obligor"
+df_base   = base
+# ----------------
 
-meilleur_candidat_fusion = meilleur_candidat_fusion_modele
+def cohen_d(a1, a2):
+    n1, n2 = len(a1), len(a2)
+    s1, s2 = a1.std(ddof=1), a2.std(ddof=1)
+    sp = np.sqrt(((n1 - 1) * s1**2 + (n2 - 1) * s2**2) / (n1 + n2 - 2))
+    return (a2.mean() - a1.mean()) / sp if sp > 0 else 0.0
 
-# Lancez la fusion sur base
-df_fusionne_final, mapping_final = fusion_glouton(df_base, log=True)
+def overlap(a1, a2, n_bins=50):
+    lo, hi = min(a1.min(), a2.min()), max(a1.max(), a2.max())
+    if hi <= lo:
+        return 1.0
+    bins = np.linspace(lo, hi, n_bins)
+    p, _ = np.histogram(a1, bins=bins); q, _ = np.histogram(a2, bins=bins)
+    p, q = p / p.sum(), q / q.sum()
+    return float(np.minimum(p, q).sum())
 
-# Collectez et vérifiez
-df_fusionne_collected = df_fusionne_final.collect()
-n_final = df_fusionne_collected.select(CLASS_COL).n_unique()
-print(f"\n✓ Fusion complète : {n_final} CHR_model finales avec delta={DELTA_LGD_MODELE}")
-
-# Enregistrez en parquet (format compressé, standard BNP)
-output_path = "/mnt/user-data/outputs/base_fusionnee_chr_model.parquet"
-df_fusionne_collected.write_parquet(output_path)
-print(f"✓ Fichier sauvegardé : {output_path}")
-
-# (Optionnel) Enregistrez aussi le mapping classe_avant → classe_après, 
-# si vous avez besoin de traçabilité pour le validateur
-# mapping_final : c'est ce que fusion_glouton retourne en 2ᵉ élément
-if mapping_final is not None:
-    mapping_final.write_parquet(
-        "/mnt/user-data/outputs/mapping_chr_model_before_after.parquet"
+def diagnostics_tailles_effet_modele(
+    df, class_col: str = CLASS_COL, lgd_col: str = LGD_COL,
+) -> pl.DataFrame:
+    lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+    ordre = (
+        lf.group_by([class_col, "year"]).agg(pl.col(lgd_col).mean().alias("m"))
+          .group_by([class_col]).agg(pl.col("m").mean().alias("mean_LGD_global"))
+          .sort("mean_LGD_global")
+          .collect()
     )
-    print(f"✓ Mapping avant/après sauvegardé")
+    obligors = {}
+    base_col = lf.select([class_col, lgd_col]).collect()
+    for cls in base_col.select(class_col).unique().to_series():
+        obligors[cls] = base_col.filter(pl.col(class_col) == cls).get_column(lgd_col).to_numpy()
+    rows = []
+    classes = ordre.get_column(class_col).to_list()
+    for i in range(len(classes) - 1):
+        c1, c2 = classes[i], classes[i + 1]
+        a1, a2 = obligors[c1], obligors[c2]
+        rows.append({
+            "class_1": c1, "class_2": c2,
+            "n_1": len(a1), "n_2": len(a2),
+            "gap": float(abs(a2.mean() - a1.mean())),
+            "cohen_d": float(abs(cohen_d(a1, a2))),
+            "ovl": overlap(a1, a2),
+            "wasserstein": float(wasserstein_distance(a1, a2)),
+        })
+    return pl.DataFrame(rows)
 
-# Vérification rapide : comparez avant/après
-print("\n" + "=" * 70)
-print("VÉRIFICATION AVANT/APRÈS :")
-print("=" * 70)
-print(f"Classes avant fusion (CHR initial)  : {df_base.select(CLASS_COL).n_unique()}")
-print(f"Classes après fusion                : {n_final}")
-print(f"Réduction                           : {df_base.select(CLASS_COL).n_unique() - n_final} classes fusionnées")
-print(f"Taux de réduction                   : {100 * (1 - n_final / df_base.select(CLASS_COL).n_unique()):.1f} %")
+# ============================================================================
+# ÉTAPE 1 : Calculer les tailles d'effet pour toutes les paires
+# ============================================================================
+print("=" * 90)
+print("OPTIMISATION AUTOMATIQUE DES SEUILS (tailles d'effet)")
+print("=" * 90)
+print("\n[1/3] Calcul des tailles d'effet pour toutes les paires adjacentes...")
+eff = diagnostics_tailles_effet_modele(df_base)
+print(f"✓ {eff.height} paires adjacentes analysées")
+
+# ============================================================================
+# ÉTAPE 2 : Grille d'optimisation (test combinatoire)
+# ============================================================================
+print("\n[2/3] Optimisation : test de {0} combinaisons de seuils...")
+
+# Grilles de seuils à tester
+d_max_range = [0.3, 0.5, 0.8, 1.0]
+ovl_min_range = [0.05, 0.10, 0.15, 0.20]
+w_max_range = [1.0, 2.0, 3.0, 4.0]
+
+combos = list(itertools.product(d_max_range, ovl_min_range, w_max_range))
+print(f"✓ {len(combos)} combinaisons à tester\n")
+
+resultats_opt = []
+
+for d_max, ovl_min, w_max in combos:
+    n_paires_ok = eff.filter(
+        (pl.col("cohen_d") < d_max) & (pl.col("ovl") > ovl_min) & (pl.col("wasserstein") < w_max)
+    ).height
+    
+    # Score d'optimalité : nombre de paires fusionnables
+    # Pénalité légère pour seuils trop lâches (pour favoriser conservatisme)
+    penalite = 0.0
+    if d_max > 1.0:
+        penalite += 0.1 * (d_max - 1.0)  # pénalise d_max > 1.0
+    if ovl_min < 0.10:
+        penalite += 0.05 * (0.10 - ovl_min)  # récompense ovl_min >= 0.10
+    if w_max > 4.0:
+        penalite += 0.05 * (w_max - 4.0)  # pénalise w_max > 4.0
+    
+    score = n_paires_ok - penalite
+    
+    resultats_opt.append({
+        "d_max": d_max,
+        "ovl_min": ovl_min,
+        "w_max": w_max,
+        "n_paires": n_paires_ok,
+        "score_opt": score,
+    })
+
+df_opt = pl.DataFrame(resultats_opt).sort("score_opt", descending=True)
+
+print("TOP 10 COMBINAISONS :")
+print("-" * 90)
+with pl.Config(tbl_rows=10, tbl_cols=-1, tbl_width_chars=100, float_precision=2):
+    print(df_opt.head(10))
+
+# Sélectionner l'OPTIMUM
+meilleur = df_opt.head(1)
+d_max_opt = meilleur["d_max"][0]
+ovl_min_opt = meilleur["ovl_min"][0]
+w_max_opt = meilleur["w_max"][0]
+n_paires_opt = meilleur["n_paires"][0]
+score_opt = meilleur["score_opt"][0]
+
+print("\n" + "=" * 90)
+print("OPTIMUM DÉTECTÉ :")
+print("=" * 90)
+print(f"d_max={d_max_opt}  |  OVL_min={ovl_min_opt}  |  W_max={w_max_opt}")
+print(f"→ {n_paires_opt} paires fusionnables / {eff.height} (score={score_opt:.1f})")
+print("=" * 90)
+
+# ============================================================================
+# ÉTAPE 3 : Candidate finder basé sur les seuils optimaux
+# ============================================================================
+print("\n[3/3] Fusion basée sur les seuils optimaux...")
+
+def meilleur_candidat_fusion_tailles_effet(
+    df: pl.LazyFrame,
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
+    lgd_col: str = LGD_COL,
+    jenks_col: str = CLASS_COL,
+    log: bool = False,
+) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
+    """
+    Fusionne basé sur tailles d'effet :
+    Cohen's d < d_max_opt ET OVL > ovl_min_opt ET Wasserstein < w_max_opt
+    """
+    lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+    ordre = (
+        lf.group_by([jenks_col, "year"]).agg(pl.col(lgd_col).mean().alias("m"))
+          .group_by([jenks_col]).agg(pl.col("m").mean().alias("mean_LGD_global"))
+          .sort("mean_LGD_global")
+          .collect()
+    )
+    
+    obligors = {}
+    base_col = lf.select([jenks_col, lgd_col]).collect()
+    for cls in base_col.select(jenks_col).unique().to_series():
+        obligors[cls] = base_col.filter(pl.col(jenks_col) == cls).get_column(lgd_col).to_numpy()
+    
+    paires = []
+    classes = ordre.get_column(jenks_col).to_list()
+    for i in range(len(classes) - 1):
+        c1, c2 = classes[i], classes[i + 1]
+        a1, a2 = obligors[c1], obligors[c2]
+        
+        d = abs(cohen_d(a1, a2))
+        o = overlap(a1, a2)
+        w = wasserstein_distance(a1, a2)
+        
+        # Les TROIS critères doivent passer
+        if (d < d_max_opt) and (o > ovl_min_opt) and (w < w_max_opt):
+            paires.append({
+                jenks_col: c1,
+                "next_class": c2,
+                "cohen_d": d,
+                "ovl": o,
+                "wasserstein": w,
+                "severite_totale": w,  # priorité Wasserstein minimal
+            })
+    
+    if not paires:
+        return None, None
+    
+    df_paires = pl.DataFrame(paires).sort("severite_totale")
+    meilleur = df_paires.head(1)
+    return [meilleur[jenks_col][0], meilleur["next_class"][0]], df_paires
+
+
+# Remplacer le candidate finder
+meilleur_candidat_fusion = meilleur_candidat_fusion_tailles_effet
+
+# Lancer la fusion
+df_fusionne_final, mapping_final = fusion_glouton(df_base, log=False)
+df_fusionne_collected = df_fusionne_final.collect()
+n_chr_final = df_fusionne_collected.select(CLASS_COL).n_unique()
+
+print(f"✓ Fusion complète : {n_chr_final} CHR_model finales")
+
+# ============================================================================
+# ENREGISTREMENT
+# ============================================================================
+print("\n" + "=" * 90)
+print("ENREGISTREMENT DE LA BASE RASSEMBLÉE")
+print("=" * 90)
+
+output_path = "/mnt/user-data/outputs/base_fusionnee_tailles_effet.parquet"
+df_fusionne_collected.write_parquet(output_path)
+print(f"✓ Base fusionnée enregistrée : {output_path}")
+
+# Mapping (optionnel)
+if mapping_final is not None:
+    mapping_path = "/mnt/user-data/outputs/mapping_tailles_effet.parquet"
+    mapping_final.write_parquet(mapping_path)
+    print(f"✓ Mapping sauvegardé : {mapping_path}")
+
+# Synthèse finale
+print("\n" + "=" * 90)
+print("RÉSUMÉ FINAL")
+print("=" * 90)
+print(f"Classes initiales (CHR)             : {df_base.select(CLASS_COL).n_unique()}")
+print(f"Classes finales                     : {n_chr_final}")
+print(f"Réduction                           : {df_base.select(CLASS_COL).n_unique() - n_chr_final} classes")
+print(f"Taux de réduction                   : {100 * (1 - n_chr_final / df_base.select(CLASS_COL).n_unique()):.1f} %")
+print("-" * 90)
+print(f"Seuils optimaux appliqués           :")
+print(f"  → Cohen's d < {d_max_opt}")
+print(f"  → OVL > {ovl_min_opt}")
+print(f"  → Wasserstein < {w_max_opt}")
+print(f"  → Score d'optimalité : {score_opt:.1f}")
+print("=" * 90)
+
+# Vérification : relire le fichier
+base_new = pl.read_parquet(output_path)
+print(f"\n✓ Vérification : {base_new.select(CLASS_COL).n_unique()} CHR_model dans le fichier enregistré")
