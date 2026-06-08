@@ -1,14 +1,63 @@
-# Reprend `diag` (déjà trié par perte_eta croissant) et `eta_full`
-diag_cum = diag.with_columns([
-    pl.col("perte_eta").cum_sum().alias("perte_eta_cumulee"),
-    (100 * pl.col("perte_eta").cum_sum() / eta_full).alias("perte_cum_pct"),
-    (pl.int_range(1, diag.height + 1)).alias("n_fusions"),
-])
+import polars as pl
+import numpy as np
 
-with pl.Config(tbl_rows=64, tbl_cols=-1, tbl_width_chars=160, float_precision=5):
-    print(diag_cum.select(["class_1","class_2","perte_relative_pct","perte_cum_pct","n_fusions"]))
+CLASS_COL = "CHR_model"
+LGD_COL   = "lgd_obligor"
+df_base   = base
 
-# Budget de perte TOTALE autorisé (sur l'eta² global) — choix métier
-for budget_pct in [0.5, 1.0, 2.0, 5.0]:
-    n_fus = diag_cum.filter(pl.col("perte_cum_pct") <= budget_pct).height
-    print(f"budget {budget_pct:>4}% d'eta² total  ->  {n_fus} fusions  ->  {65 - n_fus} CHR_model")
+def cohen_d(a1, a2):
+    n1, n2 = len(a1), len(a2)
+    s1, s2 = a1.std(ddof=1), a2.std(ddof=1)
+    sp = np.sqrt(((n1 - 1) * s1**2 + (n2 - 1) * s2**2) / (n1 + n2 - 2))
+    return (a2.mean() - a1.mean()) / sp if sp > 0 else 0.0
+
+# Ordre LRA global (niveau modèle, pas de cloisonnement)
+ordre = (
+    (df_base.lazy() if isinstance(df_base, pl.DataFrame) else df_base)
+    .group_by([CLASS_COL, "year"]).agg(pl.col(LGD_COL).mean().alias("m"))
+    .group_by([CLASS_COL]).agg(pl.col("m").mean().alias("mean_LGD_global"))
+    .sort("mean_LGD_global")
+    .collect()
+)
+
+obligors = {}
+col = (df_base.lazy() if isinstance(df_base, pl.DataFrame) else df_base).select([CLASS_COL, LGD_COL]).collect()
+for cls in col.select(CLASS_COL).unique().to_series():
+    obligors[cls] = col.filter(pl.col(CLASS_COL) == cls).get_column(LGD_COL).to_numpy()
+
+classes = ordre.get_column(CLASS_COL).to_list()
+rows = []
+for i in range(len(classes) - 1):
+    c1, c2 = classes[i], classes[i + 1]
+    a1, a2 = obligors[c1], obligors[c2]
+    d = abs(cohen_d(a1, a2))
+    rows.append({
+        "class_1": c1, "class_2": c2,
+        "n_1": len(a1), "n_2": len(a2),
+        "gap_lgd": float(abs(a2.mean() - a1.mean())),
+        "cohen_d": d,
+        "ampleur": ("négligeable" if d < 0.2 else "petite" if d < 0.5
+                    else "moyenne" if d < 0.8 else "grande"),
+    })
+
+diag = pl.DataFrame(rows).sort("cohen_d")
+
+print("=" * 90)
+print("TEST D'HÉTÉROGÉNÉITÉ — Cohen's d (taille d'effet, robuste au grand n)")
+print("=" * 90)
+with pl.Config(tbl_rows=64, tbl_cols=-1, tbl_width_chars=160, float_precision=4):
+    print(diag)
+
+s = diag.get_column("cohen_d")
+SEUIL = 0.2
+n_negl = diag.filter(pl.col("cohen_d") < SEUIL).height
+print("\n" + "-" * 90)
+print(f"Cohen's d : min={s.min():.3f}  med={s.median():.3f}  max={s.max():.3f}")
+print(f"Paires avec d < {SEUIL} (hétérogénéité négligeable) : {n_negl} / {diag.height}")
+print("-" * 90)
+if n_negl == 0:
+    print("NON CONCLUANT : toutes les paires montrent une hétérogénéité au moins petite.")
+    print("Aucun argument statistique pour fusionner -> bascule sur le critère de MATÉRIALITÉ.")
+else:
+    print(f"CONCLUANT : {n_negl} paire(s) statistiquement quasi indiscernable(s), fusionnable(s).")
+print("=" * 90)
