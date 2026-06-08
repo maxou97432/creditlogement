@@ -1,26 +1,46 @@
-import polars as pl
+from scipy.stats import wasserstein_distance
 import numpy as np
-from scipy import stats as sp_stats
 
-def diagnostics_welch_kruskal(
+def cohen_d(arr1, arr2):
+    """Cohen's d : écart standardisé (indépendant de n)"""
+    n1, n2 = len(arr1), len(arr2)
+    s1, s2 = arr1.std(ddof=1), arr2.std(ddof=1)
+    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
+    return (arr2.mean() - arr1.mean()) / sp if sp > 0 else 0
+
+def overlap(arr1, arr2, n_bins=50):
+    """OVL : pourcentage de recouvrement (indépendant de n)"""
+    lo = min(arr1.min(), arr2.min())
+    hi = max(arr1.max(), arr2.max())
+    bins = np.linspace(lo, hi, n_bins)
+    p, _ = np.histogram(arr1, bins=bins)
+    q, _ = np.histogram(arr2, bins=bins)
+    p, q = p / p.sum(), q / q.sum()
+    return float(np.minimum(p, q).sum())
+
+def meilleur_candidat_fusion_robuste(
     df: pl.LazyFrame,
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
     lgd_col: str = "lgd_obligor",
     jenks_col: str = "submodel_class",
-) -> pl.DataFrame:
+    log: bool = False,
+) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
     """
-    Pour chaque paire de classes ADJACENTES intra-segment (ordre LRA croissant) :
-    test de Welch (égalité des moyennes) et Kruskal-Wallis (égalité des
-    distributions par les rangs), avec leurs p-values.
-
-    Objet : DÉMONTRER qu'à n élevé (2k-686k obligors/classe) ces tests rejettent
-    l'égalité quasi systématiquement, et ne peuvent donc pas servir de critère
-    de fusion. La décision se fera sur la MATÉRIALITÉ (gap_lgd).
+    Fusionne la paire adjacente la plus PROCHE qui passe TOUS les critères :
+    1. gap < DELTA_LGD (matérialité)
+    2. |Cohen's d| < D_MAX (petit effet)
+    3. OVL > OVL_MIN (recouvrement)
+    4. Wasserstein < W_MAX (distributions proches)
+    
+    Tous les critères doivent passer (AND logic).
+    Aucun ne dépend de n → robuste à grand échantillon.
     """
-    ordre = (
+    ordre_global = (
         df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("m"))
+        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
         .group_by([jenks_col])
-        .agg(pl.col("m").mean().alias("mean_LGD_global"))
+        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
         .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
         .sort(["seg", "mean_LGD_global"])
         .collect()
@@ -31,71 +51,83 @@ def diagnostics_welch_kruskal(
     for cls in base.select(jenks_col).unique().to_series():
         obligors[cls] = base.filter(pl.col(jenks_col) == cls).get_column(lgd_col).to_numpy()
 
-    rows = []
-    for i in range(len(ordre) - 1):
-        cls_1 = ordre[jenks_col][i]
+    paires = []
+    for i in range(len(ordre_global) - 1):
+        cls_1 = ordre_global[jenks_col][i]
         seg_1 = cls_1.split("_")[0]
         cls_2 = None
-        for j in range(i + 1, len(ordre)):
-            if ordre[jenks_col][j].split("_")[0] == seg_1:
-                cls_2 = ordre[jenks_col][j]
+        for j in range(i + 1, len(ordre_global)):
+            if ordre_global[jenks_col][j].split("_")[0] == seg_1:
+                cls_2 = ordre_global[jenks_col][j]
                 break
         if cls_2 is None:
             continue
 
-        a1, a2 = obligors[cls_1], obligors[cls_2]
-        t_w, p_w = sp_stats.ttest_ind(a1, a2, equal_var=False)
-        h_k, p_k = sp_stats.kruskal(a1, a2)
+        arr1, arr2 = obligors[cls_1], obligors[cls_2]
+        gap = abs(arr2.mean() - arr1.mean())
+        d = cohen_d(arr1, arr2)
+        o = overlap(arr1, arr2)
+        w = wasserstein_distance(arr1, arr2)
 
-        rows.append({
-            "segment": seg_1,
-            "class_1": cls_1,
-            "class_2": cls_2,
-            "n_1": len(a1),
-            "n_2": len(a2),
-            "gap_lgd": float(a2.mean() - a1.mean()),
-            "welch_p": float(p_w),
-            "kruskal_p": float(p_k),
-        })
+        # TOUS les critères doivent passer
+        if (gap < DELTA_LGD) and (abs(d) < D_MAX) and (o > OVL_MIN) and (w < W_MAX):
+            paires.append({
+                "class_1": cls_1,
+                "class_2": cls_2,
+                "gap": gap,
+                "cohen_d": d,
+                "ovl": o,
+                "wasserstein": w,
+                "severite_totale": gap,  # priorité à la plus proche
+            })
 
-    return pl.DataFrame(rows).sort(["segment", "class_1"])
+    if not paires:
+        return None, None
+
+    df_paires = pl.DataFrame(paires).sort("severite_totale")
+    meilleur = df_paires.head(1)
+    return [meilleur["class_1"][0], meilleur["class_2"][0]], df_paires
 
 
 # ============================================================================
-# Exécution + démonstration
+# Calibrage : tailles d'effet
 # ============================================================================
-ALPHA = 0.05
-diag = diagnostics_welch_kruskal(lra_prov_model3)
+print("Calibrage sur TAILLES D'EFFET (indépendantes de n)")
+print("=" * 80)
 
-print("=" * 90)
-print("DIAGNOSTIC : tests d'hypothèse comme critère de fusion (Welch & Kruskal-Wallis)")
-print("=" * 90)
+DELTA_LGD = 2.0
+D_MAX = 0.3
+OVL_MIN = 0.85
+W_MAX = 1.0
 
-with pl.Config(tbl_rows=100, tbl_cols=-1, tbl_width_chars=220, float_precision=6):
-    print(diag)
+meilleur_candidat_fusion = meilleur_candidat_fusion_robuste
 
-n_tot = diag.height
-n_welch_eq  = diag.filter(pl.col("welch_p")   >= ALPHA).height
-n_krusk_eq  = diag.filter(pl.col("kruskal_p") >= ALPHA).height
-p_welch_max  = diag.select(pl.col("welch_p").max()).item()
-p_krusk_max  = diag.select(pl.col("kruskal_p").max()).item()
-gap_min, gap_max = diag.select(pl.col("gap_lgd").abs().min()).item(), diag.select(pl.col("gap_lgd").abs().max()).item()
+print(f"\nConfiguration de base : delta={DELTA_LGD}, d<{D_MAX}, OVL>{OVL_MIN}, W<{W_MAX}")
+print("-" * 40)
+dff, _ = fusion_glouton(lra_prov_model3, log=False)
+n = dff.collect().select("submodel_class").n_unique()
+print(f"Résultat : {n} classes")
 
-print("\n" + "=" * 90)
-print("SYNTHÈSE")
-print("=" * 90)
-print(f"Paires adjacentes testées (intra-segment)        : {n_tot}")
-print(f"Effectifs par classe                             : {diag['n_1'].min()} à {diag['n_1'].max()} obligors")
-print(f"Écart de LGD entre voisines (matériel)           : {gap_min:.3f} à {gap_max:.3f} pts")
-print("-" * 90)
-print(f"Welch   -- paires NON sig. différentes (p>={ALPHA}) : {n_welch_eq}/{n_tot}   (p-value max observée : {p_welch_max:.2e})")
-print(f"Kruskal -- paires NON sig. différentes (p>={ALPHA}) : {n_krusk_eq}/{n_tot}   (p-value max observée : {p_krusk_max:.2e})")
-print("-" * 90)
-if n_welch_eq == 0 and n_krusk_eq == 0:
-    print("CONCLUSION : aucune paire n'est jugée équivalente. À ces effectifs, Welch et")
-    print("Kruskal-Wallis rejettent l'égalité même pour des écarts de LGD < 1.3 pt, donc")
-    print("ils ne peuvent pas servir de critère de fusion (ils donneraient toujours 80")
-    print("classes). La décision est portée sur la MATÉRIALITÉ : fusion si l'écart de LGD")
-    print("moyenne entre classes adjacentes est inférieur à un seuil delta documenté.")
-else:
-    print("CONCLUSION : certains tests ne rejettent pas l'égalité -- à examiner au cas par cas.")
+print("\nEn variant Cohen's d (delta=2.0, OVL>0.85, W<1.0) :")
+print("-" * 40)
+for d in [0.2, 0.3, 0.5, 0.8]:
+    D_MAX = d
+    dff, _ = fusion_glouton(lra_prov_model3, log=False)
+    n = dff.collect().select("submodel_class").n_unique()
+    print(f"  d<{d}  ->  {n} classes")
+
+print("\nEn variant OVL (delta=2.0, d<0.3, W<1.0) :")
+print("-" * 40)
+for ovl in [0.75, 0.8, 0.85, 0.9]:
+    OVL_MIN = ovl
+    dff, _ = fusion_glouton(lra_prov_model3, log=False)
+    n = dff.collect().select("submodel_class").n_unique()
+    print(f"  OVL>{ovl}  ->  {n} classes")
+
+print("\nEn variant Wasserstein (delta=2.0, d<0.3, OVL>0.85) :")
+print("-" * 40)
+for w in [0.5, 0.75, 1.0, 1.5]:
+    W_MAX = w
+    dff, _ = fusion_glouton(lra_prov_model3, log=False)
+    n = dff.collect().select("submodel_class").n_unique()
+    print(f"  W<{w}  ->  {n} classes")
