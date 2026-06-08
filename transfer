@@ -1,133 +1,62 @@
 from scipy.stats import wasserstein_distance
 import numpy as np
+import polars as pl
 
 def cohen_d(arr1, arr2):
-    """Cohen's d : écart standardisé (indépendant de n)"""
     n1, n2 = len(arr1), len(arr2)
     s1, s2 = arr1.std(ddof=1), arr2.std(ddof=1)
     sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
     return (arr2.mean() - arr1.mean()) / sp if sp > 0 else 0
 
 def overlap(arr1, arr2, n_bins=50):
-    """OVL : pourcentage de recouvrement (indépendant de n)"""
-    lo = min(arr1.min(), arr2.min())
-    hi = max(arr1.max(), arr2.max())
+    lo = min(arr1.min(), arr2.min()); hi = max(arr1.max(), arr2.max())
     bins = np.linspace(lo, hi, n_bins)
-    p, _ = np.histogram(arr1, bins=bins)
-    q, _ = np.histogram(arr2, bins=bins)
+    p, _ = np.histogram(arr1, bins=bins); q, _ = np.histogram(arr2, bins=bins)
     p, q = p / p.sum(), q / q.sum()
     return float(np.minimum(p, q).sum())
 
-def meilleur_candidat_fusion_robuste(
-    df: pl.LazyFrame,
-    nb_croisements_max: int = 0,
-    ans_strict: int = 0,
-    lgd_col: str = "lgd_obligor",
-    jenks_col: str = "submodel_class",
-    log: bool = False,
-) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
-    """
-    Fusionne la paire adjacente la plus PROCHE qui passe TOUS les critères :
-    1. gap < DELTA_LGD (matérialité)
-    2. |Cohen's d| < D_MAX (petit effet)
-    3. OVL > OVL_MIN (recouvrement)
-    4. Wasserstein < W_MAX (distributions proches)
-    
-    Tous les critères doivent passer (AND logic).
-    Aucun ne dépend de n → robuste à grand échantillon.
-    """
-    ordre_global = (
-        df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
-        .group_by([jenks_col])
-        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
-        .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
-        .sort(["seg", "mean_LGD_global"])
-        .collect()
-    )
+# LRA + segment pour l'adjacence
+ordre = (
+    lra_prov_model3
+    .group_by(["submodel_class", "year"]).agg(pl.col("lgd_obligor").mean().alias("m"))
+    .group_by(["submodel_class"]).agg(pl.col("m").mean().alias("mean_LGD"))
+    .with_columns(pl.col("submodel_class").str.split("_").list.first().alias("seg"))
+    .sort(["seg", "mean_LGD"])
+    .collect()
+)
 
-    obligors = {}
-    base = df.select([jenks_col, lgd_col]).collect()
-    for cls in base.select(jenks_col).unique().to_series():
-        obligors[cls] = base.filter(pl.col(jenks_col) == cls).get_column(lgd_col).to_numpy()
+obligors = {}
+base = lra_prov_model3.select(["submodel_class", "lgd_obligor"]).collect()
+for cls in base.select("submodel_class").unique().to_series():
+    obligors[cls] = base.filter(pl.col("submodel_class") == cls).get_column("lgd_obligor").to_numpy()
 
-    paires = []
-    for i in range(len(ordre_global) - 1):
-        cls_1 = ordre_global[jenks_col][i]
-        seg_1 = cls_1.split("_")[0]
-        cls_2 = None
-        for j in range(i + 1, len(ordre_global)):
-            if ordre_global[jenks_col][j].split("_")[0] == seg_1:
-                cls_2 = ordre_global[jenks_col][j]
-                break
-        if cls_2 is None:
-            continue
+rows = []
+for i in range(len(ordre) - 1):
+    cls_1 = ordre["submodel_class"][i]; seg_1 = cls_1.split("_")[0]
+    cls_2 = None
+    for j in range(i + 1, len(ordre)):
+        if ordre["submodel_class"][j].split("_")[0] == seg_1:
+            cls_2 = ordre["submodel_class"][j]; break
+    if cls_2 is None:
+        continue
+    a1, a2 = obligors[cls_1], obligors[cls_2]
+    rows.append({
+        "class_1": cls_1, "class_2": cls_2,
+        "gap": float(abs(a2.mean() - a1.mean())),
+        "cohen_d": float(abs(cohen_d(a1, a2))),
+        "ovl": overlap(a1, a2),
+        "wasserstein": float(wasserstein_distance(a1, a2)),
+    })
 
-        arr1, arr2 = obligors[cls_1], obligors[cls_2]
-        gap = abs(arr2.mean() - arr1.mean())
-        d = cohen_d(arr1, arr2)
-        o = overlap(arr1, arr2)
-        w = wasserstein_distance(arr1, arr2)
+eff = pl.DataFrame(rows)
 
-        # TOUS les critères doivent passer
-        if (gap < DELTA_LGD) and (abs(d) < D_MAX) and (o > OVL_MIN) and (w < W_MAX):
-            paires.append({
-                "class_1": cls_1,
-                "class_2": cls_2,
-                "gap": gap,
-                "cohen_d": d,
-                "ovl": o,
-                "wasserstein": w,
-                "severite_totale": gap,  # priorité à la plus proche
-            })
+# Distribution réelle de chaque métrique
+print("Distribution des tailles d'effet sur les", eff.height, "paires adjacentes :\n")
+for col in ["gap", "cohen_d", "ovl", "wasserstein"]:
+    s = eff.get_column(col)
+    print(f"{col:12s}  min={s.min():.3f}  q25={s.quantile(.25):.3f}  med={s.median():.3f}  "
+          f"q75={s.quantile(.75):.3f}  max={s.max():.3f}")
 
-    if not paires:
-        return None, None
-
-    df_paires = pl.DataFrame(paires).sort("severite_totale")
-    meilleur = df_paires.head(1)
-    return [meilleur["class_1"][0], meilleur["class_2"][0]], df_paires
-
-
-# ============================================================================
-# Calibrage : tailles d'effet
-# ============================================================================
-print("Calibrage sur TAILLES D'EFFET (indépendantes de n)")
-print("=" * 80)
-
-DELTA_LGD = 2.0
-D_MAX = 0.3
-OVL_MIN = 0.85
-W_MAX = 1.0
-
-meilleur_candidat_fusion = meilleur_candidat_fusion_robuste
-
-print(f"\nConfiguration de base : delta={DELTA_LGD}, d<{D_MAX}, OVL>{OVL_MIN}, W<{W_MAX}")
-print("-" * 40)
-dff, _ = fusion_glouton(lra_prov_model3, log=False)
-n = dff.collect().select("submodel_class").n_unique()
-print(f"Résultat : {n} classes")
-
-print("\nEn variant Cohen's d (delta=2.0, OVL>0.85, W<1.0) :")
-print("-" * 40)
-for d in [0.2, 0.3, 0.5, 0.8]:
-    D_MAX = d
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  d<{d}  ->  {n} classes")
-
-print("\nEn variant OVL (delta=2.0, d<0.3, W<1.0) :")
-print("-" * 40)
-for ovl in [0.75, 0.8, 0.85, 0.9]:
-    OVL_MIN = ovl
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  OVL>{ovl}  ->  {n} classes")
-
-print("\nEn variant Wasserstein (delta=2.0, d<0.3, OVL>0.85) :")
-print("-" * 40)
-for w in [0.5, 0.75, 1.0, 1.5]:
-    W_MAX = w
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  W<{w}  ->  {n} classes")
+print("\nLes 10 paires les plus PROCHES (Wasserstein croissant) :")
+with pl.Config(tbl_rows=10, float_precision=4):
+    print(eff.sort("wasserstein").head(10))
