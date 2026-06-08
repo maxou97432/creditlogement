@@ -1,156 +1,20 @@
-def meilleur_candidat_fusion_tost(
-    df: pl.LazyFrame,
-    nb_croisements_max: int = 0,
-    ans_strict: int = 0,
-    lgd_col: str = "lgd_obligor",
-    jenks_col: str = "submodel_class",
-    log: bool = False,
-) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
-    """
-    TOST (Two One-Sided Tests) :
-    
-    Fusionne si l'IC (1-2*alpha) du gap est dans (-delta, +delta).
-    
-    Avec grand n : IC très étroit → le gap doit être VRAIMENT proche de 0
-    pour rentrer dans la bande. C'est exactement ce qu'on veut.
-    
-    delta = la marge de matérialité en pts LGD (décision métier documentée)
-    alpha = 0.05 → IC à 90%
-    """
-    from scipy import stats as sp_stats
-    
-    ordre_global = (
-        df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
-        .group_by([jenks_col])
-        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
-        .with_columns(pl.col(jenks_col).str.split("_").list.first().alias("seg"))
-        .sort(["seg", "mean_LGD_global"])
-        .collect()
-    )
+import polars as pl
 
-    obligors_per_class = {}
-    df_collected = df.select([jenks_col, lgd_col]).collect()
-    for cls_name in df_collected.select(jenks_col).unique().to_series():
-        obligors_per_class[cls_name] = (
-            df_collected.filter(pl.col(jenks_col) == cls_name)
-            .select(lgd_col)
-            .to_numpy()
-            .flatten()
-        )
-
-    paires_list = []
-    
-    for i in range(len(ordre_global) - 1):
-        row_i = ordre_global[i]
-        seg_i = row_i[jenks_col].str.split("_").list.first().item()
-        cls_1 = row_i[jenks_col].item()
-        mean_1 = row_i["mean_LGD_global"].item()
-
-        cls_2, mean_2 = None, None
-        for j in range(i + 1, len(ordre_global)):
-            row_j = ordre_global[j]
-            seg_j = row_j[jenks_col].str.split("_").list.first().item()
-            if seg_j == seg_i:
-                cls_2 = row_j[jenks_col].item()
-                mean_2 = row_j["mean_LGD_global"].item()
-                break
-        
-        if cls_2 is None:
-            continue
-
-        arr1 = obligors_per_class[cls_1]
-        arr2 = obligors_per_class[cls_2]
-        n1, n2 = len(arr1), len(arr2)
-        gap = mean_2 - mean_1
-
-        # --- TOST : calcul de l'IC (1-2*alpha) du gap ---
-        s1, s2 = arr1.std(ddof=1), arr2.std(ddof=1)
-        se = np.sqrt(s1**2 / n1 + s2**2 / n2)
-
-        # Welch-Satterthwaite df
-        df_w = (s1**2/n1 + s2**2/n2)**2 / (
-            (s1**2/n1)**2/(n1-1) + (s2**2/n2)**2/(n2-1)
-        )
-        tcrit = sp_stats.t.ppf(1 - ALPHA_TOST, df_w)
-        ci_low  = gap - tcrit * se
-        ci_high = gap + tcrit * se
-
-        # Équivalent si IC entièrement dans (-delta, +delta)
-        tost_pass = (ci_low > -DELTA_LGD) and (ci_high < DELTA_LGD)
-
-        if not tost_pass:
-            continue
-
-        paires_list.append({
-            jenks_col: cls_1,
-            "next_class": cls_2,
-            "gap": gap,
-            "ci_low": ci_low,
-            "ci_high": ci_high,
-            "se": se,
-            "n_lo": n1,
-            "n_hi": n2,
-            "severite_totale": -abs(gap),
-        })
-
-    paires = pl.DataFrame(paires_list) if paires_list else pl.DataFrame()
-
-    if log:
-        print("=== TOST : équivalence de moyennes ===")
-        print(f"Paires candidates : {paires.height}")
-        if paires.height > 0:
-            print(paires.sort("severite_totale", descending=True).head(10))
-
-    if paires.height == 0:
-        return None, None
-
-    paires = paires.sort("severite_totale", descending=True)
-    meilleur = paires.head(1)
-    return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
-
-
-# ============================================================================
-# TEST TOST
-# ============================================================================
-print("="*80)
-print("TOST : Two One-Sided Tests (la méthode correcte à grand n)")
-print("="*80)
-
-ALPHA_TOST = 0.05
-meilleur_candidat_fusion = meilleur_candidat_fusion_tost
-
-print("\nEn variant delta (alpha=0.05) :")
-print("-" * 40)
-for delta in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
-    DELTA_LGD = delta
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  delta={delta:>4}  ->  {n:>3} classes")
-
-print("\nEn variant alpha (delta=1.0) :")
-print("-" * 40)
-DELTA_LGD = 1.0
-for alpha in [0.01, 0.05, 0.10, 0.20]:
-    ALPHA_TOST = alpha
-    dff, _ = fusion_glouton(lra_prov_model3, log=False)
-    n = dff.collect().select("submodel_class").n_unique()
-    print(f"  alpha={alpha}  ->  {n:>3} classes")
-
-# Diagnostic : regarder les IC pour quelques paires
-print("\nDiagnostic IC sur les premières paires (delta=1.0, alpha=0.05) :")
-print("-" * 40)
-DELTA_LGD = 1.0
-ALPHA_TOST = 0.05
-paire, dbg = meilleur_candidat_fusion_tost(lra_prov_model3, log=False)
-if dbg is not None:
-    print(dbg.head(10))
-else:
-    print("Aucune paire équivalente -> regardez le diagnostic ci-dessous")
-    
-    # Diagnostic : calculer les IC sans filtre pour voir pourquoi rien ne passe
-    print("\n--- IC de TOUTES les paires adjacentes (sans filtre) ---")
-    DELTA_LGD = 999  # désactiver le filtre temporairement
-    paire_dbg, dbg_all = meilleur_candidat_fusion_tost(lra_prov_model3, log=False)
-    if dbg_all is not None:
-        print(dbg_all.sort("gap").head(20))
+stats = (
+    lra_prov_model3
+    .group_by(["submodel_class", "year"])
+    .agg(pl.col("lgd_obligor").mean().alias("m"))
+    .group_by("submodel_class")
+    .agg(pl.col("m").mean().alias("mean_lgd"))
+    .with_columns(pl.col("submodel_class").str.split("_").list.first().alias("seg"))
+    .sort(["seg", "mean_lgd"])
+    .with_columns([
+        pl.col("mean_lgd").shift(-1).over("seg").alias("next_lgd"),
+        pl.col("submodel_class").shift(-1).over("seg").alias("next_class"),
+    ])
+    .filter(pl.col("next_class").is_not_null())
+    .with_columns((pl.col("next_lgd") - pl.col("mean_lgd")).alias("gap"))
+    .sort("gap")
+    .collect()
+)
+print(stats.select("submodel_class","next_class","mean_lgd","gap").head(20))
