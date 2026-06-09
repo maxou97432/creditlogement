@@ -1,25 +1,36 @@
 MARGIN_MODE = "equipe"
-diag = build_adjacent_pairs(df_base.lazy()).sort("severite_totale")
-rows = []
-for ca, cb, sev in diag.iter_rows():
-    a = get_lgd_vectors(df_base.lazy(), ca)
-    b = get_lgd_vectors(df_base.lazy(), cb)
-    mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
-    delta_a, delta_b = get_margins(mean_lgd)
+current, history = df_base.lazy(), []
+n_start = current.select(CLASS_COL).unique().collect().height
 
-    # MA condition : IC entier dans ±delta_b
-    n1, n2 = len(a), len(b); s1, s2 = a.std(ddof=1), b.std(ddof=1)
-    gap = b.mean()-a.mean(); se = np.sqrt(s1**2/n1+s2**2/n2)
-    dfw = (s1**2/n1+s2**2/n2)**2/((s1**2/n1)**2/(n1-1)+(s2**2/n2)**2/(n2-1))
-    tcrit = sp_stats.t.ppf(1-0.05, dfw)
-    ci_lo, ci_hi = gap-tcrit*se, gap+tcrit*se
-    ma_cond = (ci_lo > -delta_b) and (ci_hi < delta_b)
+for it in range(200):                       # large, pour ne pas être bloqué par MAX_ITER
+    candidates = build_adjacent_pairs(current).sort("severite_totale")
+    fused = False
+    for cls_a, cls_b, severity in candidates.iter_rows():
+        a = get_lgd_vectors(current, cls_a)
+        b = get_lgd_vectors(current, cls_b)
+        mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
+        if len(a)+len(b) > ReturnThreshold(mean_lgd):
+            possible, det = tost_heterogeneity(a, b, mean_lgd)
+        else:
+            possible, det = welch_heterogeneity(a, b)
+            if not possible: possible, det = kw_heterogeneity(a, b)
+            if not possible: possible, det = levene_heterogeneity(a, b)
+        if possible:
+            current = merge_classes(current, cls_a, cls_b, f"{cls_a}_{cls_b}")
+            fused = True
+            break
+    if not fused:
+        # AUCUNE paire fusionnable : on inspecte la 1re paire refusée
+        ca, cb, sev = candidates.row(0)
+        a = get_lgd_vectors(current, ca); b = get_lgd_vectors(current, cb)
+        mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
+        print(f"ARRÊT à l'itération {it}, {current.select(CLASS_COL).unique().collect().height} classes")
+        print(f"  paire la plus proche refusée : {ca}+{cb}, gap={sev:.3f}, "
+              f"n={len(a)+len(b)}, threshold={ReturnThreshold(mean_lgd)}, "
+              f"test={'tost' if len(a)+len(b)>ReturnThreshold(mean_lgd) else 'welch/kw/levene'}")
+        _, det = (tost_heterogeneity(a,b,mean_lgd) if len(a)+len(b)>ReturnThreshold(mean_lgd)
+                  else welch_heterogeneity(a,b))
+        print(f"  raison du refus : {det['reason']}")
+        break
 
-    # ANCIENNE condition : deux ttest unilatéraux, p < 0.05
-    _, p_a = sp_stats.ttest_ind(a, b + delta_b, equal_var=False)
-    ancienne_cond = p_a < 0.05
-
-    rows.append({"a":ca,"b":cb,"gap":round(sev,3),"delta_b":round(delta_b,2),
-                 "IC_lo":round(ci_lo,3),"IC_hi":round(ci_hi,3),
-                 "MA_fusionne":ma_cond, "ANCIENNE_fusionne":ancienne_cond})
-print(pl.DataFrame(rows))
+print(f"\n{n_start} -> {current.select(CLASS_COL).unique().collect().height} classes en {it} fusions")
