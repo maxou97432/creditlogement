@@ -2,35 +2,25 @@ MARGIN_MODE = "equipe"
 current, history = df_base.lazy(), []
 n_start = current.select(CLASS_COL).unique().collect().height
 
-for it in range(200):                       # large, pour ne pas être bloqué par MAX_ITER
+for it in range(200):
     candidates = build_adjacent_pairs(current).sort("severite_totale")
     fused = False
     for cls_a, cls_b, severity in candidates.iter_rows():
         a = get_lgd_vectors(current, cls_a)
         b = get_lgd_vectors(current, cls_b)
         mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
-        if len(a)+len(b) > ReturnThreshold(mean_lgd):
-            possible, det = tost_heterogeneity(a, b, mean_lgd)
-        else:
-            possible, det = welch_heterogeneity(a, b)
-            if not possible: possible, det = kw_heterogeneity(a, b)
-            if not possible: possible, det = levene_heterogeneity(a, b)
+        
+        # TOST PARTOUT, peu importe l'effectif
+        possible, det = tost_heterogeneity(a, b, mean_lgd)
+        
         if possible:
             current = merge_classes(current, cls_a, cls_b, f"{cls_a}_{cls_b}")
             fused = True
             break
+    
     if not fused:
-        # AUCUNE paire fusionnable : on inspecte la 1re paire refusée
-        ca, cb, sev = candidates.row(0)
-        a = get_lgd_vectors(current, ca); b = get_lgd_vectors(current, cb)
-        mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
-        print(f"ARRÊT à l'itération {it}, {current.select(CLASS_COL).unique().collect().height} classes")
-        print(f"  paire la plus proche refusée : {ca}+{cb}, gap={sev:.3f}, "
-              f"n={len(a)+len(b)}, threshold={ReturnThreshold(mean_lgd)}, "
-              f"test={'tost' if len(a)+len(b)>ReturnThreshold(mean_lgd) else 'welch/kw/levene'}")
-        _, det = (tost_heterogeneity(a,b,mean_lgd) if len(a)+len(b)>ReturnThreshold(mean_lgd)
-                  else welch_heterogeneity(a,b))
-        print(f"  raison du refus : {det['reason']}")
+        n_final = current.select(CLASS_COL).unique().collect().height
+        print(f"ARRÊT à l'itération {it}, {n_final} classes")
         break
 
-print(f"\n{n_start} -> {current.select(CLASS_COL).unique().collect().height} classes en {it} fusions")
+print(f"{n_start} -> {current.select(CLASS_COL).unique().collect().height} classes")
