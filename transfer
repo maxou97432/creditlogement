@@ -1,58 +1,93 @@
 import polars as pl
+import numpy as np
 from typing import Tuple, List, Optional
 
 # ---- CONFIG ----
 CLASS_COL = "CHR_model"
 LGD_COL   = "lgd_obligor"
+df_base   = base
 
-# Variable globale : seuil de matérialité (points de LGD)
-DELTA_LGD_MODELE = 1.5
+Z = 1.96              # niveau 95 %
+USE_N = True          # True  -> IC de la moyenne (±Z·σ/√n)  [dépend de n, va saturer]
+                      # False -> intervalle de dispersion (±Z·σ) [robuste à n]
 # ----------------
 
-def meilleur_candidat_fusion_modele(
+def meilleur_candidat_fusion_chevauchement(
     df: pl.LazyFrame,
-    nb_croisements_max: int = 0,      # conservé pour compat, ignoré
-    ans_strict: int = 0,              # idem
+    nb_croisements_max: int = 0,      # compat, ignoré
+    ans_strict: int = 0,              # compat, ignoré
     lgd_col: str = LGD_COL,
     jenks_col: str = CLASS_COL,
     log: bool = False,
 ) -> Tuple[Optional[List[str]], Optional[pl.DataFrame]]:
     """
-    Niveau MODÈLE : fusionne la paire de CHR_model ADJACENTES (ordre LRA GLOBAL,
-    SANS cloisonnement par segment) la plus proche dont l'écart de LGD moyenne
-    de long terme est < DELTA_LGD_MODELE.
+    Fusionne la paire adjacente (ordre LRA global) dont les intervalles à 95 %
+    se CHEVAUCHENT le plus.
+
+    USE_N = True  : borne = moyenne ± Z·σ/√n   (IC de la moyenne, dépend de n)
+    USE_N = False : borne = moyenne ± Z·σ      (dispersion des obligors, robuste à n)
+
+    Chevauchement : borne_sup(classe basse) > borne_inf(classe haute).
+    On fusionne la paire au chevauchement maximal (= severite_totale max).
     """
-    
-    # Étape 1 : calculer LRA par classe (moyenne des moyennes annuelles)
-    ordre_global = (
-        df.group_by([jenks_col, "year"])
-        .agg(pl.col(lgd_col).mean().alias("mean_LGD_year"))
-        .group_by([jenks_col])
-        .agg(pl.col("mean_LGD_year").mean().alias("mean_LGD_global"))
-        .sort("mean_LGD_global")  # ← ordre GLOBAL, pas de seg
+    # moyenne, écart-type, effectif par classe (sur obligors bruts)
+    stats = (
+        df.group_by([jenks_col])
+        .agg([
+            pl.col(lgd_col).mean().alias("mu"),
+            pl.col(lgd_col).std(ddof=1).alias("sigma"),
+            pl.len().alias("n"),
+        ])
+        .with_columns(
+            # demi-largeur : avec ou sans /sqrt(n) selon USE_N
+            (pl.lit(Z) * pl.col("sigma") /
+             (pl.col("n").sqrt() if USE_N else pl.lit(1.0))).alias("demi")
+        )
+        .with_columns([
+            (pl.col("mu") - pl.col("demi")).alias("borne_inf"),
+            (pl.col("mu") + pl.col("demi")).alias("borne_sup"),
+        ])
+        .sort("mu")   # ordre LRA global, pas de cloisonnement segment
     )
 
-    # Étape 2 : chercher les paires adjacentes et filtrer sur DELTA_LGD_MODELE
+    # paires adjacentes + mesure de chevauchement
     paires = (
-        ordre_global.with_columns([
-            pl.col(jenks_col).shift(-1).alias("next_class"),           # ← shift global
-            pl.col("mean_LGD_global").shift(-1).alias("next_lgd"),    # ← pas de .over("seg")
+        stats.with_columns([
+            pl.col(jenks_col).shift(-1).alias("next_class"),
+            pl.col("borne_inf").shift(-1).alias("next_inf"),
+            pl.col("mu").shift(-1).alias("next_mu"),
         ])
         .filter(pl.col("next_class").is_not_null())
-        .with_columns((pl.col("next_lgd") - pl.col("mean_LGD_global")).alias("ecart_lgd"))
-        .filter(pl.col("ecart_lgd") < DELTA_LGD_MODELE)   # ← FILTRE SUR LA VARIABLE GLOBALE
-        .with_columns((-pl.col("ecart_lgd")).alias("severite_totale"))
-        .sort("severite_totale", descending=True)
-        .select([jenks_col, "next_class", "severite_totale", "ecart_lgd"])
+        # chevauchement = combien la borne sup de la basse dépasse la borne inf de la haute
+        .with_columns((pl.col("borne_sup") - pl.col("next_inf")).alias("chevauchement"))
+        .with_columns((pl.col("next_mu") - pl.col("mu")).alias("gap"))
+        .filter(pl.col("chevauchement") > 0)           # il faut qu'elles se chevauchent
+        .with_columns(pl.col("chevauchement").alias("severite_totale"))
+        .sort("severite_totale", descending=True)       # le plus gros chevauchement d'abord
+        .select([jenks_col, "next_class", "severite_totale", "chevauchement", "gap"])
         .collect()
     )
 
     if log:
-        print(f"=== Paires sous le seuil DELTA_LGD_MODELE={DELTA_LGD_MODELE} ===")
-        print("Aucune paire." if paires.height == 0 else paires)
+        mode = "IC moyenne (±Zσ/√n)" if USE_N else "dispersion (±Zσ)"
+        print(f"=== Chevauchements 95 % — mode {mode} ===")
+        print("Aucune paire ne se chevauche." if paires.height == 0 else paires)
 
     if paires.height == 0:
         return None, None
 
     meilleur = paires.head(1)
     return [meilleur[jenks_col][0], meilleur["next_class"][0]], paires
+
+
+# ============================================================================
+# Test des DEUX modes
+# ============================================================================
+meilleur_candidat_fusion = meilleur_candidat_fusion_chevauchement
+
+for use_n in [True, False]:
+    USE_N = use_n
+    mode = "IC de la moyenne (±Zσ/√n)" if use_n else "Dispersion obligors (±Zσ)"
+    dff, _ = fusion_glouton(df_base, log=False)
+    n_final = dff.collect().select(CLASS_COL).n_unique()
+    print(f"USE_N={use_n!s:>5}  [{mode}]  ->  {n_final} CHR_model")
