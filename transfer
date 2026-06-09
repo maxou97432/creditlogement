@@ -1,10 +1,33 @@
 MARGIN_MODE = "equipe"
-MAX_ITER = 30          # ← restaurer la limite de l'ancien code
+current, history = df_base.lazy(), []
 
-lf = df_base.lazy()
-n0 = lf.select(CLASS_COL).unique().collect().height
-reduced_lf, history = iterative_homogeneity_reduction(lf, max_iter=MAX_ITER)
-df_final = reduced_lf.collect()
-n1 = df_final[CLASS_COL].n_unique()
-
-print(f"{n0} -> {n1} classes en {len(history)} fusions (MAX_ITER={MAX_ITER})")
+for it in range(100):
+    candidates = build_adjacent_pairs(current).sort("severite_totale")
+    fused = False
+    for cls_a, cls_b, severity in candidates.iter_rows():
+        a = get_lgd_vectors(current, cls_a)
+        b = get_lgd_vectors(current, cls_b)
+        mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
+        possible, det = tost_heterogeneity(a, b, mean_lgd)
+        if possible:
+            current = merge_classes(current, cls_a, cls_b, f"{cls_a}_{cls_b}")
+            fused = True
+            break
+    
+    if it == 29:  # On regarde ce qui se passe à l'itération 30
+        n_at_30 = current.select(CLASS_COL).unique().collect().height
+        candidates_at_30 = build_adjacent_pairs(current).sort("severite_totale")
+        if candidates_at_30.height > 0:
+            ca, cb, sev = candidates_at_30.row(0)
+            a = get_lgd_vectors(current, ca); b = get_lgd_vectors(current, cb)
+            mean_lgd = float((a.sum()+b.sum())/(len(a)+len(b)))
+            possible, det = tost_heterogeneity(a, b, mean_lgd)
+            print(f"À l'itération 30 ({n_at_30} classes) :")
+            print(f"  prochaine paire : {ca}+{cb}, gap={sev:.3f}")
+            print(f"  serait fusionnable? {possible}")
+            print(f"  raison: {det['reason']}")
+    
+    if not fused:
+        n_final = current.select(CLASS_COL).unique().collect().height
+        print(f"\nSaturation naturelle à l'itération {it}, {n_final} classes")
+        break
