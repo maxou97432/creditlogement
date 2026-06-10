@@ -1,191 +1,24 @@
-import polars as pl
-import numpy as np
-from scipy import stats as sp_stats
-from scipy.stats import kruskal, levene
-from collections import Counter
+# Diagnostic : qu'est-ce que counts contient pour D_7 ?
+counts_check = (
+    lf_LGD3
+    .group_by("Jenks_Submodel")
+    .agg(pl.col(config['Obligor']).n_unique().alias("count_distinct_id_client"))
+    .filter(pl.col("Jenks_Submodel") == "D_7")
+    .collect()
+)
+print("counts pour D_7 :", counts_check)
 
-# =====================================================================
-# CONFIGURATION
-# =====================================================================
-df_base       = base                  # base rassemblée niveau modèle (grain obligor)
-TARGET_COL    = "lgd_obligor"
-CLASS_COL     = "CHR_model"
-P_VALUE_FLOOR = 0.05
-MAX_ITER      = 1000
-ECHELLE       = 100.0                  # LGD en base 100
+# Et après le join, combien de lignes D_7 ?
+joined_check = (
+    lf_LGD3
+    .join(counts_check.lazy(), on="Jenks_Submodel", how="left")
+    .filter(pl.col("Jenks_Submodel") == "D_7")
+    .select([
+        pl.len().alias("n_lignes"),
+        pl.col("count_distinct_id_client").first().alias("count_apres_join"),
+        pl.col("lgd_obligor").mean().alias("mean_lgd"),
+    ])
+    .collect()
+)
+print("après join D_7 :", joined_check)
 
-# >>> NIVEAU D'ACCEPTATION DES FUSIONS — modifiable en 1 ligne <<<<<<<<
-#   {0}    = strict   (équivalence forte seulement)
-#   {0,1}  = LARGE    (forte OU modérée)        <-- choix actuel
-CODES_FUSIONNABLES = {0, 1}
-
-# >>> CHOIX DE LA MARGE D'ÉQUIVALENCE — modifiable en 1 ligne <<<<<<<<<
-#   "equipe"   = marge proportionnelle de l'équipe : max(0.2*lgd, 0.5)/max(0.3*lgd, 1.0)
-#   "absolue"  = marge fixe DELTA_LGD (votre delta calibré, contrôlé)
-MARGE_MODE = "equipe"
-DELTA_LGD  = 1.5                       # utilisé seulement si MARGE_MODE="absolue"
-
-# >>> GARDE-FOU POPULATION DÉSÉQUILIBRÉE (prop<0.3 => fusion) <<<<<<<<<
-#   True  = reprend le comportement de l'équipe (DANGEREUX : fusionne de gros écarts)
-#   False = désactivé (recommandé pour un regroupement par LGD)
-ACTIVER_GARDE_FOU_POPULATION = False
-
-# =====================================================================
-# UTILITAIRES (repris MOC_Homogeneity)
-# =====================================================================
-def get_lgd_vectors(lf, cls):
-    return (lf.filter(pl.col(CLASS_COL) == cls)
-              .select(TARGET_COL).collect()
-              .get_column(TARGET_COL).to_numpy())
-
-def ReturnThreshold(mean_lgd):
-    """Seuils de l'équipe (mean_lgd en base 100) : effectif de bascule vers TOST."""
-    if mean_lgd < 5:   return 80000
-    if mean_lgd < 10:  return 40000
-    if mean_lgd < 20:  return 20000
-    return 10000
-
-def get_marges(mean_lgd):
-    """(delta_a, delta_b) selon le mode choisi."""
-    if MARGE_MODE == "equipe":
-        return max(0.2 * mean_lgd, 0.005 * ECHELLE), max(0.3 * mean_lgd, 0.01 * ECHELLE)
-    return DELTA_LGD, DELTA_LGD
-
-# =====================================================================
-# TESTS REPRIS DE L'ÉQUIPE
-# =====================================================================
-def WelchTest(a, b):
-    _, p = sp_stats.ttest_ind(a, b, equal_var=False)
-    return float(p)
-
-def KWTest(a, b):
-    _, p = kruskal(a, b)
-    return float(p)
-
-def MarginTest(mean_a, mean_b, mean_lgd):
-    """Test de marge de l'équipe : code 0 / 1 / 99 selon delta_a, delta_b."""
-    delta_a, delta_b = get_marges(mean_lgd)
-    ad = abs(mean_b - mean_a)
-    if ad < delta_a: return 0, f"MARGIN OK (<{delta_a:.2f})"
-    if ad < delta_b: return 1, f"MARGIN MODERE (<{delta_b:.2f})"
-    return 99, f"MARGIN SEVERE (>={delta_b:.2f})"
-
-def TostTest(a, b, mean_lgd):
-    """
-    TOST de l'équipe, version CORRIGÉE pour le grand n.
-    On garde leurs marges (delta_a, delta_b) et leur structure de codes 0/1/99,
-    mais l'équivalence est jugée sur l'IC de l'écart (le ttest_ind(a, b+delta)
-    d'origine sature à grand n et conclut "équivalent" partout).
-    """
-    delta_a, delta_b = get_marges(mean_lgd)
-    n1, n2 = len(a), len(b)
-    s1, s2 = a.std(ddof=1), b.std(ddof=1)
-    gap = b.mean() - a.mean()
-    se  = np.sqrt(s1**2/n1 + s2**2/n2)
-    dfw = (s1**2/n1 + s2**2/n2)**2 / ((s1**2/n1)**2/(n1-1) + (s2**2/n2)**2/(n2-1))
-    tcrit = sp_stats.t.ppf(1 - 0.05, dfw)            # IC à 90 %
-    ci_lo, ci_hi = gap - tcrit*se, gap + tcrit*se
-    prop_a, prop_b = n1/(n1+n2), n2/(n1+n2)
-    if (ci_lo > -delta_a) and (ci_hi < delta_a):
-        return 0, f"TOST equiv stricte (IC[{ci_lo:.2f},{ci_hi:.2f}] in +-{delta_a:.2f})"
-    if (ci_lo > -delta_b) and (ci_hi < delta_b):
-        return 1, f"TOST equiv moderee (IC dans +-{delta_b:.2f})"
-    if ACTIVER_GARDE_FOU_POPULATION and (prop_a < 0.3 or prop_b < 0.3):
-        return 1, f"TOST pop desequilibree (IC[{ci_lo:.2f},{ci_hi:.2f}])"
-    return 99, f"TOST heterogene (IC[{ci_lo:.2f},{ci_hi:.2f}] hors +-{delta_b:.2f})"
-
-# =====================================================================
-# DÉCISION DE FUSION POUR UNE PAIRE (bascule effectif + cascade)
-# =====================================================================
-def tester_paire(a, b):
-    """Renvoie (fusionnable: bool, test: str, code: int, raison: str)."""
-    n = len(a) + len(b)
-    mean_lgd = float((a.sum() + b.sum()) / n)
-
-    if n > ReturnThreshold(mean_lgd):
-        code, raison = TostTest(a, b, mean_lgd)          # grand n -> TOST
-        test = "tost"
-    else:
-        p_w = WelchTest(a, b)                             # petit n -> cascade
-        if p_w >= P_VALUE_FLOOR:
-            code, raison, test = 0, f"WELCH p={p_w:.3f}>=floor", "welch"
-        else:
-            p_kw = KWTest(a, b)
-            if p_kw >= P_VALUE_FLOOR:
-                code, raison, test = 0, f"KW p={p_kw:.3f}>=floor", "kw"
-            else:
-                code, raison = MarginTest(a.mean(), b.mean(), mean_lgd)
-                test = "margin"
-    return (code in CODES_FUSIONNABLES), test, code, raison
-
-# =====================================================================
-# OPÉRATIONS SUR LES CLASSES
-# =====================================================================
-def merge_classes(lf, ca, cb, new):
-    return lf.with_columns(
-        pl.when(pl.col(CLASS_COL).is_in([ca, cb]))
-          .then(pl.lit(new)).otherwise(pl.col(CLASS_COL)).alias(CLASS_COL))
-
-def build_adjacent_pairs(lf):
-    """Paires adjacentes, ordre LRA global (niveau modèle)."""
-    cm = (lf.group_by(CLASS_COL).agg(pl.col(TARGET_COL).mean().alias("m"))
-            .sort("m").collect())
-    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
-         for i in range(cm.height - 1)]
-    return pl.DataFrame({"class_a": [p[0] for p in P],
-                         "class_b": [p[1] for p in P],
-                         "severite_totale": [p[2] for p in P]})
-
-# =====================================================================
-# BOUCLE DE REGROUPEMENT
-# =====================================================================
-def regroupement(lf, max_iter=MAX_ITER):
-    current, history = lf, []
-    for it in range(max_iter):
-        candidates = build_adjacent_pairs(current).sort("severite_totale")
-        fused = False
-        for ca, cb, sev in candidates.iter_rows():
-            a = get_lgd_vectors(current, ca)
-            b = get_lgd_vectors(current, cb)
-            ok, test, code, raison = tester_paire(a, b)
-            if ok:
-                new = f"{ca}_{cb}"
-                current = merge_classes(current, ca, cb, new)
-                fused = True
-                history.append({
-                    "iteration": it, "class_a": ca, "class_b": cb, "new_class": new,
-                    "test": test, "code": code, "gap": round(sev, 4),
-                    "mean_a": round(float(a.mean()), 3), "mean_b": round(float(b.mean()), 3),
-                    "n_a": len(a), "n_b": len(b), "raison": raison,
-                })
-                break
-        if not fused:
-            break
-    return current, history
-
-# =====================================================================
-# EXÉCUTION + SORTIE DÉTAILLÉE
-# =====================================================================
-lf = df_base.lazy()
-n0 = lf.select(CLASS_COL).unique().collect().height
-reduced_lf, history = regroupement(lf)
-df_final = reduced_lf.collect()
-n1 = df_final[CLASS_COL].n_unique()
-
-print("=" * 110)
-print(f"REGROUPEMENT — marge='{MARGE_MODE}'"
-      + (f" (DELTA_LGD={DELTA_LGD})" if MARGE_MODE == "absolue" else "")
-      + f" | codes fusionnables={sorted(CODES_FUSIONNABLES)}"
-      + f" | garde-fou pop={ACTIVER_GARDE_FOU_POPULATION}")
-print(f"{n0} -> {n1} CHR_model  ({len(history)} fusions)")
-print("=" * 110)
-if history:
-    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=70):
-        print(pl.DataFrame(history).select(
-            ["iteration", "class_a", "class_b", "new_class", "test", "code",
-             "gap", "mean_a", "mean_b", "n_a", "n_b", "raison"]))
-    print("\nTests:", dict(Counter(h["test"] for h in history)),
-          " | Codes:", dict(Counter(h["code"] for h in history)))
-else:
-    print("\nAucune fusion.")
-print(f"\nTaux de réduction : {100*(1-n1/n0):.1f} %")
