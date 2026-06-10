@@ -1,3 +1,5 @@
+import numpy as np
+
 # Etape 1 : moyenne par (HLC, year)
 mean_by_year = (
     base
@@ -5,8 +7,8 @@ mean_by_year = (
     .agg(pl.col('lgd_obligor').mean().alias('mean_lgd_year'))
 )
 
-# Etape 2 : moyenne des moyennes annuelles par HLC
-stats_hlc = (
+# Etape 2 : moyenne des moyennes annuelles + IC par HLC
+lra_stats = (
     mean_by_year
     .group_by('HLC')
     .agg([
@@ -16,7 +18,29 @@ stats_hlc = (
         pl.col('mean_lgd_year').max().alias('max_lgd_year'),
         pl.len().alias('nb_years_couvert'),
     ])
-    # Rejoindre les autres stats qui restent au grain obligor
+    .with_columns([
+        # IC 95% sur la LRA (IC de la moyenne des moyennes annuelles)
+        (pl.col('lgd_obligor_hlc_weighted_year')
+         - 1.96 * pl.col('std_lgd_year') / pl.col('nb_years_couvert').sqrt()
+        ).alias('borne_inf_95'),
+        (pl.col('lgd_obligor_hlc_weighted_year')
+         + 1.96 * pl.col('std_lgd_year') / pl.col('nb_years_couvert').sqrt()
+        ).alias('borne_sup_95'),
+    ])
+    .with_columns(
+        pl.struct(['borne_inf_95', 'borne_sup_95'])
+        .map_elements(
+            lambda x: f"[{x['borne_inf_95']:.3f}, {x['borne_sup_95']:.3f}]",
+            return_dtype=pl.String
+        )
+        .alias('IC_95')
+    )
+    .drop(['borne_inf_95', 'borne_sup_95'])
+)
+
+# Etape 3 : join avec les stats au grain obligor
+stats_hlc = (
+    lra_stats
     .join(
         base.group_by('HLC').agg([
             pl.col('lgd_obligor').mean().alias('lgd_hlc_obligor'),
@@ -34,6 +58,7 @@ stats_hlc = (
         on='HLC',
         how='left'
     )
+    .sort('lgd_obligor_hlc_weighted_year')
 )
 
 print(stats_hlc)
