@@ -1,17 +1,22 @@
-# Distribution des valeurs de count_distinct_id_client après join pour D_7
-print(
+# Recalcul propre dans une cellule fraîche
+debug2 = (
     lf_LGD3
     .join(counts.lazy(), on="Jenks_Submodel", how="left")
+    .with_columns(
+        (pl.col("lgd_obligor") * pl.col("count_distinct_id_client"))
+        .alias("weighted_lgd")
+    )
     .filter(pl.col("Jenks_Submodel") == "D_7")
-    .select(pl.col("count_distinct_id_client").value_counts())
+    .select([
+        pl.col("lgd_obligor").mean().alias("mean_lgd_brut"),
+        pl.col("count_distinct_id_client").first().alias("count_first"),
+        pl.col("count_distinct_id_client").sum().alias("sum_count"),
+        pl.col("weighted_lgd").mean().alias("mean_weighted"),
+        pl.col("weighted_lgd").sum().alias("sum_weighted"),
+        (pl.col("weighted_lgd").sum() / pl.col("count_distinct_id_client").sum())
+            .alias("resultat"),
+        pl.len().alias("n_lignes"),
+    ])
     .collect()
 )
-
-# Y a-t-il des nulls après le join ?
-print(
-    lf_LGD3
-    .join(counts.lazy(), on="Jenks_Submodel", how="left")
-    .filter(pl.col("Jenks_Submodel") == "D_7")
-    .select(pl.col("count_distinct_id_client").null_count().alias("nulls"))
-    .collect()
-)
+print(debug2)
