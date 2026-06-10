@@ -1,24 +1,21 @@
-# Diagnostic : qu'est-ce que counts contient pour D_7 ?
-counts_check = (
+# Diagnostic étape par étape pour D_7
+debug = (
     lf_LGD3
-    .group_by("Jenks_Submodel")
-    .agg(pl.col(config['Obligor']).n_unique().alias("count_distinct_id_client"))
-    .filter(pl.col("Jenks_Submodel") == "D_7")
-    .collect()
-)
-print("counts pour D_7 :", counts_check)
-
-# Et après le join, combien de lignes D_7 ?
-joined_check = (
-    lf_LGD3
-    .join(counts_check.lazy(), on="Jenks_Submodel", how="left")
+    .join(counts.lazy(), on="Jenks_Submodel", how="left")
+    .with_columns(
+        (pl.col("lgd_obligor") * pl.col("count_distinct_id_client"))
+        .alias("weighted_lgd")
+    )
     .filter(pl.col("Jenks_Submodel") == "D_7")
     .select([
+        pl.col("lgd_obligor").mean().alias("mean_lgd_brut"),
+        pl.col("count_distinct_id_client").first().alias("count"),
+        pl.col("weighted_lgd").sum().alias("sum_weighted"),
+        pl.col("count_distinct_id_client").sum().alias("sum_count"),
+        (pl.col("weighted_lgd").sum() / pl.col("count_distinct_id_client").sum())
+            .alias("resultat_division"),
         pl.len().alias("n_lignes"),
-        pl.col("count_distinct_id_client").first().alias("count_apres_join"),
-        pl.col("lgd_obligor").mean().alias("mean_lgd"),
     ])
     .collect()
 )
-print("après join D_7 :", joined_check)
-
+print(debug)
