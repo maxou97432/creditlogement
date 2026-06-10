@@ -1,21 +1,7 @@
-# Diagnostic étape par étape pour D_7
-debug = (
+# Valeurs exactes de Jenks_Submodel dans lf_LGD3 pour ce qui ressemble à D_7
+print(
     lf_LGD3
-    .join(counts.lazy(), on="Jenks_Submodel", how="left")
-    .with_columns(
-        (pl.col("lgd_obligor") * pl.col("count_distinct_id_client"))
-        .alias("weighted_lgd")
-    )
-    .filter(pl.col("Jenks_Submodel") == "D_7")
-    .select([
-        pl.col("lgd_obligor").mean().alias("mean_lgd_brut"),
-        pl.col("count_distinct_id_client").first().alias("count"),
-        pl.col("weighted_lgd").sum().alias("sum_weighted"),
-        pl.col("count_distinct_id_client").sum().alias("sum_count"),
-        (pl.col("weighted_lgd").sum() / pl.col("count_distinct_id_client").sum())
-            .alias("resultat_division"),
-        pl.len().alias("n_lignes"),
-    ])
+    .select(pl.col("Jenks_Submodel").unique())
+    .filter(pl.col("Jenks_Submodel").str.contains("D_7"))
     .collect()
 )
-print(debug)
