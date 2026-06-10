@@ -1,40 +1,39 @@
+# Etape 1 : moyenne par (HLC, year)
+mean_by_year = (
+    base
+    .group_by(['HLC', 'year'])
+    .agg(pl.col('lgd_obligor').mean().alias('mean_lgd_year'))
+)
+
+# Etape 2 : moyenne des moyennes annuelles par HLC
 stats_hlc = (
-    base.group_by('HLC')
+    mean_by_year
+    .group_by('HLC')
     .agg([
-        # Statistiques descriptives
-        pl.col('lgd_obligor').mean().alias('lgd_hlc_obligor'),
-        pl.col('lgd_obligor').median().alias('median_lgd'),
-        pl.col('lgd_obligor').std().alias('std_lgd'),
-        pl.col('lgd_obligor').min().alias('min_lgd'),
-        pl.col('lgd_obligor').max().alias('max_lgd'),
-
-        # Statistiques sur les pondérations
-        pl.col('n_obligor').sum().alias('total_obligors'),
-
-        # Statistiques sur les composantes MoC
-        pl.col('MoC_C').mean().alias('MoC_C'),
-        pl.col('Downturn').mean().alias('MoC_Downturn'),
-
-        # Statistiques sur la colonne calculée
-        pl.col('Somme MoC').mean().alias('mean_somme_moc'),
-        pl.col('Somme MoC').median().alias('median_somme_moc'),
-
-        # Indicateur de significativité
-        pl.col('Significatif').mean().alias('Significatif'),
-
-        # Par année
-        pl.col('year').n_unique().alias('nb_years_couvert'),
-
-        # LGD pondérée par année (LRA)
-        (
-            pl.col('lgd_obligor')
-            .mean()
-            .over(['HLC', 'year'])
-            * pl.len().over(['HLC', 'year'])
-        ).sum()
-        .truediv(pl.len())
-        .alias('lgd_obligor_hlc_weighted_year'),
+        pl.col('mean_lgd_year').mean().alias('lgd_obligor_hlc_weighted_year'),
+        pl.col('mean_lgd_year').std().alias('std_lgd_year'),
+        pl.col('mean_lgd_year').min().alias('min_lgd_year'),
+        pl.col('mean_lgd_year').max().alias('max_lgd_year'),
+        pl.len().alias('nb_years_couvert'),
     ])
+    # Rejoindre les autres stats qui restent au grain obligor
+    .join(
+        base.group_by('HLC').agg([
+            pl.col('lgd_obligor').mean().alias('lgd_hlc_obligor'),
+            pl.col('lgd_obligor').median().alias('median_lgd'),
+            pl.col('lgd_obligor').std().alias('std_lgd'),
+            pl.col('lgd_obligor').min().alias('min_lgd'),
+            pl.col('lgd_obligor').max().alias('max_lgd'),
+            pl.col('n_obligor').sum().alias('total_obligors'),
+            pl.col('MoC_C').mean().alias('MoC_C'),
+            pl.col('Downturn').mean().alias('MoC_Downturn'),
+            pl.col('Somme MoC').mean().alias('mean_somme_moc'),
+            pl.col('Somme MoC').median().alias('median_somme_moc'),
+            pl.col('Significatif').mean().alias('Significatif'),
+        ]),
+        on='HLC',
+        how='left'
+    )
 )
 
 print(stats_hlc)
