@@ -1,15 +1,26 @@
-df_ob_class = (
+# Combien de lignes par obligor pour E_13 ?
+(
     lf_LGD3
-    .join(counts, on="Jenks_Submodel", how="left")
-    .with_columns(
-        (pl.col("lgd_obligor") * pl.col("count_distinct_id_client").cast(pl.Float64))
-        .alias("weighted_lgd")
-    )
-    .group_by("Jenks_Submodel")
-    .agg(
-        (pl.col("weighted_lgd").sum() / 
-         pl.col("count_distinct_id_client").cast(pl.Float64).sum())
-        .alias("lgd_obligor_hlc")
-    )
+    .filter(pl.col("Jenks_Submodel") == "E_13")
+    .group_by(config['Obligor'])
+    .agg(pl.len().alias("n_lignes_par_obligor"))
+    .group_by("n_lignes_par_obligor")
+    .agg(pl.len().alias("nb_obligors"))
+    .sort("n_lignes_par_obligor")
     .collect()
+)
+# Comparer n_observations vs n_obligors_distincts pour toutes les classes
+(
+    lf_LGD3
+    .group_by("Jenks_Submodel")
+    .agg([
+        pl.len().alias("n_lignes"),
+        pl.col(config['Obligor']).n_unique().alias("n_distincts"),
+    ])
+    .with_columns(
+        (pl.col("n_lignes") / pl.col("n_distincts")).alias("ratio")
+    )
+    .sort("ratio", descending=True)
+    .collect()
+    .head(10)
 )
