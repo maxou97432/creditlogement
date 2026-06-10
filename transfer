@@ -1,7 +1,17 @@
-# Valeurs exactes de Jenks_Submodel dans lf_LGD3 pour ce qui ressemble à D_7
+# Distribution des valeurs de count_distinct_id_client après join pour D_7
 print(
     lf_LGD3
-    .select(pl.col("Jenks_Submodel").unique())
-    .filter(pl.col("Jenks_Submodel").str.contains("D_7"))
+    .join(counts.lazy(), on="Jenks_Submodel", how="left")
+    .filter(pl.col("Jenks_Submodel") == "D_7")
+    .select(pl.col("count_distinct_id_client").value_counts())
+    .collect()
+)
+
+# Y a-t-il des nulls après le join ?
+print(
+    lf_LGD3
+    .join(counts.lazy(), on="Jenks_Submodel", how="left")
+    .filter(pl.col("Jenks_Submodel") == "D_7")
+    .select(pl.col("count_distinct_id_client").null_count().alias("nulls"))
     .collect()
 )
