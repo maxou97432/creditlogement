@@ -1,64 +1,174 @@
 import numpy as np
+import polars as pl
+from typing import Tuple
+from scipy.stats import wasserstein_distance, gaussian_kde
 
-# Etape 1 : moyenne par (HLC, year)
-mean_by_year = (
-    base
-    .group_by(['HLC', 'year'])
-    .agg(pl.col('lgd_obligor').mean().alias('mean_lgd_year'))
-)
+# Parametres
+EPS_W1       = 1.5      # marge W1 en pts LGD (base 0-100)
+EPS_ETA      = 0.85     # overlap minimal code 0
+ETA_MODERE   = 0.70     # overlap minimal code 1
+B_BOOT       = 500      # replications bootstrap
+ALPHA_EQUIV  = 0.05     # niveau test unilateral
+N_BOOT_CAP   = 50_000   # sous-echantillonnage par classe
+KDE_GRID_PTS = 512
+RNG_SEED     = 42
+CODES_FUSIONNABLES = {0, 1}
 
-# Etape 2 : moyenne des moyennes annuelles + IC par HLC
-lra_stats = (
-    mean_by_year
-    .group_by('HLC')
+_LAST_W1_DIAG = {}
+
+def _overlap_eta(a: np.ndarray, b: np.ndarray) -> float:
+    if a.std() == 0 or b.std() == 0:
+        return 1.0 if (a.std() == 0 and b.std() == 0 and a[0] == b[0]) else 0.0
+    kde_a, kde_b = gaussian_kde(a), gaussian_kde(b)
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    pad = 0.05 * (hi - lo) if hi > lo else 1.0
+    grid = np.linspace(lo - pad, hi + pad, KDE_GRID_PTS)
+    eta = float(np.trapz(np.minimum(kde_a(grid), kde_b(grid)), grid))
+    return min(eta, 1.0)
+
+
+def _w1_decompose(a: np.ndarray, b: np.ndarray, w1_obs: float) -> Tuple[float, float, float]:
+    loc = abs(float(a.mean()) - float(b.mean()))
+    shape = float(wasserstein_distance(a - a.mean(), b - b.mean()))
+    pct_loc = 100.0 * loc / w1_obs if w1_obs > 0 else 0.0
+    return loc, shape, min(pct_loc, 100.0)
+
+
+def _w1_bootstrap_upper(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
+    rng = np.random.default_rng(RNG_SEED)
+    w1_obs = float(wasserstein_distance(a, b))
+    sa = rng.choice(a, size=min(len(a), N_BOOT_CAP), replace=False)
+    sb = rng.choice(b, size=min(len(b), N_BOOT_CAP), replace=False)
+    boot = np.empty(B_BOOT)
+    for i in range(B_BOOT):
+        ra = rng.choice(sa, size=len(sa), replace=True)
+        rb = rng.choice(sb, size=len(sb), replace=True)
+        boot[i] = wasserstein_distance(ra, rb)
+    ic_upper = float(np.percentile(boot, 100.0 * (1.0 - ALPHA_EQUIV)))
+    return w1_obs, ic_upper
+
+
+def W1OverlapTest(a: np.ndarray, b: np.ndarray, mean_lgd: float) -> Tuple[int, str]:
+    global _LAST_W1_DIAG
+    mean_a, mean_b = float(a.mean()), float(b.mean())
+    gap = abs(mean_b - mean_a)
+
+    _LAST_W1_DIAG = {
+        "w1_obs": None, "w1_ic95_sup": None, "eta": None,
+        "w1_loc": None, "w1_shape": None, "w1_pct_loc": None,
+        "eps_w1": EPS_W1, "eps_eta": EPS_ETA,
+        "n_a_boot": min(len(a), N_BOOT_CAP), "n_b_boot": min(len(b), N_BOOT_CAP),
+    }
+
+    if gap >= EPS_W1:
+        _LAST_W1_DIAG["w1_obs"] = gap
+        return 99, f"[W1] gap={gap:.3f} >= eps={EPS_W1} (equivalence impossible)"
+
+    w1_obs, ic_upper = _w1_bootstrap_upper(a, b)
+    loc, shape, pct_loc = _w1_decompose(a, b, w1_obs)
+    _LAST_W1_DIAG.update({
+        "w1_obs": round(w1_obs, 4), "w1_ic95_sup": round(ic_upper, 4),
+        "w1_loc": round(loc, 4), "w1_shape": round(shape, 4),
+        "w1_pct_loc": round(pct_loc, 1),
+    })
+
+    if ic_upper >= EPS_W1:
+        return 99, (f"[W1] IC95_sup={ic_upper:.3f} >= eps={EPS_W1} "
+                    f"(W1obs={w1_obs:.3f}, non prouvee)")
+
+    eta = _overlap_eta(a, b)
+    _LAST_W1_DIAG["eta"] = round(eta, 4)
+
+    if eta >= EPS_ETA:
+        return 0, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1}, "
+                   f"eta={eta:.3f}>={EPS_ETA} (equivalent)")
+    elif eta >= ETA_MODERE:
+        return 1, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1}, "
+                   f"eta={eta:.3f} dans [{ETA_MODERE},{EPS_ETA}) (modere)")
+    else:
+        return 99, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1} MAIS "
+                    f"eta={eta:.3f}<{ETA_MODERE} (formes differentes)")
+
+# Stats par classe, triees par LGD moyenne croissante
+class_stats = (
+    df_base
+    .group_by("CHR_model")
     .agg([
-        pl.col('mean_lgd_year').mean().alias('lgd_obligor_hlc_weighted_year'),
-        pl.col('mean_lgd_year').std().alias('std_lgd_year'),
-        pl.col('mean_lgd_year').min().alias('min_lgd_year'),
-        pl.col('mean_lgd_year').max().alias('max_lgd_year'),
-        pl.len().alias('nb_years_couvert'),
+        pl.col("lgd_obligor").mean().alias("mean_lgd"),
+        pl.col("lgd_obligor").count().alias("n"),
     ])
-    .with_columns([
-        # IC 95% sur la LRA (IC de la moyenne des moyennes annuelles)
-        (pl.col('lgd_obligor_hlc_weighted_year')
-         - 1.96 * pl.col('std_lgd_year') / pl.col('nb_years_couvert').sqrt()
-        ).alias('borne_inf_95'),
-        (pl.col('lgd_obligor_hlc_weighted_year')
-         + 1.96 * pl.col('std_lgd_year') / pl.col('nb_years_couvert').sqrt()
-        ).alias('borne_sup_95'),
-    ])
-    .with_columns(
-        pl.struct(['borne_inf_95', 'borne_sup_95'])
-        .map_elements(
-            lambda x: f"[{x['borne_inf_95']:.3f}, {x['borne_sup_95']:.3f}]",
-            return_dtype=pl.String
-        )
-        .alias('IC_95')
-    )
-    .drop(['borne_inf_95', 'borne_sup_95'])
+    .sort("mean_lgd")
 )
 
-# Etape 3 : join avec les stats au grain obligor
-stats_hlc = (
-    lra_stats
-    .join(
-        base.group_by('HLC').agg([
-            pl.col('lgd_obligor').mean().alias('lgd_hlc_obligor'),
-            pl.col('lgd_obligor').median().alias('median_lgd'),
-            pl.col('lgd_obligor').std().alias('std_lgd'),
-            pl.col('lgd_obligor').min().alias('min_lgd'),
-            pl.col('lgd_obligor').max().alias('max_lgd'),
-            pl.col('n_obligor').sum().alias('total_obligors'),
-            pl.col('MoC_C').mean().alias('MoC_C'),
-            pl.col('Downturn').mean().alias('MoC_Downturn'),
-            pl.col('Somme MoC').mean().alias('mean_somme_moc'),
-            pl.col('Somme MoC').median().alias('median_somme_moc'),
-            pl.col('Significatif').mean().alias('Significatif'),
-        ]),
-        on='HLC',
-        how='left'
-    )
-    .sort('lgd_obligor_hlc_weighted_year')
+classes   = class_stats["CHR_model"].to_list()
+means     = class_stats["mean_lgd"].to_list()
+effectifs = class_stats["n"].to_list()
+
+print(f"{len(classes)} classes | LGD [{min(means):.2f} – {max(means):.2f}]\n")
+
+# Boucle sur les 64 paires adjacentes
+rows = []
+for i in range(len(classes) - 1):
+    ca, cb = classes[i], classes[i + 1]
+    a = df_base.filter(pl.col("CHR_model") == ca)["lgd_obligor"].to_numpy()
+    b = df_base.filter(pl.col("CHR_model") == cb)["lgd_obligor"].to_numpy()
+    mean_lgd = float((a.sum() + b.sum()) / (len(a) + len(b)))
+
+    code, raison = W1OverlapTest(a, b, mean_lgd)
+    diag = _LAST_W1_DIAG.copy()
+
+    rows.append({
+        "class_a"     : ca,
+        "class_b"     : cb,
+        "mean_a"      : round(means[i],     3),
+        "mean_b"      : round(means[i + 1], 3),
+        "gap"         : round(abs(means[i + 1] - means[i]), 3),
+        "n_a"         : effectifs[i],
+        "n_b"         : effectifs[i + 1],
+        "code"        : code,
+        "fusionnable" : code in CODES_FUSIONNABLES,
+        "w1_obs"      : diag.get("w1_obs"),
+        "w1_ic95_sup" : diag.get("w1_ic95_sup"),
+        "eta"         : diag.get("eta"),
+        "w1_pct_loc"  : diag.get("w1_pct_loc"),
+        "raison"      : raison,
+    })
+
+    symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
+    print(f"{symbole} [{i+1:2d}/64] {str(ca):<25} | {str(cb):<25} "
+          f"gap={rows[-1]['gap']:5.2f}  "
+          f"W1={str(diag.get('w1_obs') or '—'):>7}  "
+          f"IC_sup={str(diag.get('w1_ic95_sup') or '—'):>7}  "
+          f"eta={str(diag.get('eta') or '—'):>6}")
+
+# DataFrame resultats
+resultats = pl.DataFrame(rows)
+
+# Résumé
+n_zero = resultats.filter(pl.col("code") == 0).height
+n_un   = resultats.filter(pl.col("code") == 1).height
+n_non  = resultats.filter(pl.col("code") == 99).height
+print(f"\n{'='*55}")
+print(f"  ✅ code 0 (équivalent)  : {n_zero:>3}")
+print(f"  🟡 code 1 (modéré)     : {n_un:>3}")
+print(f"  ❌ code 99 (différent) : {n_non:>3}")
+print(f"{'='*55}\n")
+
+# Tableaux
+print("=== FUSIONNABLES ===")
+display(
+    resultats
+    .filter(pl.col("fusionnable"))
+    .sort("gap")
+    .select(["class_a","class_b","gap","n_a","n_b",
+             "w1_obs","w1_ic95_sup","eta","w1_pct_loc","code","raison"])
 )
 
-print(stats_hlc)
+print("\n=== NON FUSIONNABLES ===")
+display(
+    resultats
+    .filter(~pl.col("fusionnable"))
+    .sort("gap")
+    .select(["class_a","class_b","gap","n_a","n_b",
+             "w1_obs","w1_ic95_sup","eta","w1_pct_loc","raison"])
+)
