@@ -1,253 +1,154 @@
 # ============================================================
-#  CALIBRATION DU SEUIL g — impact ΔMAE par seuil
-#  Logique : pour chaque seuil g testé, on fusionne et on
-#  mesure la dégradation de MAE vs référence 65 classes
+#  FOREST PLOT — moyennes LGD par classe
+#  4 classes par figure, distinction fusionnées / originales
+#  Requiert : class_stats_base, groups_state, df_base
 # ============================================================
 
 import numpy as np
 import polars as pl
-
-# Seuils a tester
-G_SEUILS_TEST = [0.20, 0.50, 0.80, 1.20, 2.00]
-
-# Seuil de materialite IRB (votre politique interne)
-SEUIL_MAE_PCT = 5.0   # % de degradation MAE acceptable
-
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 # ================================================================
-#  FONCTION MAE SUR STATS AGREGEES
+#  PREPARATION DES DONNEES
 # ================================================================
 
-def mae_from_groups(groups_state: dict, df: pl.DataFrame) -> float:
-    """
-    MAE de substitution : erreur moyenne si on predit
-    la moyenne de classe fusionnee pour chaque observation.
-    Utilise lgd_obligor deja ponderee EAD.
-    """
-    # Construire le mapping membre -> moyenne groupe
-    mapping_rows = []
-    for grp in groups_state.values():
-        for membre in grp["members"]:
-            mapping_rows.append({
-                "CHR_model"  : int(membre),
-                "mean_groupe": grp["mean"],
-            })
+# Mapping CHR_model_orig -> classe_finale
+mapping_rows = []
+for label, grp in groups_state.items():
+    for membre in grp["members"]:
+        mapping_rows.append({
+            "CHR_model"     : int(membre),
+            "classe_finale" : label,
+            "n_membres"     : len(grp["members"]),
+        })
+mapping_df = pl.DataFrame(mapping_rows)
 
-    mapping = pl.DataFrame(mapping_rows)
-
-    mae = (
-        df
-        .join(mapping, on="CHR_model", how="left")
-        .select(
-            pl.col("lgd_obligor"),
-            pl.col("mean_groupe"),
-        )
-        .select(
-            (pl.col("lgd_obligor") - pl.col("mean_groupe"))
-            .abs()
-            .mean()
-            .alias("mae")
-        )
-        .item()
-    )
-    return float(mae)
-
-
-def run_fusion_for_seuil(g_seuil: float,
-                          class_stats: pl.DataFrame) -> dict:
-    """
-    Lance la fusion gloutonne jusqu'a saturation pour un seuil g donne.
-    Retourne les stats finales.
-    """
-    # Init groups_state
-    groups = {
-        str(r["CHR_model"]): {
-            "mean"   : float(r["mean_lgd"]),
-            "var"    : float(r["var_lgd"]),
-            "n"      : int(r["n"]),
-            "members": [str(r["CHR_model"])],
-        }
-        for r in class_stats.iter_rows(named=True)
-    }
-
-    n_fusions = 0
-    for _ in range(500):
-        ordre = sorted(groups.keys(), key=lambda c: groups[c]["mean"])
-        if len(ordre) <= 1:
-            break
-
-        # Meilleure paire adjacente
-        best_g, best_pair = np.inf, None
-        for i in range(len(ordre) - 1):
-            ca, cb = ordre[i], ordre[i + 1]
-            ga, gb = groups[ca], groups[cb]
-            df_   = ga["n"] + gb["n"] - 2
-            if df_ <= 0:
-                continue
-            s_pooled = np.sqrt(
-                ((ga["n"]-1)*ga["var"] + (gb["n"]-1)*gb["var"]) / df_
-            )
-            g_val = abs(ga["mean"]-gb["mean"]) / s_pooled if s_pooled > 0 else 0.0
-            if g_val < best_g:
-                best_g, best_pair = g_val, (ca, cb)
-
-        # Arret si meilleure fusion depasse le seuil
-        if best_g >= g_seuil:
-            break
-
-        # Fusion
-        ca, cb = best_pair
-        ga, gb = groups.pop(ca), groups.pop(cb)
-        n_new    = ga["n"] + gb["n"]
-        mean_new = (ga["mean"]*ga["n"] + gb["mean"]*gb["n"]) / n_new
-        var_new  = (
-            (ga["n"]-1)*ga["var"] +
-            (gb["n"]-1)*gb["var"] +
-            ga["n"]*gb["n"]/n_new * (ga["mean"]-gb["mean"])**2
-        ) / (n_new - 1)
-
-        groups[f"{ca}|{cb}"] = {
-            "mean"   : mean_new,
-            "var"    : var_new,
-            "n"      : n_new,
-            "members": ga["members"] + gb["members"],
-        }
-        n_fusions += 1
-
-    return {
-        "g_seuil"  : g_seuil,
-        "n_classes": len(groups),
-        "n_fusions": n_fusions,
-        "groups"   : groups,
-    }
-
-
-# ================================================================
-#  REFERENCE : 65 classes originales
-# ================================================================
-
-class_stats_base = (
-    df_base
-    .group_by("CHR_model")
-    .agg([
-        pl.col("lgd_obligor").mean().alias("mean_lgd"),
-        pl.col("lgd_obligor").var().alias("var_lgd"),
-        pl.col("lgd_obligor").count().alias("n"),
+# Stats par classe originale avec info fusion
+stats_plot = (
+    class_stats_base
+    .join(mapping_df, on="CHR_model", how="left")
+    .with_columns([
+        (pl.col("n_membres") > 1).alias("est_fusionne"),
+        # IC95% : mean ± 1.96 * std / sqrt(n)
+        (pl.col("mean_lgd") - 1.96 * (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
+        .alias("ic_low"),
+        (pl.col("mean_lgd") + 1.96 * (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
+        .alias("ic_high"),
     ])
     .sort("mean_lgd")
 )
 
-# Groups_state reference (65 classes, pas de fusion)
-groups_ref = {
-    str(r["CHR_model"]): {
-        "mean"   : float(r["mean_lgd"]),
-        "var"    : float(r["var_lgd"]),
-        "n"      : int(r["n"]),
-        "members": [str(r["CHR_model"])],
-    }
-    for r in class_stats_base.iter_rows(named=True)
-}
+classes_plot  = stats_plot["CHR_model"].to_list()
+means_plot    = stats_plot["mean_lgd"].to_list()
+ic_low_plot   = stats_plot["ic_low"].to_list()
+ic_high_plot  = stats_plot["ic_high"].to_list()
+fusionne_plot = stats_plot["est_fusionne"].to_list()
+n_plot        = stats_plot["n"].to_list()
+cls_finale    = stats_plot["classe_finale"].to_list()
 
-mae_ref    = mae_from_groups(groups_ref, df_base)
-n_ref      = len(groups_ref)
+N_CLASSES   = len(classes_plot)
+PAR_PAGE    = 4
+N_PAGES     = int(np.ceil(N_CLASSES / PAR_PAGE))
 
-print(f"REFERENCE : {n_ref} classes | MAE = {mae_ref:.6f}\n")
-
+print(f"{N_CLASSES} classes | {N_PAGES} pages de {PAR_PAGE} classes\n")
 
 # ================================================================
-#  BOUCLE SUR LES SEUILS
+#  FOREST PLOTS
 # ================================================================
 
-resultats_calibration = []
+for page in range(N_PAGES):
+    debut = page * PAR_PAGE
+    fin   = min(debut + PAR_PAGE, N_CLASSES)
+    batch = list(range(debut, fin))
+    n_plots = len(batch)
 
-for g_seuil in G_SEUILS_TEST:
-    res     = run_fusion_for_seuil(g_seuil, class_stats_base)
-    mae_g   = mae_from_groups(res["groups"], df_base)
-    delta   = (mae_g - mae_ref) / mae_ref * 100
-    ok      = delta <= SEUIL_MAE_PCT
+    fig, axes = plt.subplots(
+        1, n_plots,
+        figsize=(4.5 * n_plots, 5),
+        sharey=False,
+    )
+    if n_plots == 1:
+        axes = [axes]
 
-    resultats_calibration.append({
-        "g_seuil"       : g_seuil,
-        "n_classes"     : res["n_classes"],
-        "n_fusions"     : res["n_fusions"],
-        "mae"           : round(mae_g,  6),
-        "delta_mae_pct" : round(delta,  3),
-        "acceptable"    : ok,
-    })
+    fig.suptitle(
+        f"Forest plot — LGD par classe  |  page {page+1}/{N_PAGES}",
+        fontsize=11, fontweight="bold"
+    )
 
-    symbole = "✅" if ok else "❌"
-    print(f"{symbole} g < {g_seuil:.2f} | "
-          f"n={res['n_classes']:3d} classes | "
-          f"MAE={mae_g:.6f} | "
-          f"ΔMAE={delta:+.3f}% "
-          f"({'< ' if ok else '>= '}{SEUIL_MAE_PCT}%)")
+    for col, idx in enumerate(batch):
+        ax  = axes[col]
+        cls = classes_plot[idx]
+        mu  = means_plot[idx]
+        lo  = ic_low_plot[idx]
+        hi  = ic_high_plot[idx]
+        fus = fusionne_plot[idx]
+        n   = n_plot[idx]
+        cf  = cls_finale[idx]
 
+        couleur = "#E05A2B" if fus else "#2B7BB9"   # orange=fusionné, bleu=intact
 
-# ================================================================
-#  TABLEAU + GRAPHE
-# ================================================================
+        # Point estimate
+        ax.scatter(0, mu, s=80, color=couleur, zorder=5)
 
-df_calib = pl.DataFrame(resultats_calibration)
+        # IC95% — barre verticale
+        ax.plot([0, 0], [lo, hi], color=couleur, lw=2.5, zorder=4)
 
-print(f"\n{'='*65}")
-print(f"  Seuil matérialité MAE : {SEUIL_MAE_PCT}%")
-print(f"  Référence : MAE={mae_ref:.6f} ({n_ref} classes)")
-print(f"{'='*65}")
-display(df_calib)
+        # Caps horizontaux
+        cap_w = 0.06
+        ax.plot([-cap_w, cap_w], [lo, lo], color=couleur, lw=1.5)
+        ax.plot([-cap_w, cap_w], [hi, hi], color=couleur, lw=1.5)
 
-# Identifier le seuil recommande
-acceptables = df_calib.filter(pl.col("acceptable"))
-if acceptables.height > 0:
-    # Seuil le plus grand encore acceptable = max fusions sans depasser la limite
-    seuil_retenu = acceptables["g_seuil"].max()
-    n_retenu     = acceptables.filter(
-        pl.col("g_seuil") == seuil_retenu)["n_classes"].item()
-    delta_retenu = acceptables.filter(
-        pl.col("g_seuil") == seuil_retenu)["delta_mae_pct"].item()
-    print(f"\n✅ SEUIL RECOMMANDE : g < {seuil_retenu}")
-    print(f"   → {n_retenu} classes finales")
-    print(f"   → ΔMAE = {delta_retenu:+.3f}% < {SEUIL_MAE_PCT}%")
-else:
-    print(f"\n⚠️  Aucun seuil ne respecte ΔMAE < {SEUIL_MAE_PCT}%")
-    print(f"   Envisagez d'assouplir SEUIL_MAE_PCT")
+        # Ligne de référence verticale (moyenne globale)
+        grand_mean = float(
+            (np.array(means_plot) * np.array(n_plot)).sum() /
+            np.sum(n_plot)
+        )
+        ax.axhline(grand_mean, color="gray", linestyle="--",
+                   lw=0.8, alpha=0.6, label="moy. globale")
 
-# Graphe
-import matplotlib.pyplot as plt
+        # Annotations
+        ax.set_title(
+            f"CHR {cls}\n{'🔴 fusionné' if fus else '🔵 intact'}",
+            fontsize=9, pad=4
+        )
+        ax.set_ylabel("LGD (%)" if col == 0 else "")
+        ax.set_xticks([])
+        ax.set_xlim(-0.3, 0.3)
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-fig.suptitle("Calibration du seuil g — impact ΔMAE", fontsize=13)
+        # Texte : moyenne + IC + n
+        ax.text(
+            0.97, 0.97,
+            f"μ = {mu:.2f}\nIC = [{lo:.2f}, {hi:.2f}]\nn = {n:,}",
+            transform=ax.transAxes,
+            ha="right", va="top", fontsize=7.5,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                      ec=couleur, alpha=0.85)
+        )
 
-g_vals    = df_calib["g_seuil"].to_list()
-n_vals    = df_calib["n_classes"].to_list()
-delta_vals= df_calib["delta_mae_pct"].to_list()
+        # Classe finale (si fusionné)
+        if fus:
+            membres = cf.replace("|", ", ")
+            ax.text(
+                0.03, 0.03,
+                f"Groupe:\n{membres[:30]}{'…' if len(membres)>30 else ''}",
+                transform=ax.transAxes,
+                ha="left", va="bottom", fontsize=6.5,
+                color="#E05A2B",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                          ec="#E05A2B", alpha=0.7)
+            )
 
-# ΔMAE vs seuil g
-couleurs = ["green" if ok else "red"
-            for ok in df_calib["acceptable"].to_list()]
-axes[0].bar(
-    [str(g) for g in g_vals], delta_vals,
-    color=couleurs, alpha=0.7, edgecolor="black"
-)
-axes[0].axhline(SEUIL_MAE_PCT, color="orange", linestyle="--",
-                lw=1.5, label=f"seuil matérialité {SEUIL_MAE_PCT}%")
-axes[0].set_xlabel("Seuil g")
-axes[0].set_ylabel("ΔMAE (%)")
-axes[0].set_title("Dégradation MAE par seuil g")
-axes[0].legend()
+    # Legende commune
+    patch_fus   = mpatches.Patch(color="#E05A2B", label="Classe fusionnée")
+    patch_intact= mpatches.Patch(color="#2B7BB9", label="Classe intacte")
+    fig.legend(
+        handles=[patch_intact, patch_fus],
+        loc="lower center", ncol=2,
+        fontsize=8, framealpha=0.9,
+        bbox_to_anchor=(0.5, -0.02)
+    )
 
-# Nb classes vs ΔMAE
-axes[1].scatter(delta_vals, n_vals, s=80, zorder=5,
-                color=couleurs, edgecolor="black")
-for g, d, n in zip(g_vals, delta_vals, n_vals):
-    axes[1].annotate(f"g<{g}", (d, n),
-                     textcoords="offset points",
-                     xytext=(6, 0), fontsize=9)
-axes[1].axvline(SEUIL_MAE_PCT, color="orange", linestyle="--",
-                lw=1.5, label=f"seuil {SEUIL_MAE_PCT}%")
-axes[1].set_xlabel("ΔMAE (%)")
-axes[1].set_ylabel("Nombre de classes finales")
-axes[1].set_title("Parcimonie vs dégradation")
-axes[1].legend()
-
-plt.tight_layout()
-plt.show()
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    plt.show()
+    print(f"  — page {page+1}/{N_PAGES} —\n")
