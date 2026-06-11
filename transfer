@@ -1,255 +1,120 @@
 # ============================================================
-#  CRITERE DE PARSIMONIE — pouvoir discriminant
-#  Cellule 1 : scores de reference sur les 65 classes
-# ============================================================
-
-from sklearn.metrics import roc_auc_score
-import polars as pl
-import numpy as np
-
-def compute_scores(df: pl.DataFrame, class_col: str, target_col: str) -> dict:
-    """
-    Calcule les 3 criteres de pouvoir discriminant sur un partitionnement donne.
-    
-    R2        : variance inter / variance totale (eta-squared)
-    Gini/AUC  : AUC one-vs-rest moyenne ponderee entre classes
-    MAE_pred  : erreur de prediction si on predit la moyenne de classe
-    """
-    # Stats globales
-    y = df[target_col].to_numpy()
-    grand_mean = y.mean()
-    ss_total   = ((y - grand_mean) ** 2).sum()
-
-    # Stats par classe
-    class_stats = (
-        df.group_by(class_col)
-        .agg([
-            pl.col(target_col).mean().alias("mean_cls"),
-            pl.col(target_col).count().alias("n_cls"),
-        ])
-    )
-    classes  = class_stats[class_col].to_list()
-    means    = class_stats["mean_cls"].to_numpy()
-    ns       = class_stats["n_cls"].to_numpy()
-
-    # R2 : variance expliquee par les classes
-    ss_inter = float(((means - grand_mean) ** 2 * ns).sum())
-    r2 = ss_inter / ss_total if ss_total > 0 else 0.0
-
-    # MAE_pred : erreur moyenne si on predit mean_cls pour chaque observation
-    df_joined = df.join(class_stats, on=class_col, how="left")
-    y_pred    = df_joined["mean_cls"].to_numpy()
-    mae_pred  = float(np.abs(y - y_pred).mean())
-
-    # Gini : AUC one-vs-rest, pondere par effectif
-    # Pour chaque classe : AUC(classe_i vs reste)
-    labels = df[class_col].to_numpy()
-    aucs, weights = [], []
-    for cls, n_cls in zip(classes, ns):
-        binary = (labels == cls).astype(int)
-        if binary.sum() == 0 or binary.sum() == len(binary):
-            continue
-        try:
-            auc = roc_auc_score(binary, y)
-            aucs.append(auc)
-            weights.append(n_cls)
-        except Exception:
-            continue
-    gini = float(2 * np.average(aucs, weights=weights) - 1) if aucs else 0.0
-
-    return {
-        "n_classes": len(classes),
-        "r2"       : round(r2,       6),
-        "gini"     : round(gini,     6),
-        "mae_pred" : round(mae_pred, 6),
-    }
-
-
-# Scores de reference sur les 65 classes originales
-scores_ref = compute_scores(df_base, "CHR_model", "lgd_obligor")
-print("=== REFERENCE (65 classes) ===")
-for k, v in scores_ref.items():
-    print(f"  {k:<12} : {v}")
-
-# ============================================================
-#  CRITERE DE PARSIMONIE — fusion gloutonne
-#  Cellule 2 : fusion iterative, on s'arrete quand la perte
-#              depasse le seuil de tolerance
-# ============================================================
-
-# Seuils de tolerance (perte relative acceptee sur chaque critere)
-TOL_R2       = 0.02   # on accepte de perdre jusqu'a 2% de R2
-TOL_GINI     = 0.02   # idem Gini
-TOL_MAE      = 0.05   # on accepte +5% de MAE (erreur prediction)
-
-MAX_ITER_PARS = 200   # securite
-
-def get_adjacent_pairs(df: pl.DataFrame, class_col: str, target_col: str):
-    """Paires adjacentes triees par LGD moyenne croissante."""
-    stats = (
-        df.group_by(class_col)
-        .agg(pl.col(target_col).mean().alias("mean_lgd"))
-        .sort("mean_lgd")
-    )
-    classes = stats[class_col].to_list()
-    pairs = [(classes[i], classes[i+1]) for i in range(len(classes)-1)]
-    return pairs
-
-
-def merge_classes_df(df: pl.DataFrame, ca, cb, class_col: str) -> pl.DataFrame:
-    """Fusionne ca et cb en une nouvelle classe nommee 'ca|cb'."""
-    new_name = f"{ca}|{cb}"
-    return df.with_columns(
-        pl.when(pl.col(class_col).is_in([ca, cb]))
-        .then(pl.lit(new_name))
-        .otherwise(pl.col(class_col))
-        .alias(class_col)
-    )
-
-
-# Boucle de fusion gloutonne
-df_current  = df_base.clone()
-history_par = []
-r2_ref      = scores_ref["r2"]
-gini_ref    = scores_ref["gini"]
-mae_ref     = scores_ref["mae_pred"]
-
-print(f"Reference : R2={r2_ref:.6f}  Gini={gini_ref:.6f}  MAE={mae_ref:.6f}\n")
-
-for it in range(MAX_ITER_PARS):
-    pairs = get_adjacent_pairs(df_current, "CHR_model", "lgd_obligor")
-    if not pairs:
-        print("Plus de paires adjacentes.")
-        break
-
-    # Tester toutes les paires, garder celle qui perd le moins de R2
-    best = None
-    best_loss_r2 = np.inf
-
-    for ca, cb in pairs:
-        df_merged  = merge_classes_df(df_current, ca, cb, "CHR_model")
-        sc         = compute_scores(df_merged, "CHR_model", "lgd_obligor")
-        loss_r2    = (r2_ref    - sc["r2"])    / r2_ref    if r2_ref   > 0 else 0
-        loss_gini  = (gini_ref  - sc["gini"])  / gini_ref  if gini_ref > 0 else 0
-        delta_mae  = (sc["mae_pred"] - mae_ref) / mae_ref  if mae_ref  > 0 else 0
-
-        if loss_r2 < best_loss_r2:
-            best_loss_r2 = loss_r2
-            best = {
-                "ca": ca, "cb": cb,
-                "scores": sc,
-                "loss_r2"  : round(loss_r2,   6),
-                "loss_gini": round(loss_gini,  6),
-                "delta_mae": round(delta_mae,  6),
-            }
-
-    # Critere d'arret : la meilleure fusion disponible depasse un seuil
-    stop_r2   = best["loss_r2"]   > TOL_R2
-    stop_gini = best["loss_gini"] > TOL_GINI
-    stop_mae  = best["delta_mae"] > TOL_MAE
-
-    symbole = "✅" if not (stop_r2 or stop_gini or stop_mae) else "⚠️"
-    print(f"{symbole} it={it+1:3d} | {str(best['ca']):<20} + {str(best['cb']):<20} | "
-          f"R2={best['scores']['r2']:.6f} (-{best['loss_r2']*100:.3f}%)  "
-          f"Gini={best['scores']['gini']:.6f} (-{best['loss_gini']*100:.3f}%)  "
-          f"MAE={best['scores']['mae_pred']:.4f} (+{best['delta_mae']*100:.3f}%)")
-
-    history_par.append({
-        "iteration" : it + 1,
-        "class_a"   : best["ca"],
-        "class_b"   : best["cb"],
-        "n_classes" : best["scores"]["n_classes"],
-        "r2"        : best["scores"]["r2"],
-        "gini"      : best["scores"]["gini"],
-        "mae_pred"  : best["scores"]["mae_pred"],
-        "loss_r2"   : best["loss_r2"],
-        "loss_gini" : best["loss_gini"],
-        "delta_mae" : best["delta_mae"],
-        "stop_r2"   : stop_r2,
-        "stop_gini" : stop_gini,
-        "stop_mae"  : stop_mae,
-    })
-
-    if stop_r2 or stop_gini or stop_mae:
-        raisons = []
-        if stop_r2:   raisons.append(f"R2 -perte={best['loss_r2']*100:.2f}%>{TOL_R2*100}%")
-        if stop_gini: raisons.append(f"Gini -perte={best['loss_gini']*100:.2f}%>{TOL_GINI*100}%")
-        if stop_mae:  raisons.append(f"MAE +delta={best['delta_mae']*100:.2f}%>{TOL_MAE*100}%")
-        print(f"\n🛑 Arret it={it+1} : {' | '.join(raisons)}")
-        break
-
-    df_current = merge_classes_df(df_current, best["ca"], best["cb"], "CHR_model")
-
-print(f"\nClasses finales : {df_current['CHR_model'].n_unique()}")
-
-
-# ============================================================
-#  CRITERE DE PARSIMONIE — resultats
-#  Cellule 3 : tableau + courbes des 3 criteres
+#  VISUALISATION DISTRIBUTIONS PAIRES ADJACENTES
+#  Cellule autonome — necessite df_base charge
 # ============================================================
 
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import numpy as np
+from scipy.stats import gaussian_kde
 
-results_par = pl.DataFrame(history_par)
+def plot_adjacent_pairs(df, class_col="CHR_model", target_col="lgd_obligor", 
+                        pairs_per_page=4):
+    """
+    Affiche les distributions KDE de chaque paire adjacente.
+    Navigation par page (pairs_per_page paires par figure).
+    """
+    # Classes triees par LGD moyenne croissante
+    stats = (
+        df.group_by(class_col)
+        .agg([
+            pl.col(target_col).mean().alias("mean_lgd"),
+            pl.col(target_col).count().alias("n"),
+        ])
+        .sort("mean_lgd")
+    )
+    classes   = stats[class_col].to_list()
+    means_map = dict(zip(stats[class_col].to_list(), stats["mean_lgd"].to_list()))
+    ns_map    = dict(zip(stats[class_col].to_list(), stats["n"].to_list()))
+    
+    pairs = [(classes[i], classes[i+1]) for i in range(len(classes)-1)]
+    n_pages = int(np.ceil(len(pairs) / pairs_per_page))
 
-print("=== HISTORIQUE DES FUSIONS ===")
-display(
-    results_par.select([
-        "iteration","class_a","class_b","n_classes",
-        "r2","gini","mae_pred",
-        "loss_r2","loss_gini","delta_mae",
-    ])
-)
+    for page in range(n_pages):
+        batch = pairs[page * pairs_per_page : (page+1) * pairs_per_page]
+        n_plots = len(batch)
 
-# Scores finaux vs reference
-scores_final = compute_scores(df_current, "CHR_model", "lgd_obligor")
-print(f"\n{'='*55}")
-print(f"{'':20} {'REFERENCE':>12} {'FINAL':>12} {'PERTE':>10}")
-print(f"  {'n_classes':<18} {scores_ref['n_classes']:>12} {scores_final['n_classes']:>12}")
-print(f"  {'R2':<18} {scores_ref['r2']:>12.6f} {scores_final['r2']:>12.6f} "
-      f"{(scores_ref['r2']-scores_final['r2'])/scores_ref['r2']*100:>9.3f}%")
-print(f"  {'Gini':<18} {scores_ref['gini']:>12.6f} {scores_final['gini']:>12.6f} "
-      f"{(scores_ref['gini']-scores_final['gini'])/scores_ref['gini']*100:>9.3f}%")
-print(f"  {'MAE_pred':<18} {scores_ref['mae_pred']:>12.6f} {scores_final['mae_pred']:>12.6f} "
-      f"{(scores_final['mae_pred']-scores_ref['mae_pred'])/scores_ref['mae_pred']*100:>9.3f}%")
-print(f"{'='*55}")
+        fig, axes = plt.subplots(n_plots, 2, figsize=(14, 3.5 * n_plots))
+        if n_plots == 1:
+            axes = [axes]  # normalise en liste de lignes
 
-# Courbes
-iters       = results_par["iteration"].to_list()
-n_cls_hist  = results_par["n_classes"].to_list()
-r2_hist     = results_par["r2"].to_list()
-gini_hist   = results_par["gini"].to_list()
-mae_hist    = results_par["mae_pred"].to_list()
+        fig.suptitle(
+            f"Distributions paires adjacentes — page {page+1}/{n_pages}",
+            fontsize=13, fontweight="bold", y=1.01
+        )
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-fig.suptitle("Evolution des criteres lors des fusions", fontsize=13)
+        for row, (ca, cb) in enumerate(batch):
+            ax_kde  = axes[row][0]
+            ax_cdf  = axes[row][1]
 
-axes[0].plot(n_cls_hist, r2_hist, marker="o", markersize=3)
-axes[0].axhline(r2_ref,   color="red", linestyle="--", label="reference")
-axes[0].axhline(r2_ref * (1 - TOL_R2), color="orange", linestyle=":", label=f"seuil -{TOL_R2*100:.0f}%")
-axes[0].set_xlabel("Nombre de classes")
-axes[0].set_ylabel("R²")
-axes[0].set_title("R² (variance expliquee)")
-axes[0].invert_xaxis()
-axes[0].legend()
+            a = df.filter(pl.col(class_col) == ca)[target_col].to_numpy()
+            b = df.filter(pl.col(class_col) == cb)[target_col].to_numpy()
 
-axes[1].plot(n_cls_hist, gini_hist, marker="o", markersize=3, color="green")
-axes[1].axhline(gini_ref, color="red", linestyle="--", label="reference")
-axes[1].axhline(gini_ref * (1 - TOL_GINI), color="orange", linestyle=":", label=f"seuil -{TOL_GINI*100:.0f}%")
-axes[1].set_xlabel("Nombre de classes")
-axes[1].set_ylabel("Gini")
-axes[1].set_title("Gini (pouvoir discriminant)")
-axes[1].invert_xaxis()
-axes[1].legend()
+            # Calcul W1 et eta pour annotation
+            w1  = float(wasserstein_distance(a, b))
+            eta = _overlap_eta(a, b)
 
-axes[2].plot(n_cls_hist, mae_hist, marker="o", markersize=3, color="purple")
-axes[2].axhline(mae_ref,  color="red", linestyle="--", label="reference")
-axes[2].axhline(mae_ref * (1 + TOL_MAE), color="orange", linestyle=":", label=f"seuil +{TOL_MAE*100:.0f}%")
-axes[2].set_xlabel("Nombre de classes")
-axes[2].set_ylabel("MAE")
-axes[2].set_title("MAE prediction LGD")
-axes[2].invert_xaxis()
-axes[2].legend()
+            # Grille commune
+            lo  = min(a.min(), b.min())
+            hi  = max(a.max(), b.max())
+            pad = 0.05 * (hi - lo) if hi > lo else 1.0
+            grid = np.linspace(lo - pad, hi + pad, 512)
 
-plt.tight_layout()
-plt.show()
+            # KDE
+            kde_a = gaussian_kde(a)
+            kde_b = gaussian_kde(b)
+            fa    = kde_a(grid)
+            fb    = kde_b(grid)
+
+            # --- Panneau gauche : KDE + zone de recouvrement ---
+            ax_kde.fill_between(grid, np.minimum(fa, fb),
+                                alpha=0.35, color="purple", label=f"overlap η={eta:.3f}")
+            ax_kde.plot(grid, fa, color="steelblue",  lw=1.8,
+                        label=f"{ca}  μ={means_map[ca]:.2f}  n={ns_map[ca]:,}")
+            ax_kde.plot(grid, fb, color="darkorange",  lw=1.8,
+                        label=f"{cb}  μ={means_map[cb]:.2f}  n={ns_map[cb]:,}")
+            ax_kde.axvline(means_map[ca], color="steelblue",  lw=1, linestyle="--", alpha=0.7)
+            ax_kde.axvline(means_map[cb], color="darkorange",  lw=1, linestyle="--", alpha=0.7)
+            ax_kde.set_title(f"{ca}  vs  {cb} — KDE", fontsize=10)
+            ax_kde.set_xlabel("lgd_obligor")
+            ax_kde.set_ylabel("densité")
+            ax_kde.legend(fontsize=8)
+
+            # Annotation W1 + eta
+            ax_kde.text(0.97, 0.95,
+                        f"W₁ = {w1:.4f}\nη  = {eta:.4f}\ngap = {abs(means_map[cb]-means_map[ca]):.4f}",
+                        transform=ax_kde.transAxes,
+                        ha="right", va="top", fontsize=8,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+
+            # --- Panneau droit : CDF empiriques ---
+            a_sorted = np.sort(a)
+            b_sorted = np.sort(b)
+            cdf_a    = np.arange(1, len(a)+1) / len(a)
+            cdf_b    = np.arange(1, len(b)+1) / len(b)
+
+            ax_cdf.plot(a_sorted, cdf_a, color="steelblue",  lw=1.5, label=str(ca))
+            ax_cdf.plot(b_sorted, cdf_b, color="darkorange",  lw=1.5, label=str(cb))
+
+            # Zone W1 = aire entre les deux CDF (ombrage vertical)
+            # On interpole sur grille commune pour l'ombrage
+            cdf_a_interp = np.interp(grid, a_sorted, cdf_a, left=0, right=1)
+            cdf_b_interp = np.interp(grid, b_sorted, cdf_b, left=0, right=1)
+            ax_cdf.fill_betweenx(
+                np.linspace(0, 1, len(grid)),
+                np.interp(np.linspace(0, 1, len(grid)), cdf_a_interp, grid),
+                np.interp(np.linspace(0, 1, len(grid)), cdf_b_interp, grid),
+                alpha=0.15, color="purple", label=f"aire = W₁"
+            )
+            ax_cdf.set_title(f"{ca}  vs  {cb} — CDF empirique", fontsize=10)
+            ax_cdf.set_xlabel("lgd_obligor")
+            ax_cdf.set_ylabel("F(x)")
+            ax_cdf.legend(fontsize=8)
+
+        plt.tight_layout()
+        plt.show()
+        print(f"  — page {page+1}/{n_pages} —\n")
+
+
+# Lancement
+plot_adjacent_pairs(df_base, pairs_per_page=4)
