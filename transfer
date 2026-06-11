@@ -1,247 +1,89 @@
 # ============================================================
-#  CRITERE DE PARSIMONIE v2 — R2 + STD_INTRA + MAE
-#  Cellule 1 : fonction de scores (remplace la precedente)
+#  CLUSTERING HIERARCHIQUE DE WARD — contrainte d'adjacence
+#  Cellule 1 : algorithme + dendrogramme
 # ============================================================
 
-import polars as pl
 import numpy as np
+import polars as pl
 import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from scipy.spatial.distance import squareform
 
-# Tolerances
-TOL_R2        = 0.005   # perte relative R2 max acceptee      : 0.5%
-TOL_STD_INTRA = 0.05    # hausse relative std intra max        : 5%
-TOL_MAE       = 0.02    # hausse relative MAE pred max         : 2%
-
-MAX_ITER_PARS = 200
-
-
-def compute_scores(df: pl.DataFrame, class_col: str, target_col: str) -> dict:
-    """
-    3 criteres de pouvoir discriminant — sans Gini.
-
-    R2        : variance inter / variance totale (eta-squared)
-    std_intra : ecart-type intra-classe moyen pondere (homogeneite)
-    mae_pred  : MAE si on predit la moyenne de classe pour chaque obs
-    """
-    y          = df[target_col].to_numpy()
-    grand_mean = y.mean()
-    ss_total   = ((y - grand_mean) ** 2).sum()
-
-    class_stats = (
-        df.group_by(class_col)
-        .agg([
-            pl.col(target_col).mean().alias("mean_cls"),
-            pl.col(target_col).std().alias("std_cls"),
-            pl.col(target_col).count().alias("n_cls"),
-        ])
-    )
-
-    means = class_stats["mean_cls"].to_numpy()
-    stds  = class_stats["std_cls"].to_numpy()
-    ns    = class_stats["n_cls"].to_numpy()
-
-    # R2
-    ss_inter = float(((means - grand_mean) ** 2 * ns).sum())
-    r2       = ss_inter / ss_total if ss_total > 0 else 0.0
-
-    # Std intra ponderee
-    std_intra = float((stds * ns).sum() / ns.sum())
-
-    # MAE prediction
-    df_joined = df.join(class_stats.select([class_col, "mean_cls"]),
-                        on=class_col, how="left")
-    y_pred    = df_joined["mean_cls"].to_numpy()
-    mae_pred  = float(np.abs(y - y_pred).mean())
-
-    return {
-        "n_classes" : int(class_stats.height),
-        "r2"        : round(r2,        6),
-        "std_intra" : round(std_intra, 6),
-        "mae_pred"  : round(mae_pred,  6),
-    }
-
-
-# ---- Reference sur les 65 classes originales ----
-scores_ref = compute_scores(df_base, "CHR_model", "lgd_obligor")
-print("=== REFERENCE (classes originales) ===")
-for k, v in scores_ref.items():
-    print(f"  {k:<14} : {v}")
-
-# ============================================================
-#  CRITERE DE PARSIMONIE v2 — fusion gloutonne
-#  Cellule 2 : boucle de fusion
-# ============================================================
-
-def get_adjacent_pairs(df: pl.DataFrame, class_col: str, target_col: str):
-    stats = (
-        df.group_by(class_col)
-        .agg(pl.col(target_col).mean().alias("mean_lgd"))
-        .sort("mean_lgd")
-    )
-    classes = stats[class_col].to_list()
-    return [(classes[i], classes[i+1]) for i in range(len(classes)-1)]
-
-
-def merge_classes_df(df: pl.DataFrame, ca, cb, class_col: str) -> pl.DataFrame:
-    new_name = f"{ca}|{cb}"
-    return df.with_columns(
-        pl.when(pl.col(class_col).is_in([ca, cb]))
-        .then(pl.lit(new_name))
-        .otherwise(pl.col(class_col))
-        .alias(class_col)
-    )
-
-
-# Valeurs de reference
-r2_ref        = scores_ref["r2"]
-std_intra_ref = scores_ref["std_intra"]
-mae_ref       = scores_ref["mae_pred"]
-
-print(f"Reference : R2={r2_ref:.6f}  std_intra={std_intra_ref:.6f}  MAE={mae_ref:.6f}")
-print(f"Tolerances: R2<-{TOL_R2*100}%  std_intra<+{TOL_STD_INTRA*100}%  MAE<+{TOL_MAE*100}%\n")
-
-df_current  = df_base.clone()
-history_par = []
-
-for it in range(MAX_ITER_PARS):
-    pairs = get_adjacent_pairs(df_current, "CHR_model", "lgd_obligor")
-    if not pairs:
-        print("Plus de paires adjacentes.")
-        break
-
-    # Tester toutes les paires, garder celle qui minimise la perte R2
-    best          = None
-    best_loss_r2  = np.inf
-
-    for ca, cb in pairs:
-        df_merged  = merge_classes_df(df_current, ca, cb, "CHR_model")
-        sc         = compute_scores(df_merged, "CHR_model", "lgd_obligor")
-
-        loss_r2        = (r2_ref        - sc["r2"])        / r2_ref        if r2_ref        > 0 else 0
-        delta_std      = (sc["std_intra"] - std_intra_ref) / std_intra_ref if std_intra_ref > 0 else 0
-        delta_mae      = (sc["mae_pred"]  - mae_ref)       / mae_ref       if mae_ref       > 0 else 0
-
-        if loss_r2 < best_loss_r2:
-            best_loss_r2 = loss_r2
-            best = {
-                "ca": ca, "cb": cb,
-                "scores"    : sc,
-                "loss_r2"   : round(loss_r2,   6),
-                "delta_std" : round(delta_std,  6),
-                "delta_mae" : round(delta_mae,  6),
-            }
-
-    stop_r2  = best["loss_r2"]   > TOL_R2
-    stop_std = best["delta_std"] > TOL_STD_INTRA
-    stop_mae = best["delta_mae"] > TOL_MAE
-
-    # Symbole selon gravite
-    n_stops  = sum([stop_r2, stop_std, stop_mae])
-    symbole  = "✅" if n_stops == 0 else "⚠️" if n_stops == 1 else "🛑"
-
-    print(f"{symbole} it={it+1:3d} | "
-          f"{str(best['ca']):<20} + {str(best['cb']):<20} | "
-          f"n={best['scores']['n_classes']:3d} | "
-          f"R2={best['scores']['r2']:.6f} ({best['loss_r2']*100:+.3f}%)  "
-          f"std={best['scores']['std_intra']:.4f} ({best['delta_std']*100:+.2f}%)  "
-          f"MAE={best['scores']['mae_pred']:.4f} ({best['delta_mae']*100:+.2f}%)")
-
-    history_par.append({
-        "iteration"  : it + 1,
-        "class_a"    : best["ca"],
-        "class_b"    : best["cb"],
-        "n_classes"  : best["scores"]["n_classes"],
-        "r2"         : best["scores"]["r2"],
-        "std_intra"  : best["scores"]["std_intra"],
-        "mae_pred"   : best["scores"]["mae_pred"],
-        "loss_r2"    : best["loss_r2"],
-        "delta_std"  : best["delta_std"],
-        "delta_mae"  : best["delta_mae"],
-        "stop_r2"    : stop_r2,
-        "stop_std"   : stop_std,
-        "stop_mae"   : stop_mae,
-    })
-
-    if stop_r2 or stop_std or stop_mae:
-        raisons = []
-        if stop_r2:  raisons.append(f"R2 -{best['loss_r2']*100:.3f}% > {TOL_R2*100}%")
-        if stop_std: raisons.append(f"std_intra +{best['delta_std']*100:.2f}% > {TOL_STD_INTRA*100}%")
-        if stop_mae: raisons.append(f"MAE +{best['delta_mae']*100:.2f}% > {TOL_MAE*100}%")
-        print(f"\n🛑 Arret it={it+1} — {' | '.join(raisons)}")
-        break
-
-    df_current = merge_classes_df(df_current, best["ca"], best["cb"], "CHR_model")
-
-print(f"\nClasses finales : {df_current['CHR_model'].n_unique()}")
-
-# ============================================================
-#  CRITERE DE PARSIMONIE v2 — resultats + courbes
-#  Cellule 3 : affichage
-# ============================================================
-
-results_par = pl.DataFrame(history_par)
-
-print("=== HISTORIQUE DES FUSIONS ===")
-display(
-    results_par.select([
-        "iteration","class_a","class_b","n_classes",
-        "r2","std_intra","mae_pred",
-        "loss_r2","delta_std","delta_mae",
+# --- Stats par classe, triees par LGD moyenne croissante ---
+class_stats = (
+    df_base
+    .group_by("CHR_model")
+    .agg([
+        pl.col("lgd_obligor").mean().alias("mean_lgd"),
+        pl.col("lgd_obligor").var().alias("var_lgd"),
+        pl.col("lgd_obligor").count().alias("n"),
     ])
+    .sort("mean_lgd")
 )
 
-scores_final = compute_scores(df_current, "CHR_model", "lgd_obligor")
+classes = class_stats["CHR_model"].to_list()
+means   = np.array(class_stats["mean_lgd"].to_list())
+ns      = np.array(class_stats["n"].to_list())
+K       = len(classes)
 
-print(f"\n{'='*60}")
-print(f"  {'':18} {'REFERENCE':>12} {'FINAL':>12} {'DELTA':>10}")
-print(f"  {'n_classes':<18} {scores_ref['n_classes']:>12} {scores_final['n_classes']:>12}")
-print(f"  {'R2':<18} {scores_ref['r2']:>12.6f} {scores_final['r2']:>12.6f} "
-      f"{(scores_ref['r2']-scores_final['r2'])/scores_ref['r2']*100:>+9.3f}%")
-print(f"  {'std_intra':<18} {scores_ref['std_intra']:>12.6f} {scores_final['std_intra']:>12.6f} "
-      f"{(scores_final['std_intra']-scores_ref['std_intra'])/scores_ref['std_intra']*100:>+9.3f}%")
-print(f"  {'mae_pred':<18} {scores_ref['mae_pred']:>12.6f} {scores_final['mae_pred']:>12.6f} "
-      f"{(scores_final['mae_pred']-scores_ref['mae_pred'])/scores_ref['mae_pred']*100:>+9.3f}%")
-print(f"{'='*60}")
+print(f"{K} classes | LGD [{means.min():.3f} – {means.max():.3f}]\n")
 
-# Courbes
-iters      = results_par["iteration"].to_list()
-n_cls_hist = results_par["n_classes"].to_list()
-r2_hist    = results_par["r2"].to_list()
-std_hist   = results_par["std_intra"].to_list()
-mae_hist   = results_par["mae_pred"].to_list()
+# --- Algorithme de Ward avec contrainte d'adjacence ---
+# Implémentation manuelle : à chaque étape on ne considère
+# que les paires adjacentes dans l'ordre courant
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-fig.suptitle("Evolution des criteres lors des fusions", fontsize=13)
+# Etat courant : liste ordonnée de groupes
+# Chaque groupe = {"label": str, "mean": float, "n": int, "members": list}
+groups = [
+    {"label": str(c), "mean": float(m), "n": int(n), "members": [str(c)]}
+    for c, m, n in zip(classes, means, ns)
+]
 
-# R2
-axes[0].plot(n_cls_hist, r2_hist, marker="o", markersize=3, color="steelblue")
-axes[0].axhline(r2_ref,                      color="red",    linestyle="--", lw=1, label="référence")
-axes[0].axhline(r2_ref * (1 - TOL_R2),       color="orange", linestyle=":",  lw=1, label=f"seuil -{TOL_R2*100:.1f}%")
-axes[0].set_xlabel("Nombre de classes")
-axes[0].set_ylabel("R²")
-axes[0].set_title("R² (variance expliquée)")
-axes[0].invert_xaxis()
-axes[0].legend(fontsize=8)
+fusion_history = []   # (distance_ward, label_a, label_b, label_new, n_classes_apres)
 
-# Std intra
-axes[1].plot(n_cls_hist, std_hist, marker="o", markersize=3, color="green")
-axes[1].axhline(std_intra_ref,                            color="red",    linestyle="--", lw=1, label="référence")
-axes[1].axhline(std_intra_ref * (1 + TOL_STD_INTRA),     color="orange", linestyle=":",  lw=1, label=f"seuil +{TOL_STD_INTRA*100:.0f}%")
-axes[1].set_xlabel("Nombre de classes")
-axes[1].set_ylabel("std intra")
-axes[1].set_title("Std intra-classe (homogénéité)")
-axes[1].invert_xaxis()
-axes[1].legend(fontsize=8)
+while len(groups) > 1:
+    best_delta = np.inf
+    best_idx   = -1
 
-# MAE
-axes[2].plot(n_cls_hist, mae_hist, marker="o", markersize=3, color="purple")
-axes[2].axhline(mae_ref,                       color="red",    linestyle="--", lw=1, label="référence")
-axes[2].axhline(mae_ref * (1 + TOL_MAE),       color="orange", linestyle=":",  lw=1, label=f"seuil +{TOL_MAE*100:.0f}%")
-axes[2].set_xlabel("Nombre de classes")
-axes[2].set_ylabel("MAE")
-axes[2].set_title("MAE prédiction LGD")
-axes[2].invert_xaxis()
-axes[2].legend(fontsize=8)
+    for i in range(len(groups) - 1):
+        a, b = groups[i], groups[i + 1]
+        # Critere de Ward : gain de variance intra si on fusionne a et b
+        delta = (a["n"] * b["n"]) / (a["n"] + b["n"]) * (a["mean"] - b["mean"]) ** 2
+        if delta < best_delta:
+            best_delta = delta
+            best_idx   = i
 
-plt.tight_layout()
-plt.show()
+    a = groups[best_idx]
+    b = groups[best_idx + 1]
+
+    # Nouveau groupe fusionne
+    n_new    = a["n"] + b["n"]
+    mean_new = (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new
+    new_grp  = {
+        "label"  : f"{a['label']}|{b['label']}",
+        "mean"   : mean_new,
+        "n"      : n_new,
+        "members": a["members"] + b["members"],
+    }
+
+    fusion_history.append({
+        "n_classes"  : len(groups) - 1,
+        "label_a"    : a["label"],
+        "label_b"    : b["label"],
+        "mean_a"     : round(a["mean"], 4),
+        "mean_b"     : round(b["mean"], 4),
+        "n_a"        : a["n"],
+        "n_b"        : b["n"],
+        "delta_ward" : round(best_delta, 6),
+        "members"    : new_grp["members"],
+    })
+
+    groups = groups[:best_idx] + [new_grp] + groups[best_idx + 2:]
+
+fh = pl.DataFrame([
+    {k: v for k, v in row.items() if k != "members"}
+    for row in fusion_history
+])
+
+print("=== HISTORIQUE DES FUSIONS (Ward) ===")
+display(fh)
