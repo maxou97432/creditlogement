@@ -1,37 +1,196 @@
 # ============================================================
-#  CLUSTERING HIERARCHIQUE DE WARD — coupure naturelle
-#  Cellule 2 : detection du saut maximal
+#  CLUSTERING HIERARCHIQUE DE WARD — bloc complet
+#  Requiert : df_base charge, compute_scores defini
 # ============================================================
 
-deltas     = np.array([r["delta_ward"] for r in fusion_history])
-n_classes  = np.array([r["n_classes"]  for r in fusion_history])
+import numpy as np
+import polars as pl
+import matplotlib.pyplot as plt
 
-# Saut entre deux deltas consecutifs
-sauts      = np.diff(deltas)
-idx_saut   = int(np.argmax(sauts))   # index dans fusion_history
+# ---- Fonction de scores complete avec Gini correct ----
 
-k_naturel  = int(n_classes[idx_saut + 1])   # K juste AVANT le grand saut
+def compute_scores(df: pl.DataFrame, class_col: str, target_col: str) -> dict:
+    """
+    R2        : variance inter / variance totale
+    std_intra : ecart-type intra-classe moyen pondere
+    mae_pred  : MAE si on predit la moyenne de classe
+    gini      : coefficient de Gini de discrimination
+                = 2*AUC - 1 ou AUC mesure si la moyenne de classe
+                  ordonne correctement les LGD individuelles
+                  (concordance entre rang de classe et LGD realisee)
+    """
+    y          = df[target_col].to_numpy()
+    grand_mean = y.mean()
+    ss_total   = ((y - grand_mean) ** 2).sum()
+
+    class_stats = (
+        df.group_by(class_col)
+        .agg([
+            pl.col(target_col).mean().alias("mean_cls"),
+            pl.col(target_col).std().alias("std_cls"),
+            pl.col(target_col).count().alias("n_cls"),
+        ])
+        .sort("mean_cls")
+    )
+
+    means_cls = class_stats["mean_cls"].to_numpy()
+    stds_cls  = class_stats["std_cls"].to_numpy()
+    ns_cls    = class_stats["n_cls"].to_numpy()
+    cls_list  = class_stats[class_col].to_list()
+
+    # R2
+    ss_inter  = float(((means_cls - grand_mean) ** 2 * ns_cls).sum())
+    r2        = ss_inter / ss_total if ss_total > 0 else 0.0
+
+    # Std intra ponderee
+    std_intra = float((stds_cls * ns_cls).sum() / ns_cls.sum())
+
+    # MAE prediction
+    df_joined = df.join(
+        class_stats.select([class_col, "mean_cls"]),
+        on=class_col, how="left"
+    )
+    y_pred   = df_joined["mean_cls"].to_numpy()
+    mae_pred = float(np.abs(y - y_pred).mean())
+
+    # Gini de discrimination (Somers D / concordance)
+    # Pour chaque observation, le score predit = moyenne de sa classe
+    # Gini = 2 * AUC(y_reel, score_predit) - 1
+    # AUC calculee manuellement via Mann-Whitney pour eviter sklearn
+    # Sur grand n : sous-echantillonnage a 50k pour la perf
+    rng = np.random.default_rng(42)
+    if len(y) > 50_000:
+        idx    = rng.choice(len(y), size=50_000, replace=False)
+        y_s    = y[idx]
+        yp_s   = y_pred[idx]
+    else:
+        y_s  = y
+        yp_s = y_pred
+
+    # AUC via formule des rangs (Wilcoxon-Mann-Whitney)
+    from scipy.stats import rankdata
+    n_tot  = len(y_s)
+    ranks  = rankdata(yp_s)
+    # Trier par score predit et calculer AUC
+    order  = np.argsort(yp_s)
+    y_ord  = y_s[order]
+    # Concordance : proportion de paires (i<j) ou score_i < score_j
+    # et y_i < y_j — approximation via correlation de rang
+    from scipy.stats import spearmanr
+    rho, _ = spearmanr(yp_s, y_s)
+    # Gini = rho de Spearman (approximation robuste pour distributions continues)
+    gini   = float(rho)
+
+    return {
+        "n_classes" : int(len(cls_list)),
+        "r2"        : round(r2,        6),
+        "std_intra" : round(std_intra, 6),
+        "mae_pred"  : round(mae_pred,  6),
+        "gini"      : round(gini,      6),
+    }
+
+
+# ================================================================
+#  PARTIE 1 — Ward avec contrainte d'adjacence
+# ================================================================
+
+class_stats_base = (
+    df_base
+    .group_by("CHR_model")
+    .agg([
+        pl.col("lgd_obligor").mean().alias("mean_lgd"),
+        pl.col("lgd_obligor").count().alias("n"),
+    ])
+    .sort("mean_lgd")
+)
+
+classes = class_stats_base["CHR_model"].to_list()
+means   = np.array(class_stats_base["mean_lgd"].to_list())
+ns      = np.array(class_stats_base["n"].to_list())
+K       = len(classes)
+
+print(f"{K} classes | LGD [{means.min():.3f} – {means.max():.3f}]\n")
+
+groups = [
+    {"label": str(c), "mean": float(m), "n": int(n), "members": [str(c)]}
+    for c, m, n in zip(classes, means, ns)
+]
+
+fusion_history = []
+
+while len(groups) > 1:
+    best_delta = np.inf
+    best_idx   = -1
+
+    for i in range(len(groups) - 1):
+        a, b  = groups[i], groups[i + 1]
+        delta = (a["n"] * b["n"]) / (a["n"] + b["n"]) * (a["mean"] - b["mean"]) ** 2
+        if delta < best_delta:
+            best_delta = delta
+            best_idx   = i
+
+    a = groups[best_idx]
+    b = groups[best_idx + 1]
+    n_new    = a["n"] + b["n"]
+    mean_new = (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new
+
+    fusion_history.append({
+        "n_classes"  : len(groups) - 1,
+        "label_a"    : a["label"],
+        "label_b"    : b["label"],
+        "mean_a"     : round(a["mean"], 4),
+        "mean_b"     : round(b["mean"], 4),
+        "n_a"        : a["n"],
+        "n_b"        : b["n"],
+        "delta_ward" : round(best_delta, 6),
+        "members"    : a["members"] + b["members"],
+    })
+
+    new_grp = {
+        "label"  : f"{a['label']}|{b['label']}",
+        "mean"   : mean_new,
+        "n"      : n_new,
+        "members": a["members"] + b["members"],
+    }
+    groups = groups[:best_idx] + [new_grp] + groups[best_idx + 2:]
+
+fh = pl.DataFrame([
+    {k: v for k, v in row.items() if k != "members"}
+    for row in fusion_history
+])
+
+print("=== HISTORIQUE DES FUSIONS (Ward) ===")
+display(fh)
+
+
+# ================================================================
+#  PARTIE 2 — Detection du saut maximal
+# ================================================================
+
+deltas    = np.array([r["delta_ward"] for r in fusion_history])
+n_classes = np.array([r["n_classes"]  for r in fusion_history])
+sauts     = np.diff(deltas)
+idx_saut  = int(np.argmax(sauts))
+
+k_naturel   = int(n_classes[idx_saut + 1])
 delta_avant = deltas[idx_saut]
 delta_apres = deltas[idx_saut + 1]
 
-print(f"Saut maximal : delta {delta_avant:.4f} → {delta_apres:.4f} "
+print(f"\nSaut maximal : {delta_avant:.4f} → {delta_apres:.4f} "
       f"(x{delta_apres/delta_avant:.1f})")
 print(f"Coupure naturelle : K = {k_naturel} classes\n")
 
-# --- Graphe des deltas de Ward ---
 fig, axes = plt.subplots(1, 2, figsize=(14, 4))
 
-# Courbe des deltas
 axes[0].plot(n_classes, deltas, marker="o", markersize=3, color="steelblue")
 axes[0].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
-                label=f"coupure naturelle K={k_naturel}")
+                label=f"coupure K={k_naturel}")
 axes[0].set_xlabel("Nombre de classes")
-axes[0].set_ylabel("Δ Ward (variance perdue)")
+axes[0].set_ylabel("Δ Ward")
 axes[0].set_title("Distance de fusion Ward")
 axes[0].invert_xaxis()
 axes[0].legend()
 
-# Courbe des sauts (differences de deltas)
 axes[1].plot(n_classes[1:], sauts, marker="o", markersize=3, color="darkorange")
 axes[1].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
                 label=f"saut max → K={k_naturel}")
@@ -44,7 +203,6 @@ axes[1].legend()
 plt.tight_layout()
 plt.show()
 
-# --- Top 10 des plus grands sauts ---
 top_sauts = (
     pl.DataFrame({
         "n_classes_apres" : n_classes[1:].tolist(),
@@ -57,3 +215,95 @@ top_sauts = (
 )
 print("=== TOP 10 SAUTS ===")
 display(top_sauts)
+
+
+# ================================================================
+#  PARTIE 3 — Partitionnement final + validation
+# ================================================================
+
+K_FINAL = k_naturel   # <- modifier ici si besoin
+
+# Rejouer les fusions jusqu'a K_FINAL
+groups_final = [
+    {"label": str(c), "mean": float(m), "n": int(n), "members": [str(c)]}
+    for c, m, n in zip(classes, means, ns)
+]
+
+for row in fusion_history:
+    if row["n_classes"] < K_FINAL:
+        break
+
+    membres_a = set(row["label_a"].split("|"))
+    membres_b = set(row["label_b"].split("|"))
+
+    idx_a = next(i for i, g in enumerate(groups_final)
+                 if set(g["members"]) == membres_a)
+    idx_b = next(i for i, g in enumerate(groups_final)
+                 if set(g["members"]) == membres_b)
+
+    a, b  = groups_final[idx_a], groups_final[idx_b]
+    n_new = a["n"] + b["n"]
+    new_grp = {
+        "label"  : f"{a['label']}|{b['label']}",
+        "mean"   : (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new,
+        "n"      : n_new,
+        "members": a["members"] + b["members"],
+    }
+    keep         = [g for i, g in enumerate(groups_final)
+                    if i not in (idx_a, idx_b)]
+    groups_final = sorted(keep + [new_grp], key=lambda g: g["mean"])
+
+# Mapping
+mapping_rows = []
+for grp in groups_final:
+    label_court = f"G_{round(grp['mean'], 2)}"
+    for membre in grp["members"]:
+        mapping_rows.append({
+            "CHR_model_orig" : membre,
+            "classe_finale"  : label_court,
+            "mean_groupe"    : round(grp["mean"], 4),
+            "n_groupe"       : grp["n"],
+            "n_membres"      : len(grp["members"]),
+        })
+
+mapping_df = pl.DataFrame(mapping_rows).sort("mean_groupe")
+
+print(f"\n=== PARTITIONNEMENT FINAL : K={K_FINAL} classes ===")
+display(mapping_df)
+
+# Appliquer le mapping
+df_final = (
+    df_base
+    .join(
+        mapping_df.select(["CHR_model_orig", "classe_finale"])
+                  .rename({"CHR_model_orig": "CHR_model"}),
+        on="CHR_model",
+        how="left",
+    )
+)
+
+# Scores de validation
+scores_orig = compute_scores(df_base,  "CHR_model",     "lgd_obligor")
+scores_ward = compute_scores(df_final, "classe_finale",  "lgd_obligor")
+
+print(f"\n{'='*65}")
+print(f"  {'':18} {'ORIGINAL':>12} {'WARD K={}'.format(K_FINAL):>12} {'DELTA':>10}")
+print(f"  {'n_classes':<18} {scores_orig['n_classes']:>12} {scores_ward['n_classes']:>12}")
+print(f"  {'R2':<18} {scores_orig['r2']:>12.6f} {scores_ward['r2']:>12.6f} "
+      f"{(scores_orig['r2']-scores_ward['r2'])/scores_orig['r2']*100:>+9.3f}%")
+print(f"  {'std_intra':<18} {scores_orig['std_intra']:>12.6f} {scores_ward['std_intra']:>12.6f} "
+      f"{(scores_ward['std_intra']-scores_orig['std_intra'])/scores_orig['std_intra']*100:>+9.3f}%")
+print(f"  {'mae_pred':<18} {scores_orig['mae_pred']:>12.6f} {scores_ward['mae_pred']:>12.6f} "
+      f"{(scores_ward['mae_pred']-scores_orig['mae_pred'])/scores_orig['mae_pred']*100:>+9.3f}%")
+print(f"  {'gini':<18} {scores_orig['gini']:>12.6f} {scores_ward['gini']:>12.6f} "
+      f"{(scores_orig['gini']-scores_ward['gini'])/scores_orig['gini']*100:>+9.3f}%")
+print(f"{'='*65}")
+
+# Tailles des groupes
+print(f"\n=== TAILLES DES {K_FINAL} GROUPES ===")
+display(
+    mapping_df
+    .unique("classe_finale")
+    .select(["classe_finale", "mean_groupe", "n_groupe", "n_membres"])
+    .sort("mean_groupe")
+)
