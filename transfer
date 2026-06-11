@@ -1,174 +1,66 @@
-import numpy as np
-import polars as pl
-from typing import Tuple
-from scipy.stats import wasserstein_distance, gaussian_kde
+# ============================================================
+#  CALIBRATION AUTOMATIQUE DE EPS_W1 ET EPS_ETA
+#  A lancer AVANT la cellule d'exploration
+#  Principe : variabilite intra-classe = bruit de reference
+# ============================================================
 
-# Parametres
-EPS_W1       = 1.5      # marge W1 en pts LGD (base 0-100)
-EPS_ETA      = 0.85     # overlap minimal code 0
-ETA_MODERE   = 0.70     # overlap minimal code 1
-B_BOOT       = 500      # replications bootstrap
-ALPHA_EQUIV  = 0.05     # niveau test unilateral
-N_BOOT_CAP   = 50_000   # sous-echantillonnage par classe
-KDE_GRID_PTS = 512
-RNG_SEED     = 42
-CODES_FUSIONNABLES = {0, 1}
+N_SPLITS     = 100   # nb de decoupages aleatoires par classe
+N_CAP_CALIB  = 20_000  # sous-echantillonnage par demi-classe (perf)
+RNG_CALIB    = np.random.default_rng(123)
 
-_LAST_W1_DIAG = {}
+w1_intra  = []
+eta_intra = []
 
-def _overlap_eta(a: np.ndarray, b: np.ndarray) -> float:
-    if a.std() == 0 or b.std() == 0:
-        return 1.0 if (a.std() == 0 and b.std() == 0 and a[0] == b[0]) else 0.0
-    kde_a, kde_b = gaussian_kde(a), gaussian_kde(b)
-    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-    pad = 0.05 * (hi - lo) if hi > lo else 1.0
-    grid = np.linspace(lo - pad, hi + pad, KDE_GRID_PTS)
-    eta = float(np.trapz(np.minimum(kde_a(grid), kde_b(grid)), grid))
-    return min(eta, 1.0)
-
-
-def _w1_decompose(a: np.ndarray, b: np.ndarray, w1_obs: float) -> Tuple[float, float, float]:
-    loc = abs(float(a.mean()) - float(b.mean()))
-    shape = float(wasserstein_distance(a - a.mean(), b - b.mean()))
-    pct_loc = 100.0 * loc / w1_obs if w1_obs > 0 else 0.0
-    return loc, shape, min(pct_loc, 100.0)
-
-
-def _w1_bootstrap_upper(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
-    rng = np.random.default_rng(RNG_SEED)
-    w1_obs = float(wasserstein_distance(a, b))
-    sa = rng.choice(a, size=min(len(a), N_BOOT_CAP), replace=False)
-    sb = rng.choice(b, size=min(len(b), N_BOOT_CAP), replace=False)
-    boot = np.empty(B_BOOT)
-    for i in range(B_BOOT):
-        ra = rng.choice(sa, size=len(sa), replace=True)
-        rb = rng.choice(sb, size=len(sb), replace=True)
-        boot[i] = wasserstein_distance(ra, rb)
-    ic_upper = float(np.percentile(boot, 100.0 * (1.0 - ALPHA_EQUIV)))
-    return w1_obs, ic_upper
-
-
-def W1OverlapTest(a: np.ndarray, b: np.ndarray, mean_lgd: float) -> Tuple[int, str]:
-    global _LAST_W1_DIAG
-    mean_a, mean_b = float(a.mean()), float(b.mean())
-    gap = abs(mean_b - mean_a)
-
-    _LAST_W1_DIAG = {
-        "w1_obs": None, "w1_ic95_sup": None, "eta": None,
-        "w1_loc": None, "w1_shape": None, "w1_pct_loc": None,
-        "eps_w1": EPS_W1, "eps_eta": EPS_ETA,
-        "n_a_boot": min(len(a), N_BOOT_CAP), "n_b_boot": min(len(b), N_BOOT_CAP),
-    }
-
-    if gap >= EPS_W1:
-        _LAST_W1_DIAG["w1_obs"] = gap
-        return 99, f"[W1] gap={gap:.3f} >= eps={EPS_W1} (equivalence impossible)"
-
-    w1_obs, ic_upper = _w1_bootstrap_upper(a, b)
-    loc, shape, pct_loc = _w1_decompose(a, b, w1_obs)
-    _LAST_W1_DIAG.update({
-        "w1_obs": round(w1_obs, 4), "w1_ic95_sup": round(ic_upper, 4),
-        "w1_loc": round(loc, 4), "w1_shape": round(shape, 4),
-        "w1_pct_loc": round(pct_loc, 1),
-    })
-
-    if ic_upper >= EPS_W1:
-        return 99, (f"[W1] IC95_sup={ic_upper:.3f} >= eps={EPS_W1} "
-                    f"(W1obs={w1_obs:.3f}, non prouvee)")
-
-    eta = _overlap_eta(a, b)
-    _LAST_W1_DIAG["eta"] = round(eta, 4)
-
-    if eta >= EPS_ETA:
-        return 0, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1}, "
-                   f"eta={eta:.3f}>={EPS_ETA} (equivalent)")
-    elif eta >= ETA_MODERE:
-        return 1, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1}, "
-                   f"eta={eta:.3f} dans [{ETA_MODERE},{EPS_ETA}) (modere)")
-    else:
-        return 99, (f"[W1] IC95_sup={ic_upper:.3f}<eps={EPS_W1} MAIS "
-                    f"eta={eta:.3f}<{ETA_MODERE} (formes differentes)")
-
-# Stats par classe, triees par LGD moyenne croissante
-class_stats = (
+classes_calib = (
     df_base
     .group_by("CHR_model")
-    .agg([
-        pl.col("lgd_obligor").mean().alias("mean_lgd"),
-        pl.col("lgd_obligor").count().alias("n"),
-    ])
-    .sort("mean_lgd")
+    .agg(pl.col("lgd_obligor").count().alias("n"))
+    .filter(pl.col("n") >= 100)   # ignorer classes trop petites pour splitter
+    ["CHR_model"].to_list()
 )
 
-classes   = class_stats["CHR_model"].to_list()
-means     = class_stats["mean_lgd"].to_list()
-effectifs = class_stats["n"].to_list()
+print(f"Classes utilisees pour calibration : {len(classes_calib)}\n")
 
-print(f"{len(classes)} classes | LGD [{min(means):.2f} – {max(means):.2f}]\n")
+for cls in classes_calib:
+    vec = df_base.filter(pl.col("CHR_model") == cls)["lgd_obligor"].to_numpy()
 
-# Boucle sur les 64 paires adjacentes
-rows = []
-for i in range(len(classes) - 1):
-    ca, cb = classes[i], classes[i + 1]
-    a = df_base.filter(pl.col("CHR_model") == ca)["lgd_obligor"].to_numpy()
-    b = df_base.filter(pl.col("CHR_model") == cb)["lgd_obligor"].to_numpy()
-    mean_lgd = float((a.sum() + b.sum()) / (len(a) + len(b)))
+    # Sous-echantillonnage global si classe enorme
+    if len(vec) > 2 * N_CAP_CALIB:
+        vec = RNG_CALIB.choice(vec, size=2 * N_CAP_CALIB, replace=False)
 
-    code, raison = W1OverlapTest(a, b, mean_lgd)
-    diag = _LAST_W1_DIAG.copy()
+    for _ in range(N_SPLITS):
+        # Split aleatoire 50/50
+        idx = RNG_CALIB.permutation(len(vec))
+        half = len(vec) // 2
+        a_intra = vec[idx[:half]]
+        b_intra = vec[idx[half:2*half]]
 
-    rows.append({
-        "class_a"     : ca,
-        "class_b"     : cb,
-        "mean_a"      : round(means[i],     3),
-        "mean_b"      : round(means[i + 1], 3),
-        "gap"         : round(abs(means[i + 1] - means[i]), 3),
-        "n_a"         : effectifs[i],
-        "n_b"         : effectifs[i + 1],
-        "code"        : code,
-        "fusionnable" : code in CODES_FUSIONNABLES,
-        "w1_obs"      : diag.get("w1_obs"),
-        "w1_ic95_sup" : diag.get("w1_ic95_sup"),
-        "eta"         : diag.get("eta"),
-        "w1_pct_loc"  : diag.get("w1_pct_loc"),
-        "raison"      : raison,
-    })
+        w1_intra.append(wasserstein_distance(a_intra, b_intra))
+        eta_intra.append(_overlap_eta(a_intra, b_intra))
 
-    symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
-    print(f"{symbole} [{i+1:2d}/64] {str(ca):<25} | {str(cb):<25} "
-          f"gap={rows[-1]['gap']:5.2f}  "
-          f"W1={str(diag.get('w1_obs') or '—'):>7}  "
-          f"IC_sup={str(diag.get('w1_ic95_sup') or '—'):>7}  "
-          f"eta={str(diag.get('eta') or '—'):>6}")
+    print(f"  {cls} (n={len(vec)}) OK")
 
-# DataFrame resultats
-resultats = pl.DataFrame(rows)
+w1_intra  = np.array(w1_intra)
+eta_intra = np.array(eta_intra)
 
-# Résumé
-n_zero = resultats.filter(pl.col("code") == 0).height
-n_un   = resultats.filter(pl.col("code") == 1).height
-n_non  = resultats.filter(pl.col("code") == 99).height
+# Statistiques de reference
+w1_p50  = float(np.percentile(w1_intra,  50))
+w1_p75  = float(np.percentile(w1_intra,  75))
+w1_p90  = float(np.percentile(w1_intra,  90))
+eta_p50 = float(np.percentile(eta_intra, 50))
+eta_p25 = float(np.percentile(eta_intra, 25))
+eta_p10 = float(np.percentile(eta_intra, 10))
+
 print(f"\n{'='*55}")
-print(f"  ✅ code 0 (équivalent)  : {n_zero:>3}")
-print(f"  🟡 code 1 (modéré)     : {n_un:>3}")
-print(f"  ❌ code 99 (différent) : {n_non:>3}")
-print(f"{'='*55}\n")
-
-# Tableaux
-print("=== FUSIONNABLES ===")
-display(
-    resultats
-    .filter(pl.col("fusionnable"))
-    .sort("gap")
-    .select(["class_a","class_b","gap","n_a","n_b",
-             "w1_obs","w1_ic95_sup","eta","w1_pct_loc","code","raison"])
-)
-
-print("\n=== NON FUSIONNABLES ===")
-display(
-    resultats
-    .filter(~pl.col("fusionnable"))
-    .sort("gap")
-    .select(["class_a","class_b","gap","n_a","n_b",
-             "w1_obs","w1_ic95_sup","eta","w1_pct_loc","raison"])
-)
+print(f"  W1 intra-classe  — p50={w1_p50:.4f}  p75={w1_p75:.4f}  p90={w1_p90:.4f}")
+print(f"  eta intra-classe — p50={eta_p50:.4f}  p25={eta_p25:.4f}  p10={eta_p10:.4f}")
+print(f"{'='*55}")
+print(f"\nRecommandations :")
+print(f"  EPS_W1    = p75 intra  -> {w1_p75:.4f}  (conservateur)")
+print(f"  EPS_W1    = p90 intra  -> {w1_p90:.4f}  (liberal)")
+print(f"  EPS_ETA   = p25 intra  -> {eta_p25:.4f}  (conservateur)")
+print(f"  ETA_MODERE= p10 intra  -> {eta_p10:.4f}")
+print(f"\n>>> Copiez dans la cellule parametres :")
+print(f"EPS_W1     = {w1_p75:.4f}")
+print(f"EPS_ETA    = {eta_p25:.4f}")
+print(f"ETA_MODERE = {eta_p10:.4f}")
