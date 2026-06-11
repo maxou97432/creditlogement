@@ -1,89 +1,59 @@
 # ============================================================
-#  CLUSTERING HIERARCHIQUE DE WARD — contrainte d'adjacence
-#  Cellule 1 : algorithme + dendrogramme
+#  CLUSTERING HIERARCHIQUE DE WARD — coupure naturelle
+#  Cellule 2 : detection du saut maximal
 # ============================================================
 
-import numpy as np
-import polars as pl
-import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from scipy.spatial.distance import squareform
+deltas     = np.array([r["delta_ward"] for r in fusion_history])
+n_classes  = np.array([r["n_classes"]  for r in fusion_history])
 
-# --- Stats par classe, triees par LGD moyenne croissante ---
-class_stats = (
-    df_base
-    .group_by("CHR_model")
-    .agg([
-        pl.col("lgd_obligor").mean().alias("mean_lgd"),
-        pl.col("lgd_obligor").var().alias("var_lgd"),
-        pl.col("lgd_obligor").count().alias("n"),
-    ])
-    .sort("mean_lgd")
-)
+# Saut entre deux deltas consecutifs
+sauts      = np.diff(deltas)
+idx_saut   = int(np.argmax(sauts))   # index dans fusion_history
 
-classes = class_stats["CHR_model"].to_list()
-means   = np.array(class_stats["mean_lgd"].to_list())
-ns      = np.array(class_stats["n"].to_list())
-K       = len(classes)
+k_naturel  = int(n_classes[idx_saut + 1])   # K juste AVANT le grand saut
+delta_avant = deltas[idx_saut]
+delta_apres = deltas[idx_saut + 1]
 
-print(f"{K} classes | LGD [{means.min():.3f} – {means.max():.3f}]\n")
+print(f"Saut maximal : delta {delta_avant:.4f} → {delta_apres:.4f} "
+      f"(x{delta_apres/delta_avant:.1f})")
+print(f"Coupure naturelle : K = {k_naturel} classes\n")
 
-# --- Algorithme de Ward avec contrainte d'adjacence ---
-# Implémentation manuelle : à chaque étape on ne considère
-# que les paires adjacentes dans l'ordre courant
+# --- Graphe des deltas de Ward ---
+fig, axes = plt.subplots(1, 2, figsize=(14, 4))
 
-# Etat courant : liste ordonnée de groupes
-# Chaque groupe = {"label": str, "mean": float, "n": int, "members": list}
-groups = [
-    {"label": str(c), "mean": float(m), "n": int(n), "members": [str(c)]}
-    for c, m, n in zip(classes, means, ns)
-]
+# Courbe des deltas
+axes[0].plot(n_classes, deltas, marker="o", markersize=3, color="steelblue")
+axes[0].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
+                label=f"coupure naturelle K={k_naturel}")
+axes[0].set_xlabel("Nombre de classes")
+axes[0].set_ylabel("Δ Ward (variance perdue)")
+axes[0].set_title("Distance de fusion Ward")
+axes[0].invert_xaxis()
+axes[0].legend()
 
-fusion_history = []   # (distance_ward, label_a, label_b, label_new, n_classes_apres)
+# Courbe des sauts (differences de deltas)
+axes[1].plot(n_classes[1:], sauts, marker="o", markersize=3, color="darkorange")
+axes[1].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
+                label=f"saut max → K={k_naturel}")
+axes[1].set_xlabel("Nombre de classes")
+axes[1].set_ylabel("Δ(Δ Ward)")
+axes[1].set_title("Sauts entre distances consecutives")
+axes[1].invert_xaxis()
+axes[1].legend()
 
-while len(groups) > 1:
-    best_delta = np.inf
-    best_idx   = -1
+plt.tight_layout()
+plt.show()
 
-    for i in range(len(groups) - 1):
-        a, b = groups[i], groups[i + 1]
-        # Critere de Ward : gain de variance intra si on fusionne a et b
-        delta = (a["n"] * b["n"]) / (a["n"] + b["n"]) * (a["mean"] - b["mean"]) ** 2
-        if delta < best_delta:
-            best_delta = delta
-            best_idx   = i
-
-    a = groups[best_idx]
-    b = groups[best_idx + 1]
-
-    # Nouveau groupe fusionne
-    n_new    = a["n"] + b["n"]
-    mean_new = (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new
-    new_grp  = {
-        "label"  : f"{a['label']}|{b['label']}",
-        "mean"   : mean_new,
-        "n"      : n_new,
-        "members": a["members"] + b["members"],
-    }
-
-    fusion_history.append({
-        "n_classes"  : len(groups) - 1,
-        "label_a"    : a["label"],
-        "label_b"    : b["label"],
-        "mean_a"     : round(a["mean"], 4),
-        "mean_b"     : round(b["mean"], 4),
-        "n_a"        : a["n"],
-        "n_b"        : b["n"],
-        "delta_ward" : round(best_delta, 6),
-        "members"    : new_grp["members"],
+# --- Top 10 des plus grands sauts ---
+top_sauts = (
+    pl.DataFrame({
+        "n_classes_apres" : n_classes[1:].tolist(),
+        "saut"            : sauts.tolist(),
+        "delta_avant"     : deltas[:-1].tolist(),
+        "delta_apres"     : deltas[1:].tolist(),
     })
-
-    groups = groups[:best_idx] + [new_grp] + groups[best_idx + 2:]
-
-fh = pl.DataFrame([
-    {k: v for k, v in row.items() if k != "members"}
-    for row in fusion_history
-])
-
-print("=== HISTORIQUE DES FUSIONS (Ward) ===")
-display(fh)
+    .sort("saut", descending=True)
+    .head(10)
+)
+print("=== TOP 10 SAUTS ===")
+display(top_sauts)
