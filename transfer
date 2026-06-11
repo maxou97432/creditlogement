@@ -1,186 +1,441 @@
 # ============================================================
-#  FOREST PLOT — moyennes LGD par classe
-#  4 classes par figure, distinction fusionnées / originales
-#  Requiert : class_stats_base, groups_state, df_base
+#  FUSION GLOUTONNE — g de Hedges + TOST (double critère)
+#  Étape 1 : g < G_MODERE (filtre effect size)
+#  Étape 2 : TOST avec δ = g × s_pooled (garantie formelle)
+#  Référence : Cohen (1988), Sawilowsky (2009), Wellek (2010)
 # ============================================================
 
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+from scipy import stats
 
 # ================================================================
-#  PREPARATION DES DONNEES
+#  PARAMETRES
 # ================================================================
 
-# Mapping CHR_model_orig -> classe_finale
-mapping_rows = []
-for label, grp in groups_state.items():
-    for membre in grp["members"]:
-        mapping_rows.append({
-            "CHR_model"  : int(membre),
-            "classe_finale": label,
-            "n_membres"  : len(grp["members"]),
-        })
-mapping_df = pl.DataFrame(mapping_rows)
+G_MODERE   = 1.66    # seuil g calibré empiriquement (ΔMAE < 10%)
+ALPHA_TOST = 0.05    # niveau du TOST
+CODES_FUSIONNABLES = {0, 1}
+MAX_ITER   = 200
 
-# Stats par classe originale avec info fusion + IC95%
-stats_plot = (
-    class_stats_base
-    .join(mapping_df, on="CHR_model", how="left")
-    .with_columns([
-        (pl.col("n_membres") > 1).alias("est_fusionne"),
-        (pl.col("mean_lgd") - 1.96 *
-         (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
-        .alias("ic_low"),
-        (pl.col("mean_lgd") + 1.96 *
-         (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
-        .alias("ic_high"),
+
+# ================================================================
+#  FONCTIONS CORE
+# ================================================================
+
+def hedges_g_from_stats(mean_a, var_a, n_a, mean_b, var_b, n_b):
+    """g de Hedges sur stats agrégées."""
+    df = n_a + n_b - 2
+    if df <= 0:
+        return np.inf
+    s_pooled = np.sqrt(
+        ((n_a - 1) * var_a + (n_b - 1) * var_b) / df
+    )
+    if s_pooled == 0:
+        return 0.0 if mean_a == mean_b else np.inf
+    return float(abs(mean_a - mean_b) / s_pooled)
+
+
+def tost_from_stats(mean_a, var_a, n_a, mean_b, var_b, n_b, delta):
+    """
+    TOST (Two One-Sided Tests) de Welch.
+    δ = g × s_pooled — dérivé des données, pas arbitraire.
+
+    H₀₁ : μ_A - μ_B ≤ -δ   vs   H₁₁ : μ_A - μ_B > -δ
+    H₀₂ : μ_A - μ_B ≥ +δ   vs   H₁₂ : μ_A - μ_B < +δ
+
+    Fusion si p1 < α ET p2 < α
+    (les deux hypothèses nulles de grande différence sont rejetées)
+
+    Degrés de liberté de Welch-Satterthwaite :
+    ν = (sA²/nA + sB²/nB)² / ((sA²/nA)²/(nA-1) + (sB²/nB)²/(nB-1))
+    """
+    diff    = mean_a - mean_b
+    se      = np.sqrt(var_a / n_a + var_b / n_b)
+
+    if se == 0:
+        return 1.0, 1.0, 0.0, 0
+
+    # Degrés de liberté Welch-Satterthwaite
+    num = (var_a / n_a + var_b / n_b) ** 2
+    den = (var_a / n_a) ** 2 / (n_a - 1) + (var_b / n_b) ** 2 / (n_b - 1)
+    df_w = float(num / den) if den > 0 else float(n_a + n_b - 2)
+
+    # Statistiques t pour les deux tests unilatéraux
+    t1 = (diff + delta) / se   # test H₀₁ : diff ≤ -δ
+    t2 = (diff - delta) / se   # test H₀₂ : diff ≥ +δ
+
+    # P-values unilatérales
+    p1 = float(stats.t.sf(t1, df=df_w))    # P(T > t1)  — rejet si petit
+    p2 = float(stats.t.cdf(t2, df=df_w))   # P(T < t2)  — rejet si petit
+
+    return p1, p2, se, int(df_w)
+
+
+def hedges_tost_test(mean_a, var_a, n_a, mean_b, var_b, n_b):
+    """
+    Double critère : g de Hedges + TOST.
+
+    Codes :
+      0  -> g < G_MODERE ET TOST passe (α=5%)
+      1  -> g < G_MODERE ET TOST passe (α=10%) — zone grise
+      99 -> g >= G_MODERE OU TOST échoue
+    """
+    g = hedges_g_from_stats(mean_a, var_a, n_a, mean_b, var_b, n_b)
+
+    # Étape 1 : filtre g
+    if g >= G_MODERE:
+        return 99, f"[g={g:.4f}] >= {G_MODERE} (refus g)", {
+            "g": round(g, 4), "p1": None, "p2": None,
+            "delta": None, "etape": "g"
+        }
+
+    # Étape 2 : TOST avec δ = g × s_pooled
+    df    = n_a + n_b - 2
+    s_pooled = np.sqrt(
+        ((n_a - 1) * var_a + (n_b - 1) * var_b) / df
+    )
+    delta = g * s_pooled   # δ en points de LGD, dérivé des données
+
+    p1, p2, se, df_w = tost_from_stats(
+        mean_a, var_a, n_a,
+        mean_b, var_b, n_b,
+        delta
+    )
+    p_tost = max(p1, p2)   # p-value conservative du TOST
+
+    diag = {
+        "g"      : round(g,       4),
+        "delta"  : round(delta,   4),
+        "p1"     : round(p1,      4),
+        "p2"     : round(p2,      4),
+        "p_tost" : round(p_tost,  4),
+        "se"     : round(se,      6),
+        "df_w"   : df_w,
+        "etape"  : "tost",
+    }
+
+    if p_tost < ALPHA_TOST:
+        return 0, (f"[g={g:.4f}<{G_MODERE}] "
+                   f"TOST p={p_tost:.4f}<{ALPHA_TOST} (fusionnable)"), diag
+    elif p_tost < ALPHA_TOST * 2:   # zone grise α=10%
+        return 1, (f"[g={g:.4f}<{G_MODERE}] "
+                   f"TOST p={p_tost:.4f}<{ALPHA_TOST*2} (modéré)"), diag
+    else:
+        return 99, (f"[g={g:.4f}<{G_MODERE}] "
+                    f"TOST p={p_tost:.4f}>={ALPHA_TOST} (refus TOST)"), diag
+
+
+def merge_two(ga, gb):
+    """Fusion de deux groupes — variance combinée exacte."""
+    n_new    = ga["n"] + gb["n"]
+    mean_new = (ga["mean"] * ga["n"] + gb["mean"] * gb["n"]) / n_new
+    var_new  = (
+        (ga["n"] - 1) * ga["var"] +
+        (gb["n"] - 1) * gb["var"] +
+        ga["n"] * gb["n"] / n_new * (ga["mean"] - gb["mean"]) ** 2
+    ) / (n_new - 1)
+    return {
+        "mean"   : mean_new,
+        "var"    : var_new,
+        "n"      : n_new,
+        "members": ga["members"] + gb["members"],
+    }
+
+
+def eta_squared(groups):
+    """η² = variance inter / variance totale."""
+    ns    = np.array([g["n"]    for g in groups], dtype=float)
+    means = np.array([g["mean"] for g in groups], dtype=float)
+    vars_ = np.array([g["var"]  for g in groups], dtype=float)
+    n_total    = ns.sum()
+    grand_mean = (means * ns).sum() / n_total
+    ss_inter   = (ns * (means - grand_mean) ** 2).sum()
+    ss_intra   = ((ns - 1) * vars_).sum()
+    ss_total   = ss_inter + ss_intra
+    return float(ss_inter / ss_total) if ss_total > 0 else 0.0
+
+
+# ================================================================
+#  STATS DE BASE
+# ================================================================
+
+class_stats_base = (
+    df_base
+    .group_by("CHR_model")
+    .agg([
+        pl.col("lgd_obligor").mean().alias("mean_lgd"),
+        pl.col("lgd_obligor").var().alias("var_lgd"),
+        pl.col("lgd_obligor").count().alias("n"),
     ])
     .sort("mean_lgd")
 )
 
-classes_plot  = stats_plot["CHR_model"].to_list()
-means_plot    = stats_plot["mean_lgd"].to_list()
-ic_low_plot   = stats_plot["ic_low"].to_list()
-ic_high_plot  = stats_plot["ic_high"].to_list()
-fusionne_plot = stats_plot["est_fusionne"].to_list()
-n_plot        = stats_plot["n"].to_list()
-cls_finale    = stats_plot["classe_finale"].to_list()
+classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
+means   = class_stats_base["mean_lgd"].to_list()
 
-# Moyenne globale ponderee
-grand_mean = float(
-    sum(m * n for m, n in zip(means_plot, n_plot)) /
-    sum(n_plot)
+print(f"{len(classes)} classes | LGD [{min(means):.3f} – {max(means):.3f}]")
+print(f"Seuil g : {G_MODERE} | TOST α : {ALPHA_TOST}\n")
+
+
+# ================================================================
+#  PARTIE 1 — EXPLORATION : toutes les paires adjacentes
+# ================================================================
+
+rows_explo = []
+for i in range(len(classes) - 1):
+    ca = classes[i]
+    cb = classes[i + 1]
+    ra = class_stats_base.row(i,   named=True)
+    rb = class_stats_base.row(i+1, named=True)
+
+    code, raison, diag = hedges_tost_test(
+        ra["mean_lgd"], ra["var_lgd"], ra["n"],
+        rb["mean_lgd"], rb["var_lgd"], rb["n"],
+    )
+
+    rows_explo.append({
+        "class_a"    : ca,
+        "class_b"    : cb,
+        "mean_a"     : round(ra["mean_lgd"], 4),
+        "mean_b"     : round(rb["mean_lgd"], 4),
+        "gap"        : round(abs(ra["mean_lgd"] - rb["mean_lgd"]), 4),
+        "n_a"        : ra["n"],
+        "n_b"        : rb["n"],
+        "g"          : diag["g"],
+        "delta"      : diag["delta"],
+        "p1"         : diag["p1"],
+        "p2"         : diag["p2"],
+        "p_tost"     : diag.get("p_tost"),
+        "code"       : code,
+        "fusionnable": code in CODES_FUSIONNABLES,
+        "etape_arret": diag["etape"],
+        "raison"     : raison,
+    })
+
+    symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
+    print(f"{symbole} [{i+1:2d}/{len(classes)-1}] "
+          f"{ca:<5} | {cb:<5}  "
+          f"g={diag['g']:6.4f}  "
+          f"δ={diag['delta'] or 0:6.4f}  "
+          f"p_tost={diag.get('p_tost') or '—':>7}  "
+          f"{diag['etape']}")
+
+resultats_explo = pl.DataFrame(rows_explo)
+
+n0  = resultats_explo.filter(pl.col("code") == 0).height
+n1  = resultats_explo.filter(pl.col("code") == 1).height
+n99 = resultats_explo.filter(pl.col("code") == 99).height
+
+print(f"\n{'='*60}")
+print(f"  ✅ fusionnable (code 0)  : {n0:>3}")
+print(f"  🟡 modéré     (code 1)  : {n1:>3}")
+print(f"  ❌ hétérogène (code 99) : {n99:>3}")
+print(f"{'='*60}\n")
+
+print("=== FUSIONNABLES ===")
+display(
+    resultats_explo.filter(pl.col("fusionnable")).sort("g")
+    .select(["class_a","class_b","gap","n_a","n_b",
+             "g","delta","p1","p2","p_tost","code","etape_arret"])
+)
+print("\n=== NON FUSIONNABLES ===")
+display(
+    resultats_explo.filter(~pl.col("fusionnable")).sort("g")
+    .select(["class_a","class_b","gap","n_a","n_b",
+             "g","delta","p_tost","etape_arret","raison"])
 )
 
-# Plage Y globale pour tous les graphes
-y_min = min(ic_low_plot)  * 0.97
-y_max = max(ic_high_plot) * 1.03
 
-N_CLASSES = len(classes_plot)
-PAR_PAGE  = 4
-N_PAGES   = int(np.ceil(N_CLASSES / PAR_PAGE))
+# ================================================================
+#  PARTIE 2 — FUSION GLOUTONNE
+# ================================================================
 
-print(f"{N_CLASSES} classes | {N_PAGES} pages\n")
-print(f"Moyenne globale portefeuille : {grand_mean:.3f}\n")
+print("\n\n=== FUSION GLOUTONNE — g + TOST ===\n")
+
+groups_state = {
+    str(r["CHR_model"]): {
+        "mean"   : float(r["mean_lgd"]),
+        "var"    : float(r["var_lgd"]),
+        "n"      : int(r["n"]),
+        "members": [str(r["CHR_model"])],
+    }
+    for r in class_stats_base.iter_rows(named=True)
+}
+
+history   = []
+iteration = 0
+
+for _ in range(MAX_ITER):
+    ordre = sorted(groups_state.keys(),
+                   key=lambda c: groups_state[c]["mean"])
+    if len(ordre) <= 1:
+        break
+
+    # Meilleure paire = g le plus bas
+    best_g, best_pair = np.inf, None
+    for i in range(len(ordre) - 1):
+        ca, cb = ordre[i], ordre[i + 1]
+        ga, gb = groups_state[ca], groups_state[cb]
+        g = hedges_g_from_stats(
+            ga["mean"], ga["var"], ga["n"],
+            gb["mean"], gb["var"], gb["n"],
+        )
+        if g < best_g:
+            best_g, best_pair = g, (ca, cb)
+
+    ca, cb = best_pair
+    ga, gb = groups_state[ca], groups_state[cb]
+
+    code, raison, diag = hedges_tost_test(
+        ga["mean"], ga["var"], ga["n"],
+        gb["mean"], gb["var"], gb["n"],
+    )
+
+    iteration += 1
+    n_apres = len(ordre) - 1
+
+    symbole = "✅" if code == 0 else "🟡" if code == 1 else "⛔"
+    print(f"{symbole} it={iteration:3d} | n={n_apres:3d} | "
+          f"{ca:<22} + {cb:<22} | "
+          f"g={diag['g']:.4f}  "
+          f"δ={diag['delta'] or 0:.4f}  "
+          f"p={diag.get('p_tost') or '—'}")
+
+    history.append({
+        "iteration" : iteration,
+        "n_classes" : n_apres,
+        "class_a"   : ca,
+        "class_b"   : cb,
+        "g"         : diag["g"],
+        "delta"     : diag["delta"],
+        "p_tost"    : diag.get("p_tost"),
+        "mean_a"    : round(ga["mean"], 4),
+        "mean_b"    : round(gb["mean"], 4),
+        "n_a"       : ga["n"],
+        "n_b"       : gb["n"],
+        "code"      : code,
+        "etape"     : diag["etape"],
+        "raison"    : raison,
+    })
+
+    if code not in CODES_FUSIONNABLES:
+        print(f"\n🛑 Arret it={iteration} — {raison}")
+        break
+
+    new_label = f"{ca}|{cb}"
+    groups_state.pop(ca)
+    groups_state.pop(cb)
+    groups_state[new_label] = merge_two(ga, gb)
+
+n_cls_final = len(groups_state)
+print(f"\nClasses finales : {n_cls_final}")
 
 
 # ================================================================
-#  FOREST PLOTS
+#  PARTIE 3 — RESULTATS + COURBES + MAPPING
 # ================================================================
 
-for page in range(N_PAGES):
-    debut   = page * PAR_PAGE
-    fin     = min(debut + PAR_PAGE, N_CLASSES)
-    batch   = list(range(debut, fin))
-    n_plots = len(batch)
+results_df = pl.DataFrame(history)
 
-    fig, axes = plt.subplots(
-        1, n_plots,
-        figsize=(4 * n_plots, 6),
-        sharey=True,
-    )
-    if n_plots == 1:
-        axes = [axes]
+groups_orig  = [
+    {"mean": float(r["mean_lgd"]),
+     "var" : float(r["var_lgd"]),
+     "n"   : int(r["n"])}
+    for r in class_stats_base.iter_rows(named=True)
+]
+groups_final = [
+    {"mean": g["mean"], "var": g["var"], "n": g["n"]}
+    for g in groups_state.values()
+]
+eta2_orig  = eta_squared(groups_orig)
+eta2_final = eta_squared(groups_final)
+perte_pct  = (eta2_orig - eta2_final) / eta2_orig * 100
 
-    fig.suptitle(
-        f"Forest plot LGD — page {page+1}/{N_PAGES}  "
-        f"(seuil g={G_MODERE}, {len(groups_state)} classes finales)",
-        fontsize=11, fontweight="bold"
-    )
+print(f"\n{'='*60}")
+print(f"  {'':20} {'ORIGINAL':>12} {'FINAL':>12} {'PERTE':>9}")
+print(f"  {'n_classes':<20} {len(classes):>12} {n_cls_final:>12}")
+print(f"  {'η²':<20} {eta2_orig:>12.6f} {eta2_final:>12.6f} "
+      f"{perte_pct:>+8.3f}%")
+print(f"{'='*60}")
 
-    for col, idx in enumerate(batch):
-        ax     = axes[col]
-        cls    = classes_plot[idx]
-        mu     = means_plot[idx]
-        lo     = ic_low_plot[idx]
-        hi     = ic_high_plot[idx]
-        fus    = fusionne_plot[idx]
-        n      = n_plot[idx]
-        cf     = cls_finale[idx]
+# Courbes
+n_hist = results_df["n_classes"].to_list()
+g_hist = results_df["g"].to_list()
+p_hist = [p if p is not None else float("nan")
+          for p in results_df["p_tost"].to_list()]
 
-        couleur = "#E05A2B" if fus else "#2B7BB9"
+fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+fig.suptitle("Fusion gloutonne — g de Hedges + TOST", fontsize=13)
 
-        # Ligne de reference globale
-        ax.axhline(grand_mean, color="gray", linestyle="--",
-                   lw=1.0, alpha=0.5, zorder=1)
+# g au fil des fusions
+axes[0].plot(n_hist, g_hist, marker="o", markersize=4, color="steelblue")
+axes[0].axhline(G_MODERE, color="red", linestyle="--", lw=1.5,
+                label=f"seuil g={G_MODERE}")
+axes[0].set_xlabel("Nombre de classes")
+axes[0].set_ylabel("g de Hedges")
+axes[0].set_title("g au fil des fusions")
+axes[0].invert_xaxis()
+axes[0].legend()
 
-        # Barre IC95%
-        ax.plot([0, 0], [lo, hi],
-                color=couleur, lw=3, zorder=3, solid_capstyle="round")
+# p_tost au fil des fusions
+axes[1].plot(n_hist, p_hist, marker="o", markersize=4, color="darkorange")
+axes[1].axhline(ALPHA_TOST, color="green", linestyle="--", lw=1.5,
+                label=f"α={ALPHA_TOST}")
+axes[1].axhline(ALPHA_TOST * 2, color="orange", linestyle=":", lw=1.5,
+                label=f"α={ALPHA_TOST*2} (modéré)")
+axes[1].set_xlabel("Nombre de classes")
+axes[1].set_ylabel("p-value TOST")
+axes[1].set_title("p-value TOST au fil des fusions")
+axes[1].invert_xaxis()
+axes[1].legend()
 
-        # Caps
-        cap_w = 0.12
-        ax.plot([-cap_w, cap_w], [lo, lo], color=couleur, lw=2, zorder=4)
-        ax.plot([-cap_w, cap_w], [hi, hi], color=couleur, lw=2, zorder=4)
+# δ au fil des fusions
+d_hist = [d if d is not None else float("nan")
+          for d in results_df["delta"].to_list()]
+axes[2].plot(n_hist, d_hist, marker="o", markersize=4, color="green")
+axes[2].set_xlabel("Nombre de classes")
+axes[2].set_ylabel("δ (pts LGD)")
+axes[2].set_title("δ = g × s_pooled au fil des fusions")
+axes[2].invert_xaxis()
 
-        # Point estimate (moyenne)
-        ax.scatter(0, mu, s=100, color=couleur,
-                   zorder=5, edgecolors="white", linewidths=1.5)
+plt.tight_layout()
+plt.show()
 
-        # Axe Y
-        ax.set_ylim(y_min, y_max)
-        ax.set_xlim(-0.5, 0.5)
-        ax.set_xticks([])
-        ax.yaxis.set_tick_params(labelsize=8)
-        if col == 0:
-            ax.set_ylabel("LGD (%)", fontsize=9)
+print("\n=== HISTORIQUE ===")
+display(results_df.select([
+    "iteration","n_classes","class_a","class_b",
+    "g","delta","p_tost","mean_a","mean_b","n_a","n_b","etape"
+]))
 
-        # Titre
-        statut = "fusionné" if fus else "intact"
-        ax.set_title(
-            f"CHR {cls}\n[{statut}]",
-            fontsize=9,
-            color=couleur,
-            pad=5,
-        )
+# Mapping final
+mapping_rows = []
+for rank, (label, grp) in enumerate(
+    sorted(groups_state.items(), key=lambda x: x[1]["mean"]), start=1
+):
+    label_court = f"G{rank:02d}_lgd{round(grp['mean'], 1)}"
+    for membre in grp["members"]:
+        mapping_rows.append({
+            "CHR_model"     : int(membre),
+            "classe_finale" : label_court,
+            "mean_groupe"   : round(grp["mean"], 4),
+            "n_groupe"      : int(grp["n"]),
+            "n_membres"     : len(grp["members"]),
+        })
 
-        # Cartouche stats
-        ax.text(
-            0.97, 0.97,
-            f"μ = {mu:.3f}\n"
-            f"IC = [{lo:.3f},\n"
-            f"       {hi:.3f}]\n"
-            f"n = {n:,}",
-            transform=ax.transAxes,
-            ha="right", va="top", fontsize=7,
-            family="monospace",
-            bbox=dict(boxstyle="round,pad=0.4",
-                      fc="white", ec=couleur, alpha=0.9),
-        )
+mapping_df = pl.DataFrame(mapping_rows).sort("mean_groupe")
 
-        # Groupe final (si fusionné)
-        if fus:
-            membres_str = cf.replace("|", ", ")
-            if len(membres_str) > 25:
-                membres_str = membres_str[:25] + "…"
-            ax.text(
-                0.03, 0.03,
-                f"→ {membres_str}",
-                transform=ax.transAxes,
-                ha="left", va="bottom", fontsize=6,
-                color="#E05A2B",
-                bbox=dict(boxstyle="round,pad=0.2",
-                          fc="white", ec="#E05A2B", alpha=0.8),
-            )
+df_final = df_base.join(
+    mapping_df.select(["CHR_model", "classe_finale"]),
+    on="CHR_model", how="left",
+)
+n_null = df_final.filter(pl.col("classe_finale").is_null()).height
+print(f"\n{'✅ Mapping complet' if n_null == 0 else f'⚠️ {n_null} lignes sans mapping'}")
 
-        # Grille legere
-        ax.yaxis.grid(True, linestyle=":", alpha=0.4, zorder=0)
-        ax.set_axisbelow(True)
-
-    # Legende commune
-    patch_intact = mpatches.Patch(color="#2B7BB9", label="Classe intacte")
-    patch_fus    = mpatches.Patch(color="#E05A2B", label="Classe fusionnée")
-    line_gm      = plt.Line2D([0], [0], color="gray", linestyle="--",
-                               lw=1, label=f"Moy. globale ({grand_mean:.2f})")
-    fig.legend(
-        handles=[patch_intact, patch_fus, line_gm],
-        loc="lower center", ncol=3,
-        fontsize=8, framealpha=0.9,
-        bbox_to_anchor=(0.5, -0.04),
-    )
-
-    plt.tight_layout(rect=[0, 0.06, 1, 0.97])
-    plt.show()
-    print(f"  — page {page+1}/{N_PAGES} —\n")
+print(f"\n=== {n_cls_final} GROUPES FINAUX ===")
+display(
+    mapping_df.unique("classe_finale", keep="first")
+    .select(["classe_finale","mean_groupe","n_groupe","n_membres"])
+    .sort("mean_groupe")
+)
