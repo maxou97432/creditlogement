@@ -18,22 +18,23 @@ mapping_rows = []
 for label, grp in groups_state.items():
     for membre in grp["members"]:
         mapping_rows.append({
-            "CHR_model"     : int(membre),
-            "classe_finale" : label,
-            "n_membres"     : len(grp["members"]),
+            "CHR_model"  : int(membre),
+            "classe_finale": label,
+            "n_membres"  : len(grp["members"]),
         })
 mapping_df = pl.DataFrame(mapping_rows)
 
-# Stats par classe originale avec info fusion
+# Stats par classe originale avec info fusion + IC95%
 stats_plot = (
     class_stats_base
     .join(mapping_df, on="CHR_model", how="left")
     .with_columns([
         (pl.col("n_membres") > 1).alias("est_fusionne"),
-        # IC95% : mean ± 1.96 * std / sqrt(n)
-        (pl.col("mean_lgd") - 1.96 * (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
+        (pl.col("mean_lgd") - 1.96 *
+         (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
         .alias("ic_low"),
-        (pl.col("mean_lgd") + 1.96 * (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
+        (pl.col("mean_lgd") + 1.96 *
+         (pl.col("var_lgd").sqrt() / pl.col("n").sqrt()))
         .alias("ic_high"),
     ])
     .sort("mean_lgd")
@@ -47,108 +48,139 @@ fusionne_plot = stats_plot["est_fusionne"].to_list()
 n_plot        = stats_plot["n"].to_list()
 cls_finale    = stats_plot["classe_finale"].to_list()
 
-N_CLASSES   = len(classes_plot)
-PAR_PAGE    = 4
-N_PAGES     = int(np.ceil(N_CLASSES / PAR_PAGE))
+# Moyenne globale ponderee
+grand_mean = float(
+    sum(m * n for m, n in zip(means_plot, n_plot)) /
+    sum(n_plot)
+)
 
-print(f"{N_CLASSES} classes | {N_PAGES} pages de {PAR_PAGE} classes\n")
+# Plage Y globale pour tous les graphes
+y_min = min(ic_low_plot)  * 0.97
+y_max = max(ic_high_plot) * 1.03
+
+N_CLASSES = len(classes_plot)
+PAR_PAGE  = 4
+N_PAGES   = int(np.ceil(N_CLASSES / PAR_PAGE))
+
+print(f"{N_CLASSES} classes | {N_PAGES} pages\n")
+print(f"Moyenne globale portefeuille : {grand_mean:.3f}\n")
+
 
 # ================================================================
 #  FOREST PLOTS
 # ================================================================
 
 for page in range(N_PAGES):
-    debut = page * PAR_PAGE
-    fin   = min(debut + PAR_PAGE, N_CLASSES)
-    batch = list(range(debut, fin))
+    debut   = page * PAR_PAGE
+    fin     = min(debut + PAR_PAGE, N_CLASSES)
+    batch   = list(range(debut, fin))
     n_plots = len(batch)
 
     fig, axes = plt.subplots(
         1, n_plots,
-        figsize=(4.5 * n_plots, 5),
-        sharey=False,
+        figsize=(4 * n_plots, 6),
+        sharey=True,
     )
     if n_plots == 1:
         axes = [axes]
 
     fig.suptitle(
-        f"Forest plot — LGD par classe  |  page {page+1}/{N_PAGES}",
+        f"Forest plot LGD — page {page+1}/{N_PAGES}  "
+        f"(seuil g={G_MODERE}, {len(groups_state)} classes finales)",
         fontsize=11, fontweight="bold"
     )
 
     for col, idx in enumerate(batch):
-        ax  = axes[col]
-        cls = classes_plot[idx]
-        mu  = means_plot[idx]
-        lo  = ic_low_plot[idx]
-        hi  = ic_high_plot[idx]
-        fus = fusionne_plot[idx]
-        n   = n_plot[idx]
-        cf  = cls_finale[idx]
+        ax     = axes[col]
+        cls    = classes_plot[idx]
+        mu     = means_plot[idx]
+        lo     = ic_low_plot[idx]
+        hi     = ic_high_plot[idx]
+        fus    = fusionne_plot[idx]
+        n      = n_plot[idx]
+        cf     = cls_finale[idx]
 
-        couleur = "#E05A2B" if fus else "#2B7BB9"   # orange=fusionné, bleu=intact
+        couleur = "#E05A2B" if fus else "#2B7BB9"
 
-        # Point estimate
-        ax.scatter(0, mu, s=80, color=couleur, zorder=5)
-
-        # IC95% — barre verticale
-        ax.plot([0, 0], [lo, hi], color=couleur, lw=2.5, zorder=4)
-
-        # Caps horizontaux
-        cap_w = 0.06
-        ax.plot([-cap_w, cap_w], [lo, lo], color=couleur, lw=1.5)
-        ax.plot([-cap_w, cap_w], [hi, hi], color=couleur, lw=1.5)
-
-        # Ligne de référence verticale (moyenne globale)
-        grand_mean = float(
-            (np.array(means_plot) * np.array(n_plot)).sum() /
-            np.sum(n_plot)
-        )
+        # Ligne de reference globale
         ax.axhline(grand_mean, color="gray", linestyle="--",
-                   lw=0.8, alpha=0.6, label="moy. globale")
+                   lw=1.0, alpha=0.5, zorder=1)
 
-        # Annotations
-        ax.set_title(
-            f"CHR {cls}\n{'🔴 fusionné' if fus else '🔵 intact'}",
-            fontsize=9, pad=4
-        )
-        ax.set_ylabel("LGD (%)" if col == 0 else "")
+        # Barre IC95%
+        ax.plot([0, 0], [lo, hi],
+                color=couleur, lw=3, zorder=3, solid_capstyle="round")
+
+        # Caps
+        cap_w = 0.12
+        ax.plot([-cap_w, cap_w], [lo, lo], color=couleur, lw=2, zorder=4)
+        ax.plot([-cap_w, cap_w], [hi, hi], color=couleur, lw=2, zorder=4)
+
+        # Point estimate (moyenne)
+        ax.scatter(0, mu, s=100, color=couleur,
+                   zorder=5, edgecolors="white", linewidths=1.5)
+
+        # Axe Y
+        ax.set_ylim(y_min, y_max)
+        ax.set_xlim(-0.5, 0.5)
         ax.set_xticks([])
-        ax.set_xlim(-0.3, 0.3)
+        ax.yaxis.set_tick_params(labelsize=8)
+        if col == 0:
+            ax.set_ylabel("LGD (%)", fontsize=9)
 
-        # Texte : moyenne + IC + n
+        # Titre
+        statut = "fusionné" if fus else "intact"
+        ax.set_title(
+            f"CHR {cls}\n[{statut}]",
+            fontsize=9,
+            color=couleur,
+            pad=5,
+        )
+
+        # Cartouche stats
         ax.text(
             0.97, 0.97,
-            f"μ = {mu:.2f}\nIC = [{lo:.2f}, {hi:.2f}]\nn = {n:,}",
+            f"μ = {mu:.3f}\n"
+            f"IC = [{lo:.3f},\n"
+            f"       {hi:.3f}]\n"
+            f"n = {n:,}",
             transform=ax.transAxes,
-            ha="right", va="top", fontsize=7.5,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white",
-                      ec=couleur, alpha=0.85)
+            ha="right", va="top", fontsize=7,
+            family="monospace",
+            bbox=dict(boxstyle="round,pad=0.4",
+                      fc="white", ec=couleur, alpha=0.9),
         )
 
-        # Classe finale (si fusionné)
+        # Groupe final (si fusionné)
         if fus:
-            membres = cf.replace("|", ", ")
+            membres_str = cf.replace("|", ", ")
+            if len(membres_str) > 25:
+                membres_str = membres_str[:25] + "…"
             ax.text(
                 0.03, 0.03,
-                f"Groupe:\n{membres[:30]}{'…' if len(membres)>30 else ''}",
+                f"→ {membres_str}",
                 transform=ax.transAxes,
-                ha="left", va="bottom", fontsize=6.5,
+                ha="left", va="bottom", fontsize=6,
                 color="#E05A2B",
-                bbox=dict(boxstyle="round,pad=0.2", fc="white",
-                          ec="#E05A2B", alpha=0.7)
+                bbox=dict(boxstyle="round,pad=0.2",
+                          fc="white", ec="#E05A2B", alpha=0.8),
             )
 
+        # Grille legere
+        ax.yaxis.grid(True, linestyle=":", alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
+
     # Legende commune
-    patch_fus   = mpatches.Patch(color="#E05A2B", label="Classe fusionnée")
-    patch_intact= mpatches.Patch(color="#2B7BB9", label="Classe intacte")
+    patch_intact = mpatches.Patch(color="#2B7BB9", label="Classe intacte")
+    patch_fus    = mpatches.Patch(color="#E05A2B", label="Classe fusionnée")
+    line_gm      = plt.Line2D([0], [0], color="gray", linestyle="--",
+                               lw=1, label=f"Moy. globale ({grand_mean:.2f})")
     fig.legend(
-        handles=[patch_intact, patch_fus],
-        loc="lower center", ncol=2,
+        handles=[patch_intact, patch_fus, line_gm],
+        loc="lower center", ncol=3,
         fontsize=8, framealpha=0.9,
-        bbox_to_anchor=(0.5, -0.02)
+        bbox_to_anchor=(0.5, -0.04),
     )
 
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    plt.tight_layout(rect=[0, 0.06, 1, 0.97])
     plt.show()
     print(f"  — page {page+1}/{N_PAGES} —\n")
