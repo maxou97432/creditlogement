@@ -1,120 +1,129 @@
 # ============================================================
-#  FUSION GLOUTONNE — g de Hedges (Cohen 1988 / Sawilowsky 2009)
-#  Critère : g_corr < 0.20 = "very small" = fusionnable
-#  Indépendant de n par construction.
-#  Décision sur stats agrégées (mean, var, n) — pas de relecture
-#  des vecteurs bruts dans la boucle.
+#  CALIBRATION DU SEUIL g — impact ΔMAE par seuil
+#  Logique : pour chaque seuil g testé, on fusionne et on
+#  mesure la dégradation de MAE vs référence 65 classes
 # ============================================================
 
 import numpy as np
 import polars as pl
-import matplotlib.pyplot as plt
 
-# ================================================================
-#  PARAMETRES
-# ================================================================
+# Seuils a tester
+G_SEUILS_TEST = [0.20, 0.50, 0.80, 1.20, 2.00]
 
-G_SEUIL   = 0.20   # very small effect — fusionnable (code 0)
-G_MODERE  = 0.50   # small — zone grise (code 1)
-CODES_FUSIONNABLES = {0, 1}
-MAX_ITER  = 200
-
-# Garde-fou overlap (optionnel) — protège contre fusions de classes
-# de même moyenne mais formes différentes. Mettre None pour désactiver.
-ETA_MIN_GARDE = None   # ex: 0.60 pour activer ; None = g seul
+# Seuil de materialite IRB (votre politique interne)
+SEUIL_MAE_PCT = 5.0   # % de degradation MAE acceptable
 
 
 # ================================================================
-#  FONCTIONS CORE
+#  FONCTION MAE SUR STATS AGREGEES
 # ================================================================
 
-def hedges_g_corr(mean_a, var_a, n_a, mean_b, var_b, n_b):
+def mae_from_groups(groups_state: dict, df: pl.DataFrame) -> float:
     """
-    g de Hedges corrigé du biais (facteur J de Hedges & Olkin 1985),
-    calculé à partir des stats agrégées. Insensible aux effectifs.
-
-      g = |mean_a - mean_b| / s_pooled
-      s_pooled = sqrt(((n_a-1)*var_a + (n_b-1)*var_b) / (n_a+n_b-2))
-      J = 1 - 3/(4*(n_a+n_b-2)-1)
-      g_corr = g * J
+    MAE de substitution : erreur moyenne si on predit
+    la moyenne de classe fusionnee pour chaque observation.
+    Utilise lgd_obligor deja ponderee EAD.
     """
-    df = n_a + n_b - 2
-    if df <= 0:
-        return np.inf
+    # Construire le mapping membre -> moyenne groupe
+    mapping_rows = []
+    for grp in groups_state.values():
+        for membre in grp["members"]:
+            mapping_rows.append({
+                "CHR_model"  : int(membre),
+                "mean_groupe": grp["mean"],
+            })
 
-    s_pooled = np.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / df)
-    if s_pooled == 0:
-        return 0.0 if mean_a == mean_b else np.inf
+    mapping = pl.DataFrame(mapping_rows)
 
-    g = abs(mean_a - mean_b) / s_pooled
-    J = 1 - (3 / (4 * df - 1))
-    return float(g * J)
+    mae = (
+        df
+        .join(mapping, on="CHR_model", how="left")
+        .select(
+            pl.col("lgd_obligor"),
+            pl.col("mean_groupe"),
+        )
+        .select(
+            (pl.col("lgd_obligor") - pl.col("mean_groupe"))
+            .abs()
+            .mean()
+            .alias("mae")
+        )
+        .item()
+    )
+    return float(mae)
 
 
-def classify_g(g_corr):
-    """Code de décision à partir du g corrigé."""
-    if g_corr < G_SEUIL:
-        return 0
-    elif g_corr < G_MODERE:
-        return 1
-    return 99
-
-
-def overlap_eta(a, b, grid_pts=512):
+def run_fusion_for_seuil(g_seuil: float,
+                          class_stats: pl.DataFrame) -> dict:
     """
-    Indice de recouvrement η (Pastore & Calcagni 2019).
-    Calculé sur vecteurs bruts — utilisé seulement en garde-fou /
-    exploration, jamais dans la boucle de décision principale.
+    Lance la fusion gloutonne jusqu'a saturation pour un seuil g donne.
+    Retourne les stats finales.
     """
-    from scipy.stats import gaussian_kde
-    if a.std() == 0 or b.std() == 0:
-        return 1.0 if (a.std() == 0 and b.std() == 0 and a[0] == b[0]) else 0.0
-    kde_a, kde_b = gaussian_kde(a), gaussian_kde(b)
-    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-    pad = 0.05 * (hi - lo) if hi > lo else 1.0
-    grid = np.linspace(lo - pad, hi + pad, grid_pts)
-    inter = np.minimum(kde_a(grid), kde_b(grid))
-    eta = float(np.trapezoid(inter, grid))   # np.trapz si NumPy < 2.0
-    return min(eta, 1.0)
+    # Init groups_state
+    groups = {
+        str(r["CHR_model"]): {
+            "mean"   : float(r["mean_lgd"]),
+            "var"    : float(r["var_lgd"]),
+            "n"      : int(r["n"]),
+            "members": [str(r["CHR_model"])],
+        }
+        for r in class_stats.iter_rows(named=True)
+    }
 
+    n_fusions = 0
+    for _ in range(500):
+        ordre = sorted(groups.keys(), key=lambda c: groups[c]["mean"])
+        if len(ordre) <= 1:
+            break
 
-def eta_squared(groups):
-    """
-    η² = variance inter / variance totale (rapport de corrélation).
-    Caractérise la partition globale (Rakotomalala 2016).
-    groups = [{"mean","var","n"}, ...]
-    """
-    ns    = np.array([g["n"]    for g in groups], dtype=float)
-    means = np.array([g["mean"] for g in groups], dtype=float)
-    vars_ = np.array([g["var"]  for g in groups], dtype=float)
+        # Meilleure paire adjacente
+        best_g, best_pair = np.inf, None
+        for i in range(len(ordre) - 1):
+            ca, cb = ordre[i], ordre[i + 1]
+            ga, gb = groups[ca], groups[cb]
+            df_   = ga["n"] + gb["n"] - 2
+            if df_ <= 0:
+                continue
+            s_pooled = np.sqrt(
+                ((ga["n"]-1)*ga["var"] + (gb["n"]-1)*gb["var"]) / df_
+            )
+            g_val = abs(ga["mean"]-gb["mean"]) / s_pooled if s_pooled > 0 else 0.0
+            if g_val < best_g:
+                best_g, best_pair = g_val, (ca, cb)
 
-    n_total    = ns.sum()
-    grand_mean = (means * ns).sum() / n_total
-    ss_inter   = (ns * (means - grand_mean) ** 2).sum()
-    ss_intra   = ((ns - 1) * vars_).sum()
-    ss_total   = ss_inter + ss_intra
-    return float(ss_inter / ss_total) if ss_total > 0 else 0.0
+        # Arret si meilleure fusion depasse le seuil
+        if best_g >= g_seuil:
+            break
 
+        # Fusion
+        ca, cb = best_pair
+        ga, gb = groups.pop(ca), groups.pop(cb)
+        n_new    = ga["n"] + gb["n"]
+        mean_new = (ga["mean"]*ga["n"] + gb["mean"]*gb["n"]) / n_new
+        var_new  = (
+            (ga["n"]-1)*ga["var"] +
+            (gb["n"]-1)*gb["var"] +
+            ga["n"]*gb["n"]/n_new * (ga["mean"]-gb["mean"])**2
+        ) / (n_new - 1)
 
-def merge_two(ga, gb):
-    """Fusionne deux groupes agrégés. Variance combinée exacte."""
-    n_new    = ga["n"] + gb["n"]
-    mean_new = (ga["mean"] * ga["n"] + gb["mean"] * gb["n"]) / n_new
-    var_new  = (
-        (ga["n"] - 1) * ga["var"] +
-        (gb["n"] - 1) * gb["var"] +
-        ga["n"] * gb["n"] / n_new * (ga["mean"] - gb["mean"]) ** 2
-    ) / (n_new - 1)
+        groups[f"{ca}|{cb}"] = {
+            "mean"   : mean_new,
+            "var"    : var_new,
+            "n"      : n_new,
+            "members": ga["members"] + gb["members"],
+        }
+        n_fusions += 1
+
     return {
-        "mean"   : mean_new,
-        "var"    : var_new,
-        "n"      : n_new,
-        "members": ga["members"] + gb["members"],
+        "g_seuil"  : g_seuil,
+        "n_classes": len(groups),
+        "n_fusions": n_fusions,
+        "groups"   : groups,
     }
 
 
 # ================================================================
-#  STATS DE BASE
+#  REFERENCE : 65 classes originales
 # ================================================================
 
 class_stats_base = (
@@ -128,83 +137,8 @@ class_stats_base = (
     .sort("mean_lgd")
 )
 
-classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
-means   = class_stats_base["mean_lgd"].to_list()
-
-print(f"{len(classes)} classes | LGD [{min(means):.3f} – {max(means):.3f}]")
-print(f"Seuils : g < {G_SEUIL} (fusionnable) | g < {G_MODERE} (modéré)")
-print(f"Garde-fou overlap : {'OFF' if ETA_MIN_GARDE is None else f'η ≥ {ETA_MIN_GARDE}'}\n")
-
-
-# ================================================================
-#  PARTIE 1 — EXPLORATION : toutes les paires adjacentes
-# ================================================================
-
-rows_explo = []
-for i in range(len(classes) - 1):
-    ca, cb = classes[i], classes[i + 1]
-    ra = class_stats_base.row(i,   named=True)
-    rb = class_stats_base.row(i+1, named=True)
-
-    g_corr = hedges_g_corr(
-        ra["mean_lgd"], ra["var_lgd"], ra["n"],
-        rb["mean_lgd"], rb["var_lgd"], rb["n"],
-    )
-    code = classify_g(g_corr)
-    gap  = abs(ra["mean_lgd"] - rb["mean_lgd"])
-
-    rows_explo.append({
-        "class_a"    : ca,
-        "class_b"    : cb,
-        "mean_a"     : round(ra["mean_lgd"], 4),
-        "mean_b"     : round(rb["mean_lgd"], 4),
-        "gap"        : round(gap, 4),
-        "std_a"      : round(np.sqrt(ra["var_lgd"]), 4),
-        "std_b"      : round(np.sqrt(rb["var_lgd"]), 4),
-        "n_a"        : ra["n"],
-        "n_b"        : rb["n"],
-        "g_corr"     : round(g_corr, 6),
-        "code"       : code,
-        "fusionnable": code in CODES_FUSIONNABLES,
-    })
-
-    symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
-    print(f"{symbole} [{i+1:2d}/{len(classes)-1}] {ca:<5} | {cb:<5}  "
-          f"gap={gap:6.3f}  g={g_corr:7.4f}  "
-          f"std_a={np.sqrt(ra['var_lgd']):.3f}  std_b={np.sqrt(rb['var_lgd']):.3f}")
-
-resultats_explo = pl.DataFrame(rows_explo)
-
-n0  = resultats_explo.filter(pl.col("code") == 0).height
-n1  = resultats_explo.filter(pl.col("code") == 1).height
-n99 = resultats_explo.filter(pl.col("code") == 99).height
-
-print(f"\n{'='*60}")
-print(f"  ✅ g < {G_SEUIL}  (very small)  : {n0:>3}")
-print(f"  🟡 g < {G_MODERE}  (small)       : {n1:>3}")
-print(f"  ❌ g >= {G_MODERE} (medium+)     : {n99:>3}")
-print(f"{'='*60}\n")
-
-print("=== FUSIONNABLES ===")
-display(
-    resultats_explo.filter(pl.col("fusionnable")).sort("g_corr")
-    .select(["class_a","class_b","gap","n_a","n_b","g_corr","std_a","std_b","code"])
-)
-
-print("\n=== NON FUSIONNABLES ===")
-display(
-    resultats_explo.filter(~pl.col("fusionnable")).sort("g_corr")
-    .select(["class_a","class_b","gap","n_a","n_b","g_corr","std_a","std_b"])
-)
-
-
-# ================================================================
-#  PARTIE 2 — FUSION GLOUTONNE (sur stats agrégées)
-# ================================================================
-
-print("\n\n=== FUSION GLOUTONNE — g de Hedges ===\n")
-
-groups_state = {
+# Groups_state reference (65 classes, pas de fusion)
+groups_ref = {
     str(r["CHR_model"]): {
         "mean"   : float(r["mean_lgd"]),
         "var"    : float(r["var_lgd"]),
@@ -214,157 +148,106 @@ groups_state = {
     for r in class_stats_base.iter_rows(named=True)
 }
 
-history_g = []
-iteration = 0
+mae_ref    = mae_from_groups(groups_ref, df_base)
+n_ref      = len(groups_ref)
 
-for _ in range(MAX_ITER):
-    ordre = sorted(groups_state.keys(), key=lambda c: groups_state[c]["mean"])
-    if len(ordre) <= 1:
-        print("Une seule classe restante.")
-        break
+print(f"REFERENCE : {n_ref} classes | MAE = {mae_ref:.6f}\n")
 
-    # Meilleure paire adjacente = g corrigé le plus bas
-    best_g, best_pair = np.inf, None
-    for i in range(len(ordre) - 1):
-        ca, cb = ordre[i], ordre[i + 1]
-        ga, gb = groups_state[ca], groups_state[cb]
-        g_corr = hedges_g_corr(
-            ga["mean"], ga["var"], ga["n"],
-            gb["mean"], gb["var"], gb["n"],
-        )
-        if g_corr < best_g:
-            best_g, best_pair = g_corr, (ca, cb)
 
-    ca, cb = best_pair
-    ga, gb = groups_state[ca], groups_state[cb]
-    code   = classify_g(best_g)
-    gap    = abs(ga["mean"] - gb["mean"])
+# ================================================================
+#  BOUCLE SUR LES SEUILS
+# ================================================================
 
-    # Garde-fou overlap optionnel (recharge vecteurs seulement si activé)
-    eta_val = None
-    if ETA_MIN_GARDE is not None and code in CODES_FUSIONNABLES:
-        a = df_base.filter(
-            pl.col("CHR_model").cast(pl.Utf8).is_in(ga["members"]))["lgd_obligor"].to_numpy()
-        b = df_base.filter(
-            pl.col("CHR_model").cast(pl.Utf8).is_in(gb["members"]))["lgd_obligor"].to_numpy()
-        eta_val = overlap_eta(a, b)
-        if eta_val < ETA_MIN_GARDE:
-            code = 99   # bloqué par le garde-fou forme
+resultats_calibration = []
 
-    iteration += 1
-    n_apres = len(ordre) - 1
+for g_seuil in G_SEUILS_TEST:
+    res     = run_fusion_for_seuil(g_seuil, class_stats_base)
+    mae_g   = mae_from_groups(res["groups"], df_base)
+    delta   = (mae_g - mae_ref) / mae_ref * 100
+    ok      = delta <= SEUIL_MAE_PCT
 
-    symbole = "✅" if code == 0 else "🟡" if code == 1 else "⛔"
-    eta_str = f"  η={eta_val:.3f}" if eta_val is not None else ""
-    print(f"{symbole} it={iteration:3d} | n={n_apres:3d} | "
-          f"{ca:<22} + {cb:<22} | g={best_g:.4f}  gap={gap:.3f}{eta_str}")
-
-    history_g.append({
-        "iteration": iteration,
-        "n_classes": n_apres,
-        "class_a"  : ca,
-        "class_b"  : cb,
-        "g_corr"   : round(best_g, 6),
-        "gap"      : round(gap, 4),
-        "eta"      : round(eta_val, 4) if eta_val is not None else None,
-        "mean_a"   : round(ga["mean"], 4),
-        "mean_b"   : round(gb["mean"], 4),
-        "n_a"      : ga["n"],
-        "n_b"      : gb["n"],
-        "code"     : code,
+    resultats_calibration.append({
+        "g_seuil"       : g_seuil,
+        "n_classes"     : res["n_classes"],
+        "n_fusions"     : res["n_fusions"],
+        "mae"           : round(mae_g,  6),
+        "delta_mae_pct" : round(delta,  3),
+        "acceptable"    : ok,
     })
 
-    if code not in CODES_FUSIONNABLES:
-        motif = ("garde-fou overlap" if (eta_val is not None and eta_val < ETA_MIN_GARDE)
-                 else f"g={best_g:.4f} >= {G_MODERE}")
-        print(f"\n🛑 Arret it={iteration} — meilleure fusion : {motif}")
-        break
-
-    new_label = f"{ca}|{cb}"
-    groups_state.pop(ca)
-    groups_state.pop(cb)
-    groups_state[new_label] = merge_two(ga, gb)
-
-n_cls_final = len(groups_state)
-print(f"\nClasses finales : {n_cls_final}")
+    symbole = "✅" if ok else "❌"
+    print(f"{symbole} g < {g_seuil:.2f} | "
+          f"n={res['n_classes']:3d} classes | "
+          f"MAE={mae_g:.6f} | "
+          f"ΔMAE={delta:+.3f}% "
+          f"({'< ' if ok else '>= '}{SEUIL_MAE_PCT}%)")
 
 
 # ================================================================
-#  PARTIE 3 — RESULTATS + COURBES + MAPPING
+#  TABLEAU + GRAPHE
 # ================================================================
 
-results_g = pl.DataFrame(history_g)
+df_calib = pl.DataFrame(resultats_calibration)
 
-# η² avant / après
-groups_orig  = [{"mean": float(r["mean_lgd"]), "var": float(r["var_lgd"]), "n": int(r["n"])}
-                for r in class_stats_base.iter_rows(named=True)]
-groups_final = [{"mean": g["mean"], "var": g["var"], "n": g["n"]}
-                for g in groups_state.values()]
-eta2_orig  = eta_squared(groups_orig)
-eta2_final = eta_squared(groups_final)
-perte_pct  = (eta2_orig - eta2_final) / eta2_orig * 100 if eta2_orig > 0 else 0
+print(f"\n{'='*65}")
+print(f"  Seuil matérialité MAE : {SEUIL_MAE_PCT}%")
+print(f"  Référence : MAE={mae_ref:.6f} ({n_ref} classes)")
+print(f"{'='*65}")
+display(df_calib)
 
-print(f"\n{'='*60}")
-print(f"  {'':22} {'ORIGINAL':>12} {'FINAL':>12} {'PERTE':>9}")
-print(f"  {'n_classes':<22} {len(classes):>12} {n_cls_final:>12}")
-print(f"  {'η² (var. expliquée)':<22} {eta2_orig:>12.6f} {eta2_final:>12.6f} {perte_pct:>+8.3f}%")
-print(f"{'='*60}")
+# Identifier le seuil recommande
+acceptables = df_calib.filter(pl.col("acceptable"))
+if acceptables.height > 0:
+    # Seuil le plus grand encore acceptable = max fusions sans depasser la limite
+    seuil_retenu = acceptables["g_seuil"].max()
+    n_retenu     = acceptables.filter(
+        pl.col("g_seuil") == seuil_retenu)["n_classes"].item()
+    delta_retenu = acceptables.filter(
+        pl.col("g_seuil") == seuil_retenu)["delta_mae_pct"].item()
+    print(f"\n✅ SEUIL RECOMMANDE : g < {seuil_retenu}")
+    print(f"   → {n_retenu} classes finales")
+    print(f"   → ΔMAE = {delta_retenu:+.3f}% < {SEUIL_MAE_PCT}%")
+else:
+    print(f"\n⚠️  Aucun seuil ne respecte ΔMAE < {SEUIL_MAE_PCT}%")
+    print(f"   Envisagez d'assouplir SEUIL_MAE_PCT")
 
-# Courbes
-n_hist = results_g["n_classes"].to_list()
-g_hist = results_g["g_corr"].to_list()
+# Graphe
+import matplotlib.pyplot as plt
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-fig.suptitle("Fusion gloutonne — g de Hedges (Cohen 1988 / Sawilowsky 2009)", fontsize=13)
+fig.suptitle("Calibration du seuil g — impact ΔMAE", fontsize=13)
 
-axes[0].plot(n_hist, g_hist, marker="o", markersize=4, color="steelblue")
-axes[0].axhline(G_SEUIL,  color="green",  linestyle="--", lw=1.5, label=f"very small g={G_SEUIL}")
-axes[0].axhline(G_MODERE, color="orange", linestyle="--", lw=1.5, label=f"small g={G_MODERE}")
-axes[0].set_xlabel("Nombre de classes"); axes[0].set_ylabel("g de Hedges (corrigé)")
-axes[0].set_title("g de la meilleure fusion disponible")
-axes[0].invert_xaxis(); axes[0].legend()
+g_vals    = df_calib["g_seuil"].to_list()
+n_vals    = df_calib["n_classes"].to_list()
+delta_vals= df_calib["delta_mae_pct"].to_list()
 
-axes[1].plot(n_hist, results_g["gap"].to_list(), marker="o", markersize=4, color="darkorange")
-axes[1].set_xlabel("Nombre de classes"); axes[1].set_ylabel("Gap LGD (pts)")
-axes[1].set_title("Gap de moyenne au fil des fusions")
-axes[1].invert_xaxis()
+# ΔMAE vs seuil g
+couleurs = ["green" if ok else "red"
+            for ok in df_calib["acceptable"].to_list()]
+axes[0].bar(
+    [str(g) for g in g_vals], delta_vals,
+    color=couleurs, alpha=0.7, edgecolor="black"
+)
+axes[0].axhline(SEUIL_MAE_PCT, color="orange", linestyle="--",
+                lw=1.5, label=f"seuil matérialité {SEUIL_MAE_PCT}%")
+axes[0].set_xlabel("Seuil g")
+axes[0].set_ylabel("ΔMAE (%)")
+axes[0].set_title("Dégradation MAE par seuil g")
+axes[0].legend()
+
+# Nb classes vs ΔMAE
+axes[1].scatter(delta_vals, n_vals, s=80, zorder=5,
+                color=couleurs, edgecolor="black")
+for g, d, n in zip(g_vals, delta_vals, n_vals):
+    axes[1].annotate(f"g<{g}", (d, n),
+                     textcoords="offset points",
+                     xytext=(6, 0), fontsize=9)
+axes[1].axvline(SEUIL_MAE_PCT, color="orange", linestyle="--",
+                lw=1.5, label=f"seuil {SEUIL_MAE_PCT}%")
+axes[1].set_xlabel("ΔMAE (%)")
+axes[1].set_ylabel("Nombre de classes finales")
+axes[1].set_title("Parcimonie vs dégradation")
+axes[1].legend()
 
 plt.tight_layout()
 plt.show()
-
-print("\n=== HISTORIQUE DES FUSIONS ===")
-display(results_g.select(
-    ["iteration","n_classes","class_a","class_b","g_corr","gap","eta","mean_a","mean_b","n_a","n_b"]
-))
-
-# Mapping final
-mapping_rows = []
-for rank, (label, grp) in enumerate(
-    sorted(groups_state.items(), key=lambda x: x[1]["mean"]), start=1
-):
-    label_court = f"G{rank:02d}_lgd{round(grp['mean'], 1)}"
-    for membre in grp["members"]:
-        mapping_rows.append({
-            "CHR_model"     : int(membre),
-            "classe_finale" : label_court,
-            "mean_groupe"   : round(grp["mean"], 4),
-            "n_groupe"      : int(grp["n"]),
-            "n_membres"     : len(grp["members"]),
-        })
-
-mapping_df = pl.DataFrame(mapping_rows).sort("mean_groupe")
-
-# Application sur df_base
-df_final = df_base.join(
-    mapping_df.select(["CHR_model", "classe_finale"]),
-    on="CHR_model", how="left",
-)
-n_null = df_final.filter(pl.col("classe_finale").is_null()).height
-print(f"\n{'✅ Mapping complet' if n_null == 0 else f'⚠️  {n_null} lignes sans mapping'}")
-
-print(f"\n=== {n_cls_final} GROUPES FINAUX ===")
-display(
-    mapping_df.unique("classe_finale", keep="first")
-    .select(["classe_finale","mean_groupe","n_groupe","n_membres"])
-    .sort("mean_groupe")
-)
