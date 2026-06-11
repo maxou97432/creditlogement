@@ -1,76 +1,109 @@
 # ============================================================
-#  CLUSTERING HIERARCHIQUE DE WARD — bloc complet v2
-#  Requiert : df_base charge (Polars DataFrame)
-#             colonnes : CHR_model (i64), lgd_obligor (f64)
+#  TEST D'HOMOGENEITE I² (Cochran Q) — fusion gloutonne
+#  Référence : Higgins & Thompson (2002), Cochrane Handbook
+#  Seuil : I² < 25% = homogène (convention universelle)
 # ============================================================
 
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
-from scipy.stats import spearmanr
+from scipy import stats
 
 # ================================================================
-#  FONCTION SCORES
+#  PARAMETRES
 # ================================================================
 
-def compute_scores(df: pl.DataFrame, class_col: str, target_col: str) -> dict:
+I2_SEUIL      = 0.25   # seuil homogeneite : 25% convention Cochrane
+I2_MODERE     = 0.50   # zone moderee
+MAX_ITER      = 200
+CODES_FUSIONNABLES = {0, 1}
+
+
+# ================================================================
+#  FONCTIONS CORE
+# ================================================================
+
+def compute_Q_I2(groups: list[dict]) -> tuple[float, float, float]:
     """
-    R2        : variance inter / variance totale
-    std_intra : ecart-type intra-classe moyen pondere
-    mae_pred  : MAE si on predit la moyenne de classe
-    gini      : Spearman(lgd_realisee, moyenne_classe_predite)
+    Calcule Q de Cochran et I² sur un ensemble de groupes.
+
+    Chaque groupe = {"mean": float, "var": float, "n": int}
+    où var = variance intra-groupe (variance de la LGD dans la classe).
+
+    Q = Σ w_i * (y_i - y_pooled)²
+    où w_i = 1 / v_i  et  v_i = var_i / n_i  (variance de la moyenne)
+
+    I² = max(0, (Q - df) / Q)  avec df = k - 1
+
+    Retourne (Q, I2, y_pooled)
     """
-    y          = df[target_col].to_numpy().astype(float)
-    grand_mean = y.mean()
-    ss_total   = ((y - grand_mean) ** 2).sum()
+    k = len(groups)
+    if k < 2:
+        return 0.0, 0.0, float(groups[0]["mean"]) if groups else 0.0
 
-    cs = (
-        df.group_by(class_col)
-        .agg([
-            pl.col(target_col).mean().alias("mean_cls"),
-            pl.col(target_col).std().alias("std_cls"),
-            pl.col(target_col).count().alias("n_cls"),
-        ])
-        .sort("mean_cls")
-    )
+    # Variance de la moyenne estimee pour chaque groupe
+    vi     = np.array([g["var"] / g["n"] for g in groups])
+    wi     = 1.0 / vi
+    yi     = np.array([g["mean"] for g in groups])
 
-    means_cls = cs["mean_cls"].to_numpy().astype(float)
-    stds_cls  = cs["std_cls"].to_numpy().astype(float)
-    ns_cls    = cs["n_cls"].to_numpy().astype(float)
+    # Moyenne poolee (weighted)
+    y_pool = float((wi * yi).sum() / wi.sum())
 
-    # R2
-    ss_inter  = float(((means_cls - grand_mean) ** 2 * ns_cls).sum())
-    r2        = ss_inter / ss_total if ss_total > 0 else 0.0
+    # Statistique Q
+    Q  = float((wi * (yi - y_pool) ** 2).sum())
+    df = k - 1
 
-    # Std intra ponderee
-    std_intra = float((stds_cls * ns_cls).sum() / ns_cls.sum())
+    # I²
+    I2 = max(0.0, (Q - df) / Q) if Q > 0 else 0.0
 
-    # MAE
-    df_joined = df.join(cs.select([class_col, "mean_cls"]), on=class_col, how="left")
-    y_pred    = df_joined["mean_cls"].to_numpy().astype(float)
-    mae_pred  = float(np.abs(y - y_pred).mean())
+    return Q, I2, y_pool
 
-    # Gini (Spearman sur sous-echantillon 50k)
-    rng = np.random.default_rng(42)
-    if len(y) > 50_000:
-        idx   = rng.choice(len(y), size=50_000, replace=False)
-        y_s   = y[idx]
-        yp_s  = y_pred[idx]
-    else:
-        y_s, yp_s = y, y_pred
-    rho, _ = spearmanr(yp_s, y_s)
 
-    return {
-        "n_classes" : int(cs.height),
-        "r2"        : round(float(r2),        6),
-        "std_intra" : round(float(std_intra), 6),
-        "mae_pred"  : round(float(mae_pred),  6),
-        "gini"      : round(float(rho),       6),
+def i2_fusion_test(a: np.ndarray, b: np.ndarray) -> tuple[int, str, dict]:
+    """
+    Teste si fusionner a et b produit un groupe homogene au sens I².
+
+    Logique :
+      - Calculer I² sur le groupe fusionne {a, b}
+      - Si I² < I2_SEUIL (25%) : homogene -> code 0
+      - Si I² < I2_MODERE (50%) : moderement homogene -> code 1
+      - Sinon : heterogene -> code 99
+
+    Retourne (code, raison, diag)
+    """
+    groups = [
+        {"mean": float(a.mean()), "var": float(a.var(ddof=1)), "n": len(a)},
+        {"mean": float(b.mean()), "var": float(b.var(ddof=1)), "n": len(b)},
+    ]
+
+    Q, I2, y_pool = compute_Q_I2(groups)
+
+    # P-value du test Q (chi2 avec df=1)
+    df   = len(groups) - 1
+    pval = float(1 - stats.chi2.cdf(Q, df))
+
+    diag = {
+        "Q"       : round(Q,     4),
+        "I2"      : round(I2,    4),
+        "I2_pct"  : round(I2 * 100, 1),
+        "pval_Q"  : round(pval,  4),
+        "mean_a"  : round(float(a.mean()), 4),
+        "mean_b"  : round(float(b.mean()), 4),
+        "gap"     : round(abs(float(a.mean()) - float(b.mean())), 4),
+        "n_a"     : len(a),
+        "n_b"     : len(b),
     }
 
+    if I2 < I2_SEUIL:
+        return 0, f"[I²={I2*100:.1f}%] < {I2_SEUIL*100:.0f}% (homogène)", diag
+    elif I2 < I2_MODERE:
+        return 1, f"[I²={I2*100:.1f}%] < {I2_MODERE*100:.0f}% (modéré)", diag
+    else:
+        return 99, f"[I²={I2*100:.1f}%] >= {I2_MODERE*100:.0f}% (hétérogène)", diag
+
 
 # ================================================================
-#  PARTIE 1 — Stats de base + algorithme de Ward
+#  EXPLORATION — toutes les paires adjacentes
 # ================================================================
 
 class_stats_base = (
@@ -78,185 +111,235 @@ class_stats_base = (
     .group_by("CHR_model")
     .agg([
         pl.col("lgd_obligor").mean().alias("mean_lgd"),
+        pl.col("lgd_obligor").var().alias("var_lgd"),
         pl.col("lgd_obligor").count().alias("n"),
     ])
     .sort("mean_lgd")
 )
 
-# Conversion en str pour uniformite interne (le cast i64 se fait au join)
-classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
-means   = np.array(class_stats_base["mean_lgd"].to_list(), dtype=float)
-ns      = np.array(class_stats_base["n"].to_list(),        dtype=float)
-K       = len(classes)
+classes   = [str(c) for c in class_stats_base["CHR_model"].to_list()]
+means     = class_stats_base["mean_lgd"].to_list()
+effectifs = class_stats_base["n"].to_list()
 
-print(f"{K} classes | LGD [{means.min():.3f} – {means.max():.3f}]\n")
+print(f"{len(classes)} classes | LGD [{min(means):.3f} – {max(means):.3f}]\n")
 
-# Etat initial : un groupe par classe
-groups = [
-    {
-        "label"  : c,
-        "mean"   : float(m),
-        "n"      : float(n),
-        "members": [c],
-    }
-    for c, m, n in zip(classes, means, ns)
-]
+rows_explo = []
+for i in range(len(classes) - 1):
+    ca, cb = classes[i], classes[i + 1]
+    a = df_base.filter(
+        pl.col("CHR_model") == int(ca))["lgd_obligor"].to_numpy()
+    b = df_base.filter(
+        pl.col("CHR_model") == int(cb))["lgd_obligor"].to_numpy()
 
-fusion_history = []  # liste de dicts — un par fusion
+    code, raison, diag = i2_fusion_test(a, b)
 
-while len(groups) > 1:
-    best_delta = np.inf
-    best_idx   = -1
-
-    for i in range(len(groups) - 1):
-        a, b  = groups[i], groups[i + 1]
-        delta = (a["n"] * b["n"]) / (a["n"] + b["n"]) * (a["mean"] - b["mean"]) ** 2
-        if delta < best_delta:
-            best_delta = delta
-            best_idx   = i
-
-    a     = groups[best_idx]
-    b     = groups[best_idx + 1]
-    n_new = a["n"] + b["n"]
-
-    new_grp = {
-        "label"  : f"{a['label']}|{b['label']}",
-        "mean"   : (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new,
-        "n"      : n_new,
-        "members": a["members"] + b["members"],
-    }
-
-    fusion_history.append({
-        "n_classes"  : len(groups) - 1,
-        "label_a"    : a["label"],
-        "label_b"    : b["label"],
-        "mean_a"     : round(a["mean"], 4),
-        "mean_b"     : round(b["mean"], 4),
-        "n_a"        : int(a["n"]),
-        "n_b"        : int(b["n"]),
-        "delta_ward" : round(best_delta, 6),
+    rows_explo.append({
+        "class_a"    : ca,
+        "class_b"    : cb,
+        "gap"        : diag["gap"],
+        "n_a"        : diag["n_a"],
+        "n_b"        : diag["n_b"],
+        "I2_pct"     : diag["I2_pct"],
+        "Q"          : diag["Q"],
+        "pval_Q"     : diag["pval_Q"],
+        "code"       : code,
+        "fusionnable": code in CODES_FUSIONNABLES,
+        "raison"     : raison,
     })
 
-    groups = groups[:best_idx] + [new_grp] + groups[best_idx + 2:]
+    symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
+    print(f"{symbole} [{i+1:2d}/64] {ca:<6} | {cb:<6}  "
+          f"gap={diag['gap']:6.3f}  "
+          f"I²={diag['I2_pct']:5.1f}%  "
+          f"Q={diag['Q']:10.1f}  "
+          f"p={diag['pval_Q']:.4f}")
 
-fh = pl.DataFrame(fusion_history)
-print("=== HISTORIQUE DES FUSIONS (Ward) ===")
-display(fh)
+resultats_explo = pl.DataFrame(rows_explo)
+
+# Résumé
+n0  = resultats_explo.filter(pl.col("code") == 0).height
+n1  = resultats_explo.filter(pl.col("code") == 1).height
+n99 = resultats_explo.filter(pl.col("code") == 99).height
+
+print(f"\n{'='*55}")
+print(f"  ✅ I² < 25% (homogène)  : {n0:>3}")
+print(f"  🟡 I² < 50% (modéré)   : {n1:>3}")
+print(f"  ❌ I² >= 50% (hétéro)  : {n99:>3}")
+print(f"{'='*55}\n")
+
+print("=== FUSIONNABLES ===")
+display(
+    resultats_explo
+    .filter(pl.col("fusionnable"))
+    .sort("I2_pct")
+    .select(["class_a","class_b","gap","n_a","n_b","I2_pct","Q","pval_Q","raison"])
+)
+
+print("\n=== NON FUSIONNABLES ===")
+display(
+    resultats_explo
+    .filter(~pl.col("fusionnable"))
+    .sort("I2_pct")
+    .select(["class_a","class_b","gap","n_a","n_b","I2_pct","Q","pval_Q","raison"])
+)
 
 
 # ================================================================
-#  PARTIE 2 — Detection du saut maximal + graphes
+#  FUSION GLOUTONNE PAR I²
 # ================================================================
 
-deltas    = np.array([r["delta_ward"] for r in fusion_history])
-n_classes = np.array([r["n_classes"]  for r in fusion_history])
-sauts     = np.diff(deltas)
-idx_saut  = int(np.argmax(sauts))
+print("\n\n=== FUSION GLOUTONNE PAR I² ===\n")
 
-k_naturel   = int(n_classes[idx_saut + 1])
-delta_avant = deltas[idx_saut]
-delta_apres = deltas[idx_saut + 1]
+# Reconstruire l'etat initial avec var et n
+groups_state = {}
+for row in class_stats_base.iter_rows(named=True):
+    cls = str(row["CHR_model"])
+    groups_state[cls] = {
+        "mean"   : row["mean_lgd"],
+        "var"    : row["var_lgd"],
+        "n"      : row["n"],
+        "members": [cls],
+    }
 
-print(f"\nSaut maximal : {delta_avant:.6f} → {delta_apres:.6f} "
-      f"(x{delta_apres/delta_avant:.1f})")
-print(f"Coupure naturelle : K = {k_naturel} classes\n")
+# Ordre des classes (tri par mean_lgd)
+ordre_classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
 
+history_i2 = []
+iteration  = 0
+
+for _ in range(MAX_ITER):
+    # Classes courantes dans l'ordre LGD
+    ordre_courant = sorted(groups_state.keys(),
+                           key=lambda c: groups_state[c]["mean"])
+
+    if len(ordre_courant) <= 1:
+        break
+
+    # Trouver la paire adjacente avec le I² le plus bas
+    best_i2   = np.inf
+    best_pair = None
+
+    for i in range(len(ordre_courant) - 1):
+        ca, cb = ordre_courant[i], ordre_courant[i + 1]
+        ga, gb = groups_state[ca], groups_state[cb]
+
+        groups_tmp = [
+            {"mean": ga["mean"], "var": ga["var"], "n": ga["n"]},
+            {"mean": gb["mean"], "var": gb["var"], "n": gb["n"]},
+        ]
+        _, I2, _ = compute_Q_I2(groups_tmp)
+
+        if I2 < best_i2:
+            best_i2   = I2
+            best_pair = (ca, cb)
+
+    ca, cb = best_pair
+    code, raison, diag = i2_fusion_test(
+        df_base.filter(pl.col("CHR_model").is_in(
+            [int(m) for m in groups_state[ca]["members"]])
+        )["lgd_obligor"].to_numpy(),
+        df_base.filter(pl.col("CHR_model").is_in(
+            [int(m) for m in groups_state[cb]["members"]])
+        )["lgd_obligor"].to_numpy(),
+    )
+
+    iteration += 1
+    n_apres    = len(ordre_courant) - 1
+
+    symbole = "✅" if code == 0 else "🟡" if code == 1 else "⛔"
+    print(f"{symbole} it={iteration:3d} | n={n_apres:3d} | "
+          f"{ca:<25} + {cb:<25} | "
+          f"I²={diag['I2_pct']:5.1f}%  "
+          f"gap={diag['gap']:.3f}")
+
+    history_i2.append({
+        "iteration" : iteration,
+        "n_classes" : n_apres,
+        "class_a"   : ca,
+        "class_b"   : cb,
+        "I2_pct"    : diag["I2_pct"],
+        "Q"         : diag["Q"],
+        "pval_Q"    : diag["pval_Q"],
+        "gap"       : diag["gap"],
+        "code"      : code,
+        "raison"    : raison,
+        "stop"      : code not in CODES_FUSIONNABLES,
+    })
+
+    if code not in CODES_FUSIONNABLES:
+        print(f"\n🛑 Arret it={iteration} — {raison}")
+        print(f"   Toutes les fusions restantes produisent I² >= {I2_MODERE*100:.0f}%")
+        break
+
+    # Fusionner dans groups_state
+    ga  = groups_state.pop(ca)
+    gb  = groups_state.pop(cb)
+    n_new    = ga["n"] + gb["n"]
+    mean_new = (ga["mean"] * ga["n"] + gb["mean"] * gb["n"]) / n_new
+    # Variance poolee : formule exacte pour deux groupes
+    var_new  = (
+        (ga["n"] - 1) * ga["var"] +
+        (gb["n"] - 1) * gb["var"] +
+        ga["n"] * gb["n"] / n_new * (ga["mean"] - gb["mean"]) ** 2
+    ) / (n_new - 1)
+
+    new_label = f"{ca}|{cb}"
+    groups_state[new_label] = {
+        "mean"   : mean_new,
+        "var"    : var_new,
+        "n"      : n_new,
+        "members": ga["members"] + gb["members"],
+    }
+
+# ================================================================
+#  RESULTATS FINAUX
+# ================================================================
+
+results_i2   = pl.DataFrame(history_i2)
+n_cls_final  = len(groups_state)
+
+print(f"\nClasses finales : {n_cls_final}")
+print(f"\n=== HISTORIQUE DES FUSIONS ===")
+display(results_i2)
+
+# Courbe I² au fil des fusions
 fig, axes = plt.subplots(1, 2, figsize=(14, 4))
 
-axes[0].plot(n_classes, deltas, marker="o", markersize=3, color="steelblue")
-axes[0].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
-                label=f"coupure K={k_naturel}")
+iters   = results_i2["iteration"].to_list()
+n_cls   = results_i2["n_classes"].to_list()
+i2_vals = results_i2["I2_pct"].to_list()
+
+axes[0].plot(n_cls, i2_vals, marker="o", markersize=4, color="steelblue")
+axes[0].axhline(I2_SEUIL  * 100, color="green",  linestyle="--", lw=1.5,
+                label=f"seuil homogène {I2_SEUIL*100:.0f}%")
+axes[0].axhline(I2_MODERE * 100, color="orange", linestyle="--", lw=1.5,
+                label=f"seuil modéré {I2_MODERE*100:.0f}%")
 axes[0].set_xlabel("Nombre de classes")
-axes[0].set_ylabel("Δ Ward")
-axes[0].set_title("Distance de fusion Ward")
+axes[0].set_ylabel("I² (%)")
+axes[0].set_title("I² de la meilleure fusion disponible")
 axes[0].invert_xaxis()
 axes[0].legend()
 
-axes[1].plot(n_classes[1:], sauts, marker="o", markersize=3, color="darkorange")
-axes[1].axvline(k_naturel, color="red", linestyle="--", lw=1.5,
-                label=f"saut max → K={k_naturel}")
+axes[1].plot(n_cls, results_i2["Q"].to_list(),
+             marker="o", markersize=4, color="darkorange")
 axes[1].set_xlabel("Nombre de classes")
-axes[1].set_ylabel("Δ(Δ Ward)")
-axes[1].set_title("Sauts entre distances consecutives")
+axes[1].set_ylabel("Q de Cochran")
+axes[1].set_title("Statistique Q au fil des fusions")
 axes[1].invert_xaxis()
-axes[1].legend()
 
 plt.tight_layout()
 plt.show()
 
-top_sauts = (
-    pl.DataFrame({
-        "n_classes_apres": n_classes[1:].tolist(),
-        "saut"           : sauts.tolist(),
-        "delta_avant"    : deltas[:-1].tolist(),
-        "delta_apres"    : deltas[1:].tolist(),
-    })
-    .sort("saut", descending=True)
-    .head(10)
-)
-print("=== TOP 10 SAUTS ===")
-display(top_sauts)
-
-
-# ================================================================
-#  PARTIE 3 — Partitionnement final + mapping + validation
-# ================================================================
-
-K_FINAL = k_naturel   # <- modifier ici si besoin, ex: K_FINAL = 20
-
-print(f"\nReconstruction du partitionnement a K={K_FINAL} classes...")
-
-# Rejouer les fusions depuis l'etat initial jusqu'a K_FINAL
-groups_final = [
-    {
-        "label"  : c,
-        "mean"   : float(m),
-        "n"      : float(n),
-        "members": [c],
-    }
-    for c, m, n in zip(classes, means, ns)
-]
-
-for row in fusion_history:
-    if row["n_classes"] < K_FINAL:
-        break
-
-    # Recherche par label exact — robuste aux labels composes
-    idx_a = next(
-        (i for i, g in enumerate(groups_final) if g["label"] == row["label_a"]),
-        None
-    )
-    idx_b = next(
-        (i for i, g in enumerate(groups_final) if g["label"] == row["label_b"]),
-        None
-    )
-
-    if idx_a is None or idx_b is None:
-        print(f"  ⚠️  labels non trouves : {row['label_a']} / {row['label_b']}")
-        continue
-
-    a, b  = groups_final[idx_a], groups_final[idx_b]
-    n_new = a["n"] + b["n"]
-    new_grp = {
-        "label"  : f"{a['label']}|{b['label']}",
-        "mean"   : (a["mean"] * a["n"] + b["mean"] * b["n"]) / n_new,
-        "n"      : n_new,
-        "members": a["members"] + b["members"],
-    }
-    keep         = [g for i, g in enumerate(groups_final)
-                    if i not in (idx_a, idx_b)]
-    groups_final = sorted(keep + [new_grp], key=lambda g: g["mean"])
-
-print(f"Groupes reconstruits : {len(groups_final)}")
-
-# --- Mapping membres -> classe finale ---
+# Mapping final
+print(f"\n=== MAPPING FINAL ({n_cls_final} classes) ===")
 mapping_rows = []
-for rank, grp in enumerate(groups_final, start=1):
+for rank, (label, grp) in enumerate(
+    sorted(groups_state.items(), key=lambda x: x[1]["mean"]), start=1
+):
     label_court = f"G{rank:02d}_lgd{round(grp['mean'], 1)}"
     for membre in grp["members"]:
         mapping_rows.append({
-            "CHR_model_str" : membre,
-            "CHR_model"     : int(membre),   # cast i64 pour le join
+            "CHR_model"     : int(membre),
             "classe_finale" : label_court,
             "mean_groupe"   : round(grp["mean"], 4),
             "n_groupe"      : int(grp["n"]),
@@ -264,57 +347,8 @@ for rank, grp in enumerate(groups_final, start=1):
         })
 
 mapping_df = pl.DataFrame(mapping_rows).sort("mean_groupe")
-
-print(f"\n=== MAPPING CHR_model → classe finale (K={K_FINAL}) ===")
 display(
-    mapping_df
-    .select(["CHR_model", "classe_finale", "mean_groupe", "n_groupe", "n_membres"])
-)
-
-# --- Appliquer le mapping sur df_base ---
-df_final = (
-    df_base
-    .join(
-        mapping_df.select(["CHR_model", "classe_finale"]),
-        on="CHR_model",
-        how="left",
-    )
-)
-
-# Verification : pas de null dans classe_finale
-n_null = df_final.filter(pl.col("classe_finale").is_null()).height
-if n_null > 0:
-    print(f"⚠️  {n_null} lignes sans mapping — verifier CHR_model")
-else:
-    print(f"✅ Mapping complet — aucune valeur manquante")
-
-# --- Scores de validation ---
-scores_orig = compute_scores(df_base,  "CHR_model",    "lgd_obligor")
-scores_ward = compute_scores(df_final, "classe_finale", "lgd_obligor")
-
-def pct_change(ref, new, higher_is_better=True):
-    delta = (new - ref) / abs(ref) * 100 if ref != 0 else 0
-    return delta if higher_is_better else -delta
-
-print(f"\n{'='*70}")
-print(f"  {'CRITERE':<18} {'ORIGINAL':>12} {'WARD K={}'.format(K_FINAL):>14} {'DELTA':>10}")
-print(f"  {'-'*66}")
-print(f"  {'n_classes':<18} {scores_orig['n_classes']:>12} {scores_ward['n_classes']:>14}")
-print(f"  {'R2':<18} {scores_orig['r2']:>12.6f} {scores_ward['r2']:>14.6f} "
-      f"{pct_change(scores_orig['r2'], scores_ward['r2']):>+9.3f}%")
-print(f"  {'std_intra':<18} {scores_orig['std_intra']:>12.6f} {scores_ward['std_intra']:>14.6f} "
-      f"{pct_change(scores_orig['std_intra'], scores_ward['std_intra'], False):>+9.3f}%")
-print(f"  {'mae_pred':<18} {scores_orig['mae_pred']:>12.6f} {scores_ward['mae_pred']:>14.6f} "
-      f"{pct_change(scores_orig['mae_pred'], scores_ward['mae_pred'], False):>+9.3f}%")
-print(f"  {'gini':<18} {scores_orig['gini']:>12.6f} {scores_ward['gini']:>14.6f} "
-      f"{pct_change(scores_orig['gini'], scores_ward['gini']):>+9.3f}%")
-print(f"{'='*70}")
-
-# --- Resume des groupes finaux ---
-print(f"\n=== TAILLES DES {K_FINAL} GROUPES ===")
-display(
-    mapping_df
-    .unique("classe_finale", keep="first")
-    .select(["classe_finale", "mean_groupe", "n_groupe", "n_membres"])
+    mapping_df.unique("classe_finale", keep="first")
+    .select(["classe_finale","mean_groupe","n_groupe","n_membres"])
     .sort("mean_groupe")
 )
