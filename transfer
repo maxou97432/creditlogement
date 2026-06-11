@@ -1,109 +1,120 @@
 # ============================================================
-#  TEST D'HOMOGENEITE I² (Cochran Q) — fusion gloutonne
-#  Référence : Higgins & Thompson (2002), Cochrane Handbook
-#  Seuil : I² < 25% = homogène (convention universelle)
+#  FUSION GLOUTONNE — g de Hedges (Cohen 1988 / Sawilowsky 2009)
+#  Critère : g_corr < 0.20 = "very small" = fusionnable
+#  Indépendant de n par construction.
+#  Décision sur stats agrégées (mean, var, n) — pas de relecture
+#  des vecteurs bruts dans la boucle.
 # ============================================================
 
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
-from scipy import stats
 
 # ================================================================
 #  PARAMETRES
 # ================================================================
 
-I2_SEUIL      = 0.25   # seuil homogeneite : 25% convention Cochrane
-I2_MODERE     = 0.50   # zone moderee
-MAX_ITER      = 200
+G_SEUIL   = 0.20   # very small effect — fusionnable (code 0)
+G_MODERE  = 0.50   # small — zone grise (code 1)
 CODES_FUSIONNABLES = {0, 1}
+MAX_ITER  = 200
+
+# Garde-fou overlap (optionnel) — protège contre fusions de classes
+# de même moyenne mais formes différentes. Mettre None pour désactiver.
+ETA_MIN_GARDE = None   # ex: 0.60 pour activer ; None = g seul
 
 
 # ================================================================
 #  FONCTIONS CORE
 # ================================================================
 
-def compute_Q_I2(groups: list[dict]) -> tuple[float, float, float]:
+def hedges_g_corr(mean_a, var_a, n_a, mean_b, var_b, n_b):
     """
-    Calcule Q de Cochran et I² sur un ensemble de groupes.
+    g de Hedges corrigé du biais (facteur J de Hedges & Olkin 1985),
+    calculé à partir des stats agrégées. Insensible aux effectifs.
 
-    Chaque groupe = {"mean": float, "var": float, "n": int}
-    où var = variance intra-groupe (variance de la LGD dans la classe).
-
-    Q = Σ w_i * (y_i - y_pooled)²
-    où w_i = 1 / v_i  et  v_i = var_i / n_i  (variance de la moyenne)
-
-    I² = max(0, (Q - df) / Q)  avec df = k - 1
-
-    Retourne (Q, I2, y_pooled)
+      g = |mean_a - mean_b| / s_pooled
+      s_pooled = sqrt(((n_a-1)*var_a + (n_b-1)*var_b) / (n_a+n_b-2))
+      J = 1 - 3/(4*(n_a+n_b-2)-1)
+      g_corr = g * J
     """
-    k = len(groups)
-    if k < 2:
-        return 0.0, 0.0, float(groups[0]["mean"]) if groups else 0.0
+    df = n_a + n_b - 2
+    if df <= 0:
+        return np.inf
 
-    # Variance de la moyenne estimee pour chaque groupe
-    vi     = np.array([g["var"] / g["n"] for g in groups])
-    wi     = 1.0 / vi
-    yi     = np.array([g["mean"] for g in groups])
+    s_pooled = np.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / df)
+    if s_pooled == 0:
+        return 0.0 if mean_a == mean_b else np.inf
 
-    # Moyenne poolee (weighted)
-    y_pool = float((wi * yi).sum() / wi.sum())
-
-    # Statistique Q
-    Q  = float((wi * (yi - y_pool) ** 2).sum())
-    df = k - 1
-
-    # I²
-    I2 = max(0.0, (Q - df) / Q) if Q > 0 else 0.0
-
-    return Q, I2, y_pool
+    g = abs(mean_a - mean_b) / s_pooled
+    J = 1 - (3 / (4 * df - 1))
+    return float(g * J)
 
 
-def i2_fusion_test(a: np.ndarray, b: np.ndarray) -> tuple[int, str, dict]:
+def classify_g(g_corr):
+    """Code de décision à partir du g corrigé."""
+    if g_corr < G_SEUIL:
+        return 0
+    elif g_corr < G_MODERE:
+        return 1
+    return 99
+
+
+def overlap_eta(a, b, grid_pts=512):
     """
-    Teste si fusionner a et b produit un groupe homogene au sens I².
-
-    Logique :
-      - Calculer I² sur le groupe fusionne {a, b}
-      - Si I² < I2_SEUIL (25%) : homogene -> code 0
-      - Si I² < I2_MODERE (50%) : moderement homogene -> code 1
-      - Sinon : heterogene -> code 99
-
-    Retourne (code, raison, diag)
+    Indice de recouvrement η (Pastore & Calcagni 2019).
+    Calculé sur vecteurs bruts — utilisé seulement en garde-fou /
+    exploration, jamais dans la boucle de décision principale.
     """
-    groups = [
-        {"mean": float(a.mean()), "var": float(a.var(ddof=1)), "n": len(a)},
-        {"mean": float(b.mean()), "var": float(b.var(ddof=1)), "n": len(b)},
-    ]
+    from scipy.stats import gaussian_kde
+    if a.std() == 0 or b.std() == 0:
+        return 1.0 if (a.std() == 0 and b.std() == 0 and a[0] == b[0]) else 0.0
+    kde_a, kde_b = gaussian_kde(a), gaussian_kde(b)
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    pad = 0.05 * (hi - lo) if hi > lo else 1.0
+    grid = np.linspace(lo - pad, hi + pad, grid_pts)
+    inter = np.minimum(kde_a(grid), kde_b(grid))
+    eta = float(np.trapezoid(inter, grid))   # np.trapz si NumPy < 2.0
+    return min(eta, 1.0)
 
-    Q, I2, y_pool = compute_Q_I2(groups)
 
-    # P-value du test Q (chi2 avec df=1)
-    df   = len(groups) - 1
-    pval = float(1 - stats.chi2.cdf(Q, df))
+def eta_squared(groups):
+    """
+    η² = variance inter / variance totale (rapport de corrélation).
+    Caractérise la partition globale (Rakotomalala 2016).
+    groups = [{"mean","var","n"}, ...]
+    """
+    ns    = np.array([g["n"]    for g in groups], dtype=float)
+    means = np.array([g["mean"] for g in groups], dtype=float)
+    vars_ = np.array([g["var"]  for g in groups], dtype=float)
 
-    diag = {
-        "Q"       : round(Q,     4),
-        "I2"      : round(I2,    4),
-        "I2_pct"  : round(I2 * 100, 1),
-        "pval_Q"  : round(pval,  4),
-        "mean_a"  : round(float(a.mean()), 4),
-        "mean_b"  : round(float(b.mean()), 4),
-        "gap"     : round(abs(float(a.mean()) - float(b.mean())), 4),
-        "n_a"     : len(a),
-        "n_b"     : len(b),
+    n_total    = ns.sum()
+    grand_mean = (means * ns).sum() / n_total
+    ss_inter   = (ns * (means - grand_mean) ** 2).sum()
+    ss_intra   = ((ns - 1) * vars_).sum()
+    ss_total   = ss_inter + ss_intra
+    return float(ss_inter / ss_total) if ss_total > 0 else 0.0
+
+
+def merge_two(ga, gb):
+    """Fusionne deux groupes agrégés. Variance combinée exacte."""
+    n_new    = ga["n"] + gb["n"]
+    mean_new = (ga["mean"] * ga["n"] + gb["mean"] * gb["n"]) / n_new
+    var_new  = (
+        (ga["n"] - 1) * ga["var"] +
+        (gb["n"] - 1) * gb["var"] +
+        ga["n"] * gb["n"] / n_new * (ga["mean"] - gb["mean"]) ** 2
+    ) / (n_new - 1)
+    return {
+        "mean"   : mean_new,
+        "var"    : var_new,
+        "n"      : n_new,
+        "members": ga["members"] + gb["members"],
     }
-
-    if I2 < I2_SEUIL:
-        return 0, f"[I²={I2*100:.1f}%] < {I2_SEUIL*100:.0f}% (homogène)", diag
-    elif I2 < I2_MODERE:
-        return 1, f"[I²={I2*100:.1f}%] < {I2_MODERE*100:.0f}% (modéré)", diag
-    else:
-        return 99, f"[I²={I2*100:.1f}%] >= {I2_MODERE*100:.0f}% (hétérogène)", diag
 
 
 # ================================================================
-#  EXPLORATION — toutes les paires adjacentes
+#  STATS DE BASE
 # ================================================================
 
 class_stats_base = (
@@ -117,221 +128,216 @@ class_stats_base = (
     .sort("mean_lgd")
 )
 
-classes   = [str(c) for c in class_stats_base["CHR_model"].to_list()]
-means     = class_stats_base["mean_lgd"].to_list()
-effectifs = class_stats_base["n"].to_list()
+classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
+means   = class_stats_base["mean_lgd"].to_list()
 
-print(f"{len(classes)} classes | LGD [{min(means):.3f} – {max(means):.3f}]\n")
+print(f"{len(classes)} classes | LGD [{min(means):.3f} – {max(means):.3f}]")
+print(f"Seuils : g < {G_SEUIL} (fusionnable) | g < {G_MODERE} (modéré)")
+print(f"Garde-fou overlap : {'OFF' if ETA_MIN_GARDE is None else f'η ≥ {ETA_MIN_GARDE}'}\n")
+
+
+# ================================================================
+#  PARTIE 1 — EXPLORATION : toutes les paires adjacentes
+# ================================================================
 
 rows_explo = []
 for i in range(len(classes) - 1):
     ca, cb = classes[i], classes[i + 1]
-    a = df_base.filter(
-        pl.col("CHR_model") == int(ca))["lgd_obligor"].to_numpy()
-    b = df_base.filter(
-        pl.col("CHR_model") == int(cb))["lgd_obligor"].to_numpy()
+    ra = class_stats_base.row(i,   named=True)
+    rb = class_stats_base.row(i+1, named=True)
 
-    code, raison, diag = i2_fusion_test(a, b)
+    g_corr = hedges_g_corr(
+        ra["mean_lgd"], ra["var_lgd"], ra["n"],
+        rb["mean_lgd"], rb["var_lgd"], rb["n"],
+    )
+    code = classify_g(g_corr)
+    gap  = abs(ra["mean_lgd"] - rb["mean_lgd"])
 
     rows_explo.append({
         "class_a"    : ca,
         "class_b"    : cb,
-        "gap"        : diag["gap"],
-        "n_a"        : diag["n_a"],
-        "n_b"        : diag["n_b"],
-        "I2_pct"     : diag["I2_pct"],
-        "Q"          : diag["Q"],
-        "pval_Q"     : diag["pval_Q"],
+        "mean_a"     : round(ra["mean_lgd"], 4),
+        "mean_b"     : round(rb["mean_lgd"], 4),
+        "gap"        : round(gap, 4),
+        "std_a"      : round(np.sqrt(ra["var_lgd"]), 4),
+        "std_b"      : round(np.sqrt(rb["var_lgd"]), 4),
+        "n_a"        : ra["n"],
+        "n_b"        : rb["n"],
+        "g_corr"     : round(g_corr, 6),
         "code"       : code,
         "fusionnable": code in CODES_FUSIONNABLES,
-        "raison"     : raison,
     })
 
     symbole = "✅" if code == 0 else "🟡" if code == 1 else "❌"
-    print(f"{symbole} [{i+1:2d}/64] {ca:<6} | {cb:<6}  "
-          f"gap={diag['gap']:6.3f}  "
-          f"I²={diag['I2_pct']:5.1f}%  "
-          f"Q={diag['Q']:10.1f}  "
-          f"p={diag['pval_Q']:.4f}")
+    print(f"{symbole} [{i+1:2d}/{len(classes)-1}] {ca:<5} | {cb:<5}  "
+          f"gap={gap:6.3f}  g={g_corr:7.4f}  "
+          f"std_a={np.sqrt(ra['var_lgd']):.3f}  std_b={np.sqrt(rb['var_lgd']):.3f}")
 
 resultats_explo = pl.DataFrame(rows_explo)
 
-# Résumé
 n0  = resultats_explo.filter(pl.col("code") == 0).height
 n1  = resultats_explo.filter(pl.col("code") == 1).height
 n99 = resultats_explo.filter(pl.col("code") == 99).height
 
-print(f"\n{'='*55}")
-print(f"  ✅ I² < 25% (homogène)  : {n0:>3}")
-print(f"  🟡 I² < 50% (modéré)   : {n1:>3}")
-print(f"  ❌ I² >= 50% (hétéro)  : {n99:>3}")
-print(f"{'='*55}\n")
+print(f"\n{'='*60}")
+print(f"  ✅ g < {G_SEUIL}  (very small)  : {n0:>3}")
+print(f"  🟡 g < {G_MODERE}  (small)       : {n1:>3}")
+print(f"  ❌ g >= {G_MODERE} (medium+)     : {n99:>3}")
+print(f"{'='*60}\n")
 
 print("=== FUSIONNABLES ===")
 display(
-    resultats_explo
-    .filter(pl.col("fusionnable"))
-    .sort("I2_pct")
-    .select(["class_a","class_b","gap","n_a","n_b","I2_pct","Q","pval_Q","raison"])
+    resultats_explo.filter(pl.col("fusionnable")).sort("g_corr")
+    .select(["class_a","class_b","gap","n_a","n_b","g_corr","std_a","std_b","code"])
 )
 
 print("\n=== NON FUSIONNABLES ===")
 display(
-    resultats_explo
-    .filter(~pl.col("fusionnable"))
-    .sort("I2_pct")
-    .select(["class_a","class_b","gap","n_a","n_b","I2_pct","Q","pval_Q","raison"])
+    resultats_explo.filter(~pl.col("fusionnable")).sort("g_corr")
+    .select(["class_a","class_b","gap","n_a","n_b","g_corr","std_a","std_b"])
 )
 
 
 # ================================================================
-#  FUSION GLOUTONNE PAR I²
+#  PARTIE 2 — FUSION GLOUTONNE (sur stats agrégées)
 # ================================================================
 
-print("\n\n=== FUSION GLOUTONNE PAR I² ===\n")
+print("\n\n=== FUSION GLOUTONNE — g de Hedges ===\n")
 
-# Reconstruire l'etat initial avec var et n
-groups_state = {}
-for row in class_stats_base.iter_rows(named=True):
-    cls = str(row["CHR_model"])
-    groups_state[cls] = {
-        "mean"   : row["mean_lgd"],
-        "var"    : row["var_lgd"],
-        "n"      : row["n"],
-        "members": [cls],
+groups_state = {
+    str(r["CHR_model"]): {
+        "mean"   : float(r["mean_lgd"]),
+        "var"    : float(r["var_lgd"]),
+        "n"      : int(r["n"]),
+        "members": [str(r["CHR_model"])],
     }
+    for r in class_stats_base.iter_rows(named=True)
+}
 
-# Ordre des classes (tri par mean_lgd)
-ordre_classes = [str(c) for c in class_stats_base["CHR_model"].to_list()]
-
-history_i2 = []
-iteration  = 0
+history_g = []
+iteration = 0
 
 for _ in range(MAX_ITER):
-    # Classes courantes dans l'ordre LGD
-    ordre_courant = sorted(groups_state.keys(),
-                           key=lambda c: groups_state[c]["mean"])
-
-    if len(ordre_courant) <= 1:
+    ordre = sorted(groups_state.keys(), key=lambda c: groups_state[c]["mean"])
+    if len(ordre) <= 1:
+        print("Une seule classe restante.")
         break
 
-    # Trouver la paire adjacente avec le I² le plus bas
-    best_i2   = np.inf
-    best_pair = None
-
-    for i in range(len(ordre_courant) - 1):
-        ca, cb = ordre_courant[i], ordre_courant[i + 1]
+    # Meilleure paire adjacente = g corrigé le plus bas
+    best_g, best_pair = np.inf, None
+    for i in range(len(ordre) - 1):
+        ca, cb = ordre[i], ordre[i + 1]
         ga, gb = groups_state[ca], groups_state[cb]
-
-        groups_tmp = [
-            {"mean": ga["mean"], "var": ga["var"], "n": ga["n"]},
-            {"mean": gb["mean"], "var": gb["var"], "n": gb["n"]},
-        ]
-        _, I2, _ = compute_Q_I2(groups_tmp)
-
-        if I2 < best_i2:
-            best_i2   = I2
-            best_pair = (ca, cb)
+        g_corr = hedges_g_corr(
+            ga["mean"], ga["var"], ga["n"],
+            gb["mean"], gb["var"], gb["n"],
+        )
+        if g_corr < best_g:
+            best_g, best_pair = g_corr, (ca, cb)
 
     ca, cb = best_pair
-    code, raison, diag = i2_fusion_test(
-        df_base.filter(pl.col("CHR_model").is_in(
-            [int(m) for m in groups_state[ca]["members"]])
-        )["lgd_obligor"].to_numpy(),
-        df_base.filter(pl.col("CHR_model").is_in(
-            [int(m) for m in groups_state[cb]["members"]])
-        )["lgd_obligor"].to_numpy(),
-    )
+    ga, gb = groups_state[ca], groups_state[cb]
+    code   = classify_g(best_g)
+    gap    = abs(ga["mean"] - gb["mean"])
+
+    # Garde-fou overlap optionnel (recharge vecteurs seulement si activé)
+    eta_val = None
+    if ETA_MIN_GARDE is not None and code in CODES_FUSIONNABLES:
+        a = df_base.filter(
+            pl.col("CHR_model").cast(pl.Utf8).is_in(ga["members"]))["lgd_obligor"].to_numpy()
+        b = df_base.filter(
+            pl.col("CHR_model").cast(pl.Utf8).is_in(gb["members"]))["lgd_obligor"].to_numpy()
+        eta_val = overlap_eta(a, b)
+        if eta_val < ETA_MIN_GARDE:
+            code = 99   # bloqué par le garde-fou forme
 
     iteration += 1
-    n_apres    = len(ordre_courant) - 1
+    n_apres = len(ordre) - 1
 
     symbole = "✅" if code == 0 else "🟡" if code == 1 else "⛔"
+    eta_str = f"  η={eta_val:.3f}" if eta_val is not None else ""
     print(f"{symbole} it={iteration:3d} | n={n_apres:3d} | "
-          f"{ca:<25} + {cb:<25} | "
-          f"I²={diag['I2_pct']:5.1f}%  "
-          f"gap={diag['gap']:.3f}")
+          f"{ca:<22} + {cb:<22} | g={best_g:.4f}  gap={gap:.3f}{eta_str}")
 
-    history_i2.append({
-        "iteration" : iteration,
-        "n_classes" : n_apres,
-        "class_a"   : ca,
-        "class_b"   : cb,
-        "I2_pct"    : diag["I2_pct"],
-        "Q"         : diag["Q"],
-        "pval_Q"    : diag["pval_Q"],
-        "gap"       : diag["gap"],
-        "code"      : code,
-        "raison"    : raison,
-        "stop"      : code not in CODES_FUSIONNABLES,
+    history_g.append({
+        "iteration": iteration,
+        "n_classes": n_apres,
+        "class_a"  : ca,
+        "class_b"  : cb,
+        "g_corr"   : round(best_g, 6),
+        "gap"      : round(gap, 4),
+        "eta"      : round(eta_val, 4) if eta_val is not None else None,
+        "mean_a"   : round(ga["mean"], 4),
+        "mean_b"   : round(gb["mean"], 4),
+        "n_a"      : ga["n"],
+        "n_b"      : gb["n"],
+        "code"     : code,
     })
 
     if code not in CODES_FUSIONNABLES:
-        print(f"\n🛑 Arret it={iteration} — {raison}")
-        print(f"   Toutes les fusions restantes produisent I² >= {I2_MODERE*100:.0f}%")
+        motif = ("garde-fou overlap" if (eta_val is not None and eta_val < ETA_MIN_GARDE)
+                 else f"g={best_g:.4f} >= {G_MODERE}")
+        print(f"\n🛑 Arret it={iteration} — meilleure fusion : {motif}")
         break
 
-    # Fusionner dans groups_state
-    ga  = groups_state.pop(ca)
-    gb  = groups_state.pop(cb)
-    n_new    = ga["n"] + gb["n"]
-    mean_new = (ga["mean"] * ga["n"] + gb["mean"] * gb["n"]) / n_new
-    # Variance poolee : formule exacte pour deux groupes
-    var_new  = (
-        (ga["n"] - 1) * ga["var"] +
-        (gb["n"] - 1) * gb["var"] +
-        ga["n"] * gb["n"] / n_new * (ga["mean"] - gb["mean"]) ** 2
-    ) / (n_new - 1)
-
     new_label = f"{ca}|{cb}"
-    groups_state[new_label] = {
-        "mean"   : mean_new,
-        "var"    : var_new,
-        "n"      : n_new,
-        "members": ga["members"] + gb["members"],
-    }
+    groups_state.pop(ca)
+    groups_state.pop(cb)
+    groups_state[new_label] = merge_two(ga, gb)
 
-# ================================================================
-#  RESULTATS FINAUX
-# ================================================================
-
-results_i2   = pl.DataFrame(history_i2)
-n_cls_final  = len(groups_state)
-
+n_cls_final = len(groups_state)
 print(f"\nClasses finales : {n_cls_final}")
-print(f"\n=== HISTORIQUE DES FUSIONS ===")
-display(results_i2)
 
-# Courbe I² au fil des fusions
+
+# ================================================================
+#  PARTIE 3 — RESULTATS + COURBES + MAPPING
+# ================================================================
+
+results_g = pl.DataFrame(history_g)
+
+# η² avant / après
+groups_orig  = [{"mean": float(r["mean_lgd"]), "var": float(r["var_lgd"]), "n": int(r["n"])}
+                for r in class_stats_base.iter_rows(named=True)]
+groups_final = [{"mean": g["mean"], "var": g["var"], "n": g["n"]}
+                for g in groups_state.values()]
+eta2_orig  = eta_squared(groups_orig)
+eta2_final = eta_squared(groups_final)
+perte_pct  = (eta2_orig - eta2_final) / eta2_orig * 100 if eta2_orig > 0 else 0
+
+print(f"\n{'='*60}")
+print(f"  {'':22} {'ORIGINAL':>12} {'FINAL':>12} {'PERTE':>9}")
+print(f"  {'n_classes':<22} {len(classes):>12} {n_cls_final:>12}")
+print(f"  {'η² (var. expliquée)':<22} {eta2_orig:>12.6f} {eta2_final:>12.6f} {perte_pct:>+8.3f}%")
+print(f"{'='*60}")
+
+# Courbes
+n_hist = results_g["n_classes"].to_list()
+g_hist = results_g["g_corr"].to_list()
+
 fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+fig.suptitle("Fusion gloutonne — g de Hedges (Cohen 1988 / Sawilowsky 2009)", fontsize=13)
 
-iters   = results_i2["iteration"].to_list()
-n_cls   = results_i2["n_classes"].to_list()
-i2_vals = results_i2["I2_pct"].to_list()
+axes[0].plot(n_hist, g_hist, marker="o", markersize=4, color="steelblue")
+axes[0].axhline(G_SEUIL,  color="green",  linestyle="--", lw=1.5, label=f"very small g={G_SEUIL}")
+axes[0].axhline(G_MODERE, color="orange", linestyle="--", lw=1.5, label=f"small g={G_MODERE}")
+axes[0].set_xlabel("Nombre de classes"); axes[0].set_ylabel("g de Hedges (corrigé)")
+axes[0].set_title("g de la meilleure fusion disponible")
+axes[0].invert_xaxis(); axes[0].legend()
 
-axes[0].plot(n_cls, i2_vals, marker="o", markersize=4, color="steelblue")
-axes[0].axhline(I2_SEUIL  * 100, color="green",  linestyle="--", lw=1.5,
-                label=f"seuil homogène {I2_SEUIL*100:.0f}%")
-axes[0].axhline(I2_MODERE * 100, color="orange", linestyle="--", lw=1.5,
-                label=f"seuil modéré {I2_MODERE*100:.0f}%")
-axes[0].set_xlabel("Nombre de classes")
-axes[0].set_ylabel("I² (%)")
-axes[0].set_title("I² de la meilleure fusion disponible")
-axes[0].invert_xaxis()
-axes[0].legend()
-
-axes[1].plot(n_cls, results_i2["Q"].to_list(),
-             marker="o", markersize=4, color="darkorange")
-axes[1].set_xlabel("Nombre de classes")
-axes[1].set_ylabel("Q de Cochran")
-axes[1].set_title("Statistique Q au fil des fusions")
+axes[1].plot(n_hist, results_g["gap"].to_list(), marker="o", markersize=4, color="darkorange")
+axes[1].set_xlabel("Nombre de classes"); axes[1].set_ylabel("Gap LGD (pts)")
+axes[1].set_title("Gap de moyenne au fil des fusions")
 axes[1].invert_xaxis()
 
 plt.tight_layout()
 plt.show()
 
+print("\n=== HISTORIQUE DES FUSIONS ===")
+display(results_g.select(
+    ["iteration","n_classes","class_a","class_b","g_corr","gap","eta","mean_a","mean_b","n_a","n_b"]
+))
+
 # Mapping final
-print(f"\n=== MAPPING FINAL ({n_cls_final} classes) ===")
 mapping_rows = []
 for rank, (label, grp) in enumerate(
     sorted(groups_state.items(), key=lambda x: x[1]["mean"]), start=1
@@ -347,6 +353,16 @@ for rank, (label, grp) in enumerate(
         })
 
 mapping_df = pl.DataFrame(mapping_rows).sort("mean_groupe")
+
+# Application sur df_base
+df_final = df_base.join(
+    mapping_df.select(["CHR_model", "classe_finale"]),
+    on="CHR_model", how="left",
+)
+n_null = df_final.filter(pl.col("classe_finale").is_null()).height
+print(f"\n{'✅ Mapping complet' if n_null == 0 else f'⚠️  {n_null} lignes sans mapping'}")
+
+print(f"\n=== {n_cls_final} GROUPES FINAUX ===")
 display(
     mapping_df.unique("classe_finale", keep="first")
     .select(["classe_finale","mean_groupe","n_groupe","n_membres"])
