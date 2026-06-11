@@ -1,66 +1,255 @@
 # ============================================================
-#  CALIBRATION AUTOMATIQUE DE EPS_W1 ET EPS_ETA
-#  A lancer AVANT la cellule d'exploration
-#  Principe : variabilite intra-classe = bruit de reference
+#  CRITERE DE PARSIMONIE — pouvoir discriminant
+#  Cellule 1 : scores de reference sur les 65 classes
 # ============================================================
 
-N_SPLITS     = 100   # nb de decoupages aleatoires par classe
-N_CAP_CALIB  = 20_000  # sous-echantillonnage par demi-classe (perf)
-RNG_CALIB    = np.random.default_rng(123)
+from sklearn.metrics import roc_auc_score
+import polars as pl
+import numpy as np
 
-w1_intra  = []
-eta_intra = []
+def compute_scores(df: pl.DataFrame, class_col: str, target_col: str) -> dict:
+    """
+    Calcule les 3 criteres de pouvoir discriminant sur un partitionnement donne.
+    
+    R2        : variance inter / variance totale (eta-squared)
+    Gini/AUC  : AUC one-vs-rest moyenne ponderee entre classes
+    MAE_pred  : erreur de prediction si on predit la moyenne de classe
+    """
+    # Stats globales
+    y = df[target_col].to_numpy()
+    grand_mean = y.mean()
+    ss_total   = ((y - grand_mean) ** 2).sum()
 
-classes_calib = (
-    df_base
-    .group_by("CHR_model")
-    .agg(pl.col("lgd_obligor").count().alias("n"))
-    .filter(pl.col("n") >= 100)   # ignorer classes trop petites pour splitter
-    ["CHR_model"].to_list()
+    # Stats par classe
+    class_stats = (
+        df.group_by(class_col)
+        .agg([
+            pl.col(target_col).mean().alias("mean_cls"),
+            pl.col(target_col).count().alias("n_cls"),
+        ])
+    )
+    classes  = class_stats[class_col].to_list()
+    means    = class_stats["mean_cls"].to_numpy()
+    ns       = class_stats["n_cls"].to_numpy()
+
+    # R2 : variance expliquee par les classes
+    ss_inter = float(((means - grand_mean) ** 2 * ns).sum())
+    r2 = ss_inter / ss_total if ss_total > 0 else 0.0
+
+    # MAE_pred : erreur moyenne si on predit mean_cls pour chaque observation
+    df_joined = df.join(class_stats, on=class_col, how="left")
+    y_pred    = df_joined["mean_cls"].to_numpy()
+    mae_pred  = float(np.abs(y - y_pred).mean())
+
+    # Gini : AUC one-vs-rest, pondere par effectif
+    # Pour chaque classe : AUC(classe_i vs reste)
+    labels = df[class_col].to_numpy()
+    aucs, weights = [], []
+    for cls, n_cls in zip(classes, ns):
+        binary = (labels == cls).astype(int)
+        if binary.sum() == 0 or binary.sum() == len(binary):
+            continue
+        try:
+            auc = roc_auc_score(binary, y)
+            aucs.append(auc)
+            weights.append(n_cls)
+        except Exception:
+            continue
+    gini = float(2 * np.average(aucs, weights=weights) - 1) if aucs else 0.0
+
+    return {
+        "n_classes": len(classes),
+        "r2"       : round(r2,       6),
+        "gini"     : round(gini,     6),
+        "mae_pred" : round(mae_pred, 6),
+    }
+
+
+# Scores de reference sur les 65 classes originales
+scores_ref = compute_scores(df_base, "CHR_model", "lgd_obligor")
+print("=== REFERENCE (65 classes) ===")
+for k, v in scores_ref.items():
+    print(f"  {k:<12} : {v}")
+
+# ============================================================
+#  CRITERE DE PARSIMONIE — fusion gloutonne
+#  Cellule 2 : fusion iterative, on s'arrete quand la perte
+#              depasse le seuil de tolerance
+# ============================================================
+
+# Seuils de tolerance (perte relative acceptee sur chaque critere)
+TOL_R2       = 0.02   # on accepte de perdre jusqu'a 2% de R2
+TOL_GINI     = 0.02   # idem Gini
+TOL_MAE      = 0.05   # on accepte +5% de MAE (erreur prediction)
+
+MAX_ITER_PARS = 200   # securite
+
+def get_adjacent_pairs(df: pl.DataFrame, class_col: str, target_col: str):
+    """Paires adjacentes triees par LGD moyenne croissante."""
+    stats = (
+        df.group_by(class_col)
+        .agg(pl.col(target_col).mean().alias("mean_lgd"))
+        .sort("mean_lgd")
+    )
+    classes = stats[class_col].to_list()
+    pairs = [(classes[i], classes[i+1]) for i in range(len(classes)-1)]
+    return pairs
+
+
+def merge_classes_df(df: pl.DataFrame, ca, cb, class_col: str) -> pl.DataFrame:
+    """Fusionne ca et cb en une nouvelle classe nommee 'ca|cb'."""
+    new_name = f"{ca}|{cb}"
+    return df.with_columns(
+        pl.when(pl.col(class_col).is_in([ca, cb]))
+        .then(pl.lit(new_name))
+        .otherwise(pl.col(class_col))
+        .alias(class_col)
+    )
+
+
+# Boucle de fusion gloutonne
+df_current  = df_base.clone()
+history_par = []
+r2_ref      = scores_ref["r2"]
+gini_ref    = scores_ref["gini"]
+mae_ref     = scores_ref["mae_pred"]
+
+print(f"Reference : R2={r2_ref:.6f}  Gini={gini_ref:.6f}  MAE={mae_ref:.6f}\n")
+
+for it in range(MAX_ITER_PARS):
+    pairs = get_adjacent_pairs(df_current, "CHR_model", "lgd_obligor")
+    if not pairs:
+        print("Plus de paires adjacentes.")
+        break
+
+    # Tester toutes les paires, garder celle qui perd le moins de R2
+    best = None
+    best_loss_r2 = np.inf
+
+    for ca, cb in pairs:
+        df_merged  = merge_classes_df(df_current, ca, cb, "CHR_model")
+        sc         = compute_scores(df_merged, "CHR_model", "lgd_obligor")
+        loss_r2    = (r2_ref    - sc["r2"])    / r2_ref    if r2_ref   > 0 else 0
+        loss_gini  = (gini_ref  - sc["gini"])  / gini_ref  if gini_ref > 0 else 0
+        delta_mae  = (sc["mae_pred"] - mae_ref) / mae_ref  if mae_ref  > 0 else 0
+
+        if loss_r2 < best_loss_r2:
+            best_loss_r2 = loss_r2
+            best = {
+                "ca": ca, "cb": cb,
+                "scores": sc,
+                "loss_r2"  : round(loss_r2,   6),
+                "loss_gini": round(loss_gini,  6),
+                "delta_mae": round(delta_mae,  6),
+            }
+
+    # Critere d'arret : la meilleure fusion disponible depasse un seuil
+    stop_r2   = best["loss_r2"]   > TOL_R2
+    stop_gini = best["loss_gini"] > TOL_GINI
+    stop_mae  = best["delta_mae"] > TOL_MAE
+
+    symbole = "✅" if not (stop_r2 or stop_gini or stop_mae) else "⚠️"
+    print(f"{symbole} it={it+1:3d} | {str(best['ca']):<20} + {str(best['cb']):<20} | "
+          f"R2={best['scores']['r2']:.6f} (-{best['loss_r2']*100:.3f}%)  "
+          f"Gini={best['scores']['gini']:.6f} (-{best['loss_gini']*100:.3f}%)  "
+          f"MAE={best['scores']['mae_pred']:.4f} (+{best['delta_mae']*100:.3f}%)")
+
+    history_par.append({
+        "iteration" : it + 1,
+        "class_a"   : best["ca"],
+        "class_b"   : best["cb"],
+        "n_classes" : best["scores"]["n_classes"],
+        "r2"        : best["scores"]["r2"],
+        "gini"      : best["scores"]["gini"],
+        "mae_pred"  : best["scores"]["mae_pred"],
+        "loss_r2"   : best["loss_r2"],
+        "loss_gini" : best["loss_gini"],
+        "delta_mae" : best["delta_mae"],
+        "stop_r2"   : stop_r2,
+        "stop_gini" : stop_gini,
+        "stop_mae"  : stop_mae,
+    })
+
+    if stop_r2 or stop_gini or stop_mae:
+        raisons = []
+        if stop_r2:   raisons.append(f"R2 -perte={best['loss_r2']*100:.2f}%>{TOL_R2*100}%")
+        if stop_gini: raisons.append(f"Gini -perte={best['loss_gini']*100:.2f}%>{TOL_GINI*100}%")
+        if stop_mae:  raisons.append(f"MAE +delta={best['delta_mae']*100:.2f}%>{TOL_MAE*100}%")
+        print(f"\n🛑 Arret it={it+1} : {' | '.join(raisons)}")
+        break
+
+    df_current = merge_classes_df(df_current, best["ca"], best["cb"], "CHR_model")
+
+print(f"\nClasses finales : {df_current['CHR_model'].n_unique()}")
+
+
+# ============================================================
+#  CRITERE DE PARSIMONIE — resultats
+#  Cellule 3 : tableau + courbes des 3 criteres
+# ============================================================
+
+import matplotlib.pyplot as plt
+
+results_par = pl.DataFrame(history_par)
+
+print("=== HISTORIQUE DES FUSIONS ===")
+display(
+    results_par.select([
+        "iteration","class_a","class_b","n_classes",
+        "r2","gini","mae_pred",
+        "loss_r2","loss_gini","delta_mae",
+    ])
 )
 
-print(f"Classes utilisees pour calibration : {len(classes_calib)}\n")
-
-for cls in classes_calib:
-    vec = df_base.filter(pl.col("CHR_model") == cls)["lgd_obligor"].to_numpy()
-
-    # Sous-echantillonnage global si classe enorme
-    if len(vec) > 2 * N_CAP_CALIB:
-        vec = RNG_CALIB.choice(vec, size=2 * N_CAP_CALIB, replace=False)
-
-    for _ in range(N_SPLITS):
-        # Split aleatoire 50/50
-        idx = RNG_CALIB.permutation(len(vec))
-        half = len(vec) // 2
-        a_intra = vec[idx[:half]]
-        b_intra = vec[idx[half:2*half]]
-
-        w1_intra.append(wasserstein_distance(a_intra, b_intra))
-        eta_intra.append(_overlap_eta(a_intra, b_intra))
-
-    print(f"  {cls} (n={len(vec)}) OK")
-
-w1_intra  = np.array(w1_intra)
-eta_intra = np.array(eta_intra)
-
-# Statistiques de reference
-w1_p50  = float(np.percentile(w1_intra,  50))
-w1_p75  = float(np.percentile(w1_intra,  75))
-w1_p90  = float(np.percentile(w1_intra,  90))
-eta_p50 = float(np.percentile(eta_intra, 50))
-eta_p25 = float(np.percentile(eta_intra, 25))
-eta_p10 = float(np.percentile(eta_intra, 10))
-
+# Scores finaux vs reference
+scores_final = compute_scores(df_current, "CHR_model", "lgd_obligor")
 print(f"\n{'='*55}")
-print(f"  W1 intra-classe  — p50={w1_p50:.4f}  p75={w1_p75:.4f}  p90={w1_p90:.4f}")
-print(f"  eta intra-classe — p50={eta_p50:.4f}  p25={eta_p25:.4f}  p10={eta_p10:.4f}")
+print(f"{'':20} {'REFERENCE':>12} {'FINAL':>12} {'PERTE':>10}")
+print(f"  {'n_classes':<18} {scores_ref['n_classes']:>12} {scores_final['n_classes']:>12}")
+print(f"  {'R2':<18} {scores_ref['r2']:>12.6f} {scores_final['r2']:>12.6f} "
+      f"{(scores_ref['r2']-scores_final['r2'])/scores_ref['r2']*100:>9.3f}%")
+print(f"  {'Gini':<18} {scores_ref['gini']:>12.6f} {scores_final['gini']:>12.6f} "
+      f"{(scores_ref['gini']-scores_final['gini'])/scores_ref['gini']*100:>9.3f}%")
+print(f"  {'MAE_pred':<18} {scores_ref['mae_pred']:>12.6f} {scores_final['mae_pred']:>12.6f} "
+      f"{(scores_final['mae_pred']-scores_ref['mae_pred'])/scores_ref['mae_pred']*100:>9.3f}%")
 print(f"{'='*55}")
-print(f"\nRecommandations :")
-print(f"  EPS_W1    = p75 intra  -> {w1_p75:.4f}  (conservateur)")
-print(f"  EPS_W1    = p90 intra  -> {w1_p90:.4f}  (liberal)")
-print(f"  EPS_ETA   = p25 intra  -> {eta_p25:.4f}  (conservateur)")
-print(f"  ETA_MODERE= p10 intra  -> {eta_p10:.4f}")
-print(f"\n>>> Copiez dans la cellule parametres :")
-print(f"EPS_W1     = {w1_p75:.4f}")
-print(f"EPS_ETA    = {eta_p25:.4f}")
-print(f"ETA_MODERE = {eta_p10:.4f}")
+
+# Courbes
+iters       = results_par["iteration"].to_list()
+n_cls_hist  = results_par["n_classes"].to_list()
+r2_hist     = results_par["r2"].to_list()
+gini_hist   = results_par["gini"].to_list()
+mae_hist    = results_par["mae_pred"].to_list()
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+fig.suptitle("Evolution des criteres lors des fusions", fontsize=13)
+
+axes[0].plot(n_cls_hist, r2_hist, marker="o", markersize=3)
+axes[0].axhline(r2_ref,   color="red", linestyle="--", label="reference")
+axes[0].axhline(r2_ref * (1 - TOL_R2), color="orange", linestyle=":", label=f"seuil -{TOL_R2*100:.0f}%")
+axes[0].set_xlabel("Nombre de classes")
+axes[0].set_ylabel("R²")
+axes[0].set_title("R² (variance expliquee)")
+axes[0].invert_xaxis()
+axes[0].legend()
+
+axes[1].plot(n_cls_hist, gini_hist, marker="o", markersize=3, color="green")
+axes[1].axhline(gini_ref, color="red", linestyle="--", label="reference")
+axes[1].axhline(gini_ref * (1 - TOL_GINI), color="orange", linestyle=":", label=f"seuil -{TOL_GINI*100:.0f}%")
+axes[1].set_xlabel("Nombre de classes")
+axes[1].set_ylabel("Gini")
+axes[1].set_title("Gini (pouvoir discriminant)")
+axes[1].invert_xaxis()
+axes[1].legend()
+
+axes[2].plot(n_cls_hist, mae_hist, marker="o", markersize=3, color="purple")
+axes[2].axhline(mae_ref,  color="red", linestyle="--", label="reference")
+axes[2].axhline(mae_ref * (1 + TOL_MAE), color="orange", linestyle=":", label=f"seuil +{TOL_MAE*100:.0f}%")
+axes[2].set_xlabel("Nombre de classes")
+axes[2].set_ylabel("MAE")
+axes[2].set_title("MAE prediction LGD")
+axes[2].invert_xaxis()
+axes[2].legend()
+
+plt.tight_layout()
+plt.show()
