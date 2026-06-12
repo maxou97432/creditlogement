@@ -1,16 +1,73 @@
-**Deuxième constat** : eta² calculé globalement sur les 65 classes
-atteint environ 0.99 — la classe d'appartenance explique la quasi-
-totalité de la variance des LGD. Cela confirme que la variable étudiée
-est une LGD *prédite* (issue du modèle), dont la variance intra-classe
-est par construction très faible. Conséquence directe : la perte d'eta²
-*globale* provoquée par la fusion d'une seule paire est, elle, toujours
-négligeable (eta² ne descend quasiment pas sous 0.99), et ne fournit
-donc aucun seuil naturel pour décider d'arrêter une fusion.
+# Le critère retenu : le coefficient de recouvrement (OVL)
 
-Calculé *paire par paire* (eta² entre les deux classes seules, et non
-sur l'ensemble des 65), eta² varie nettement davantage — de l'ordre de
-0.003 à 0.73 selon les paires. Ce eta² pairwise est mathématiquement
-lié à Cohen's d (eta² = d²/(d²+4) pour deux groupes de tailles
-comparables) et porte donc la même information, sous une forme
-différente : il décrit l'écart entre les centres des deux distributions,
-pas leur recouvrement global.
+## Le principe
+
+Plutôt que de tester une hypothèse statistique sur les moyennes ou les
+variances, l'OVL (overlap coefficient) mesure **directement** la
+proportion de la masse de probabilité que deux distributions ont en
+commun.
+
+Concrètement, on estime la densité de chaque distribution (par
+histogramme normalisé ou par estimation à noyau), et pour chaque point
+de la plage de valeurs, on retient le minimum des deux densités. La
+somme de ces minimums donne l'aire de la zone "partagée" par les deux
+distributions.
+
+- `OVL = 1` : les deux distributions sont identiques.
+- `OVL = 0` : les deux distributions sont totalement disjointes.
+
+## Pourquoi ce critère répond au problème identifié
+
+**Indépendant de n.** Un histogramme (ou une estimation par noyau)
+normalisé en densité ne change pas de forme lorsque l'effectif augmente
+— il devient seulement plus précis. La valeur de l'OVL pour une paire de
+classes ne dépend donc pas de leurs effectifs respectifs, contrairement
+aux p-values de Welch ou Kruskal-Wallis.
+
+**Indépendant de la forme des distributions.** Aucune hypothèse de
+normalité, de symétrie, ou d'unimodalité n'est requise. L'OVL se calcule
+de la même manière, quelle que soit la forme réelle des distributions de
+LGD observées par classe.
+
+**Mesure directement la bonne question.** L'OVL répond à : "si l'on tire
+un obligor au hasard dans chacune des deux classes, dans quelle mesure
+leurs valeurs de LGD se confondent-elles ?" C'est une question de
+**population**, pas de détection statistique — exactement ce qui motive
+le regroupement de classes : deux classes qui décrivent, dans les faits,
+la même population de risque.
+
+**Interprétation directe.** Une valeur d'OVL se lit comme une
+proportion : "75 % de la masse de probabilité des deux classes se
+recouvre" est une affirmation immédiatement compréhensible, sans
+référence à un seuil de signification ou à une unité d'écart-type.
+
+## Les seuils de décision
+
+Deux seuils définissent trois zones :
+
+- **OVL > 0.75** : fort recouvrement — les deux classes décrivent
+  essentiellement la même population de risque. Fusion recommandée.
+- **0.50 < OVL ≤ 0.75** : recouvrement modéré — fusion acceptable selon
+  le niveau de tolérance retenu.
+- **OVL ≤ 0.50** : recouvrement faible — les deux classes restent
+  distinctes, pas de fusion.
+
+Ces seuils demeurent un choix, comme tout seuil de décision. Mais ils
+portent une signification directe et stable (une proportion de
+population partagée), indépendante de l'effectif et de la forme des
+distributions — contrairement aux seuils de p-value (qui perdent leur
+sens à grand n) ou de taille d'effet (qui ne renseignent pas sur le
+recouvrement pour des distributions asymétriques).
+
+## Robustesse : deux méthodes d'estimation
+
+L'OVL est calculé selon deux méthodes d'estimation de densité :
+
+- **Histogramme** : rapide, basé sur un découpage en intervalles fixes.
+- **Noyau gaussien (KDE)** : estimation lissée, généralement plus stable
+  à petit effectif.
+
+Les deux valeurs sont calculées et comparées systématiquement pour
+chaque paire. Une convergence entre les deux méthodes renforce la
+robustesse de la décision de fusion ; un désaccord signale une paire à
+examiner plus attentivement.
