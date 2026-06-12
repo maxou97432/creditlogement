@@ -1,67 +1,108 @@
-def diagnostic_ovl(lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4):
+from scipy.stats import wasserstein_distance
+
+# =====================================================================
+# METRIQUES SUPPLEMENTAIRES
+# =====================================================================
+def hedges_g(a: np.ndarray, b: np.ndarray) -> float:
     """
-    Tableau OVL (hist + kde) pour toutes les paires adjacentes + graphiques.
-    
-    n_graphs       : nombre de paires à tracer (None = toutes)
-    graphs_per_row : nombre de colonnes par figure
-    graphs_per_fig : nombre de graphiques par figure (avant nouvelle figure)
+    g de Hedges : taille d'effet (ecart de moyennes en unites d'ecart-type
+    poole, avec correction petit echantillon). Mesure de SEPARATION,
+    pas de recouvrement -- complementaire a l'OVL.
     """
-    diag_pairs = build_adjacent_pairs(lf).sort("severite_totale")
+    n1, n2 = len(a), len(b)
+    s1, s2 = a.std(ddof=1), b.std(ddof=1)
+    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
+    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
+    correction = 1 - 3/(4*(n1+n2)-9)
+    return float(d * correction)
+
+# wasserstein_distance est deja dans scipy.stats, importe ci-dessus
+
+# =====================================================================
+# RECAP POST-FUSION : paires finales adjacentes
+# =====================================================================
+def recap_post_fusion(reduced_lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4):
+    """
+    Tableau récapitulatif des paires adjacentes dans la base APRES regroupement.
+    Pour chaque paire restante (non fusionnée) :
+      - gap (ecart de LRA)
+      - OVL_hist, OVL_kde (recouvrement -> doit etre sous le seuil, donc distinctes)
+      - hedges_g (separation en ecarts-types)
+      - wasserstein (distance interpretable en pts de LGD)
+    """
+    final_pairs = build_adjacent_pairs(reduced_lf).sort("severite_totale")
 
     rows = []
-    for ca, cb, sev in diag_pairs.iter_rows():
-        a = get_lgd_vectors(lf, ca)
-        b = get_lgd_vectors(lf, cb)
+    for ca, cb, sev in final_pairs.iter_rows():
+        a = get_lgd_vectors(reduced_lf, ca)
+        b = get_lgd_vectors(reduced_lf, cb)
         ovl_h = overlap_empirique_hist(a, b)
         ovl_k = overlap_empirique_kde(a, b)
+        g = hedges_g(a, b)
+        w = wasserstein_distance(a, b)
+
         rows.append({
             "class_a": ca, "class_b": cb,
             "gap": round(sev, 4),
             "OVL_hist": round(ovl_h, 4), "OVL_kde": round(ovl_k, 4),
-            "ecart_hist_kde": round(abs(ovl_h - ovl_k), 4),
+            "hedges_g": round(abs(g), 4),
+            "wasserstein": round(w, 4),
             "n_a": len(a), "n_b": len(b),
-            "fusionnable_hist": "OUI" if ovl_h > OVL_MODERE else "NON",
-            "fusionnable_kde":  "OUI" if ovl_k > OVL_MODERE else "NON",
+            "distinctes": "OUI" if max(ovl_h, ovl_k) <= OVL_MODERE else "NON (recouvrement residuel)",
         })
 
-    df_ovl = pl.DataFrame(rows)
-    with pl.Config(tbl_rows=100, tbl_cols=-1):
-        print(df_ovl)
+    df_recap = pl.DataFrame(rows)
+    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=220, fmt_str_lengths=70):
+        print(df_recap)
 
-    desac = df_ovl.filter(pl.col("fusionnable_hist") != pl.col("fusionnable_kde"))
-    if desac.height > 0:
-        print(f"\n{desac.height} paire(s) ou hist et kde sont en desaccord :")
-        print(desac)
+    # Alerte : paires finales qui auraient encore un fort recouvrement
+    residuel = df_recap.filter(pl.col("distinctes") != "OUI")
+    if residuel.height > 0:
+        print(f"\n/!\\ {residuel.height} paire(s) finale(s) avec recouvrement residuel "
+              f"(OVL > {OVL_MODERE}) -- a verifier :")
+        print(residuel)
     else:
-        print("\nHist et KDE sont d'accord sur toutes les paires.")
+        print(f"\nToutes les paires finales sont distinctes (OVL <= {OVL_MODERE}).")
+
+    # Statistiques globales
+    print(f"\nRESUME SEPARATION DES CLASSES FINALES :")
+    print(f"  gap        : min={df_recap['gap'].min():.3f}  median={df_recap['gap'].median():.3f}  max={df_recap['gap'].max():.3f}")
+    print(f"  hedges_g   : min={df_recap['hedges_g'].min():.3f}  median={df_recap['hedges_g'].median():.3f}  max={df_recap['hedges_g'].max():.3f}")
+    print(f"  wasserstein: min={df_recap['wasserstein'].min():.3f}  median={df_recap['wasserstein'].median():.3f}  max={df_recap['wasserstein'].max():.3f}")
+    print(f"  OVL_hist   : min={df_recap['OVL_hist'].min():.3f}  median={df_recap['OVL_hist'].median():.3f}  max={df_recap['OVL_hist'].max():.3f}")
 
     # === Graphiques ===
-    pairs_to_plot = diag_pairs if n_graphs is None else diag_pairs.head(n_graphs)
-    n_total = pairs_to_plot.height
-    n_rows_per_fig = -(-graphs_per_fig // graphs_per_row)  # ceil
-
+    pairs_to_plot = final_pairs if n_graphs is None else final_pairs.head(n_graphs)
     pairs_list = list(pairs_to_plot.iter_rows())
+    n_total = len(pairs_list)
 
     for fig_start in range(0, n_total, graphs_per_fig):
         chunk = pairs_list[fig_start:fig_start + graphs_per_fig]
         n_chunk = len(chunk)
-        n_rows = -(-n_chunk // graphs_per_row)  # ceil
+        n_rows = -(-n_chunk // graphs_per_row)
 
         fig, axes = plt.subplots(n_rows, graphs_per_row, figsize=(8 * graphs_per_row, 4 * n_rows))
-        axes = np.array(axes).reshape(-1)  # flatten, gere 1D ou 2D
+        axes = np.array(axes).reshape(-1)
 
         for i, (ca, cb, sev) in enumerate(chunk):
-            a = get_lgd_vectors(lf, ca)
-            b = get_lgd_vectors(lf, cb)
+            a = get_lgd_vectors(reduced_lf, ca)
+            b = get_lgd_vectors(reduced_lf, cb)
             ovl_h = overlap_empirique_hist(a, b)
             ovl_k = overlap_empirique_kde(a, b)
             plot_overlap(a, b, ca, cb, ovl_h, ovl_k, ax=axes[i])
 
-        # cache les axes vides si le dernier chunk est incomplet
         for j in range(n_chunk, len(axes)):
             axes[j].axis("off")
 
         plt.tight_layout()
         plt.show()
 
-    return df_ovl
+    return df_recap
+
+# =====================================================================
+# EXECUTION
+# =====================================================================
+print("\n" + "=" * 110)
+print(f"RECAPITULATIF POST-FUSION — {n1} classes finales, {n1-1} paires adjacentes")
+print("=" * 110)
+df_recap = recap_post_fusion(reduced_lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4)
