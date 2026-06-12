@@ -1,248 +1,181 @@
-import polars as pl
-import numpy as np
-from scipy import stats as sp_stats
-from scipy.stats import kruskal, f_oneway
+# Les tests classiques d'hétérogénéité — ce qu'ils mesurent
 
-# =====================================================================
-# CONFIGURATION
-# =====================================================================
-df_base   = base
-LGD_COL   = "lgd_obligor"
-CLASS_COL = "CHR_model"
+## 1. Test de Welch
 
-# =====================================================================
-# UTILITAIRES
-# =====================================================================
-def get_lgd_vectors(lf, cls):
-    return (lf.filter(pl.col(CLASS_COL) == cls)
-              .select(LGD_COL).collect()
-              .get_column(LGD_COL).to_numpy())
+### Ce que c'est
+Une variante du t-test de Student qui ne suppose pas que les deux groupes
+ont la même variance (contrairement au t-test classique). C'est le test
+"par défaut" pour comparer deux moyennes quand on n'a pas de raison de
+croire que les variances sont égales.
 
-def build_adjacent_pairs(lf):
-    """Paires adjacentes, ordre LRA global (niveau modele)."""
-    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
-            .sort("m").collect())
-    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
-         for i in range(cm.height - 1)]
-    return pl.DataFrame({"class_a": [p[0] for p in P],
-                         "class_b": [p[1] for p in P],
-                         "severite_totale": [p[2] for p in P]})
+### Ce qu'il mesure
+La statistique est :
 
-# =====================================================================
-# 1. TEST DE WELCH (t-test a variances inegales)
-# =====================================================================
-def welch_diag(a, b):
-    """
-    H0 : les deux moyennes sont egales.
-    A grand n, p -> 0 quasi systematiquement (sature).
-    """
-    t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
-    return float(t_stat), float(p_value)
+    t = (mean_b - mean_a) / SE,   avec SE = sqrt(s1²/n1 + s2²/n2)
 
-# =====================================================================
-# 2. TEST DE KRUSKAL-WALLIS (non-parametrique, alternative a Welch)
-# =====================================================================
-def kruskal_diag(a, b):
-    """
-    H0 : les deux distributions ont la meme tendance centrale.
-    Non-parametrique (pas d'hypothese de normalite), mais
-    meme pathologie a grand n que Welch : p -> 0.
-    """
-    h_stat, p_value = kruskal(a, b)
-    return float(h_stat), float(p_value)
+`t` répond à la question : "à combien d'erreurs-types l'écart observé
+correspond-il ?" Plus `t` est grand, plus on est confiant que l'écart
+n'est pas dû au hasard d'échantillonnage. La p-value traduit ça en
+probabilité : "si les deux groupes avaient vraiment la même moyenne,
+quelle est la probabilité d'observer un écart au moins aussi grand que
+celui mesuré ?"
 
-# =====================================================================
-# 3. ANOVA (test F) + ETA-SQUARED (taille d'effet)
-# =====================================================================
-def anova_diag(a, b):
-    """
-    ANOVA a un facteur (2 groupes) : equivalent au test F.
-    F-stat et p sature a grand n (meme limite que Welch/KW).
-    eta^2 = taille d'effet : proportion de variance expliquee
-    par l'appartenance au groupe (SS_between / SS_total).
-    eta^2 ne depend pas directement de n, mais sature vers 1
-    si les groupes sont tres separes par rapport a leur dispersion.
-    """
-    f_stat, p_value = f_oneway(a, b)
+### Ce qu'il faut retenir
+`SE` (l'erreur-type) dépend de `n` : plus on a d'observations, plus `SE`
+est petit, plus `t` est grand pour un même écart de moyenne. Welch
+répond donc à "cet écart est-il **détectable** ?", pas à "cet écart
+est-il **important** ?"
 
-    grand_mean = np.concatenate([a, b]).mean()
-    ss_between = len(a) * (a.mean() - grand_mean)**2 + len(b) * (b.mean() - grand_mean)**2
-    ss_total = np.sum((np.concatenate([a, b]) - grand_mean)**2)
-    eta_sq = ss_between / ss_total if ss_total > 0 else 0.0
+---
 
-    return float(f_stat), float(p_value), float(eta_sq)
+## 2. Test de Kruskal-Wallis
 
-# =====================================================================
-# 4. COHEN'S D (taille d'effet, ecart de moyennes normalise)
-# =====================================================================
-def cohen_d_diag(a, b):
-    """
+### Ce que c'est
+L'équivalent non-paramétrique de Welch (ou de l'ANOVA) : au lieu de
+comparer les moyennes, il compare les **rangs** des observations entre
+les deux groupes. Il ne suppose aucune forme particulière de
+distribution (pas besoin que les données soient gaussiennes).
+
+### Ce qu'il mesure
+La statistique H mesure si les rangs des observations du groupe A sont,
+en moyenne, systématiquement plus petits ou plus grands que ceux du
+groupe B. Si les deux groupes sont mélangés de façon homogène dans le
+classement global, H est petit ; si un groupe occupe systématiquement
+le haut (ou le bas) du classement, H est grand.
+
+### Ce qu'il faut retenir
+Comme Welch, H croît avec la taille des échantillons : plus on a
+d'observations, plus la statistique devient précise dans sa capacité à
+détecter une tendance, même minime. Kruskal-Wallis répond à la même
+question que Welch ("y a-t-il une tendance détectable ?"), avec
+l'avantage de ne pas supposer la normalité, mais avec la même
+sensibilité à la taille d'échantillon.
+
+---
+
+## 3. ANOVA et eta² (η²)
+
+### Ce que c'est
+L'ANOVA à un facteur ("Analysis Of Variance") teste si la moyenne d'une
+variable diffère selon un facteur catégoriel (ici : la classe). Avec
+seulement deux groupes, le test F de l'ANOVA est mathématiquement
+équivalent au carré du t de Welch — donc il répond à la même question.
+
+eta² (η²) est une grandeur dérivée de l'ANOVA, mais c'est une **taille
+d'effet**, pas un test : il mesure la proportion de la variance totale
+qui est "expliquée" par le facteur étudié.
+
+    eta² = SS_between / SS_total
+
+`SS_between` est la variabilité due aux différences entre groupes,
+`SS_total` est la variabilité totale (entre ET au sein des groupes).
+eta² varie de 0 (le facteur n'explique rien) à 1 (le facteur explique
+toute la variance — les groupes sont parfaitement homogènes en interne
+et totalement différents les uns des autres).
+
+### Ce qu'il faut retenir
+Le test F de l'ANOVA a la même sensibilité à n que Welch (il sature
+à grand n). eta², en revanche, ne dépend pas directement de n — c'est
+une proportion. Mais sa valeur dépend de la **structure des données** :
+si les classes sont, par construction, des regroupements très homogènes
+en interne (variance intra-classe faible), eta² sera naturellement très
+proche de 1, quel que soit l'écart entre les classes elles-mêmes.
+
+---
+
+## 4. Cohen's d
+
+### Ce que c'est
+Une taille d'effet qui mesure l'écart entre deux moyennes, exprimé non
+pas en unités brutes (points de LGD) mais en **nombre d'écarts-types**.
+
     d = (mean_b - mean_a) / s_pooled
-    Mesure la SEPARATION des moyennes en unites d'ecart-type poole.
-    Independant de n (contrairement a Welch/KW), mais c'est une
-    mesure de SEPARATION, pas de RECOUVREMENT (cf. OVL).
-    Grille de lecture (Cohen 1988) :
-      |d| < 0.2 -> negligeable
-      |d| < 0.5 -> petit
-      |d| < 0.8 -> moyen
-      |d| >= 0.8 -> grand
-    """
-    n1, n2 = len(a), len(b)
-    s1, s2 = a.std(ddof=1), b.std(ddof=1)
-    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
-    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
 
-    abs_d = abs(d)
-    if abs_d < 0.2:   ampleur = "negligeable"
-    elif abs_d < 0.5: ampleur = "petit"
-    elif abs_d < 0.8: ampleur = "moyen"
-    else:             ampleur = "grand"
+`s_pooled` est l'écart-type combiné des deux groupes — une mesure de la
+dispersion "typique" des observations autour de leur moyenne.
 
-    return float(d), ampleur
+### Ce qu'il mesure
+d répond à : "si je tire un obligor au hasard dans chaque groupe, à
+quelle distance leurs valeurs LGD typiques se situent-elles, relativement
+à la dispersion naturelle des données ?" Une grille de lecture usuelle
+(Cohen, 1988) : d < 0.2 = écart négligeable, < 0.5 = petit, < 0.8 =
+moyen, ≥ 0.8 = grand.
 
-# =====================================================================
-# DIAGNOSTIC COMPLET : tableau pour toutes les paires adjacentes
-# =====================================================================
-def diagnostic_tests_classiques(lf):
-    """
-    Calcule Welch, Kruskal-Wallis, ANOVA/eta^2, Cohen's d pour
-    chaque paire adjacente. Documentation, pas de decision.
-    """
-    pairs = build_adjacent_pairs(lf).sort("severite_totale")
-    rows = []
+### Ce qu'il faut retenir
+d ne dépend pas de n — un grand échantillon ne change pas la valeur de
+d (contrairement à t ou H). Mais d mesure la distance entre les
+**centres** des deux distributions, normalisée par leur dispersion. Il
+ne dit rien directement sur le **chevauchement** des deux distributions
+dans leur ensemble — deux distributions peuvent avoir un d élevé tout en
+partageant une large plage de valeurs communes, ou un d faible tout en
+étant presque totalement séparées, selon la forme (symétrique,
+asymétrique, étalée, concentrée) de chacune.
 
-    for ca, cb, sev in pairs.iter_rows():
-        a = get_lgd_vectors(lf, ca)
-        b = get_lgd_vectors(lf, cb)
+# Pourquoi ces résultats imposent un changement de paradigme
 
-        t_stat, p_welch = welch_diag(a, b)
-        h_stat, p_kw = kruskal_diag(a, b)
-        f_stat, p_anova, eta_sq = anova_diag(a, b)
-        d, ampleur = cohen_d_diag(a, b)
+## Ce que montre le diagnostic
 
-        rows.append({
-            "class_a": ca, "class_b": cb, "gap": round(sev, 4),
-            "n_a": len(a), "n_b": len(b),
-            "welch_t": round(t_stat, 3), "welch_p": p_welch,
-            "kw_H": round(h_stat, 3), "kw_p": p_kw,
-            "anova_F": round(f_stat, 3), "anova_p": p_anova, "eta_sq": round(eta_sq, 6),
-            "cohen_d": round(d, 4), "ampleur_effet": ampleur,
-        })
+Sur les paires de classes adjacentes (triées par LGD moyenne), le
+diagnostic fait apparaître trois constats.
 
-    df_diag = pl.DataFrame(rows)
-    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=70):
-        print(df_diag)
+**Premier constat** : Welch et Kruskal-Wallis donnent tous deux des
+p-values quasi nulles (souvent p < 1e-100) pour la quasi-totalité des
+paires — y compris celles dont l'écart de LGD moyenne n'est que de
+quelques dixièmes de point. Avec des effectifs allant de quelques
+milliers à plusieurs centaines de milliers d'obligors par classe, ces
+deux tests perdent toute capacité à distinguer "un écart négligeable"
+d'"un écart important" : ils détectent systématiquement une différence,
+quelle que soit son ampleur réelle.
 
-    # Synthese
-    n_p_sature = df_diag.filter(
-        (pl.col("welch_p") < 1e-10) & (pl.col("kw_p") < 1e-10)
-    ).height
-    print(f"\nPaires avec welch_p < 1e-10 ET kw_p < 1e-10 (saturation grand n) : "
-          f"{n_p_sature} / {df_diag.height}")
+**Deuxième constat** : eta² calculé globalement sur les 65 classes
+atteint environ 0.99 — la classe d'appartenance explique la quasi-
+totalité de la variance des LGD. Cela confirme que la variable étudiée
+est une LGD *prédite* (issue du modèle), dont la variance intra-classe
+est par construction très faible. Conséquence directe : la perte d'eta²
+provoquée par la fusion d'une seule paire de classes est toujours
+infime, et ce quel que soit l'écart entre les deux classes fusionnées.
+eta² ne fournit donc aucun seuil naturel permettant de dire "fusionner
+jusqu'ici, mais pas plus loin".
 
-    print(f"\nCohen's d : min={df_diag['cohen_d'].abs().min():.3f}  "
-          f"med={df_diag['cohen_d'].abs().median():.3f}  "
-          f"max={df_diag['cohen_d'].abs().max():.3f}")
-    print(f"eta^2     : min={df_diag['eta_sq'].min():.6f}  "
-          f"med={df_diag['eta_sq'].median():.6f}  "
-          f"max={df_diag['eta_sq'].max():.6f}")
+**Troisième constat** : Cohen's d varie fortement selon les paires
+(de l'ordre de 0.2 à plus de 3), ce qui montre qu'il existe bien des
+différences d'ampleur variable entre les classes. Mais d, par
+construction, ne renseigne que sur l'écart entre les *centres* des
+distributions, normalisé par leur dispersion — il ne dit rien sur la
+proportion de la masse de probabilité que les deux distributions ont en
+commun. Or les distributions de LGD observées par classe ne sont pas
+symétriques, ce qui invalide les formules usuelles de conversion entre
+d et le recouvrement.
 
-    return df_diag
+## Le problème de fond
 
-# =====================================================================
-# EXECUTION
-# =====================================================================
-print("=" * 110)
-print("DIAGNOSTIC TESTS CLASSIQUES — paires adjacentes (base initiale)")
-print("=" * 110)
-df_diag_classiques = diagnostic_tests_classiques(df_base.lazy())
+Ces trois familles de résultats pointent vers une même cause : tous ces
+outils ont été conçus pour répondre à la question "cette différence
+est-elle **statistiquement détectable** ?" (Welch, KW, ANOVA), ou pour
+décrire l'**écart entre les centres** des distributions (Cohen's d,
+eta²). Aucun ne répond directement à la question qui nous intéresse
+pour le regroupement : "ces deux classes décrivent-elles, dans les
+faits, la **même population de risque** ?"
 
-# Démarche de regroupement des classes CHR_model — Documentation
+À grand effectif, "statistiquement détectable" devient vide de sens
+(tout est détectable). Et "écart entre les centres" peut être trompeur
+si les distributions sont larges, asymétriques, ou de formes
+différentes : deux classes peuvent avoir des moyennes proches mais des
+populations très différentes, ou des moyennes éloignées mais des
+populations qui se recouvrent largement.
 
-## 1. Contexte et objectif
+## Le changement de paradigme
 
-Le modèle IRB comporte initialement 65 classes CHR_model. L'objectif est
-de réduire ce nombre en fusionnant les classes adjacentes (triées par LRA,
-ordre global sans cloisonnement par segment) dont les distributions de LGD
-sont jugées équivalentes, sans perte de pouvoir discriminant.
+La question pertinente n'est donc pas "la différence est-elle
+détectable ou significative", mais directement : **"quelle proportion
+des obligors des deux classes occupent-ils la même plage de valeurs de
+LGD ?"** C'est une question de **recouvrement des distributions dans
+leur ensemble** — pas seulement de leurs moyennes, et pas conditionnée
+par la taille de l'échantillon.
 
-## 2. Pourquoi les tests d'hypothèse classiques ne peuvent pas servir de critère
-
-### 2.1 Test de Welch
-
-Le test de Welch (t-test à variances inégales) teste H0 : "les deux
-moyennes sont égales". Sa statistique est :
-
-    t = (mean_b - mean_a) / SE,  où SE = sqrt(s1²/n1 + s2²/n2)
-
-**Constat empirique** : avec les effectifs du portefeuille (de quelques
-milliers à plus de 600 000 obligors par classe), SE devient extrêmement
-petit. Le test détecte alors une différence significative (p < 0.05,
-souvent p < 1e-300) pour la quasi-totalité des paires adjacentes, y
-compris celles dont l'écart de LGD est de l'ordre de 0.1 point.
-
-**Conclusion** : Welch ne discrimine pas — il dit "tout est différent",
-ce qui ne fournit aucun critère d'arrêt pour la fusion.
-
-### 2.2 Test de Kruskal-Wallis
-
-Alternative non-paramétrique à Welch (pas d'hypothèse de normalité),
-H, p = kruskal(a, b). Il souffre de la **même pathologie à grand n** :
-la statistique H croît avec n, et p sature vers 0 pour les mêmes raisons
-structurelles. Aucun gain par rapport à Welch pour notre usage.
-
-### 2.3 ANOVA (test F) et eta²
-
-L'ANOVA à un facteur (équivalente au test F sur deux groupes) teste la
-même hypothèse que Welch via F = MS_between / MS_within. **Même
-saturation à grand n** : F devient immense, p ≈ 0 systématiquement.
-
-Le sous-produit utile de l'ANOVA est **eta² = SS_between / SS_total**,
-la taille d'effet associée — proportion de variance totale expliquée par
-l'appartenance au groupe. Calculé globalement sur les 65 classes,
-eta² ≈ 0.9929 : 99.3 % de la variance des LGD est expliquée par la
-classe d'appartenance. Ceci confirme que `lgd_obligor` est une LGD
-**prédite/fittée** (et non une LGD réalisée, dont la variance intra-classe
-serait bien plus importante).
-
-Calculé paire par paire, eta² est **non-discriminant par excès** : la
-perte d'eta² associée à la fusion d'une seule paire est toujours
-négligeable (< 0.001 %), car eta² global est déjà proche de 1. Cela
-signifie : aucune fusion ne dégrade significativement le pouvoir
-explicatif global, mais ce critère ne fournit **aucun seuil d'arrêt
-naturel** — il faudrait fusionner jusqu'à 1 seule classe avant que la
-perte d'eta² devienne notable.
-
-### 2.4 Cohen's d (taille d'effet)
-
-d = (mean_b - mean_a) / s_pooled, indépendant de n (contrairement à
-Welch/KW). Calculé sur les paires adjacentes au niveau modèle, d varie
-de ~0.2 (petit effet) à plus de 3 (effet très grand selon la grille de
-Cohen 1988 : <0.2 négligeable, <0.5 petit, <0.8 moyen, ≥0.8 grand).
-
-**Limite identifiée** : d mesure la **séparation des centres** (écart de
-moyennes normalisé par la dispersion), pas le **recouvrement réel** des
-distributions. Deux classes peuvent avoir un d modéré mais un fort
-recouvrement si leurs distributions sont larges, ou un d faible mais peu
-de recouvrement si les distributions sont étroites et asymétriques. Pour
-des LGD à distribution non-normale (asymétrique, observée empiriquement),
-la conversion classique d ↔ recouvrement (sous hypothèse de normalité,
-OVL ≈ 2·Φ(-|d|/2)) n'est pas fiable.
-
-## 3. Synthèse du diagnostic
-
-| Test            | Dépend de n ? | Discrimine à grand n ? | Rôle retenu                  |
-|------------------|:---:|:---:|-------------------------------|
-| Welch            | Oui | Non (sature à p≈0)     | Documentation uniquement      |
-| Kruskal-Wallis   | Oui | Non (sature à p≈0)     | Documentation uniquement      |
-| ANOVA (F)        | Oui | Non (sature à p≈0)     | Documentation uniquement      |
-| eta² (global)    | Non | N/A (≈1, pas de seuil) | Documentation (contexte LGD)  |
-| eta² (par paire) | Non | Non (toujours négligeable) | Documentation uniquement  |
-| Cohen's d        | Non | Oui (mais ≠ recouvrement) | Documentation de la séparation finale |
-
-**Conclusion de cette phase** : aucun de ces tests/mesures ne fournit
-de critère de décision robuste, indépendant de n, et fondé sur le
-recouvrement réel des distributions. Ils sont conservés comme éléments
-de documentation (tableau diagnostique par paire), mais la décision de
-fusion repose sur un critère distinct, détaillé séparément : le
-coefficient de recouvrement empirique (OVL).
+Cette question peut être posée directement sur les distributions
+empiriques, sans hypothèse de forme (normale ou autre), et sans que la
+réponse change selon que la classe contient 2 000 ou 600 000 obligors.
+C'est ce changement de paradigme — du test d'hypothèse vers la mesure
+directe du recouvrement des distributions — qui motive le passage au
+coefficient de recouvrement (OVL), détaillé séparément.
