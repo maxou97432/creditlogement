@@ -1,8 +1,7 @@
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import stats as sp_stats
-from scipy.stats import kruskal, levene, gaussian_kde
+from scipy.stats import gaussian_kde
 from collections import Counter
 
 # =====================================================================
@@ -11,17 +10,21 @@ from collections import Counter
 df_base       = base                  # base rassemblée niveau modèle (grain obligor)
 LGD_COL       = "lgd_obligor"
 CLASS_COL     = "CHR_model"
-P_VALUE_FLOOR = 0.05
 MAX_ITER      = 1000
-ECHELLE       = 100.0                  # LGD en base 100
 
 # >>> NIVEAU D'ACCEPTATION DES FUSIONS <
 CODES_FUSIONNABLES = {0, 1}            # {0}=strict, {0,1}=large
 
-# >>> SEUILS OVL (recouvrement empirique, robuste au n et à la forme) <
+# >>> SEUILS OVL (recouvrement, robuste au n et à la forme) <
 OVL_STRICT  = 0.75                     # code 0 : fort recouvrement
 OVL_MODERE  = 0.50                     # code 1 : recouvrement modéré
-N_BINS_OVL  = 100
+N_BINS_HIST = 100
+N_POINTS_KDE = 300
+
+# >>> METHODE QUI PILOTE LA DECISION DE FUSION <
+#   "hist" = histogramme (rapide)
+#   "kde"  = noyau gaussien (plus lisse, plus coûteux)
+OVL_METHOD = "hist"
 
 # =====================================================================
 # UTILITAIRES
@@ -31,91 +34,57 @@ def get_lgd_vectors(lf, cls):
               .select(LGD_COL).collect()
               .get_column(LGD_COL).to_numpy())
 
-def ReturnThreshold(mean_lgd):
-    """Seuil d'effectif pour bascule vers OVL (mean_lgd en base 100)."""
-    if mean_lgd < 5:   return 80000
-    if mean_lgd < 10:  return 40000
-    if mean_lgd < 20:  return 20000
-    return 10000
-
 # =====================================================================
-# OVL EMPIRIQUE — recouvrement des distributions, sans hypothèse de forme
+# OVL — DEUX METHODES, INDEPENDANTES DE n ET DE LA FORME
 # =====================================================================
-def overlap_empirique(a: np.ndarray, b: np.ndarray, n_bins: int = N_BINS_OVL):
-    """
-    OVL = aire d'intersection des deux densités estimées par histogramme.
-    1.0 = distributions identiques, 0.0 = aucun recouvrement.
-    Indépendant de n et de la forme de la distribution.
-    """
-    lo = min(a.min(), b.min())
-    hi = max(a.max(), b.max())
+def overlap_empirique_hist(a: np.ndarray, b: np.ndarray, n_bins: int = N_BINS_HIST) -> float:
+    """OVL via histogrammes normalisés en densité."""
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
     bins = np.linspace(lo, hi, n_bins + 1)
-
     hist_a, _ = np.histogram(a, bins=bins, density=True)
     hist_b, _ = np.histogram(b, bins=bins, density=True)
+    bw = bins[1] - bins[0]
+    return float(np.sum(np.minimum(hist_a, hist_b)) * bw)
 
-    bin_width = bins[1] - bins[0]
-    ovl = float(np.sum(np.minimum(hist_a, hist_b)) * bin_width)
-    return ovl, bins, hist_a, hist_b
+def overlap_empirique_kde(a: np.ndarray, b: np.ndarray, n_points: int = N_POINTS_KDE) -> float:
+    """OVL via estimation par noyau gaussien (KDE) — plus lisse, plus stable à petit n."""
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    pad = 0.05 * (hi - lo)
+    x = np.linspace(lo - pad, hi + pad, n_points)
+    kde_a, kde_b = gaussian_kde(a)(x), gaussian_kde(b)(x)
+    dx = x[1] - x[0]
+    return float(np.sum(np.minimum(kde_a, kde_b)) * dx)
 
-def overlap_test(a, b, mean_lgd):
+def overlap_test(a, b):
     """
-    Test de recouvrement : code 0/1/99 selon OVL.
+    Test de recouvrement, UNIQUE critère de décision (toute classe d'effectif).
+    Pilote par OVL_METHOD.
     code 0 = fort recouvrement (fusionnable)
     code 1 = recouvrement modéré
     code 99 = peu de recouvrement (distinctes)
     """
-    ovl, _, _, _ = overlap_empirique(a, b)
+    ovl_hist = overlap_empirique_hist(a, b)
+    ovl_kde  = overlap_empirique_kde(a, b)
+    ovl = ovl_hist if OVL_METHOD == "hist" else ovl_kde
+
     if ovl > OVL_STRICT:
-        return 0, f"OVL={ovl:.3f} > {OVL_STRICT} (fort recouvrement)"
+        code, label = 0, "fort recouvrement"
     elif ovl > OVL_MODERE:
-        return 1, f"OVL={ovl:.3f} > {OVL_MODERE} (recouvrement modere)"
+        code, label = 1, "recouvrement modere"
     else:
-        return 99, f"OVL={ovl:.3f} <= {OVL_MODERE} (peu de recouvrement)"
+        code, label = 99, "peu de recouvrement"
+
+    raison = (f"OVL({OVL_METHOD})={ovl:.3f} [{label}] "
+              f"(hist={ovl_hist:.3f}, kde={ovl_kde:.3f})")
+    return code, raison, ovl_hist, ovl_kde
 
 # =====================================================================
-# TESTS À PETIT EFFECTIF (cascade Welch -> KW -> Margin)
-# =====================================================================
-def WelchTest(a, b):
-    _, p = sp_stats.ttest_ind(a, b, equal_var=False)
-    return float(p)
-
-def KWTest(a, b):
-    _, p = kruskal(a, b)
-    return float(p)
-
-def MarginTest(mean_a, mean_b, mean_lgd):
-    """Marge de matérialité en cas d'échec Welch/KW à petit n."""
-    delta_a = max(0.2 * mean_lgd, 0.005 * ECHELLE)
-    delta_b = max(0.3 * mean_lgd, 0.01  * ECHELLE)
-    ad = abs(mean_b - mean_a)
-    if ad < delta_a: return 0, f"MARGIN OK (<{delta_a:.2f})"
-    if ad < delta_b: return 1, f"MARGIN MODERE (<{delta_b:.2f})"
-    return 99, f"MARGIN SEVERE (>={delta_b:.2f})"
-
-# =====================================================================
-# DÉCISION DE FUSION POUR UNE PAIRE
+# DÉCISION DE FUSION POUR UNE PAIRE — UNIQUEMENT OVL
 # =====================================================================
 def tester_paire(a, b):
-    """Renvoie (fusionnable: bool, test: str, code: int, raison: str)."""
-    n = len(a) + len(b)
-    mean_lgd = float((a.sum() + b.sum()) / n)
-
-    if n > ReturnThreshold(mean_lgd):
-        code, raison = overlap_test(a, b, mean_lgd)   # grand n -> OVL
-        test = "ovl"
-    else:
-        p_w = WelchTest(a, b)                          # petit n -> cascade
-        if p_w >= P_VALUE_FLOOR:
-            code, raison, test = 0, f"WELCH p={p_w:.3f}>=floor", "welch"
-        else:
-            p_kw = KWTest(a, b)
-            if p_kw >= P_VALUE_FLOOR:
-                code, raison, test = 0, f"KW p={p_kw:.3f}>=floor", "kw"
-            else:
-                code, raison = MarginTest(a.mean(), b.mean(), mean_lgd)
-                test = "margin"
-    return (code in CODES_FUSIONNABLES), test, code, raison
+    """Renvoie (fusionnable: bool, test: str, code: int, raison: str, ovl_hist, ovl_kde)."""
+    code, raison, ovl_hist, ovl_kde = overlap_test(a, b)
+    return (code in CODES_FUSIONNABLES), "ovl", code, raison, ovl_hist, ovl_kde
 
 # =====================================================================
 # OPÉRATIONS SUR LES CLASSES
@@ -146,7 +115,7 @@ def regroupement(lf, max_iter=MAX_ITER):
         for ca, cb, sev in candidates.iter_rows():
             a = get_lgd_vectors(current, ca)
             b = get_lgd_vectors(current, cb)
-            ok, test, code, raison = tester_paire(a, b)
+            ok, test, code, raison, ovl_hist, ovl_kde = tester_paire(a, b)
             if ok:
                 new = f"{ca}_{cb}"
                 current = merge_classes(current, ca, cb, new)
@@ -155,7 +124,9 @@ def regroupement(lf, max_iter=MAX_ITER):
                     "iteration": it, "class_a": ca, "class_b": cb, "new_class": new,
                     "test": test, "code": code, "gap": round(sev, 4),
                     "mean_a": round(float(a.mean()), 3), "mean_b": round(float(b.mean()), 3),
-                    "n_a": len(a), "n_b": len(b), "raison": raison,
+                    "n_a": len(a), "n_b": len(b),
+                    "ovl_hist": round(ovl_hist, 4), "ovl_kde": round(ovl_kde, 4),
+                    "raison": raison,
                 })
                 break
         if not fused:
@@ -163,56 +134,73 @@ def regroupement(lf, max_iter=MAX_ITER):
     return current, history
 
 # =====================================================================
-# DIAGNOSTIC OVL — PAIRES ADJACENTES + GRAPHIQUES (histogramme + KDE)
+# DIAGNOSTIC OVL — HIST + KDE, COMPARAISON ET GRAPHIQUES
 # =====================================================================
-def plot_overlap(a, b, cls_a, cls_b, ovl, bins, hist_a, hist_b, ax=None):
+def plot_overlap(a, b, cls_a, cls_b, ovl_hist, ovl_kde, ax=None):
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 4))
 
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    bins = np.linspace(lo, hi, N_BINS_HIST + 1)
     centers = (bins[:-1] + bins[1:]) / 2
     width = bins[1] - bins[0]
 
-    # Histogrammes (barres)
+    hist_a, _ = np.histogram(a, bins=bins, density=True)
+    hist_b, _ = np.histogram(b, bins=bins, density=True)
+
+    # Histogrammes
     ax.bar(centers, hist_a, width=width, alpha=0.35, label=f"Classe {cls_a} (n={len(a)})", color="steelblue")
     ax.bar(centers, hist_b, width=width, alpha=0.35, label=f"Classe {cls_b} (n={len(b)})", color="darkorange")
 
-    # Zone de recouvrement (sur les histogrammes)
+    # Zone de recouvrement (histogramme)
     overlap_height = np.minimum(hist_a, hist_b)
     ax.bar(centers, overlap_height, width=width, alpha=0.6, color="green",
-           label=f"Recouvrement (OVL={ovl:.3f})")
+           label=f"Recouvrement hist (OVL={ovl_hist:.3f})")
 
-    # Courbes KDE par-dessus (lissage continu)
-    x_grid = np.linspace(bins[0], bins[-1], 300)
-    kde_a = gaussian_kde(a)
-    kde_b = gaussian_kde(b)
-    ax.plot(x_grid, kde_a(x_grid), color="steelblue", linewidth=2, linestyle="-")
-    ax.plot(x_grid, kde_b(x_grid), color="darkorange", linewidth=2, linestyle="-")
+    # Courbes KDE
+    pad = 0.05 * (hi - lo)
+    x_grid = np.linspace(lo - pad, hi + pad, N_POINTS_KDE)
+    kde_a, kde_b = gaussian_kde(a)(x_grid), gaussian_kde(b)(x_grid)
+    ax.plot(x_grid, kde_a, color="steelblue", linewidth=2)
+    ax.plot(x_grid, kde_b, color="darkorange", linewidth=2)
 
     ax.set_xlabel("LGD (pts)")
     ax.set_ylabel("Densite")
-    ax.set_title(f"{cls_a} vs {cls_b} - OVL = {ovl:.3f}")
+    ax.set_title(f"{cls_a} vs {cls_b} - OVL_hist={ovl_hist:.3f} | OVL_kde={ovl_kde:.3f}")
     ax.legend()
     return ax
 
 def diagnostic_ovl(lf, n_graphs=5):
-    """Tableau OVL pour toutes les paires adjacentes + graphiques pour les n_graphs plus proches."""
+    """Tableau OVL (hist + kde) pour toutes les paires adjacentes + graphiques."""
     diag_pairs = build_adjacent_pairs(lf).sort("severite_totale")
 
     rows = []
     for ca, cb, sev in diag_pairs.iter_rows():
         a = get_lgd_vectors(lf, ca)
         b = get_lgd_vectors(lf, cb)
-        ovl, _, _, _ = overlap_empirique(a, b)
+        ovl_h = overlap_empirique_hist(a, b)
+        ovl_k = overlap_empirique_kde(a, b)
         rows.append({
             "class_a": ca, "class_b": cb,
-            "gap": round(sev, 4), "OVL": round(ovl, 4),
+            "gap": round(sev, 4),
+            "OVL_hist": round(ovl_h, 4), "OVL_kde": round(ovl_k, 4),
+            "ecart_hist_kde": round(abs(ovl_h - ovl_k), 4),
             "n_a": len(a), "n_b": len(b),
-            "fusionnable": "OUI" if ovl > OVL_MODERE else "NON",
+            "fusionnable_hist": "OUI" if ovl_h > OVL_MODERE else "NON",
+            "fusionnable_kde":  "OUI" if ovl_k > OVL_MODERE else "NON",
         })
 
     df_ovl = pl.DataFrame(rows)
     with pl.Config(tbl_rows=100, tbl_cols=-1):
         print(df_ovl)
+
+    # Désaccords entre les deux méthodes
+    desac = df_ovl.filter(pl.col("fusionnable_hist") != pl.col("fusionnable_kde"))
+    if desac.height > 0:
+        print(f"\n{desac.height} paire(s) où hist et kde sont en désaccord :")
+        print(desac)
+    else:
+        print("\nHist et KDE sont d'accord sur toutes les paires.")
 
     if n_graphs > 0:
         fig, axes = plt.subplots(n_graphs, 1, figsize=(8, 4 * n_graphs))
@@ -221,8 +209,9 @@ def diagnostic_ovl(lf, n_graphs=5):
         for i, (ca, cb, sev) in enumerate(diag_pairs.head(n_graphs).iter_rows()):
             a = get_lgd_vectors(lf, ca)
             b = get_lgd_vectors(lf, cb)
-            ovl, bins, hist_a, hist_b = overlap_empirique(a, b)
-            plot_overlap(a, b, ca, cb, ovl, bins, hist_a, hist_b, ax=axes[i])
+            ovl_h = overlap_empirique_hist(a, b)
+            ovl_k = overlap_empirique_kde(a, b)
+            plot_overlap(a, b, ca, cb, ovl_h, ovl_k, ax=axes[i])
         plt.tight_layout()
         plt.show()
 
@@ -234,19 +223,17 @@ def diagnostic_ovl(lf, n_graphs=5):
 lf = df_base.lazy()
 n0 = lf.select(CLASS_COL).unique().collect().height
 
-# Diagnostic OVL avant fusion (paires de la base initiale)
 print("=" * 110)
-print("DIAGNOSTIC OVL — PAIRES ADJACENTES (base initiale)")
+print(f"DIAGNOSTIC OVL — PAIRES ADJACENTES (base initiale, {n0} classes)")
 print("=" * 110)
 df_ovl_diag = diagnostic_ovl(lf, n_graphs=5)
 
-# Regroupement
 reduced_lf, history = regroupement(lf)
 df_final = reduced_lf.collect()
 n1 = df_final[CLASS_COL].n_unique()
 
 print("\n" + "=" * 110)
-print(f"REGROUPEMENT — OVL_STRICT={OVL_STRICT}, OVL_MODERE={OVL_MODERE} | "
+print(f"REGROUPEMENT — OVL_METHOD={OVL_METHOD}, OVL_STRICT={OVL_STRICT}, OVL_MODERE={OVL_MODERE} | "
       f"codes fusionnables={sorted(CODES_FUSIONNABLES)}")
 print(f"{n0} -> {n1} CHR_model  ({len(history)} fusions)")
 print("=" * 110)
@@ -254,10 +241,9 @@ print("=" * 110)
 if history:
     with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=70):
         print(pl.DataFrame(history).select(
-            ["iteration", "class_a", "class_b", "new_class", "test", "code",
-             "gap", "mean_a", "mean_b", "n_a", "n_b", "raison"]))
-    print("\nTests:", dict(Counter(h["test"] for h in history)),
-          " | Codes:", dict(Counter(h["code"] for h in history)))
+            ["iteration", "class_a", "class_b", "new_class", "code",
+             "gap", "mean_a", "mean_b", "n_a", "n_b", "ovl_hist", "ovl_kde", "raison"]))
+    print("\nCodes:", dict(Counter(h["code"] for h in history)))
 else:
     print("\nAucune fusion.")
 print(f"\nTaux de reduction : {100*(1-n1/n0):.1f} %")
