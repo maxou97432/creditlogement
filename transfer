@@ -1,205 +1,248 @@
-# Méthodologie de fusion des classes CHR_model — g de Hedges et calibration par impact MAE
-
-## 1. Contexte et problématique
-
-Le modèle IRB LGD repose sur 65 classes de risque `CHR_model`, dont les effectifs vont de 542 à plusieurs dizaines de milliers d'obligors. L'objectif est de réduire ce nombre de classes en regroupant celles qui sont statistiquement homogènes, tout en produisant une justification défendable pour le dossier de validation.
-
-### 1.1 Pourquoi les tests classiques ne fonctionnent pas
-
-Les approches initiales (test de Welch, test de Kruskal-Wallis) ont été écartées car elles souffrent toutes du même défaut : **leur p-value est mécaniquement dépendante de la taille d'échantillon n**.
-
-La statistique de Welch s'écrit :
-
-$$
-t = \frac{\bar{x}_A - \bar{x}_B}{\sqrt{\frac{s_A^2}{n_A} + \frac{s_B^2}{n_B}}}
-$$
-
-Le facteur $\sqrt{n}$ figure implicitement au numérateur de cette expression. Avec des effectifs de plusieurs dizaines de milliers d'obligors, le dénominateur devient infinitésimal, et `t` explose pour le moindre écart de moyenne — même de l'ordre de 0.01 point de LGD. La p-value associée tombe alors à des valeurs comme 1e-100, rendant le test inutilisable : **tout est déclaré statistiquement différent**, qu'importe la pertinence pratique de l'écart.
-
-Le même phénomène se produit avec Kruskal-Wallis et avec le test Q de Cochran (utilisé en méta-analyse pour I²) : toutes ces statistiques contiennent un terme proportionnel à n qui domine à grand effectif.
-
-### 1.2 Le changement de paradigme : effect size
-
-La solution consiste à abandonner les tests de **différence** (qui répondent à *"est-ce que la différence est réelle ?"*) au profit d'une mesure d'**effet taille** (effect size), qui répond à *"quelle est l'importance pratique de la différence, indépendamment de n ?"*.
-
-C'est exactement la distinction formulée par Wikipedia sur l'effect size :
-
-> *"Sample-based effect sizes are distinguished from test statistics used in hypothesis testing, in that they estimate the strength (magnitude) of an apparent relationship, rather than assigning a significance level reflecting whether the magnitude of the relationship observed could be due to chance."*
-
----
-
-## 2. Le g de Hedges
-
-### 2.1 Définition
-
-Le g de Hedges mesure l'écart entre deux moyennes, normalisé par la dispersion commune des deux groupes :
-
-$$
-g = \frac{|\bar{x}_A - \bar{x}_B|}{s_{pooled}}
-\quad \text{avec} \quad
-s_{pooled} = \sqrt{\frac{(n_A-1)s_A^2 + (n_B-1)s_B^2}{n_A+n_B-2}}
-$$
-
-C'est une grandeur **sans unité** : le numérateur (différence de LGD en points) et le dénominateur (écart-type poolé, aussi en points de LGD) s'annulent dimensionnellement. g exprime donc l'écart de moyennes **en nombre d'écarts-types poolés**.
-
-### 2.2 Indépendance par rapport à n
-
-Contrairement à la statistique t de Welch, qui contient un facteur croissant avec n :
-
-$$
-t = g \times \sqrt{\frac{n_A \times n_B}{n_A + n_B}}
-$$
-
-g ne contient aucun terme en n. Si l'on double les effectifs sans changer les distributions sous-jacentes, $\bar{x}_A$, $\bar{x}_B$ et $s_{pooled}$ convergent vers leurs vraies valeurs de population — et g converge également, sans inflation. C'est la propriété centrale qui rend g utilisable sur un portefeuille où les effectifs varient de 542 à plusieurs dizaines de milliers.
-
-### 2.3 Interprétation intuitive
-
-g traduit le **recouvrement** entre les deux distributions. Plus g est petit, plus les deux classes se chevauchent et sont donc difficiles à distinguer statistiquement — donc plus elles sont candidates à la fusion.
-
-Un point important : g s'adapte automatiquement à la dispersion de chaque paire. Un même écart de 1 point de LGD entre deux classes peut correspondre à un g faible (si les classes sont très dispersées) ou à un g élevé (si les classes sont très concentrées). C'est une amélioration directe par rapport à un seuil fixe en points de LGD, qui ne tient pas compte de cette hétérogénéité de dispersion entre paires.
-
-### 2.4 Hypothèses requises
-
-Le calcul de g ne suppose **pas** la normalité des distributions — c'est une statistique descriptive pure, un simple ratio d'écarts. La normalité n'intervient que pour les interprétations probabilistes avancées de g (intervalles de confiance via la distribution t non-centrale, indices U3/U2/CLES), que nous n'utilisons pas ici. Le g calculé reste donc valide même sur les classes dont la distribution observée est asymétrique ou bimodale.
-
-### 2.5 Les seuils de référence (Cohen 1988, Sawilowsky 2009)
-
-Jacob Cohen (1988) a proposé des repères d'interprétation de g, ultérieurement étendus par Sawilowsky (2009) :
-
-| g | Qualification (Sawilowsky 2009) |
-|---|---|
-| 0.01 | Very small |
-| 0.20 | Small |
-| 0.50 | Medium |
-| 0.80 | Large |
-| 1.20 | Very large |
-| 2.00 | Huge |
-
-Cohen lui-même précise que ces seuils sont des repères génériques issus des sciences comportementales, et non des lois universelles :
-
-> *"The terms 'small,' 'medium,' and 'large' are relative, not only to each other, but to the area of behavioral science... This risk is nevertheless accepted in the belief that more is to be gained than lost by supplying a common conventional frame of reference which is recommended for use only when no better basis for estimating the ES index is available."*
-
-C'est pourquoi, dans notre démarche, ces seuils servent de **cadre de référence publié**, mais le seuil final retenu est calibré empiriquement sur les données du portefeuille (section 3).
-
----
-
-## 3. L'algorithme de fusion gloutonne
-
-### 3.1 Principe
-
-L'algorithme procède par fusions successives, en partant des 65 classes originales :
-
-1. À chaque itération, les classes courantes (originales ou déjà fusionnées) sont triées par LGD moyenne croissante.
-2. Pour chaque paire de classes **adjacentes** dans cet ordre, on calcule g.
-3. La paire avec le **g le plus faible** est sélectionnée.
-4. Si ce g est inférieur au seuil retenu, la paire est fusionnée ; sinon, l'algorithme s'arrête.
-
-La contrainte d'adjacence garantit que l'on ne fusionne jamais des classes dont les niveaux de LGD sont très éloignés, même si leur g global serait faible par ailleurs (ce qui pourrait arriver avec des classes de très grande dispersion).
-
-### 3.2 Calcul exact lors d'une fusion
-
-Lorsque deux groupes A et B sont fusionnés, la moyenne et la variance du nouveau groupe sont calculées par les formules exactes de combinaison statistique (et non par approximation) :
-
-$$
-\bar{x}_{A\cup B} = \frac{n_A \bar{x}_A + n_B \bar{x}_B}{n_A + n_B}
-$$
-
-$$
-s^2_{A\cup B} = \frac{(n_A-1)s_A^2 + (n_B-1)s_B^2 + \frac{n_A n_B}{n_A+n_B}(\bar{x}_A - \bar{x}_B)^2}{n_A+n_B-1}
-$$
-
-Ces formules permettent de poursuivre l'algorithme sur des statistiques agrégées, sans recharger les vecteurs d'observations bruts à chaque itération — ce qui rend le calcul instantané même sur un grand nombre de classes.
-
-### 3.3 Nature gloutonne (greedy) de l'algorithme
-
-L'algorithme optimise localement à chaque étape : il choisit la meilleure fusion disponible à l'instant présent, sans anticiper les conséquences sur les fusions futures. Cette approche est standard en classification ascendante hiérarchique avec contrainte d'adjacence, et produit des résultats stables et reproductibles. Elle ne garantit pas le partitionnement global optimal au sens strict, mais reste une heuristique largement acceptée et documentée dans la littérature.
-
----
-
-## 4. Calibration empirique du seuil g par impact sur la MAE
-
-### 4.1 Pourquoi calibrer le seuil
-
-Les seuils de Cohen/Sawilowsky offrent un cadre de référence, mais le choix du seuil exact (g < 0.80, g < 1.20, g < 2.00...) reste, dans l'absolu, un choix de modélisation. Pour éviter qu'il paraisse arbitraire, le seuil est calibré sur une grandeur métier directement interprétable : **l'erreur de prédiction LGD au niveau portefeuille**.
-
-### 4.2 La MAE de substitution
-
-Pour une partition donnée des classes (originale ou fusionnée), on calcule la MAE (Mean Absolute Error) de substitution :
-
-$$
-MAE = \frac{1}{n_{total}} \sum_{i=1}^{n} \left| lgd\_obligor_i - \overline{lgd}_{\,classe(i)} \right|
-$$
-
-C'est l'erreur moyenne commise si l'on prédit, pour chaque obligor, la LGD moyenne de sa classe (originale ou fusionnée) plutôt que sa LGD individuelle. La variable `lgd_obligor` étant déjà pondérée par l'EAD dans la base de données, cette MAE est directement une mesure d'**impact pondéré par l'exposition**, sans calcul supplémentaire.
-
-### 4.3 La référence à 65 classes
-
-Sur les 65 classes originales (avant toute fusion), on obtient :
-
-$$
-MAE_{ref} = 0.739 \text{ points de LGD}
-$$
-
-Cette valeur n'est pas nulle : elle représente la **dispersion intra-classe résiduelle**, c'est-à-dire le bruit déjà présent dans le modèle avant toute opération de fusion. Même un découpage en 65 classes ne produit pas une homogénéité parfaite.
-
-### 4.4 La dégradation relative ΔMAE
-
-Pour chaque seuil g testé, on relance l'algorithme de fusion jusqu'à saturation, puis on recalcule la MAE sur la partition obtenue. La dégradation relative s'exprime :
-
-$$
-\Delta MAE = \frac{MAE_{fusionné} - MAE_{ref}}{MAE_{ref}} \times 100
-$$
-
-### 4.5 Résultats obtenus
-
-| Seuil g | Classes finales | MAE | ΔMAE |
-|---|---|---|---|
-| 0.20 | 65 | 0.739 | -0.003% |
-| 0.50 | 52 | 0.741 | +0.292% |
-| 0.80 | 46 | 0.748 | +1.217% |
-| 1.20 | 34 | 0.771 | +4.384% |
-| 1.66 | 27 | ~0.81 | ~+9-10% |
-| 2.00 | 24 | 0.849 | +14.914% |
-
-On observe un saut net entre g < 1.20 (+4.4%) et g < 2.00 (+14.9%), facteur ×3.4 — il ne s'agit pas d'un simple effet de seuil de tolérance, mais d'une vraie discontinuité dans les données : les fusions réalisées entre g=1.20 et g=2.00 agrègent des classes nettement plus distinctes.
-
-### 4.6 Choix du seuil de matérialité
-
-Le seuil de tolérance sur ΔMAE (5%, 10%, etc.) reste un choix de politique de modélisation, à l'instar de tout seuil de matérialité en IRB (typiquement entre 1% et 10% selon le type de décision). Pour une décision de **segmentation/regroupement de classes** — par opposition à un changement de formule de calcul — un seuil de 10% est usuel et défendable, d'autant que :
-
-- L'écart absolu correspondant (+0.032 à +0.07 points de LGD selon le seuil retenu) est négligeable au regard de la dispersion intra-classe résiduelle de référence (0.739 points).
-- L'écart relatif au niveau du portefeuille (LGD moyenne ~47 points) reste de l'ordre de 0.1%.
-
-Avec un seuil de matérialité à 10%, le seuil g retenu est **g < 1.66**, conduisant à **27 classes finales** (réduction de 58% par rapport aux 65 classes initiales).
-
----
-
-## 5. Articulation g (décision locale) / η² et MAE (validation globale)
-
-Une question naturelle est de savoir pourquoi le critère de fusion n'est pas directement basé sur η² (proportion de variance expliquée par l'appartenance aux classes) ou son équivalent moins biaisé ω².
-
-La réponse tient à la nature **locale vs globale** des deux types de mesures :
-
-- **g de Hedges** est une mesure **par paire** : il permet de décider, à chaque itération, quelle paire adjacente est la plus fusionnable. Il dispose en outre de seuils de référence publiés (Cohen/Sawilowsky) qui donnent un point de départ non arbitraire.
-- **η² / ω²** sont des mesures **globales de partition** : elles indiquent la proportion de variance totale expliquée par l'ensemble des K classes finales, mais ne permettent pas, par elles-mêmes, d'arbitrer entre 64 paires candidates à une itération donnée.
-
-La démarche retenue articule donc les deux niveaux :
-
-1. **g de Hedges** pilote la décision de fusion, paire par paire, avec un seuil calibré (section 4).
-2. **η²** (et la MAE) sont calculés **avant/après** sur la partition finale, pour démontrer que la perte de pouvoir discriminant global reste non matérielle.
-
-Cette articulation correspond à la recommandation usuelle en analyse de variance : utiliser une mesure de corrélation/effet pour interpréter des comparaisons individuelles, et une proportion de variance expliquée pour caractériser la partition dans son ensemble.
-
----
-
-## 6. Synthèse pour le dossier de validation
-
-La démarche peut être résumée par l'argumentaire suivant :
-
-> *Le critère de fusion des classes CHR_model repose sur le g de Hedges (Cohen 1988, Sawilowsky 2009), une mesure d'effet taille indépendante des effectifs, contrairement aux tests de différence classiques (Welch, Kruskal-Wallis) qui saturent à grand échantillon. L'algorithme fusionne itérativement les paires de classes adjacentes (ordonnées par LGD moyenne) présentant le g le plus faible, jusqu'à un seuil g < 1.66. Ce seuil a été calibré empiriquement : c'est le plus grand seuil tel que la dégradation de la MAE de prédiction LGD au niveau portefeuille reste inférieure à 10%, seuil de matérialité retenu pour les décisions de segmentation. Le résultat est une réduction de 65 à 27 classes (-58%), pour une dégradation de précision de l'ordre de 0.07 points de LGD en valeur absolue — non matérielle au regard de la dispersion intra-classe résiduelle déjà présente dans le modèle de référence (0.739 points).*
-
-### Limites identifiées et garde-fous possibles
-
-- **Heuristique gloutonne** : l'algorithme optimise localement, sans garantie d'optimalité globale. Documenté comme une approche standard en classification hiérarchique avec contrainte d'adjacence.
-- **g ne compare que les moyennes** : deux classes de moyenne identique mais de forme très différente (bimodalité, asymétrie) pourraient présenter un g faible malgré une réelle hétérogénéité de forme. Un garde-fou optionnel basé sur l'indice de recouvrement η (Pastore & Calcagni 2019), calculé par KDE, peut être activé pour bloquer ces cas spécifiques.
-- **Seuil de matérialité ΔMAE** : reste un choix de politique de modélisation (5%, 10%...), à documenter et faire valider explicitement, à l'instar de tout seuil de matérialité utilisé ailleurs dans le dispositif IRB (MoC A/B/C).
+import polars as pl
+import numpy as np
+from scipy import stats as sp_stats
+from scipy.stats import kruskal, f_oneway
+
+# =====================================================================
+# CONFIGURATION
+# =====================================================================
+df_base   = base
+LGD_COL   = "lgd_obligor"
+CLASS_COL = "CHR_model"
+
+# =====================================================================
+# UTILITAIRES
+# =====================================================================
+def get_lgd_vectors(lf, cls):
+    return (lf.filter(pl.col(CLASS_COL) == cls)
+              .select(LGD_COL).collect()
+              .get_column(LGD_COL).to_numpy())
+
+def build_adjacent_pairs(lf):
+    """Paires adjacentes, ordre LRA global (niveau modele)."""
+    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
+            .sort("m").collect())
+    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
+         for i in range(cm.height - 1)]
+    return pl.DataFrame({"class_a": [p[0] for p in P],
+                         "class_b": [p[1] for p in P],
+                         "severite_totale": [p[2] for p in P]})
+
+# =====================================================================
+# 1. TEST DE WELCH (t-test a variances inegales)
+# =====================================================================
+def welch_diag(a, b):
+    """
+    H0 : les deux moyennes sont egales.
+    A grand n, p -> 0 quasi systematiquement (sature).
+    """
+    t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
+    return float(t_stat), float(p_value)
+
+# =====================================================================
+# 2. TEST DE KRUSKAL-WALLIS (non-parametrique, alternative a Welch)
+# =====================================================================
+def kruskal_diag(a, b):
+    """
+    H0 : les deux distributions ont la meme tendance centrale.
+    Non-parametrique (pas d'hypothese de normalite), mais
+    meme pathologie a grand n que Welch : p -> 0.
+    """
+    h_stat, p_value = kruskal(a, b)
+    return float(h_stat), float(p_value)
+
+# =====================================================================
+# 3. ANOVA (test F) + ETA-SQUARED (taille d'effet)
+# =====================================================================
+def anova_diag(a, b):
+    """
+    ANOVA a un facteur (2 groupes) : equivalent au test F.
+    F-stat et p sature a grand n (meme limite que Welch/KW).
+    eta^2 = taille d'effet : proportion de variance expliquee
+    par l'appartenance au groupe (SS_between / SS_total).
+    eta^2 ne depend pas directement de n, mais sature vers 1
+    si les groupes sont tres separes par rapport a leur dispersion.
+    """
+    f_stat, p_value = f_oneway(a, b)
+
+    grand_mean = np.concatenate([a, b]).mean()
+    ss_between = len(a) * (a.mean() - grand_mean)**2 + len(b) * (b.mean() - grand_mean)**2
+    ss_total = np.sum((np.concatenate([a, b]) - grand_mean)**2)
+    eta_sq = ss_between / ss_total if ss_total > 0 else 0.0
+
+    return float(f_stat), float(p_value), float(eta_sq)
+
+# =====================================================================
+# 4. COHEN'S D (taille d'effet, ecart de moyennes normalise)
+# =====================================================================
+def cohen_d_diag(a, b):
+    """
+    d = (mean_b - mean_a) / s_pooled
+    Mesure la SEPARATION des moyennes en unites d'ecart-type poole.
+    Independant de n (contrairement a Welch/KW), mais c'est une
+    mesure de SEPARATION, pas de RECOUVREMENT (cf. OVL).
+    Grille de lecture (Cohen 1988) :
+      |d| < 0.2 -> negligeable
+      |d| < 0.5 -> petit
+      |d| < 0.8 -> moyen
+      |d| >= 0.8 -> grand
+    """
+    n1, n2 = len(a), len(b)
+    s1, s2 = a.std(ddof=1), b.std(ddof=1)
+    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
+    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
+
+    abs_d = abs(d)
+    if abs_d < 0.2:   ampleur = "negligeable"
+    elif abs_d < 0.5: ampleur = "petit"
+    elif abs_d < 0.8: ampleur = "moyen"
+    else:             ampleur = "grand"
+
+    return float(d), ampleur
+
+# =====================================================================
+# DIAGNOSTIC COMPLET : tableau pour toutes les paires adjacentes
+# =====================================================================
+def diagnostic_tests_classiques(lf):
+    """
+    Calcule Welch, Kruskal-Wallis, ANOVA/eta^2, Cohen's d pour
+    chaque paire adjacente. Documentation, pas de decision.
+    """
+    pairs = build_adjacent_pairs(lf).sort("severite_totale")
+    rows = []
+
+    for ca, cb, sev in pairs.iter_rows():
+        a = get_lgd_vectors(lf, ca)
+        b = get_lgd_vectors(lf, cb)
+
+        t_stat, p_welch = welch_diag(a, b)
+        h_stat, p_kw = kruskal_diag(a, b)
+        f_stat, p_anova, eta_sq = anova_diag(a, b)
+        d, ampleur = cohen_d_diag(a, b)
+
+        rows.append({
+            "class_a": ca, "class_b": cb, "gap": round(sev, 4),
+            "n_a": len(a), "n_b": len(b),
+            "welch_t": round(t_stat, 3), "welch_p": p_welch,
+            "kw_H": round(h_stat, 3), "kw_p": p_kw,
+            "anova_F": round(f_stat, 3), "anova_p": p_anova, "eta_sq": round(eta_sq, 6),
+            "cohen_d": round(d, 4), "ampleur_effet": ampleur,
+        })
+
+    df_diag = pl.DataFrame(rows)
+    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=70):
+        print(df_diag)
+
+    # Synthese
+    n_p_sature = df_diag.filter(
+        (pl.col("welch_p") < 1e-10) & (pl.col("kw_p") < 1e-10)
+    ).height
+    print(f"\nPaires avec welch_p < 1e-10 ET kw_p < 1e-10 (saturation grand n) : "
+          f"{n_p_sature} / {df_diag.height}")
+
+    print(f"\nCohen's d : min={df_diag['cohen_d'].abs().min():.3f}  "
+          f"med={df_diag['cohen_d'].abs().median():.3f}  "
+          f"max={df_diag['cohen_d'].abs().max():.3f}")
+    print(f"eta^2     : min={df_diag['eta_sq'].min():.6f}  "
+          f"med={df_diag['eta_sq'].median():.6f}  "
+          f"max={df_diag['eta_sq'].max():.6f}")
+
+    return df_diag
+
+# =====================================================================
+# EXECUTION
+# =====================================================================
+print("=" * 110)
+print("DIAGNOSTIC TESTS CLASSIQUES — paires adjacentes (base initiale)")
+print("=" * 110)
+df_diag_classiques = diagnostic_tests_classiques(df_base.lazy())
+
+# Démarche de regroupement des classes CHR_model — Documentation
+
+## 1. Contexte et objectif
+
+Le modèle IRB comporte initialement 65 classes CHR_model. L'objectif est
+de réduire ce nombre en fusionnant les classes adjacentes (triées par LRA,
+ordre global sans cloisonnement par segment) dont les distributions de LGD
+sont jugées équivalentes, sans perte de pouvoir discriminant.
+
+## 2. Pourquoi les tests d'hypothèse classiques ne peuvent pas servir de critère
+
+### 2.1 Test de Welch
+
+Le test de Welch (t-test à variances inégales) teste H0 : "les deux
+moyennes sont égales". Sa statistique est :
+
+    t = (mean_b - mean_a) / SE,  où SE = sqrt(s1²/n1 + s2²/n2)
+
+**Constat empirique** : avec les effectifs du portefeuille (de quelques
+milliers à plus de 600 000 obligors par classe), SE devient extrêmement
+petit. Le test détecte alors une différence significative (p < 0.05,
+souvent p < 1e-300) pour la quasi-totalité des paires adjacentes, y
+compris celles dont l'écart de LGD est de l'ordre de 0.1 point.
+
+**Conclusion** : Welch ne discrimine pas — il dit "tout est différent",
+ce qui ne fournit aucun critère d'arrêt pour la fusion.
+
+### 2.2 Test de Kruskal-Wallis
+
+Alternative non-paramétrique à Welch (pas d'hypothèse de normalité),
+H, p = kruskal(a, b). Il souffre de la **même pathologie à grand n** :
+la statistique H croît avec n, et p sature vers 0 pour les mêmes raisons
+structurelles. Aucun gain par rapport à Welch pour notre usage.
+
+### 2.3 ANOVA (test F) et eta²
+
+L'ANOVA à un facteur (équivalente au test F sur deux groupes) teste la
+même hypothèse que Welch via F = MS_between / MS_within. **Même
+saturation à grand n** : F devient immense, p ≈ 0 systématiquement.
+
+Le sous-produit utile de l'ANOVA est **eta² = SS_between / SS_total**,
+la taille d'effet associée — proportion de variance totale expliquée par
+l'appartenance au groupe. Calculé globalement sur les 65 classes,
+eta² ≈ 0.9929 : 99.3 % de la variance des LGD est expliquée par la
+classe d'appartenance. Ceci confirme que `lgd_obligor` est une LGD
+**prédite/fittée** (et non une LGD réalisée, dont la variance intra-classe
+serait bien plus importante).
+
+Calculé paire par paire, eta² est **non-discriminant par excès** : la
+perte d'eta² associée à la fusion d'une seule paire est toujours
+négligeable (< 0.001 %), car eta² global est déjà proche de 1. Cela
+signifie : aucune fusion ne dégrade significativement le pouvoir
+explicatif global, mais ce critère ne fournit **aucun seuil d'arrêt
+naturel** — il faudrait fusionner jusqu'à 1 seule classe avant que la
+perte d'eta² devienne notable.
+
+### 2.4 Cohen's d (taille d'effet)
+
+d = (mean_b - mean_a) / s_pooled, indépendant de n (contrairement à
+Welch/KW). Calculé sur les paires adjacentes au niveau modèle, d varie
+de ~0.2 (petit effet) à plus de 3 (effet très grand selon la grille de
+Cohen 1988 : <0.2 négligeable, <0.5 petit, <0.8 moyen, ≥0.8 grand).
+
+**Limite identifiée** : d mesure la **séparation des centres** (écart de
+moyennes normalisé par la dispersion), pas le **recouvrement réel** des
+distributions. Deux classes peuvent avoir un d modéré mais un fort
+recouvrement si leurs distributions sont larges, ou un d faible mais peu
+de recouvrement si les distributions sont étroites et asymétriques. Pour
+des LGD à distribution non-normale (asymétrique, observée empiriquement),
+la conversion classique d ↔ recouvrement (sous hypothèse de normalité,
+OVL ≈ 2·Φ(-|d|/2)) n'est pas fiable.
+
+## 3. Synthèse du diagnostic
+
+| Test            | Dépend de n ? | Discrimine à grand n ? | Rôle retenu                  |
+|------------------|:---:|:---:|-------------------------------|
+| Welch            | Oui | Non (sature à p≈0)     | Documentation uniquement      |
+| Kruskal-Wallis   | Oui | Non (sature à p≈0)     | Documentation uniquement      |
+| ANOVA (F)        | Oui | Non (sature à p≈0)     | Documentation uniquement      |
+| eta² (global)    | Non | N/A (≈1, pas de seuil) | Documentation (contexte LGD)  |
+| eta² (par paire) | Non | Non (toujours négligeable) | Documentation uniquement  |
+| Cohen's d        | Non | Oui (mais ≠ recouvrement) | Documentation de la séparation finale |
+
+**Conclusion de cette phase** : aucun de ces tests/mesures ne fournit
+de critère de décision robuste, indépendant de n, et fondé sur le
+recouvrement réel des distributions. Ils sont conservés comme éléments
+de documentation (tableau diagnostique par paire), mais la décision de
+fusion repose sur un critère distinct, détaillé séparément : le
+coefficient de recouvrement empirique (OVL).
