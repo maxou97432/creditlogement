@@ -1,91 +1,166 @@
-# Hypothèses testées par chaque test
+import polars as pl
+import numpy as np
+from scipy import stats as sp_stats
+from scipy.stats import kruskal, f_oneway
 
-## Welch (t-test à variances inégales)
+# =====================================================================
+# CONFIGURATION
+# =====================================================================
+df_base   = base
+LGD_COL   = "lgd_obligor"
+CLASS_COL = "CHR_model"
 
-**H0** : `mean_a = mean_b` — les deux groupes ont la même moyenne
-population.
+# =====================================================================
+# UTILITAIRES
+# =====================================================================
+def get_lgd_vectors(lf, cls):
+    return (lf.filter(pl.col(CLASS_COL) == cls)
+              .select(LGD_COL).collect()
+              .get_column(LGD_COL).to_numpy())
 
-**H1** : `mean_a ≠ mean_b` (test bilatéral) — les moyennes diffèrent.
+def build_adjacent_pairs(lf):
+    """Paires adjacentes, ordre LRA global (niveau modele)."""
+    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
+            .sort("m").collect())
+    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
+         for i in range(cm.height - 1)]
+    return pl.DataFrame({"class_a": [p[0] for p in P],
+                         "class_b": [p[1] for p in P],
+                         "severite_totale": [p[2] for p in P]})
 
-Hypothèses sous-jacentes du test : les observations dans chaque groupe
-sont indépendantes, et les moyennes d'échantillon suivent
-approximativement une distribution normale (généralement vrai à grand n
-par le théorème central limite, même si les données brutes ne le sont
-pas). Contrairement au t-test de Student classique, Welch **ne suppose
-pas** que les variances des deux groupes sont égales.
+# =====================================================================
+# 1. TEST DE WELCH
+# =====================================================================
+def welch_diag(a, b):
+    t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
+    return float(t_stat), float(p_value)
 
----
+# =====================================================================
+# 2. TEST DE KRUSKAL-WALLIS
+# =====================================================================
+def kruskal_diag(a, b):
+    h_stat, p_value = kruskal(a, b)
+    return float(h_stat), float(p_value)
 
-## Kruskal-Wallis (2 groupes)
+# =====================================================================
+# 3. ANOVA (test F) + ETA-SQUARED
+# =====================================================================
+def anova_diag(a, b):
+    f_stat, p_value = f_oneway(a, b)
+    grand_mean = np.concatenate([a, b]).mean()
+    ss_between = len(a) * (a.mean() - grand_mean)**2 + len(b) * (b.mean() - grand_mean)**2
+    ss_total = np.sum((np.concatenate([a, b]) - grand_mean)**2)
+    eta_sq = ss_between / ss_total if ss_total > 0 else 0.0
+    return float(f_stat), float(p_value), float(eta_sq)
 
-**H0** : les deux groupes proviennent de la **même distribution** — ou,
-formulation plus précise, `P(X_a > X_b) = P(X_b > X_a)` (aucune tendance
-systématique d'un groupe à dominer l'autre en rang).
+# =====================================================================
+# 4. COHEN'S D + IC 95% + indicateur de normalite
+# =====================================================================
+def cohen_d_ic(a, b, conf=0.95):
+    """
+    Cohen's d et son IC analytique (formule de Hedges 1981) :
+      Var(d) = (n_a+n_b)/(n_a*n_b) + d^2/(2*(n_a+n_b))
+    Cette formule REPOSE SUR L'HYPOTHESE DE NORMALITE des deux groupes.
+    """
+    n1, n2 = len(a), len(b)
+    s1, s2 = a.std(ddof=1), b.std(ddof=1)
+    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
+    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
 
-**H1** : un groupe tend à avoir des valeurs systématiquement plus grandes
-(ou plus petites) que l'autre.
+    se_d = np.sqrt((n1+n2)/(n1*n2) + d**2/(2*(n1+n2)))
+    z = sp_stats.norm.ppf(1 - (1-conf)/2)
+    ci_low, ci_high = d - z*se_d, d + z*se_d
 
-Hypothèses sous-jacentes : observations indépendantes, variable au moins
-ordinale (les rangs ont un sens). **Aucune hypothèse de normalité ni
-d'égalité des variances** — c'est l'avantage par rapport à Welch. Mais si
-les distributions ont des formes très différentes (par exemple des
-variances très différentes), un rejet de H0 peut refléter une différence
-de forme plutôt qu'une différence de position centrale.
+    return float(d), float(ci_low), float(ci_high)
 
----
+def normalite_diag(x, alpha=0.05):
+    """
+    Indicateur de normalite :
+      - n < 5000  -> Shapiro-Wilk (p >= alpha => gaussien)
+      - n >= 5000 -> Shapiro sature aussi a grand n ; on bascule sur
+        skewness/kurtosis (|skew|<0.5 et |kurtosis excess|<1 => proche normal)
+    Retourne (est_gaussien: bool, methode: str)
+    """
+    n = len(x)
+    if n < 5000:
+        _, p = sp_stats.shapiro(x)
+        return bool(p >= alpha), "shapiro"
+    else:
+        skew = sp_stats.skew(x)
+        kurt = sp_stats.kurtosis(x)
+        est_normal = (abs(skew) < 0.5) and (abs(kurt) < 1.0)
+        return bool(est_normal), "skew_kurt"
 
-## ANOVA (test F, 2 groupes)
+# =====================================================================
+# DIAGNOSTIC COMPLET
+# =====================================================================
+def diagnostic_tests_classiques(lf):
+    pairs = build_adjacent_pairs(lf).sort("severite_totale")
+    rows = []
 
-**H0** : `mean_a = mean_b` — identique à Welch dans le cas à 2 groupes (le
-test F est alors le carré du t de Student).
+    for ca, cb, sev in pairs.iter_rows():
+        a = get_lgd_vectors(lf, ca)
+        b = get_lgd_vectors(lf, cb)
 
-**H1** : `mean_a ≠ mean_b`.
+        t_stat, p_welch = welch_diag(a, b)
+        h_stat, p_kw = kruskal_diag(a, b)
+        f_stat, p_anova, eta_sq = anova_diag(a, b)
+        d, ci_low, ci_high = cohen_d_ic(a, b)
 
-Hypothèses sous-jacentes : observations indépendantes, normalité des
-résidus dans chaque groupe, et **égalité des variances**
-(homoscédasticité) — contrairement à Welch. C'est cette hypothèse
-d'égalité des variances qui distingue l'ANOVA classique de Welch ; si
-elle est violée, Welch est plus fiable.
+        # Normalite des deux groupes -> indicateur global pour la paire
+        norm_a, meth_a = normalite_diag(a)
+        norm_b, meth_b = normalite_diag(b)
+        paire_gaussienne = norm_a and norm_b
 
----
+        abs_d = abs(d)
+        if abs_d < 0.2:   ampleur = "negligeable"
+        elif abs_d < 0.5: ampleur = "petit"
+        elif abs_d < 0.8: ampleur = "moyen"
+        else:             ampleur = "grand"
 
-## eta² (η²)
+        rows.append({
+            "class_a": ca, "class_b": cb, "gap": round(sev, 4),
+            "n_a": len(a), "n_b": len(b),
+            "welch_t": round(abs(t_stat), 3), "welch_p": p_welch,
+            "kw_H": round(h_stat, 3), "kw_p": p_kw,
+            "anova_F": round(f_stat, 3), "anova_p": p_anova, "eta_sq": round(eta_sq, 6),
+            "cohen_d": round(d, 4),
+            "d_IC95_low": round(ci_low, 4), "d_IC95_high": round(ci_high, 4),
+            "ampleur_effet": ampleur,
+            "gaussien": paire_gaussienne,
+            "methode_normalite": f"{meth_a}/{meth_b}",
+        })
 
-**Ce n'est pas un test d'hypothèse** — pas de H0/H1. C'est une **taille
-d'effet** dérivée de la décomposition de variance de l'ANOVA :
+    df_diag = pl.DataFrame(rows)
+    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=260, fmt_str_lengths=70):
+        print(df_diag)
 
-    eta² = SS_between / SS_total
+    n_p_sature = df_diag.filter(
+        (pl.col("welch_p") < 1e-10) & (pl.col("kw_p") < 1e-10)
+    ).height
+    print(f"\nPaires avec welch_p < 1e-10 ET kw_p < 1e-10 (saturation grand n) : "
+          f"{n_p_sature} / {df_diag.height}")
 
-Elle ne teste rien ; elle quantifie la proportion de variance totale
-"attribuable" à l'appartenance au groupe, sur l'échantillon observé.
-Aucune inférence vers une population, aucune notion de signification
-statistique.
+    print(f"\nCohen's d : min={df_diag['cohen_d'].abs().min():.3f}  "
+          f"med={df_diag['cohen_d'].abs().median():.3f}  "
+          f"max={df_diag['cohen_d'].abs().max():.3f}")
+    print(f"eta^2     : min={df_diag['eta_sq'].min():.6f}  "
+          f"med={df_diag['eta_sq'].median():.6f}  "
+          f"max={df_diag['eta_sq'].max():.6f}")
 
----
+    n_gauss = df_diag.filter(pl.col("gaussien")).height
+    print(f"\nPaires gaussiennes (skew/kurt proches de 0) : {n_gauss} / {df_diag.height}")
+    if n_gauss < df_diag.height:
+        print(f"  -> Pour les {df_diag.height - n_gauss} paire(s) non gaussienne(s), "
+              f"l'IC de Cohen's d (formule de Hedges, qui suppose la normalite) "
+              f"doit etre lu avec prudence.")
 
-## Cohen's d
+    return df_diag
 
-**Ce n'est pas non plus un test d'hypothèse.** C'est une taille d'effet :
-
-    d = (mean_b - mean_a) / s_pooled
-
-Elle quantifie l'écart entre deux moyennes en unités d'écart-type poolé.
-Aucun H0/H1, aucune p-value associée intrinsèquement (même si l'on peut
-construire un intervalle de confiance autour de d, ce qui est différent).
-
----
-
-## Récapitulatif
-
-| Test / mesure   | H0                                          | Teste quoi |
-|-----------------|---------------------------------------------|------------|
-| Welch           | `mean_a = mean_b`                            | Égalité des moyennes, sans supposer variances égales |
-| Kruskal-Wallis  | Même distribution (pas de dominance en rang) | Égalité de position, sans hypothèse de forme |
-| ANOVA (F)       | `mean_a = mean_b`                            | Égalité des moyennes, en supposant variances égales |
-| eta²            | — (pas un test)                              | Proportion de variance expliquée |
-| Cohen's d       | — (pas un test)                              | Écart de moyennes en écarts-types |
-
-Le point commun de Welch, Kruskal-Wallis et ANOVA : leur H0 porte
-toujours sur une **égalité exacte** (de moyenne ou de distribution). À
-grand n, n'importe quel écart non-nul, même infime, finit par être
-détecté comme un rejet de cette H0 — d'où la saturation observée.
+# =====================================================================
+# EXECUTION
+# =====================================================================
+print("=" * 110)
+print("DIAGNOSTIC TESTS CLASSIQUES — paires adjacentes (base initiale)")
+print("=" * 110)
+df_diag_classiques = diagnostic_tests_classiques(df_base.lazy())
