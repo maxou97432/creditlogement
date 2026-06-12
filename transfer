@@ -2,14 +2,14 @@ import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats as sp_stats
-from scipy.stats import kruskal, levene
+from scipy.stats import kruskal, levene, gaussian_kde
 from collections import Counter
 
 # =====================================================================
 # CONFIGURATION
 # =====================================================================
 df_base       = base                  # base rassemblée niveau modèle (grain obligor)
-TARGET_COL    = "lgd_obligor"
+LGD_COL       = "lgd_obligor"
 CLASS_COL     = "CHR_model"
 P_VALUE_FLOOR = 0.05
 MAX_ITER      = 1000
@@ -28,8 +28,8 @@ N_BINS_OVL  = 100
 # =====================================================================
 def get_lgd_vectors(lf, cls):
     return (lf.filter(pl.col(CLASS_COL) == cls)
-              .select(TARGET_COL).collect()
-              .get_column(TARGET_COL).to_numpy())
+              .select(LGD_COL).collect()
+              .get_column(LGD_COL).to_numpy())
 
 def ReturnThreshold(mean_lgd):
     """Seuil d'effectif pour bascule vers OVL (mean_lgd en base 100)."""
@@ -74,7 +74,7 @@ def overlap_test(a, b, mean_lgd):
         return 99, f"OVL={ovl:.3f} <= {OVL_MODERE} (peu de recouvrement)"
 
 # =====================================================================
-# TESTS À PETIT EFFECTIF (cascade Welch -> KW -> Levene)
+# TESTS À PETIT EFFECTIF (cascade Welch -> KW -> Margin)
 # =====================================================================
 def WelchTest(a, b):
     _, p = sp_stats.ttest_ind(a, b, equal_var=False)
@@ -127,7 +127,7 @@ def merge_classes(lf, ca, cb, new):
 
 def build_adjacent_pairs(lf):
     """Paires adjacentes, ordre LRA global (niveau modèle)."""
-    cm = (lf.group_by(CLASS_COL).agg(pl.col(TARGET_COL).mean().alias("m"))
+    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
             .sort("m").collect())
     P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
          for i in range(cm.height - 1)]
@@ -163,7 +163,7 @@ def regroupement(lf, max_iter=MAX_ITER):
     return current, history
 
 # =====================================================================
-# DIAGNOSTIC OVL — PAIRES ADJACENTES + GRAPHIQUES
+# DIAGNOSTIC OVL — PAIRES ADJACENTES + GRAPHIQUES (histogramme + KDE)
 # =====================================================================
 def plot_overlap(a, b, cls_a, cls_b, ovl, bins, hist_a, hist_b, ax=None):
     if ax is None:
@@ -172,12 +172,21 @@ def plot_overlap(a, b, cls_a, cls_b, ovl, bins, hist_a, hist_b, ax=None):
     centers = (bins[:-1] + bins[1:]) / 2
     width = bins[1] - bins[0]
 
-    ax.bar(centers, hist_a, width=width, alpha=0.5, label=f"Classe {cls_a} (n={len(a)})", color="steelblue")
-    ax.bar(centers, hist_b, width=width, alpha=0.5, label=f"Classe {cls_b} (n={len(b)})", color="darkorange")
+    # Histogrammes (barres)
+    ax.bar(centers, hist_a, width=width, alpha=0.35, label=f"Classe {cls_a} (n={len(a)})", color="steelblue")
+    ax.bar(centers, hist_b, width=width, alpha=0.35, label=f"Classe {cls_b} (n={len(b)})", color="darkorange")
 
+    # Zone de recouvrement (sur les histogrammes)
     overlap_height = np.minimum(hist_a, hist_b)
-    ax.bar(centers, overlap_height, width=width, alpha=0.7, color="green",
+    ax.bar(centers, overlap_height, width=width, alpha=0.6, color="green",
            label=f"Recouvrement (OVL={ovl:.3f})")
+
+    # Courbes KDE par-dessus (lissage continu)
+    x_grid = np.linspace(bins[0], bins[-1], 300)
+    kde_a = gaussian_kde(a)
+    kde_b = gaussian_kde(b)
+    ax.plot(x_grid, kde_a(x_grid), color="steelblue", linewidth=2, linestyle="-")
+    ax.plot(x_grid, kde_b(x_grid), color="darkorange", linewidth=2, linestyle="-")
 
     ax.set_xlabel("LGD (pts)")
     ax.set_ylabel("Densite")
