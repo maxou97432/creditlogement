@@ -1,73 +1,91 @@
-# Le critère retenu : le coefficient de recouvrement (OVL)
+# Hypothèses testées par chaque test
 
-## Le principe
+## Welch (t-test à variances inégales)
 
-Plutôt que de tester une hypothèse statistique sur les moyennes ou les
-variances, l'OVL (overlap coefficient) mesure **directement** la
-proportion de la masse de probabilité que deux distributions ont en
-commun.
+**H0** : `mean_a = mean_b` — les deux groupes ont la même moyenne
+population.
 
-Concrètement, on estime la densité de chaque distribution (par
-histogramme normalisé ou par estimation à noyau), et pour chaque point
-de la plage de valeurs, on retient le minimum des deux densités. La
-somme de ces minimums donne l'aire de la zone "partagée" par les deux
-distributions.
+**H1** : `mean_a ≠ mean_b` (test bilatéral) — les moyennes diffèrent.
 
-- `OVL = 1` : les deux distributions sont identiques.
-- `OVL = 0` : les deux distributions sont totalement disjointes.
+Hypothèses sous-jacentes du test : les observations dans chaque groupe
+sont indépendantes, et les moyennes d'échantillon suivent
+approximativement une distribution normale (généralement vrai à grand n
+par le théorème central limite, même si les données brutes ne le sont
+pas). Contrairement au t-test de Student classique, Welch **ne suppose
+pas** que les variances des deux groupes sont égales.
 
-## Pourquoi ce critère répond au problème identifié
+---
 
-**Indépendant de n.** Un histogramme (ou une estimation par noyau)
-normalisé en densité ne change pas de forme lorsque l'effectif augmente
-— il devient seulement plus précis. La valeur de l'OVL pour une paire de
-classes ne dépend donc pas de leurs effectifs respectifs, contrairement
-aux p-values de Welch ou Kruskal-Wallis.
+## Kruskal-Wallis (2 groupes)
 
-**Indépendant de la forme des distributions.** Aucune hypothèse de
-normalité, de symétrie, ou d'unimodalité n'est requise. L'OVL se calcule
-de la même manière, quelle que soit la forme réelle des distributions de
-LGD observées par classe.
+**H0** : les deux groupes proviennent de la **même distribution** — ou,
+formulation plus précise, `P(X_a > X_b) = P(X_b > X_a)` (aucune tendance
+systématique d'un groupe à dominer l'autre en rang).
 
-**Mesure directement la bonne question.** L'OVL répond à : "si l'on tire
-un obligor au hasard dans chacune des deux classes, dans quelle mesure
-leurs valeurs de LGD se confondent-elles ?" C'est une question de
-**population**, pas de détection statistique — exactement ce qui motive
-le regroupement de classes : deux classes qui décrivent, dans les faits,
-la même population de risque.
+**H1** : un groupe tend à avoir des valeurs systématiquement plus grandes
+(ou plus petites) que l'autre.
 
-**Interprétation directe.** Une valeur d'OVL se lit comme une
-proportion : "75 % de la masse de probabilité des deux classes se
-recouvre" est une affirmation immédiatement compréhensible, sans
-référence à un seuil de signification ou à une unité d'écart-type.
+Hypothèses sous-jacentes : observations indépendantes, variable au moins
+ordinale (les rangs ont un sens). **Aucune hypothèse de normalité ni
+d'égalité des variances** — c'est l'avantage par rapport à Welch. Mais si
+les distributions ont des formes très différentes (par exemple des
+variances très différentes), un rejet de H0 peut refléter une différence
+de forme plutôt qu'une différence de position centrale.
 
-## Les seuils de décision
+---
 
-Deux seuils définissent trois zones :
+## ANOVA (test F, 2 groupes)
 
-- **OVL > 0.75** : fort recouvrement — les deux classes décrivent
-  essentiellement la même population de risque. Fusion recommandée.
-- **0.50 < OVL ≤ 0.75** : recouvrement modéré — fusion acceptable selon
-  le niveau de tolérance retenu.
-- **OVL ≤ 0.50** : recouvrement faible — les deux classes restent
-  distinctes, pas de fusion.
+**H0** : `mean_a = mean_b` — identique à Welch dans le cas à 2 groupes (le
+test F est alors le carré du t de Student).
 
-Ces seuils demeurent un choix, comme tout seuil de décision. Mais ils
-portent une signification directe et stable (une proportion de
-population partagée), indépendante de l'effectif et de la forme des
-distributions — contrairement aux seuils de p-value (qui perdent leur
-sens à grand n) ou de taille d'effet (qui ne renseignent pas sur le
-recouvrement pour des distributions asymétriques).
+**H1** : `mean_a ≠ mean_b`.
 
-## Robustesse : deux méthodes d'estimation
+Hypothèses sous-jacentes : observations indépendantes, normalité des
+résidus dans chaque groupe, et **égalité des variances**
+(homoscédasticité) — contrairement à Welch. C'est cette hypothèse
+d'égalité des variances qui distingue l'ANOVA classique de Welch ; si
+elle est violée, Welch est plus fiable.
 
-L'OVL est calculé selon deux méthodes d'estimation de densité :
+---
 
-- **Histogramme** : rapide, basé sur un découpage en intervalles fixes.
-- **Noyau gaussien (KDE)** : estimation lissée, généralement plus stable
-  à petit effectif.
+## eta² (η²)
 
-Les deux valeurs sont calculées et comparées systématiquement pour
-chaque paire. Une convergence entre les deux méthodes renforce la
-robustesse de la décision de fusion ; un désaccord signale une paire à
-examiner plus attentivement.
+**Ce n'est pas un test d'hypothèse** — pas de H0/H1. C'est une **taille
+d'effet** dérivée de la décomposition de variance de l'ANOVA :
+
+    eta² = SS_between / SS_total
+
+Elle ne teste rien ; elle quantifie la proportion de variance totale
+"attribuable" à l'appartenance au groupe, sur l'échantillon observé.
+Aucune inférence vers une population, aucune notion de signification
+statistique.
+
+---
+
+## Cohen's d
+
+**Ce n'est pas non plus un test d'hypothèse.** C'est une taille d'effet :
+
+    d = (mean_b - mean_a) / s_pooled
+
+Elle quantifie l'écart entre deux moyennes en unités d'écart-type poolé.
+Aucun H0/H1, aucune p-value associée intrinsèquement (même si l'on peut
+construire un intervalle de confiance autour de d, ce qui est différent).
+
+---
+
+## Récapitulatif
+
+| Test / mesure   | H0                                          | Teste quoi |
+|-----------------|---------------------------------------------|------------|
+| Welch           | `mean_a = mean_b`                            | Égalité des moyennes, sans supposer variances égales |
+| Kruskal-Wallis  | Même distribution (pas de dominance en rang) | Égalité de position, sans hypothèse de forme |
+| ANOVA (F)       | `mean_a = mean_b`                            | Égalité des moyennes, en supposant variances égales |
+| eta²            | — (pas un test)                              | Proportion de variance expliquée |
+| Cohen's d       | — (pas un test)                              | Écart de moyennes en écarts-types |
+
+Le point commun de Welch, Kruskal-Wallis et ANOVA : leur H0 porte
+toujours sur une **égalité exacte** (de moyenne ou de distribution). À
+grand n, n'importe quel écart non-nul, même infime, finit par être
+détecté comme un rejet de cette H0 — d'où la saturation observée.
