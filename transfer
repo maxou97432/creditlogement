@@ -1,108 +1,205 @@
-from scipy.stats import wasserstein_distance
+# Méthodologie de fusion des classes CHR_model — g de Hedges et calibration par impact MAE
 
-# =====================================================================
-# METRIQUES SUPPLEMENTAIRES
-# =====================================================================
-def hedges_g(a: np.ndarray, b: np.ndarray) -> float:
-    """
-    g de Hedges : taille d'effet (ecart de moyennes en unites d'ecart-type
-    poole, avec correction petit echantillon). Mesure de SEPARATION,
-    pas de recouvrement -- complementaire a l'OVL.
-    """
-    n1, n2 = len(a), len(b)
-    s1, s2 = a.std(ddof=1), b.std(ddof=1)
-    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
-    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
-    correction = 1 - 3/(4*(n1+n2)-9)
-    return float(d * correction)
+## 1. Contexte et problématique
 
-# wasserstein_distance est deja dans scipy.stats, importe ci-dessus
+Le modèle IRB LGD repose sur 65 classes de risque `CHR_model`, dont les effectifs vont de 542 à plusieurs dizaines de milliers d'obligors. L'objectif est de réduire ce nombre de classes en regroupant celles qui sont statistiquement homogènes, tout en produisant une justification défendable pour le dossier de validation.
 
-# =====================================================================
-# RECAP POST-FUSION : paires finales adjacentes
-# =====================================================================
-def recap_post_fusion(reduced_lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4):
-    """
-    Tableau récapitulatif des paires adjacentes dans la base APRES regroupement.
-    Pour chaque paire restante (non fusionnée) :
-      - gap (ecart de LRA)
-      - OVL_hist, OVL_kde (recouvrement -> doit etre sous le seuil, donc distinctes)
-      - hedges_g (separation en ecarts-types)
-      - wasserstein (distance interpretable en pts de LGD)
-    """
-    final_pairs = build_adjacent_pairs(reduced_lf).sort("severite_totale")
+### 1.1 Pourquoi les tests classiques ne fonctionnent pas
 
-    rows = []
-    for ca, cb, sev in final_pairs.iter_rows():
-        a = get_lgd_vectors(reduced_lf, ca)
-        b = get_lgd_vectors(reduced_lf, cb)
-        ovl_h = overlap_empirique_hist(a, b)
-        ovl_k = overlap_empirique_kde(a, b)
-        g = hedges_g(a, b)
-        w = wasserstein_distance(a, b)
+Les approches initiales (test de Welch, test de Kruskal-Wallis) ont été écartées car elles souffrent toutes du même défaut : **leur p-value est mécaniquement dépendante de la taille d'échantillon n**.
 
-        rows.append({
-            "class_a": ca, "class_b": cb,
-            "gap": round(sev, 4),
-            "OVL_hist": round(ovl_h, 4), "OVL_kde": round(ovl_k, 4),
-            "hedges_g": round(abs(g), 4),
-            "wasserstein": round(w, 4),
-            "n_a": len(a), "n_b": len(b),
-            "distinctes": "OUI" if max(ovl_h, ovl_k) <= OVL_MODERE else "NON (recouvrement residuel)",
-        })
+La statistique de Welch s'écrit :
 
-    df_recap = pl.DataFrame(rows)
-    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=220, fmt_str_lengths=70):
-        print(df_recap)
+$$
+t = \frac{\bar{x}_A - \bar{x}_B}{\sqrt{\frac{s_A^2}{n_A} + \frac{s_B^2}{n_B}}}
+$$
 
-    # Alerte : paires finales qui auraient encore un fort recouvrement
-    residuel = df_recap.filter(pl.col("distinctes") != "OUI")
-    if residuel.height > 0:
-        print(f"\n/!\\ {residuel.height} paire(s) finale(s) avec recouvrement residuel "
-              f"(OVL > {OVL_MODERE}) -- a verifier :")
-        print(residuel)
-    else:
-        print(f"\nToutes les paires finales sont distinctes (OVL <= {OVL_MODERE}).")
+Le facteur $\sqrt{n}$ figure implicitement au numérateur de cette expression. Avec des effectifs de plusieurs dizaines de milliers d'obligors, le dénominateur devient infinitésimal, et `t` explose pour le moindre écart de moyenne — même de l'ordre de 0.01 point de LGD. La p-value associée tombe alors à des valeurs comme 1e-100, rendant le test inutilisable : **tout est déclaré statistiquement différent**, qu'importe la pertinence pratique de l'écart.
 
-    # Statistiques globales
-    print(f"\nRESUME SEPARATION DES CLASSES FINALES :")
-    print(f"  gap        : min={df_recap['gap'].min():.3f}  median={df_recap['gap'].median():.3f}  max={df_recap['gap'].max():.3f}")
-    print(f"  hedges_g   : min={df_recap['hedges_g'].min():.3f}  median={df_recap['hedges_g'].median():.3f}  max={df_recap['hedges_g'].max():.3f}")
-    print(f"  wasserstein: min={df_recap['wasserstein'].min():.3f}  median={df_recap['wasserstein'].median():.3f}  max={df_recap['wasserstein'].max():.3f}")
-    print(f"  OVL_hist   : min={df_recap['OVL_hist'].min():.3f}  median={df_recap['OVL_hist'].median():.3f}  max={df_recap['OVL_hist'].max():.3f}")
+Le même phénomène se produit avec Kruskal-Wallis et avec le test Q de Cochran (utilisé en méta-analyse pour I²) : toutes ces statistiques contiennent un terme proportionnel à n qui domine à grand effectif.
 
-    # === Graphiques ===
-    pairs_to_plot = final_pairs if n_graphs is None else final_pairs.head(n_graphs)
-    pairs_list = list(pairs_to_plot.iter_rows())
-    n_total = len(pairs_list)
+### 1.2 Le changement de paradigme : effect size
 
-    for fig_start in range(0, n_total, graphs_per_fig):
-        chunk = pairs_list[fig_start:fig_start + graphs_per_fig]
-        n_chunk = len(chunk)
-        n_rows = -(-n_chunk // graphs_per_row)
+La solution consiste à abandonner les tests de **différence** (qui répondent à *"est-ce que la différence est réelle ?"*) au profit d'une mesure d'**effet taille** (effect size), qui répond à *"quelle est l'importance pratique de la différence, indépendamment de n ?"*.
 
-        fig, axes = plt.subplots(n_rows, graphs_per_row, figsize=(8 * graphs_per_row, 4 * n_rows))
-        axes = np.array(axes).reshape(-1)
+C'est exactement la distinction formulée par Wikipedia sur l'effect size :
 
-        for i, (ca, cb, sev) in enumerate(chunk):
-            a = get_lgd_vectors(reduced_lf, ca)
-            b = get_lgd_vectors(reduced_lf, cb)
-            ovl_h = overlap_empirique_hist(a, b)
-            ovl_k = overlap_empirique_kde(a, b)
-            plot_overlap(a, b, ca, cb, ovl_h, ovl_k, ax=axes[i])
+> *"Sample-based effect sizes are distinguished from test statistics used in hypothesis testing, in that they estimate the strength (magnitude) of an apparent relationship, rather than assigning a significance level reflecting whether the magnitude of the relationship observed could be due to chance."*
 
-        for j in range(n_chunk, len(axes)):
-            axes[j].axis("off")
+---
 
-        plt.tight_layout()
-        plt.show()
+## 2. Le g de Hedges
 
-    return df_recap
+### 2.1 Définition
 
-# =====================================================================
-# EXECUTION
-# =====================================================================
-print("\n" + "=" * 110)
-print(f"RECAPITULATIF POST-FUSION — {n1} classes finales, {n1-1} paires adjacentes")
-print("=" * 110)
-df_recap = recap_post_fusion(reduced_lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4)
+Le g de Hedges mesure l'écart entre deux moyennes, normalisé par la dispersion commune des deux groupes :
+
+$$
+g = \frac{|\bar{x}_A - \bar{x}_B|}{s_{pooled}}
+\quad \text{avec} \quad
+s_{pooled} = \sqrt{\frac{(n_A-1)s_A^2 + (n_B-1)s_B^2}{n_A+n_B-2}}
+$$
+
+C'est une grandeur **sans unité** : le numérateur (différence de LGD en points) et le dénominateur (écart-type poolé, aussi en points de LGD) s'annulent dimensionnellement. g exprime donc l'écart de moyennes **en nombre d'écarts-types poolés**.
+
+### 2.2 Indépendance par rapport à n
+
+Contrairement à la statistique t de Welch, qui contient un facteur croissant avec n :
+
+$$
+t = g \times \sqrt{\frac{n_A \times n_B}{n_A + n_B}}
+$$
+
+g ne contient aucun terme en n. Si l'on double les effectifs sans changer les distributions sous-jacentes, $\bar{x}_A$, $\bar{x}_B$ et $s_{pooled}$ convergent vers leurs vraies valeurs de population — et g converge également, sans inflation. C'est la propriété centrale qui rend g utilisable sur un portefeuille où les effectifs varient de 542 à plusieurs dizaines de milliers.
+
+### 2.3 Interprétation intuitive
+
+g traduit le **recouvrement** entre les deux distributions. Plus g est petit, plus les deux classes se chevauchent et sont donc difficiles à distinguer statistiquement — donc plus elles sont candidates à la fusion.
+
+Un point important : g s'adapte automatiquement à la dispersion de chaque paire. Un même écart de 1 point de LGD entre deux classes peut correspondre à un g faible (si les classes sont très dispersées) ou à un g élevé (si les classes sont très concentrées). C'est une amélioration directe par rapport à un seuil fixe en points de LGD, qui ne tient pas compte de cette hétérogénéité de dispersion entre paires.
+
+### 2.4 Hypothèses requises
+
+Le calcul de g ne suppose **pas** la normalité des distributions — c'est une statistique descriptive pure, un simple ratio d'écarts. La normalité n'intervient que pour les interprétations probabilistes avancées de g (intervalles de confiance via la distribution t non-centrale, indices U3/U2/CLES), que nous n'utilisons pas ici. Le g calculé reste donc valide même sur les classes dont la distribution observée est asymétrique ou bimodale.
+
+### 2.5 Les seuils de référence (Cohen 1988, Sawilowsky 2009)
+
+Jacob Cohen (1988) a proposé des repères d'interprétation de g, ultérieurement étendus par Sawilowsky (2009) :
+
+| g | Qualification (Sawilowsky 2009) |
+|---|---|
+| 0.01 | Very small |
+| 0.20 | Small |
+| 0.50 | Medium |
+| 0.80 | Large |
+| 1.20 | Very large |
+| 2.00 | Huge |
+
+Cohen lui-même précise que ces seuils sont des repères génériques issus des sciences comportementales, et non des lois universelles :
+
+> *"The terms 'small,' 'medium,' and 'large' are relative, not only to each other, but to the area of behavioral science... This risk is nevertheless accepted in the belief that more is to be gained than lost by supplying a common conventional frame of reference which is recommended for use only when no better basis for estimating the ES index is available."*
+
+C'est pourquoi, dans notre démarche, ces seuils servent de **cadre de référence publié**, mais le seuil final retenu est calibré empiriquement sur les données du portefeuille (section 3).
+
+---
+
+## 3. L'algorithme de fusion gloutonne
+
+### 3.1 Principe
+
+L'algorithme procède par fusions successives, en partant des 65 classes originales :
+
+1. À chaque itération, les classes courantes (originales ou déjà fusionnées) sont triées par LGD moyenne croissante.
+2. Pour chaque paire de classes **adjacentes** dans cet ordre, on calcule g.
+3. La paire avec le **g le plus faible** est sélectionnée.
+4. Si ce g est inférieur au seuil retenu, la paire est fusionnée ; sinon, l'algorithme s'arrête.
+
+La contrainte d'adjacence garantit que l'on ne fusionne jamais des classes dont les niveaux de LGD sont très éloignés, même si leur g global serait faible par ailleurs (ce qui pourrait arriver avec des classes de très grande dispersion).
+
+### 3.2 Calcul exact lors d'une fusion
+
+Lorsque deux groupes A et B sont fusionnés, la moyenne et la variance du nouveau groupe sont calculées par les formules exactes de combinaison statistique (et non par approximation) :
+
+$$
+\bar{x}_{A\cup B} = \frac{n_A \bar{x}_A + n_B \bar{x}_B}{n_A + n_B}
+$$
+
+$$
+s^2_{A\cup B} = \frac{(n_A-1)s_A^2 + (n_B-1)s_B^2 + \frac{n_A n_B}{n_A+n_B}(\bar{x}_A - \bar{x}_B)^2}{n_A+n_B-1}
+$$
+
+Ces formules permettent de poursuivre l'algorithme sur des statistiques agrégées, sans recharger les vecteurs d'observations bruts à chaque itération — ce qui rend le calcul instantané même sur un grand nombre de classes.
+
+### 3.3 Nature gloutonne (greedy) de l'algorithme
+
+L'algorithme optimise localement à chaque étape : il choisit la meilleure fusion disponible à l'instant présent, sans anticiper les conséquences sur les fusions futures. Cette approche est standard en classification ascendante hiérarchique avec contrainte d'adjacence, et produit des résultats stables et reproductibles. Elle ne garantit pas le partitionnement global optimal au sens strict, mais reste une heuristique largement acceptée et documentée dans la littérature.
+
+---
+
+## 4. Calibration empirique du seuil g par impact sur la MAE
+
+### 4.1 Pourquoi calibrer le seuil
+
+Les seuils de Cohen/Sawilowsky offrent un cadre de référence, mais le choix du seuil exact (g < 0.80, g < 1.20, g < 2.00...) reste, dans l'absolu, un choix de modélisation. Pour éviter qu'il paraisse arbitraire, le seuil est calibré sur une grandeur métier directement interprétable : **l'erreur de prédiction LGD au niveau portefeuille**.
+
+### 4.2 La MAE de substitution
+
+Pour une partition donnée des classes (originale ou fusionnée), on calcule la MAE (Mean Absolute Error) de substitution :
+
+$$
+MAE = \frac{1}{n_{total}} \sum_{i=1}^{n} \left| lgd\_obligor_i - \overline{lgd}_{\,classe(i)} \right|
+$$
+
+C'est l'erreur moyenne commise si l'on prédit, pour chaque obligor, la LGD moyenne de sa classe (originale ou fusionnée) plutôt que sa LGD individuelle. La variable `lgd_obligor` étant déjà pondérée par l'EAD dans la base de données, cette MAE est directement une mesure d'**impact pondéré par l'exposition**, sans calcul supplémentaire.
+
+### 4.3 La référence à 65 classes
+
+Sur les 65 classes originales (avant toute fusion), on obtient :
+
+$$
+MAE_{ref} = 0.739 \text{ points de LGD}
+$$
+
+Cette valeur n'est pas nulle : elle représente la **dispersion intra-classe résiduelle**, c'est-à-dire le bruit déjà présent dans le modèle avant toute opération de fusion. Même un découpage en 65 classes ne produit pas une homogénéité parfaite.
+
+### 4.4 La dégradation relative ΔMAE
+
+Pour chaque seuil g testé, on relance l'algorithme de fusion jusqu'à saturation, puis on recalcule la MAE sur la partition obtenue. La dégradation relative s'exprime :
+
+$$
+\Delta MAE = \frac{MAE_{fusionné} - MAE_{ref}}{MAE_{ref}} \times 100
+$$
+
+### 4.5 Résultats obtenus
+
+| Seuil g | Classes finales | MAE | ΔMAE |
+|---|---|---|---|
+| 0.20 | 65 | 0.739 | -0.003% |
+| 0.50 | 52 | 0.741 | +0.292% |
+| 0.80 | 46 | 0.748 | +1.217% |
+| 1.20 | 34 | 0.771 | +4.384% |
+| 1.66 | 27 | ~0.81 | ~+9-10% |
+| 2.00 | 24 | 0.849 | +14.914% |
+
+On observe un saut net entre g < 1.20 (+4.4%) et g < 2.00 (+14.9%), facteur ×3.4 — il ne s'agit pas d'un simple effet de seuil de tolérance, mais d'une vraie discontinuité dans les données : les fusions réalisées entre g=1.20 et g=2.00 agrègent des classes nettement plus distinctes.
+
+### 4.6 Choix du seuil de matérialité
+
+Le seuil de tolérance sur ΔMAE (5%, 10%, etc.) reste un choix de politique de modélisation, à l'instar de tout seuil de matérialité en IRB (typiquement entre 1% et 10% selon le type de décision). Pour une décision de **segmentation/regroupement de classes** — par opposition à un changement de formule de calcul — un seuil de 10% est usuel et défendable, d'autant que :
+
+- L'écart absolu correspondant (+0.032 à +0.07 points de LGD selon le seuil retenu) est négligeable au regard de la dispersion intra-classe résiduelle de référence (0.739 points).
+- L'écart relatif au niveau du portefeuille (LGD moyenne ~47 points) reste de l'ordre de 0.1%.
+
+Avec un seuil de matérialité à 10%, le seuil g retenu est **g < 1.66**, conduisant à **27 classes finales** (réduction de 58% par rapport aux 65 classes initiales).
+
+---
+
+## 5. Articulation g (décision locale) / η² et MAE (validation globale)
+
+Une question naturelle est de savoir pourquoi le critère de fusion n'est pas directement basé sur η² (proportion de variance expliquée par l'appartenance aux classes) ou son équivalent moins biaisé ω².
+
+La réponse tient à la nature **locale vs globale** des deux types de mesures :
+
+- **g de Hedges** est une mesure **par paire** : il permet de décider, à chaque itération, quelle paire adjacente est la plus fusionnable. Il dispose en outre de seuils de référence publiés (Cohen/Sawilowsky) qui donnent un point de départ non arbitraire.
+- **η² / ω²** sont des mesures **globales de partition** : elles indiquent la proportion de variance totale expliquée par l'ensemble des K classes finales, mais ne permettent pas, par elles-mêmes, d'arbitrer entre 64 paires candidates à une itération donnée.
+
+La démarche retenue articule donc les deux niveaux :
+
+1. **g de Hedges** pilote la décision de fusion, paire par paire, avec un seuil calibré (section 4).
+2. **η²** (et la MAE) sont calculés **avant/après** sur la partition finale, pour démontrer que la perte de pouvoir discriminant global reste non matérielle.
+
+Cette articulation correspond à la recommandation usuelle en analyse de variance : utiliser une mesure de corrélation/effet pour interpréter des comparaisons individuelles, et une proportion de variance expliquée pour caractériser la partition dans son ensemble.
+
+---
+
+## 6. Synthèse pour le dossier de validation
+
+La démarche peut être résumée par l'argumentaire suivant :
+
+> *Le critère de fusion des classes CHR_model repose sur le g de Hedges (Cohen 1988, Sawilowsky 2009), une mesure d'effet taille indépendante des effectifs, contrairement aux tests de différence classiques (Welch, Kruskal-Wallis) qui saturent à grand échantillon. L'algorithme fusionne itérativement les paires de classes adjacentes (ordonnées par LGD moyenne) présentant le g le plus faible, jusqu'à un seuil g < 1.66. Ce seuil a été calibré empiriquement : c'est le plus grand seuil tel que la dégradation de la MAE de prédiction LGD au niveau portefeuille reste inférieure à 10%, seuil de matérialité retenu pour les décisions de segmentation. Le résultat est une réduction de 65 à 27 classes (-58%), pour une dégradation de précision de l'ordre de 0.07 points de LGD en valeur absolue — non matérielle au regard de la dispersion intra-classe résiduelle déjà présente dans le modèle de référence (0.739 points).*
+
+### Limites identifiées et garde-fous possibles
+
+- **Heuristique gloutonne** : l'algorithme optimise localement, sans garantie d'optimalité globale. Documenté comme une approche standard en classification hiérarchique avec contrainte d'adjacence.
+- **g ne compare que les moyennes** : deux classes de moyenne identique mais de forme très différente (bimodalité, asymétrie) pourraient présenter un g faible malgré une réelle hétérogénéité de forme. Un garde-fou optionnel basé sur l'indice de recouvrement η (Pastore & Calcagni 2019), calculé par KDE, peut être activé pour bloquer ces cas spécifiques.
+- **Seuil de matérialité ΔMAE** : reste un choix de politique de modélisation (5%, 10%...), à documenter et faire valider explicitement, à l'instar de tout seuil de matérialité utilisé ailleurs dans le dispositif IRB (MoC A/B/C).
