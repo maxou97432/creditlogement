@@ -1,177 +1,11 @@
-import polars as pl
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-from collections import Counter
-
-# =====================================================================
-# CONFIGURATION
-# =====================================================================
-df_base       = base                  # base rassemblée niveau modèle (grain obligor)
-LGD_COL       = "lgd_obligor"
-CLASS_COL     = "CHR_model"
-MAX_ITER      = 1000
-
-# >>> NIVEAU D'ACCEPTATION DES FUSIONS <
-CODES_FUSIONNABLES = {0, 1}            # {0}=strict, {0,1}=large
-
-# >>> SEUILS OVL (recouvrement, robuste au n et à la forme) <
-OVL_STRICT  = 0.75                     # code 0 : fort recouvrement
-OVL_MODERE  = 0.50                     # code 1 : recouvrement modéré
-N_BINS_HIST = 100
-N_POINTS_KDE = 300
-
-# >>> METHODE QUI PILOTE LA DECISION DE FUSION <
-#   "hist" = histogramme (rapide)
-#   "kde"  = noyau gaussien (plus lisse, plus coûteux)
-OVL_METHOD = "hist"
-
-# =====================================================================
-# UTILITAIRES
-# =====================================================================
-def get_lgd_vectors(lf, cls):
-    return (lf.filter(pl.col(CLASS_COL) == cls)
-              .select(LGD_COL).collect()
-              .get_column(LGD_COL).to_numpy())
-
-# =====================================================================
-# OVL — DEUX METHODES, INDEPENDANTES DE n ET DE LA FORME
-# =====================================================================
-def overlap_empirique_hist(a: np.ndarray, b: np.ndarray, n_bins: int = N_BINS_HIST) -> float:
-    """OVL via histogrammes normalisés en densité."""
-    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-    bins = np.linspace(lo, hi, n_bins + 1)
-    hist_a, _ = np.histogram(a, bins=bins, density=True)
-    hist_b, _ = np.histogram(b, bins=bins, density=True)
-    bw = bins[1] - bins[0]
-    return float(np.sum(np.minimum(hist_a, hist_b)) * bw)
-
-def overlap_empirique_kde(a: np.ndarray, b: np.ndarray, n_points: int = N_POINTS_KDE) -> float:
-    """OVL via estimation par noyau gaussien (KDE) — plus lisse, plus stable à petit n."""
-    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-    pad = 0.05 * (hi - lo)
-    x = np.linspace(lo - pad, hi + pad, n_points)
-    kde_a, kde_b = gaussian_kde(a)(x), gaussian_kde(b)(x)
-    dx = x[1] - x[0]
-    return float(np.sum(np.minimum(kde_a, kde_b)) * dx)
-
-def overlap_test(a, b):
+def diagnostic_ovl(lf, n_graphs=None, graphs_per_row=2, graphs_per_fig=4):
     """
-    Test de recouvrement, UNIQUE critère de décision (toute classe d'effectif).
-    Pilote par OVL_METHOD.
-    code 0 = fort recouvrement (fusionnable)
-    code 1 = recouvrement modéré
-    code 99 = peu de recouvrement (distinctes)
+    Tableau OVL (hist + kde) pour toutes les paires adjacentes + graphiques.
+    
+    n_graphs       : nombre de paires à tracer (None = toutes)
+    graphs_per_row : nombre de colonnes par figure
+    graphs_per_fig : nombre de graphiques par figure (avant nouvelle figure)
     """
-    ovl_hist = overlap_empirique_hist(a, b)
-    ovl_kde  = overlap_empirique_kde(a, b)
-    ovl = ovl_hist if OVL_METHOD == "hist" else ovl_kde
-
-    if ovl > OVL_STRICT:
-        code, label = 0, "fort recouvrement"
-    elif ovl > OVL_MODERE:
-        code, label = 1, "recouvrement modere"
-    else:
-        code, label = 99, "peu de recouvrement"
-
-    raison = (f"OVL({OVL_METHOD})={ovl:.3f} [{label}] "
-              f"(hist={ovl_hist:.3f}, kde={ovl_kde:.3f})")
-    return code, raison, ovl_hist, ovl_kde
-
-# =====================================================================
-# DÉCISION DE FUSION POUR UNE PAIRE — UNIQUEMENT OVL
-# =====================================================================
-def tester_paire(a, b):
-    """Renvoie (fusionnable: bool, test: str, code: int, raison: str, ovl_hist, ovl_kde)."""
-    code, raison, ovl_hist, ovl_kde = overlap_test(a, b)
-    return (code in CODES_FUSIONNABLES), "ovl", code, raison, ovl_hist, ovl_kde
-
-# =====================================================================
-# OPÉRATIONS SUR LES CLASSES
-# =====================================================================
-def merge_classes(lf, ca, cb, new):
-    return lf.with_columns(
-        pl.when(pl.col(CLASS_COL).is_in([ca, cb]))
-          .then(pl.lit(new)).otherwise(pl.col(CLASS_COL)).alias(CLASS_COL))
-
-def build_adjacent_pairs(lf):
-    """Paires adjacentes, ordre LRA global (niveau modèle)."""
-    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
-            .sort("m").collect())
-    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
-         for i in range(cm.height - 1)]
-    return pl.DataFrame({"class_a": [p[0] for p in P],
-                         "class_b": [p[1] for p in P],
-                         "severite_totale": [p[2] for p in P]})
-
-# =====================================================================
-# BOUCLE DE REGROUPEMENT
-# =====================================================================
-def regroupement(lf, max_iter=MAX_ITER):
-    current, history = lf, []
-    for it in range(max_iter):
-        candidates = build_adjacent_pairs(current).sort("severite_totale")
-        fused = False
-        for ca, cb, sev in candidates.iter_rows():
-            a = get_lgd_vectors(current, ca)
-            b = get_lgd_vectors(current, cb)
-            ok, test, code, raison, ovl_hist, ovl_kde = tester_paire(a, b)
-            if ok:
-                new = f"{ca}_{cb}"
-                current = merge_classes(current, ca, cb, new)
-                fused = True
-                history.append({
-                    "iteration": it, "class_a": ca, "class_b": cb, "new_class": new,
-                    "test": test, "code": code, "gap": round(sev, 4),
-                    "mean_a": round(float(a.mean()), 3), "mean_b": round(float(b.mean()), 3),
-                    "n_a": len(a), "n_b": len(b),
-                    "ovl_hist": round(ovl_hist, 4), "ovl_kde": round(ovl_kde, 4),
-                    "raison": raison,
-                })
-                break
-        if not fused:
-            break
-    return current, history
-
-# =====================================================================
-# DIAGNOSTIC OVL — HIST + KDE, COMPARAISON ET GRAPHIQUES
-# =====================================================================
-def plot_overlap(a, b, cls_a, cls_b, ovl_hist, ovl_kde, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4))
-
-    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-    bins = np.linspace(lo, hi, N_BINS_HIST + 1)
-    centers = (bins[:-1] + bins[1:]) / 2
-    width = bins[1] - bins[0]
-
-    hist_a, _ = np.histogram(a, bins=bins, density=True)
-    hist_b, _ = np.histogram(b, bins=bins, density=True)
-
-    # Histogrammes
-    ax.bar(centers, hist_a, width=width, alpha=0.35, label=f"Classe {cls_a} (n={len(a)})", color="steelblue")
-    ax.bar(centers, hist_b, width=width, alpha=0.35, label=f"Classe {cls_b} (n={len(b)})", color="darkorange")
-
-    # Zone de recouvrement (histogramme)
-    overlap_height = np.minimum(hist_a, hist_b)
-    ax.bar(centers, overlap_height, width=width, alpha=0.6, color="green",
-           label=f"Recouvrement hist (OVL={ovl_hist:.3f})")
-
-    # Courbes KDE
-    pad = 0.05 * (hi - lo)
-    x_grid = np.linspace(lo - pad, hi + pad, N_POINTS_KDE)
-    kde_a, kde_b = gaussian_kde(a)(x_grid), gaussian_kde(b)(x_grid)
-    ax.plot(x_grid, kde_a, color="steelblue", linewidth=2)
-    ax.plot(x_grid, kde_b, color="darkorange", linewidth=2)
-
-    ax.set_xlabel("LGD (pts)")
-    ax.set_ylabel("Densite")
-    ax.set_title(f"{cls_a} vs {cls_b} - OVL_hist={ovl_hist:.3f} | OVL_kde={ovl_kde:.3f}")
-    ax.legend()
-    return ax
-
-def diagnostic_ovl(lf, n_graphs=5):
-    """Tableau OVL (hist + kde) pour toutes les paires adjacentes + graphiques."""
     diag_pairs = build_adjacent_pairs(lf).sort("severite_totale")
 
     rows = []
@@ -194,56 +28,40 @@ def diagnostic_ovl(lf, n_graphs=5):
     with pl.Config(tbl_rows=100, tbl_cols=-1):
         print(df_ovl)
 
-    # Désaccords entre les deux méthodes
     desac = df_ovl.filter(pl.col("fusionnable_hist") != pl.col("fusionnable_kde"))
     if desac.height > 0:
-        print(f"\n{desac.height} paire(s) où hist et kde sont en désaccord :")
+        print(f"\n{desac.height} paire(s) ou hist et kde sont en desaccord :")
         print(desac)
     else:
         print("\nHist et KDE sont d'accord sur toutes les paires.")
 
-    if n_graphs > 0:
-        fig, axes = plt.subplots(n_graphs, 1, figsize=(8, 4 * n_graphs))
-        if n_graphs == 1:
-            axes = [axes]
-        for i, (ca, cb, sev) in enumerate(diag_pairs.head(n_graphs).iter_rows()):
+    # === Graphiques ===
+    pairs_to_plot = diag_pairs if n_graphs is None else diag_pairs.head(n_graphs)
+    n_total = pairs_to_plot.height
+    n_rows_per_fig = -(-graphs_per_fig // graphs_per_row)  # ceil
+
+    pairs_list = list(pairs_to_plot.iter_rows())
+
+    for fig_start in range(0, n_total, graphs_per_fig):
+        chunk = pairs_list[fig_start:fig_start + graphs_per_fig]
+        n_chunk = len(chunk)
+        n_rows = -(-n_chunk // graphs_per_row)  # ceil
+
+        fig, axes = plt.subplots(n_rows, graphs_per_row, figsize=(8 * graphs_per_row, 4 * n_rows))
+        axes = np.array(axes).reshape(-1)  # flatten, gere 1D ou 2D
+
+        for i, (ca, cb, sev) in enumerate(chunk):
             a = get_lgd_vectors(lf, ca)
             b = get_lgd_vectors(lf, cb)
             ovl_h = overlap_empirique_hist(a, b)
             ovl_k = overlap_empirique_kde(a, b)
             plot_overlap(a, b, ca, cb, ovl_h, ovl_k, ax=axes[i])
+
+        # cache les axes vides si le dernier chunk est incomplet
+        for j in range(n_chunk, len(axes)):
+            axes[j].axis("off")
+
         plt.tight_layout()
         plt.show()
 
     return df_ovl
-
-# =====================================================================
-# EXÉCUTION
-# =====================================================================
-lf = df_base.lazy()
-n0 = lf.select(CLASS_COL).unique().collect().height
-
-print("=" * 110)
-print(f"DIAGNOSTIC OVL — PAIRES ADJACENTES (base initiale, {n0} classes)")
-print("=" * 110)
-df_ovl_diag = diagnostic_ovl(lf, n_graphs=5)
-
-reduced_lf, history = regroupement(lf)
-df_final = reduced_lf.collect()
-n1 = df_final[CLASS_COL].n_unique()
-
-print("\n" + "=" * 110)
-print(f"REGROUPEMENT — OVL_METHOD={OVL_METHOD}, OVL_STRICT={OVL_STRICT}, OVL_MODERE={OVL_MODERE} | "
-      f"codes fusionnables={sorted(CODES_FUSIONNABLES)}")
-print(f"{n0} -> {n1} CHR_model  ({len(history)} fusions)")
-print("=" * 110)
-
-if history:
-    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=70):
-        print(pl.DataFrame(history).select(
-            ["iteration", "class_a", "class_b", "new_class", "code",
-             "gap", "mean_a", "mean_b", "n_a", "n_b", "ovl_hist", "ovl_kde", "raison"]))
-    print("\nCodes:", dict(Counter(h["code"] for h in history)))
-else:
-    print("\nAucune fusion.")
-print(f"\nTaux de reduction : {100*(1-n1/n0):.1f} %")
