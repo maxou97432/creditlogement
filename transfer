@@ -1,55 +1,237 @@
+import polars as pl
+import openpyxl
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import io
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
+
+def carto_excel(
+    lf,
+    output_path,
+    class_col,
+    lgd_col,
+    obligor_col  = None,          # None si pas d'obligor a ce stade
+    seg_col      = "Seg",
+    year_col     = "year",
+    title        = "Carto",
+):
+    """
+    Produit un Excel de cartographie avec une feuille par segment.
+    Chaque feuille contient :
+      - Section 1 : tableau par (classe, année) -> mean_lgd, std_lgd, n_lignes
+      - Section 2 : stats globales par classe   -> mean_lgd, std_lgd, n_lignes, min, max
+      - Section 3 : graphique LGD moyenne par classe et par année
+    obligor_col : si None, n_lignes = count des lignes ; sinon n_unique de la colonne
+    """
+    df = lf.collect() if isinstance(lf, pl.LazyFrame) else lf
+    segments = sorted(df[seg_col].drop_nulls().unique().to_list())
+
+    BLUE_DARK  = PatternFill("solid", fgColor="1F4E79")
+    BLUE_LIGHT = PatternFill("solid", fgColor="BDD7EE")
+    WHITE      = PatternFill("solid", fgColor="FFFFFF")
+    GREY       = PatternFill("solid", fgColor="F2F2F2")
+    FONT_WHITE  = Font(color="FFFFFF", bold=True, size=10)
+    FONT_BOLD   = Font(bold=True, size=10)
+    FONT_NORMAL = Font(size=10)
+    CENTER = Alignment(horizontal="center", vertical="center")
+    LEFT   = Alignment(horizontal="left",   vertical="center")
+    thin   = Side(style="thin", color="BFBFBF")
+    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def sc(cell, value, fill=WHITE, font=FONT_NORMAL, align=CENTER):
+        cell.value = value; cell.fill = fill
+        cell.font = font;   cell.alignment = align; cell.border = BORDER
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    for seg in segments:
+        df_seg = df.filter(pl.col(seg_col) == seg)
+        years   = sorted(df_seg[year_col].drop_nulls().unique().to_list())
+        classes = sorted(df_seg[class_col].drop_nulls().unique().to_list())
+
+        # Agrégations
+        n_expr = (pl.col(obligor_col).n_unique() if obligor_col
+                  else pl.len()).alias("n_lignes")
+
+        t1 = (
+            df_seg.group_by([class_col, year_col])
+            .agg([pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                  pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                  n_expr])
+            .sort([class_col, year_col])
+        )
+        t1_dict = {(r[class_col], r[year_col]): r for r in t1.iter_rows(named=True)}
+
+        t2 = (
+            df_seg.group_by(class_col)
+            .agg([pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                  pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                  pl.col(lgd_col).min().round(4).alias("min_lgd"),
+                  pl.col(lgd_col).max().round(4).alias("max_lgd"),
+                  n_expr])
+            .sort(class_col)
+        )
+
+        ws = wb.create_sheet(title=f"Seg_{seg}")
+        r = 1
+        n_cols = 1 + len(years) * 3
+
+        # === SECTION 1 : Tableau par année ===
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+        sc(ws.cell(r, 1), f"{title} — Segment {seg} — LGD par classe et par année",
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
+
+        sc(ws.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
+        for i, yr in enumerate(years):
+            cs = 2 + i*3
+            ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
+            sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
+        r += 1
+
+        sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
+        for i in range(len(years)):
+            cs = 2 + i*3
+            for j, sub in enumerate(["mean_lgd", "std_lgd", "n_lignes"]):
+                sc(ws.cell(r, cs+j), sub, fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        for idx, cls in enumerate(classes):
+            fill = WHITE if idx % 2 == 0 else GREY
+            sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
+            for i, yr in enumerate(years):
+                cs = 2 + i*3
+                d = t1_dict.get((cls, yr), {})
+                sc(ws.cell(r, cs),   d.get("mean_lgd", ""), fill=fill)
+                sc(ws.cell(r, cs+1), d.get("std_lgd",  ""), fill=fill)
+                sc(ws.cell(r, cs+2), d.get("n_lignes", ""), fill=fill)
+            r += 1
+
+        r += 2
+
+        # === SECTION 2 : Stats globales ===
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        sc(ws.cell(r, 1), f"Stats globales — Segment {seg}",
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
+
+        for j, h in enumerate(
+            [class_col, "mean_lgd", "std_lgd", "n_lignes", "min_lgd", "max_lgd"]
+        ):
+            sc(ws.cell(r, j+1), h, fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        for idx, row in enumerate(t2.iter_rows(named=True)):
+            fill = WHITE if idx % 2 == 0 else GREY
+            sc(ws.cell(r, 1), row[class_col], fill=fill, align=LEFT)
+            for j, col in enumerate(
+                ["mean_lgd", "std_lgd", "n_lignes", "min_lgd", "max_lgd"], 2
+            ):
+                sc(ws.cell(r, j), row[col], fill=fill)
+            r += 1
+
+        r += 2
+
+        # === SECTION 3 : Graphique ===
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+        sc(ws.cell(r, 1), f"LGD moyenne par classe et par année — Segment {seg}",
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
+        graph_row = r
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        colors = plt.cm.tab20.colors
+
+        for i, cls in enumerate(classes):
+            means, yrs_plot = [], []
+            for yr in years:
+                d = t1_dict.get((cls, yr), {})
+                if d.get("mean_lgd") is not None:
+                    means.append(d["mean_lgd"])
+                    yrs_plot.append(yr)
+            if means:
+                ax.plot(yrs_plot, means, marker="o", label=cls,
+                        color=colors[i % len(colors)], linewidth=1.5)
+
+        ax.set_title(f"LGD moyenne par classe — Segment {seg}", fontsize=13)
+        ax.set_xlabel("Année")
+        ax.set_ylabel(f"{lgd_col} (moyenne)")
+        ax.legend(loc="upper left", bbox_to_anchor=(1, 1), fontsize=7, ncol=2)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+
+        img = XLImage(buf)
+        img.anchor = f"A{graph_row}"
+        ws.add_image(img)
+
+        # Largeurs automatiques
+        for col in ws.columns:
+            max_len = max(
+                len(str(c.value)) if c.value is not None else 0
+                for c in col
+            )
+            ws.column_dimensions[get_column_letter(col[0].column)].width = \
+                min(max_len + 4, 30)
+
+    wb.save(output_path)
+    print(f"Excel sauvegardé : {output_path}")
+    print(f"Segments : {segments}")
+    return wb
+
+
 # =====================================================================
 # NOTEBOOK 1 — Création des Jenks
 # =====================================================================
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB1_jenks.xlsx",
-    class_col    = "Jenks_Submodel",
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    seg_col      = "Seg",
-    year_col     = "year",
-    title        = "NB1 - Jenks Submodel",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB1_jenks.xlsx",
+    class_col   = "Jenks_Submodel",
+    lgd_col     = "lgd_obligor",
+    obligor_col = None,               # pas d'obligor à ce stade
+    title       = "NB1 - Jenks Submodel",
 )
 
 # =====================================================================
 # NOTEBOOK 2 — Calcul lgd_obligor
 # =====================================================================
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB2_lgd.xlsx",
-    class_col    = "Jenks_Submodel",
-    lgd_col      = "lgd_obligor",       # <- changer si autre colonne LGD
-    obligor_col  = "ID_CLIENT",
-    seg_col      = "Seg",
-    year_col     = "year",
-    title        = "NB2 - LGD Obligor",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB2_lgd.xlsx",
+    class_col   = "Jenks_Submodel",
+    lgd_col     = "lgd_obligor",      # <- changer si autre colonne LGD
+    obligor_col = "ID_CLIENT",
+    title       = "NB2 - LGD Obligor",
 )
 
 # =====================================================================
 # NOTEBOOK 3A — Regroupement modèle
 # =====================================================================
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB3A_regroupement.xlsx",
-    class_col    = "CHR_model",         # <- changer si CHR_apres_fusion
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    seg_col      = "Seg",
-    year_col     = "year",
-    title        = "NB3A - Regroupement Modèle",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB3A_regroupement.xlsx",
+    class_col   = "CHR_model",        # <- changer si CHR_apres_fusion
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    title       = "NB3A - Regroupement Modèle",
 )
 
 # =====================================================================
 # NOTEBOOK 3B — Tests d'hétérogénéité
 # =====================================================================
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB3B_heterogeneite.xlsx",
-    class_col    = "CHR_apres_fusion",  # <- changer si autre nom
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    seg_col      = "Seg",
-    year_col     = "year",
-    title        = "NB3B - Tests Hétérogénéité",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB3B_heterogeneite.xlsx",
+    class_col   = "CHR_apres_fusion", # <- changer si autre nom
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    title       = "NB3B - Tests Hétérogénéité",
 )
