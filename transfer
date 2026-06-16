@@ -1,214 +1,47 @@
-import polars as pl
-import numpy as np
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment
-from collections import Counter
-
 # =====================================================================
-# CONFIGURATION
+# DIAGNOSTIC : obligors avec plusieurs facilités par date de défaut
 # =====================================================================
-# df_base       = base           # base originale (grain obligor)
-# reduced_lf    = ...            # LazyFrame après regroupement
-# CLASS_COL     = "CHR_apres_fusion"
-# LGD_COL       = "lgd_obligor"
-# SEG_COL       = "Seg"          # colonne segment dans df_base
-# output_path   = r"C:\..."      # chemin de sortie
 
-SEG_COL        = "Seg"
-SENTINEL_LOW   = -99999999
-SENTINEL_HIGH  =  99999999
+# Colonnes à adapter si nécessaire
+OBLIGOR_COL = config['Obligor']    # identifiant obligor
+DATE_DEF_COL = "datdef"            # date de défaut
+FACILITE_COL = config['Facilite']  # identifiant facilité (à adapter)
 
-# =====================================================================
-# ÉTAPE 1 : Réassignation des numéros de classes (segment dominant)
-# =====================================================================
-def reassigner_classes(df_base, reduced_lf, seg_col=SEG_COL):
-    """
-    Pour chaque classe fusionnée dans reduced_lf :
-      1. Identifie le segment dominant (le plus représenté en volume)
-      2. Trie les classes par LGD moyenne croissante au sein de chaque segment dominant
-      3. Attribue HLC_fin = segment_dominant + "_" + numéro séquentiel
-    Retourne un DataFrame avec la table de mapping et la base enrichie.
-    """
-    # Collecte la base finale avec segment
-    df_final = reduced_lf.collect()
-
-    # Joindre le segment depuis df_base (si pas déjà présent dans reduced_lf)
-    if seg_col not in df_final.columns:
-        df_seg = df_base.select([CLASS_COL, seg_col]).unique()
-        df_final = df_final.join(df_seg, on=CLASS_COL, how="left")
-
-    # Pour chaque classe fusionnée : volume par segment -> segment dominant
-    seg_volume = (
-        df_final
-        .group_by([CLASS_COL, seg_col])
-        .agg(pl.len().alias("vol_seg"))
-    )
-
-    # Segment dominant = segment avec le plus grand volume dans la classe
-    seg_dominant = (
-        seg_volume
-        .sort([CLASS_COL, "vol_seg"], descending=[False, True])
-        .group_by(CLASS_COL)
-        .agg(pl.col(seg_col).first().alias("segment_dominant"))
-    )
-
-    # Stats par classe fusionnée
-    stats_classes = (
-        df_final
-        .group_by(CLASS_COL)
-        .agg([
-            pl.len().alias("volume"),
-            pl.col(LGD_COL).mean().alias("LGD_mean"),
-            pl.col(LGD_COL).min().alias("lower_bound"),
-            pl.col(LGD_COL).max().alias("upper_bound"),
-        ])
-        .join(seg_dominant, on=CLASS_COL, how="left")
-        .sort(["segment_dominant", "LGD_mean"])
-    )
-
-    # Numérotation séquentielle au sein de chaque segment dominant
-    rows = []
-    compteur_seg = {}
-    hlc_global = 1
-
-    for row in stats_classes.iter_rows(named=True):
-        seg = row["segment_dominant"]
-        if seg not in compteur_seg:
-            compteur_seg[seg] = 1
-        else:
-            compteur_seg[seg] += 1
-
-        hlc_fin = f"{seg}_{compteur_seg[seg]}"
-        rows.append({
-            "HLC": compteur_seg[seg],
-            CLASS_COL: row[CLASS_COL],
-            "segment_dominant": seg,
-            "HLC_fin": hlc_fin,
-            "volume": row["volume"],
-            "LGD_mean": row["LGD_mean"],
-            "lower_bound_raw": row["lower_bound"],
-            "upper_bound_raw": row["upper_bound"],
-        })
-
-    mapping = pl.DataFrame(rows)
-
-    # Sentinelles : première classe du segment -> lower = SENTINEL_LOW
-    #              dernière classe du segment  -> upper = SENTINEL_HIGH
-    rows_final = []
-    for seg, group in mapping.group_by("segment_dominant"):
-        group_sorted = group.sort("HLC")
-        n = group_sorted.height
-        for i, row in enumerate(group_sorted.iter_rows(named=True)):
-            lb = SENTINEL_LOW  if i == 0     else row["lower_bound_raw"]
-            ub = SENTINEL_HIGH if i == n - 1 else row["upper_bound_raw"]
-            rows_final.append({**row, "lower_bound": lb, "upper_bound": ub})
-
-    mapping_final = (
-        pl.DataFrame(rows_final)
-        .drop(["lower_bound_raw", "upper_bound_raw"])
-        .sort(["segment_dominant", "HLC"])
-    )
-
-    # Enrichir la base finale avec HLC_fin
-    df_enrichie = (
-        df_final
-        .join(
-            mapping_final.select([CLASS_COL, "HLC_fin", "HLC", "segment_dominant"]),
-            on=CLASS_COL, how="left"
-        )
-    )
-
-    return mapping_final, df_enrichie
-
-# =====================================================================
-# ÉTAPE 2 : Export Excel (une feuille par segment)
-# =====================================================================
-def export_excel_segments(mapping_final, output_excel_path):
-    """
-    Exporte le mapping dans un fichier Excel.
-    Une feuille par segment dominant.
-    Colonnes : HLC, volume, lower_bound, upper_bound, LGD_mean,
-               HLC_fin, modèle, HLC_new
-    """
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # supprime la feuille vide par défaut
-
-    # Style header
-    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    header_align = Alignment(horizontal="center")
-
-    segments = sorted(mapping_final["segment_dominant"].unique().to_list())
-
-    for seg in segments:
-        df_seg = (
-            mapping_final
-            .filter(pl.col("segment_dominant") == seg)
-            .sort("HLC")
-            .select([
-                pl.col("HLC"),
-                pl.col("volume"),
-                pl.col("lower_bound"),
-                pl.col("upper_bound"),
-                pl.col("LGD_mean").round(6),
-                pl.col("HLC_fin"),
-                pl.col("segment_dominant").alias("modèle"),
-                pl.col(CLASS_COL).alias("HLC_new"),
-            ])
-        )
-
-        ws = wb.create_sheet(title=f"Segment_{seg}")
-        headers = df_seg.columns
-
-        # Header
-        for col_idx, col_name in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx, value=col_name)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = header_align
-
-        # Données
-        for row_idx, row in enumerate(df_seg.iter_rows(), 2):
-            for col_idx, value in enumerate(row, 1):
-                ws.cell(row=row_idx, column=col_idx, value=value)
-
-        # Largeur automatique
-        for col in ws.columns:
-            max_len = max(len(str(cell.value or "")) for cell in col)
-            ws.column_dimensions[col[0].column_letter].width = max_len + 4
-
-    wb.save(output_excel_path)
-    print(f"Excel sauvegardé : {output_excel_path}")
-    print(f"Feuilles créées : {segments}")
-
-# =====================================================================
-# EXÉCUTION
-# =====================================================================
-print("=" * 80)
-print("ÉTAPE 1 : Réassignation des classes fusionnées")
-print("=" * 80)
-mapping_final, df_enrichie = reassigner_classes(df_base, reduced_lf)
-
-print(f"\nMapping final ({mapping_final.height} classes) :")
-with pl.Config(tbl_rows=100, tbl_cols=-1, tbl_width_chars=200):
-    print(mapping_final)
-
-print("\nDistribution par segment dominant :")
-print(
-    mapping_final.group_by("segment_dominant")
-    .agg(pl.len().alias("nb_classes"), pl.col("volume").sum().alias("vol_total"))
-    .sort("segment_dominant")
+diagnostic_multi_facilites = (
+    lf_LGD
+    .filter(pl.col(DATE_DEF_COL).is_not_null())    # exclure les non-défauts si besoin
+    .group_by([OBLIGOR_COL, DATE_DEF_COL])
+    .agg([
+        pl.len().alias("nb_facilites"),
+        pl.col(FACILITE_COL).n_unique().alias("nb_facilites_distinctes"),
+    ])
+    .filter(pl.col("nb_facilites") > 1)            # garder uniquement les multi-facilités
+    .sort([OBLIGOR_COL, DATE_DEF_COL])
+    .collect()
 )
 
-print("\n" + "=" * 80)
-print("ÉTAPE 2 : Export Excel")
-print("=" * 80)
-output_excel = output_path + r"\mapping_classes_fusionnees.xlsx"
-export_excel_segments(mapping_final, output_excel)
+# Résumé global
+n_obligors_multi = diagnostic_multi_facilites[OBLIGOR_COL].n_unique()
+n_lignes_multi   = diagnostic_multi_facilites.height
+total_obligors   = lf_LGD.select(pl.col(OBLIGOR_COL).n_unique()).collect().item()
 
-print("\n" + "=" * 80)
-print("ÉTAPE 3 : Base enrichie avec HLC_fin")
-print("=" * 80)
-print(f"Colonnes disponibles : {df_enrichie.columns}")
-print(f"Shape : {df_enrichie.shape}")
-print(df_enrichie.select([CLASS_COL, "HLC_fin", "HLC", "segment_dominant", LGD_COL]).head(10))
+print("=" * 70)
+print("DIAGNOSTIC — Obligors avec plusieurs facilités par date de défaut")
+print("=" * 70)
+print(f"Obligors concernés     : {n_obligors_multi:>8,} / {total_obligors:,}")
+print(f"Paires (obligor, date) : {n_lignes_multi:>8,}")
+print()
+
+# Distribution du nombre de facilités
+print("Distribution du nombre de facilités par (obligor, date) :")
+print(
+    diagnostic_multi_facilites
+    .group_by("nb_facilites")
+    .agg(pl.len().alias("nb_paires"))
+    .sort("nb_facilites")
+)
+
+# Détail des cas (optionnel, premières lignes)
+print("\nDétail (premières lignes) :")
+with pl.Config(tbl_rows=20, tbl_cols=-1):
+    print(diagnostic_multi_facilites.head(20))
