@@ -1,47 +1,189 @@
+import polars as pl
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
 # =====================================================================
-# DIAGNOSTIC : obligors avec plusieurs facilités par date de défaut
+# FONCTION GÉNÉRIQUE — CARTO AVANT/APRÈS
 # =====================================================================
+def carto_excel(
+    lf,                          # LazyFrame source
+    output_path,                 # chemin du fichier Excel de sortie
+    class_col,                   # colonne de classe (ex: "Jenks_Submodel", "CHR_model")
+    lgd_col,                     # colonne LGD (ex: "lgd_obligor")
+    obligor_col,                 # colonne obligor (ex: "ID_CLIENT", "idctr")
+    seg_col       = "Seg",       # colonne segment
+    year_col      = "year",      # colonne année
+    title         = "Carto",     # titre affiché dans l'Excel
+):
+    """
+    Produit un Excel de cartographie avec une feuille par segment.
+    Chaque feuille contient :
+      - Tableau 1 : stats par (classe, année) -> mean_lgd, std_lgd, n_obligor
+      - Tableau 2 : stats globales par classe  -> mean_lgd, std_lgd, n_obligor, min, max
+    """
 
-# Colonnes à adapter si nécessaire
-OBLIGOR_COL = config['Obligor']    # identifiant obligor
-DATE_DEF_COL = "datdef"            # date de défaut
-FACILITE_COL = config['Facilite']  # identifiant facilité (à adapter)
+    # ---- Collecte des données ----
+    df = lf.collect()
 
-diagnostic_multi_facilites = (
-    lf_LGD
-    .filter(pl.col(DATE_DEF_COL).is_not_null())    # exclure les non-défauts si besoin
-    .group_by([OBLIGOR_COL, DATE_DEF_COL])
-    .agg([
-        pl.len().alias("nb_facilites"),
-        pl.col(FACILITE_COL).n_unique().alias("nb_facilites_distinctes"),
-    ])
-    .filter(pl.col("nb_facilites") > 1)            # garder uniquement les multi-facilités
-    .sort([OBLIGOR_COL, DATE_DEF_COL])
-    .collect()
-)
+    segments = sorted(df[seg_col].drop_nulls().unique().to_list())
 
-# Résumé global
-n_obligors_multi = diagnostic_multi_facilites[OBLIGOR_COL].n_unique()
-n_lignes_multi   = diagnostic_multi_facilites.height
-total_obligors   = lf_LGD.select(pl.col(OBLIGOR_COL).n_unique()).collect().item()
+    # Styles
+    BLUE_DARK   = PatternFill("solid", fgColor="1F4E79")
+    BLUE_LIGHT  = PatternFill("solid", fgColor="BDD7EE")
+    WHITE       = PatternFill("solid", fgColor="FFFFFF")
+    GREY        = PatternFill("solid", fgColor="F2F2F2")
+    FONT_WHITE  = Font(color="FFFFFF", bold=True, size=10)
+    FONT_BOLD   = Font(bold=True, size=10)
+    FONT_NORMAL = Font(size=10)
+    CENTER      = Alignment(horizontal="center", vertical="center")
+    LEFT        = Alignment(horizontal="left",   vertical="center")
+    thin_side   = Side(style="thin", color="BFBFBF")
+    THIN_BORDER = Border(left=thin_side, right=thin_side,
+                         top=thin_side,  bottom=thin_side)
 
-print("=" * 70)
-print("DIAGNOSTIC — Obligors avec plusieurs facilités par date de défaut")
-print("=" * 70)
-print(f"Obligors concernés     : {n_obligors_multi:>8,} / {total_obligors:,}")
-print(f"Paires (obligor, date) : {n_lignes_multi:>8,}")
-print()
+    def style_cell(cell, value, fill=WHITE, font=FONT_NORMAL, align=CENTER, border=THIN_BORDER):
+        cell.value     = value
+        cell.fill      = fill
+        cell.font      = font
+        cell.alignment = align
+        cell.border    = border
 
-# Distribution du nombre de facilités
-print("Distribution du nombre de facilités par (obligor, date) :")
-print(
-    diagnostic_multi_facilites
-    .group_by("nb_facilites")
-    .agg(pl.len().alias("nb_paires"))
-    .sort("nb_facilites")
-)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
 
-# Détail des cas (optionnel, premières lignes)
-print("\nDétail (premières lignes) :")
-with pl.Config(tbl_rows=20, tbl_cols=-1):
-    print(diagnostic_multi_facilites.head(20))
+    for seg in segments:
+        df_seg = df.filter(pl.col(seg_col) == seg)
+
+        # ---- Tableau 1 : par (classe, année) ----
+        t1 = (
+            df_seg
+            .group_by([class_col, year_col])
+            .agg([
+                pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                pl.col(obligor_col).n_unique().alias("n_obligor"),
+            ])
+            .sort([class_col, year_col])
+        )
+
+        # Pivoter : une ligne par classe, une colonne par année
+        years = sorted(df_seg[year_col].drop_nulls().unique().to_list())
+        classes = sorted(df_seg[class_col].drop_nulls().unique().to_list())
+
+        # ---- Tableau 2 : stats globales par classe ----
+        t2 = (
+            df_seg
+            .group_by(class_col)
+            .agg([
+                pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                pl.col(obligor_col).n_unique().alias("n_obligor"),
+                pl.col(lgd_col).min().round(4).alias("min_lgd"),
+                pl.col(lgd_col).max().round(4).alias("max_lgd"),
+            ])
+            .sort(class_col)
+        )
+
+        ws = wb.create_sheet(title=f"Seg_{seg}")
+
+        # ================================================================
+        # SECTION 1 : Tableau par année (pivoté)
+        # ================================================================
+        r = 1  # ligne courante
+
+        # Titre section
+        ws.merge_cells(start_row=r, start_column=1,
+                       end_row=r, end_column=2 + len(years)*3)
+        title_cell = ws.cell(row=r, column=1,
+                             value=f"{title} — Segment {seg} — Par année ({class_col})")
+        title_cell.fill      = BLUE_DARK
+        title_cell.font      = Font(color="FFFFFF", bold=True, size=12)
+        title_cell.alignment = CENTER
+        r += 1
+
+        # Header ligne 1 : classe | puis années groupées
+        style_cell(ws.cell(row=r, column=1), class_col,
+                   fill=BLUE_DARK, font=FONT_WHITE)
+        for i, yr in enumerate(years):
+            col_start = 2 + i * 3
+            ws.merge_cells(start_row=r, start_column=col_start,
+                           end_row=r,   end_column=col_start + 2)
+            style_cell(ws.cell(row=r, column=col_start), str(yr),
+                       fill=BLUE_DARK, font=FONT_WHITE)
+        r += 1
+
+        # Header ligne 2 : sous-colonnes par année
+        style_cell(ws.cell(row=r, column=1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
+        for i in range(len(years)):
+            col_start = 2 + i * 3
+            for j, sub in enumerate(["mean_lgd", "std_lgd", "n_obligor"]):
+                style_cell(ws.cell(row=r, column=col_start+j), sub,
+                           fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        # Données : une ligne par classe
+        t1_dict = {}
+        for row in t1.iter_rows(named=True):
+            key = (row[class_col], row[year_col])
+            t1_dict[key] = row
+
+        for idx, cls in enumerate(classes):
+            fill = WHITE if idx % 2 == 0 else GREY
+            style_cell(ws.cell(row=r, column=1), cls, fill=fill,
+                       font=FONT_NORMAL, align=LEFT)
+            for i, yr in enumerate(years):
+                col_start = 2 + i * 3
+                row_data = t1_dict.get((cls, yr), {})
+                style_cell(ws.cell(row=r, column=col_start),
+                           row_data.get("mean_lgd", ""), fill=fill)
+                style_cell(ws.cell(row=r, column=col_start+1),
+                           row_data.get("std_lgd", ""), fill=fill)
+                style_cell(ws.cell(row=r, column=col_start+2),
+                           row_data.get("n_obligor", ""), fill=fill)
+            r += 1
+
+        r += 2  # espace entre les deux tableaux
+
+        # ================================================================
+        # SECTION 2 : Stats globales par classe
+        # ================================================================
+        ws.merge_cells(start_row=r, start_column=1,
+                       end_row=r, end_column=6)
+        title2 = ws.cell(row=r, column=1,
+                         value=f"Stats globales par {class_col} — Segment {seg}")
+        title2.fill      = BLUE_DARK
+        title2.font      = Font(color="FFFFFF", bold=True, size=12)
+        title2.alignment = CENTER
+        r += 1
+
+        # Header
+        headers2 = [class_col, "mean_lgd", "std_lgd", "n_obligor", "min_lgd", "max_lgd"]
+        for j, h in enumerate(headers2):
+            style_cell(ws.cell(row=r, column=j+1), h,
+                       fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        # Données
+        for idx, row in enumerate(t2.iter_rows(named=True)):
+            fill = WHITE if idx % 2 == 0 else GREY
+            style_cell(ws.cell(row=r, column=1), row[class_col],
+                       fill=fill, font=FONT_NORMAL, align=LEFT)
+            for j, col in enumerate(["mean_lgd", "std_lgd", "n_obligor",
+                                      "min_lgd", "max_lgd"], 2):
+                style_cell(ws.cell(row=r, column=j), row[col], fill=fill)
+            r += 1
+
+        # Largeurs automatiques
+        for col in ws.columns:
+            max_len = max(
+                len(str(cell.value)) if cell.value is not None else 0
+                for cell in col
+            )
+            ws.column_dimensions[get_column_letter(col[0].column)].width = \
+                min(max_len + 4, 30)
+
+    wb.save(output_path)
+    print(f"Excel sauvegardé : {output_path}")
+    print(f"Segments traités : {segments}")
+    return wb
