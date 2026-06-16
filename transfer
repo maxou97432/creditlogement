@@ -1,166 +1,214 @@
 import polars as pl
 import numpy as np
-from scipy import stats as sp_stats
-from scipy.stats import kruskal, f_oneway
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from collections import Counter
 
 # =====================================================================
 # CONFIGURATION
 # =====================================================================
-df_base   = base
-LGD_COL   = "lgd_obligor"
-CLASS_COL = "CHR_model"
+# df_base       = base           # base originale (grain obligor)
+# reduced_lf    = ...            # LazyFrame après regroupement
+# CLASS_COL     = "CHR_apres_fusion"
+# LGD_COL       = "lgd_obligor"
+# SEG_COL       = "Seg"          # colonne segment dans df_base
+# output_path   = r"C:\..."      # chemin de sortie
+
+SEG_COL        = "Seg"
+SENTINEL_LOW   = -99999999
+SENTINEL_HIGH  =  99999999
 
 # =====================================================================
-# UTILITAIRES
+# ÉTAPE 1 : Réassignation des numéros de classes (segment dominant)
 # =====================================================================
-def get_lgd_vectors(lf, cls):
-    return (lf.filter(pl.col(CLASS_COL) == cls)
-              .select(LGD_COL).collect()
-              .get_column(LGD_COL).to_numpy())
-
-def build_adjacent_pairs(lf):
-    """Paires adjacentes, ordre LRA global (niveau modele)."""
-    cm = (lf.group_by(CLASS_COL).agg(pl.col(LGD_COL).mean().alias("m"))
-            .sort("m").collect())
-    P = [(cm[i, CLASS_COL], cm[i+1, CLASS_COL], abs(cm[i+1, "m"] - cm[i, "m"]))
-         for i in range(cm.height - 1)]
-    return pl.DataFrame({"class_a": [p[0] for p in P],
-                         "class_b": [p[1] for p in P],
-                         "severite_totale": [p[2] for p in P]})
-
-# =====================================================================
-# 1. TEST DE WELCH
-# =====================================================================
-def welch_diag(a, b):
-    t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
-    return float(t_stat), float(p_value)
-
-# =====================================================================
-# 2. TEST DE KRUSKAL-WALLIS
-# =====================================================================
-def kruskal_diag(a, b):
-    h_stat, p_value = kruskal(a, b)
-    return float(h_stat), float(p_value)
-
-# =====================================================================
-# 3. ANOVA (test F) + ETA-SQUARED
-# =====================================================================
-def anova_diag(a, b):
-    f_stat, p_value = f_oneway(a, b)
-    grand_mean = np.concatenate([a, b]).mean()
-    ss_between = len(a) * (a.mean() - grand_mean)**2 + len(b) * (b.mean() - grand_mean)**2
-    ss_total = np.sum((np.concatenate([a, b]) - grand_mean)**2)
-    eta_sq = ss_between / ss_total if ss_total > 0 else 0.0
-    return float(f_stat), float(p_value), float(eta_sq)
-
-# =====================================================================
-# 4. COHEN'S D + IC 95% + indicateur de normalite
-# =====================================================================
-def cohen_d_ic(a, b, conf=0.95):
+def reassigner_classes(df_base, reduced_lf, seg_col=SEG_COL):
     """
-    Cohen's d et son IC analytique (formule de Hedges 1981) :
-      Var(d) = (n_a+n_b)/(n_a*n_b) + d^2/(2*(n_a+n_b))
-    Cette formule REPOSE SUR L'HYPOTHESE DE NORMALITE des deux groupes.
+    Pour chaque classe fusionnée dans reduced_lf :
+      1. Identifie le segment dominant (le plus représenté en volume)
+      2. Trie les classes par LGD moyenne croissante au sein de chaque segment dominant
+      3. Attribue HLC_fin = segment_dominant + "_" + numéro séquentiel
+    Retourne un DataFrame avec la table de mapping et la base enrichie.
     """
-    n1, n2 = len(a), len(b)
-    s1, s2 = a.std(ddof=1), b.std(ddof=1)
-    sp = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
-    d = (b.mean() - a.mean()) / sp if sp > 0 else 0.0
+    # Collecte la base finale avec segment
+    df_final = reduced_lf.collect()
 
-    se_d = np.sqrt((n1+n2)/(n1*n2) + d**2/(2*(n1+n2)))
-    z = sp_stats.norm.ppf(1 - (1-conf)/2)
-    ci_low, ci_high = d - z*se_d, d + z*se_d
+    # Joindre le segment depuis df_base (si pas déjà présent dans reduced_lf)
+    if seg_col not in df_final.columns:
+        df_seg = df_base.select([CLASS_COL, seg_col]).unique()
+        df_final = df_final.join(df_seg, on=CLASS_COL, how="left")
 
-    return float(d), float(ci_low), float(ci_high)
+    # Pour chaque classe fusionnée : volume par segment -> segment dominant
+    seg_volume = (
+        df_final
+        .group_by([CLASS_COL, seg_col])
+        .agg(pl.len().alias("vol_seg"))
+    )
 
-def normalite_diag(x, alpha=0.05):
-    """
-    Indicateur de normalite :
-      - n < 5000  -> Shapiro-Wilk (p >= alpha => gaussien)
-      - n >= 5000 -> Shapiro sature aussi a grand n ; on bascule sur
-        skewness/kurtosis (|skew|<0.5 et |kurtosis excess|<1 => proche normal)
-    Retourne (est_gaussien: bool, methode: str)
-    """
-    n = len(x)
-    if n < 5000:
-        _, p = sp_stats.shapiro(x)
-        return bool(p >= alpha), "shapiro"
-    else:
-        skew = sp_stats.skew(x)
-        kurt = sp_stats.kurtosis(x)
-        est_normal = (abs(skew) < 0.5) and (abs(kurt) < 1.0)
-        return bool(est_normal), "skew_kurt"
+    # Segment dominant = segment avec le plus grand volume dans la classe
+    seg_dominant = (
+        seg_volume
+        .sort([CLASS_COL, "vol_seg"], descending=[False, True])
+        .group_by(CLASS_COL)
+        .agg(pl.col(seg_col).first().alias("segment_dominant"))
+    )
 
-# =====================================================================
-# DIAGNOSTIC COMPLET
-# =====================================================================
-def diagnostic_tests_classiques(lf):
-    pairs = build_adjacent_pairs(lf).sort("severite_totale")
+    # Stats par classe fusionnée
+    stats_classes = (
+        df_final
+        .group_by(CLASS_COL)
+        .agg([
+            pl.len().alias("volume"),
+            pl.col(LGD_COL).mean().alias("LGD_mean"),
+            pl.col(LGD_COL).min().alias("lower_bound"),
+            pl.col(LGD_COL).max().alias("upper_bound"),
+        ])
+        .join(seg_dominant, on=CLASS_COL, how="left")
+        .sort(["segment_dominant", "LGD_mean"])
+    )
+
+    # Numérotation séquentielle au sein de chaque segment dominant
     rows = []
+    compteur_seg = {}
+    hlc_global = 1
 
-    for ca, cb, sev in pairs.iter_rows():
-        a = get_lgd_vectors(lf, ca)
-        b = get_lgd_vectors(lf, cb)
+    for row in stats_classes.iter_rows(named=True):
+        seg = row["segment_dominant"]
+        if seg not in compteur_seg:
+            compteur_seg[seg] = 1
+        else:
+            compteur_seg[seg] += 1
 
-        t_stat, p_welch = welch_diag(a, b)
-        h_stat, p_kw = kruskal_diag(a, b)
-        f_stat, p_anova, eta_sq = anova_diag(a, b)
-        d, ci_low, ci_high = cohen_d_ic(a, b)
-
-        # Normalite des deux groupes -> indicateur global pour la paire
-        norm_a, meth_a = normalite_diag(a)
-        norm_b, meth_b = normalite_diag(b)
-        paire_gaussienne = norm_a and norm_b
-
-        abs_d = abs(d)
-        if abs_d < 0.2:   ampleur = "negligeable"
-        elif abs_d < 0.5: ampleur = "petit"
-        elif abs_d < 0.8: ampleur = "moyen"
-        else:             ampleur = "grand"
-
+        hlc_fin = f"{seg}_{compteur_seg[seg]}"
         rows.append({
-            "class_a": ca, "class_b": cb, "gap": round(sev, 4),
-            "n_a": len(a), "n_b": len(b),
-            "welch_t": round(abs(t_stat), 3), "welch_p": p_welch,
-            "kw_H": round(h_stat, 3), "kw_p": p_kw,
-            "anova_F": round(f_stat, 3), "anova_p": p_anova, "eta_sq": round(eta_sq, 6),
-            "cohen_d": round(d, 4),
-            "d_IC95_low": round(ci_low, 4), "d_IC95_high": round(ci_high, 4),
-            "ampleur_effet": ampleur,
-            "gaussien": paire_gaussienne,
-            "methode_normalite": f"{meth_a}/{meth_b}",
+            "HLC": compteur_seg[seg],
+            CLASS_COL: row[CLASS_COL],
+            "segment_dominant": seg,
+            "HLC_fin": hlc_fin,
+            "volume": row["volume"],
+            "LGD_mean": row["LGD_mean"],
+            "lower_bound_raw": row["lower_bound"],
+            "upper_bound_raw": row["upper_bound"],
         })
 
-    df_diag = pl.DataFrame(rows)
-    with pl.Config(tbl_rows=200, tbl_cols=-1, tbl_width_chars=260, fmt_str_lengths=70):
-        print(df_diag)
+    mapping = pl.DataFrame(rows)
 
-    n_p_sature = df_diag.filter(
-        (pl.col("welch_p") < 1e-10) & (pl.col("kw_p") < 1e-10)
-    ).height
-    print(f"\nPaires avec welch_p < 1e-10 ET kw_p < 1e-10 (saturation grand n) : "
-          f"{n_p_sature} / {df_diag.height}")
+    # Sentinelles : première classe du segment -> lower = SENTINEL_LOW
+    #              dernière classe du segment  -> upper = SENTINEL_HIGH
+    rows_final = []
+    for seg, group in mapping.group_by("segment_dominant"):
+        group_sorted = group.sort("HLC")
+        n = group_sorted.height
+        for i, row in enumerate(group_sorted.iter_rows(named=True)):
+            lb = SENTINEL_LOW  if i == 0     else row["lower_bound_raw"]
+            ub = SENTINEL_HIGH if i == n - 1 else row["upper_bound_raw"]
+            rows_final.append({**row, "lower_bound": lb, "upper_bound": ub})
 
-    print(f"\nCohen's d : min={df_diag['cohen_d'].abs().min():.3f}  "
-          f"med={df_diag['cohen_d'].abs().median():.3f}  "
-          f"max={df_diag['cohen_d'].abs().max():.3f}")
-    print(f"eta^2     : min={df_diag['eta_sq'].min():.6f}  "
-          f"med={df_diag['eta_sq'].median():.6f}  "
-          f"max={df_diag['eta_sq'].max():.6f}")
+    mapping_final = (
+        pl.DataFrame(rows_final)
+        .drop(["lower_bound_raw", "upper_bound_raw"])
+        .sort(["segment_dominant", "HLC"])
+    )
 
-    n_gauss = df_diag.filter(pl.col("gaussien")).height
-    print(f"\nPaires gaussiennes (skew/kurt proches de 0) : {n_gauss} / {df_diag.height}")
-    if n_gauss < df_diag.height:
-        print(f"  -> Pour les {df_diag.height - n_gauss} paire(s) non gaussienne(s), "
-              f"l'IC de Cohen's d (formule de Hedges, qui suppose la normalite) "
-              f"doit etre lu avec prudence.")
+    # Enrichir la base finale avec HLC_fin
+    df_enrichie = (
+        df_final
+        .join(
+            mapping_final.select([CLASS_COL, "HLC_fin", "HLC", "segment_dominant"]),
+            on=CLASS_COL, how="left"
+        )
+    )
 
-    return df_diag
+    return mapping_final, df_enrichie
 
 # =====================================================================
-# EXECUTION
+# ÉTAPE 2 : Export Excel (une feuille par segment)
 # =====================================================================
-print("=" * 110)
-print("DIAGNOSTIC TESTS CLASSIQUES — paires adjacentes (base initiale)")
-print("=" * 110)
-df_diag_classiques = diagnostic_tests_classiques(df_base.lazy())
+def export_excel_segments(mapping_final, output_excel_path):
+    """
+    Exporte le mapping dans un fichier Excel.
+    Une feuille par segment dominant.
+    Colonnes : HLC, volume, lower_bound, upper_bound, LGD_mean,
+               HLC_fin, modèle, HLC_new
+    """
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # supprime la feuille vide par défaut
+
+    # Style header
+    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    header_align = Alignment(horizontal="center")
+
+    segments = sorted(mapping_final["segment_dominant"].unique().to_list())
+
+    for seg in segments:
+        df_seg = (
+            mapping_final
+            .filter(pl.col("segment_dominant") == seg)
+            .sort("HLC")
+            .select([
+                pl.col("HLC"),
+                pl.col("volume"),
+                pl.col("lower_bound"),
+                pl.col("upper_bound"),
+                pl.col("LGD_mean").round(6),
+                pl.col("HLC_fin"),
+                pl.col("segment_dominant").alias("modèle"),
+                pl.col(CLASS_COL).alias("HLC_new"),
+            ])
+        )
+
+        ws = wb.create_sheet(title=f"Segment_{seg}")
+        headers = df_seg.columns
+
+        # Header
+        for col_idx, col_name in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+
+        # Données
+        for row_idx, row in enumerate(df_seg.iter_rows(), 2):
+            for col_idx, value in enumerate(row, 1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+
+        # Largeur automatique
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = max_len + 4
+
+    wb.save(output_excel_path)
+    print(f"Excel sauvegardé : {output_excel_path}")
+    print(f"Feuilles créées : {segments}")
+
+# =====================================================================
+# EXÉCUTION
+# =====================================================================
+print("=" * 80)
+print("ÉTAPE 1 : Réassignation des classes fusionnées")
+print("=" * 80)
+mapping_final, df_enrichie = reassigner_classes(df_base, reduced_lf)
+
+print(f"\nMapping final ({mapping_final.height} classes) :")
+with pl.Config(tbl_rows=100, tbl_cols=-1, tbl_width_chars=200):
+    print(mapping_final)
+
+print("\nDistribution par segment dominant :")
+print(
+    mapping_final.group_by("segment_dominant")
+    .agg(pl.len().alias("nb_classes"), pl.col("volume").sum().alias("vol_total"))
+    .sort("segment_dominant")
+)
+
+print("\n" + "=" * 80)
+print("ÉTAPE 2 : Export Excel")
+print("=" * 80)
+output_excel = output_path + r"\mapping_classes_fusionnees.xlsx"
+export_excel_segments(mapping_final, output_excel)
+
+print("\n" + "=" * 80)
+print("ÉTAPE 3 : Base enrichie avec HLC_fin")
+print("=" * 80)
+print(f"Colonnes disponibles : {df_enrichie.columns}")
+print(f"Shape : {df_enrichie.shape}")
+print(df_enrichie.select([CLASS_COL, "HLC_fin", "HLC", "segment_dominant", LGD_COL]).head(10))
