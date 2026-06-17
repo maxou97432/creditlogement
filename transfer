@@ -17,23 +17,18 @@ def carto_excel(
     seg_col      = "Seg",
     year_col     = "year",
     title        = "Carto",
-    count_label  = "n_obligors",    # "n_facilities" pour NB1, "n_obligors" pour les autres
-    by_segment   = True,            # True = une feuille par segment, False = 2 feuilles globales
+    count_label  = "n_obligors",    # "n_facilities" pour NB1
+    by_segment   = True,            # False pour NB3A et NB3B
 ):
     """
-    by_segment=True  : une feuille par segment (NB1, NB2, 3A)
-                       section 1 : tableau par (classe, année)
-                       section 2 : stats globales par classe
-                       section 3 : graphique LGD par classe et année
-                       + feuille GLOBAL avec toutes classes confondues
-
-    by_segment=False : 2 feuilles uniquement (NB3B - niveau modèle)
-                       feuille 1 : tableau classes fusionnées x années
-                       feuille 2 : graphique une courbe par classe fusionnée
+    by_segment=True  : une feuille par segment + feuille GLOBAL graphique
+                       classes triées par LGD moyenne croissante
+    by_segment=False : feuille tableau + feuille GLOBAL graphique
+                       classes triées par LGD moyenne croissante
     """
     df = lf.collect() if isinstance(lf, pl.LazyFrame) else lf
 
-    # Styles communs
+    # ---- Styles ----
     BLUE_DARK  = PatternFill("solid", fgColor="1F4E79")
     BLUE_LIGHT = PatternFill("solid", fgColor="BDD7EE")
     WHITE      = PatternFill("solid", fgColor="FFFFFF")
@@ -59,96 +54,138 @@ def carto_excel(
             ws.column_dimensions[get_column_letter(col[0].column)].width = \
                 min(max_len + 4, 30)
 
-    # Expression de comptage
-    n_expr = (
-        pl.col(obligor_col).n_unique() if obligor_col
-        else pl.len()
-    ).alias(count_label)
+    def classes_by_lgd(data, col, lgd):
+        """Retourne la liste des classes triées par LGD moyenne croissante."""
+        return (
+            data.group_by(col)
+            .agg(pl.col(lgd).mean().alias("_m"))
+            .sort("_m")
+            .get_column(col)
+            .to_list()
+        )
 
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+    def write_tableau(ws, df_data, classes, years, r_start, section_title):
+        """
+        Écrit le tableau pivoté (classes × années) dans ws à partir de r_start.
+        Retourne la prochaine ligne disponible.
+        """
+        r = r_start
+        n_cols = 1 + len(years) * 3
 
-    # ================================================================
-    # MODE by_segment=False : 2 feuilles globales (niveau modèle)
-    # ================================================================
-    if not by_segment:
-        all_years   = sorted(df[year_col].drop_nulls().unique().to_list())
-        all_classes = sorted(df[class_col].drop_nulls().unique().to_list())
+        # Titre section
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+        sc(ws.cell(r, 1), section_title,
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
 
-        # Agrégation : classe fusionnée × année (grain obligor -> correct)
-        t_global = (
-            df.group_by([class_col, year_col])
+        # Header années
+        sc(ws.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
+        for i, yr in enumerate(years):
+            cs = 2 + i * 3
+            ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
+            sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
+        r += 1
+
+        # Sous-header
+        sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
+        for i in range(len(years)):
+            cs = 2 + i * 3
+            for j, sub in enumerate(["mean_lgd", "std_lgd", count_label]):
+                sc(ws.cell(r, cs+j), sub, fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        # Données
+        n_expr = (
+            pl.col(obligor_col).n_unique() if obligor_col else pl.len()
+        ).alias(count_label)
+
+        t = (
+            df_data.group_by([class_col, year_col])
             .agg([
                 pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
                 pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
                 n_expr,
             ])
-            .sort([class_col, year_col])
         )
-        t_dict = {
-            (r[class_col], r[year_col]): r
-            for r in t_global.iter_rows(named=True)
-        }
+        t_dict = {(rw[class_col], rw[year_col]): rw for rw in t.iter_rows(named=True)}
 
-        # ---- Feuille 1 : tableau ----
-        ws1 = wb.create_sheet(title="Classes_par_annee")
-        r = 1
-        n_cols = 1 + len(all_years) * 3
-
-        ws1.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-        sc(ws1.cell(r, 1), f"{title} — Classes fusionnées par année",
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-        r += 1
-
-        # Header années
-        sc(ws1.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
-        for i, yr in enumerate(all_years):
-            cs = 2 + i * 3
-            ws1.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
-            sc(ws1.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
-        r += 1
-
-        # Sous-header
-        sc(ws1.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
-        for i in range(len(all_years)):
-            cs = 2 + i * 3
-            for j, sub in enumerate(["mean_lgd", "std_lgd", count_label]):
-                sc(ws1.cell(r, cs+j), sub, fill=BLUE_LIGHT, font=FONT_BOLD)
-        r += 1
-
-        # Données
-        for idx, cls in enumerate(all_classes):
+        for idx, cls in enumerate(classes):
             fill = WHITE if idx % 2 == 0 else GREY
-            sc(ws1.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
-            for i, yr in enumerate(all_years):
+            sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
+            for i, yr in enumerate(years):
                 cs = 2 + i * 3
                 d = t_dict.get((cls, yr), {})
-                sc(ws1.cell(r, cs),   d.get("mean_lgd",  ""), fill=fill)
-                sc(ws1.cell(r, cs+1), d.get("std_lgd",   ""), fill=fill)
-                sc(ws1.cell(r, cs+2), d.get(count_label, ""), fill=fill)
+                sc(ws.cell(r, cs),   d.get("mean_lgd",  ""), fill=fill)
+                sc(ws.cell(r, cs+1), d.get("std_lgd",   ""), fill=fill)
+                sc(ws.cell(r, cs+2), d.get(count_label, ""), fill=fill)
             r += 1
 
-        auto_width(ws1)
+        return r + 2, t_dict
 
-        # ---- Feuille 2 : graphique ----
-        ws2 = wb.create_sheet(title="Graphique_LGD")
-        r = 1
+    def write_stats_globales(ws, df_data, classes, r_start, section_title):
+        """Écrit les stats globales par classe (toutes années) à partir de r_start."""
+        r = r_start
+        n_expr = (
+            pl.col(obligor_col).n_unique() if obligor_col else pl.len()
+        ).alias(count_label)
 
-        ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
-        sc(ws2.cell(r, 1), f"{title} — LGD par classe fusionnée",
+        t2 = (
+            df_data.group_by(class_col)
+            .agg([
+                pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                pl.col(lgd_col).min().round(4).alias("min_lgd"),
+                pl.col(lgd_col).max().round(4).alias("max_lgd"),
+                n_expr,
+            ])
+        )
+        t2_dict = {rw[class_col]: rw for rw in t2.iter_rows(named=True)}
+
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        sc(ws.cell(r, 1), section_title,
            fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
         r += 1
-        graph_row = r
 
-        n_classes = len(all_classes)
-        fig_h = max(6, n_classes * 0.25)
+        for j, h in enumerate(
+            [class_col, "mean_lgd", "std_lgd", count_label, "min_lgd", "max_lgd"]
+        ):
+            sc(ws.cell(r, j+1), h, fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        for idx, cls in enumerate(classes):
+            fill = WHITE if idx % 2 == 0 else GREY
+            rw = t2_dict.get(cls, {})
+            sc(ws.cell(r, 1), cls, fill=fill, align=LEFT)
+            for j, col in enumerate(
+                ["mean_lgd", "std_lgd", count_label, "min_lgd", "max_lgd"], 2
+            ):
+                sc(ws.cell(r, j), rw.get(col, ""), fill=fill)
+            r += 1
+
+        return r + 2
+
+    def write_graphique(ws, df_data, classes, years, r_start, graph_title):
+        """Génère et insère le graphique LGD par classe dans ws."""
+        n_expr = (
+            pl.col(obligor_col).n_unique() if obligor_col else pl.len()
+        ).alias(count_label)
+
+        t = (
+            df_data.group_by([class_col, year_col])
+            .agg(pl.col(lgd_col).mean().round(4).alias("mean_lgd"))
+        )
+        t_dict = {(rw[class_col], rw[year_col]): rw["mean_lgd"]
+                  for rw in t.iter_rows(named=True)}
+
+        n_classes = len(classes)
+        fig_h = max(5, n_classes * 0.25)
         fig, ax = plt.subplots(figsize=(14, fig_h))
         colors = plt.cm.tab20.colors
 
-        for i, cls in enumerate(all_classes):
+        for i, cls in enumerate(classes):
             means, yrs_plot = [], []
-            for yr in all_years:
-                val = t_dict.get((cls, yr), {}).get("mean_lgd")
+            for yr in years:
+                val = t_dict.get((cls, yr))
                 if val is not None:
                     means.append(val)
                     yrs_plot.append(yr)
@@ -157,7 +194,7 @@ def carto_excel(
                         color=colors[i % len(colors)],
                         linewidth=1.5, alpha=0.85)
 
-        ax.set_title(f"LGD moyenne par classe fusionnée — {title}", fontsize=13)
+        ax.set_title(graph_title, fontsize=13)
         ax.set_xlabel("Année")
         ax.set_ylabel(f"{lgd_col} (moyenne)")
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
@@ -171,198 +208,93 @@ def carto_excel(
         buf.seek(0)
 
         img = XLImage(buf)
-        img.anchor = f"A{graph_row}"
-        ws2.add_image(img)
-        auto_width(ws2)
+        img.anchor = f"A{r_start}"
+        ws.add_image(img)
 
     # ================================================================
-    # MODE by_segment=True : une feuille par segment + GLOBAL
+    # CONSTRUCTION DU WORKBOOK
     # ================================================================
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    all_years   = sorted(df[year_col].drop_nulls().unique().to_list())
+
+    # ----------------------------------------------------------------
+    # MODE by_segment=False (NB3A, NB3B)
+    # ----------------------------------------------------------------
+    if not by_segment:
+        all_classes = classes_by_lgd(df, class_col, lgd_col)
+
+        # Feuille 1 : tableau
+        ws1 = wb.create_sheet(title="Classes_par_annee")
+        r, t_dict = write_tableau(
+            ws1, df, all_classes, all_years, r_start=1,
+            section_title=f"{title} — Classes fusionnées × années (LGD croissante)"
+        )
+        auto_width(ws1)
+
+        # Feuille 2 : graphique
+        ws2 = wb.create_sheet(title="Graphique_LGD")
+        ws2.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+        sc(ws2.cell(1, 1), f"{title} — LGD par classe fusionnée",
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        write_graphique(
+            ws2, df, all_classes, all_years, r_start=2,
+            graph_title=f"LGD moyenne par classe fusionnée — {title}"
+        )
+        auto_width(ws2)
+
+    # ----------------------------------------------------------------
+    # MODE by_segment=True (NB1, NB2)
+    # ----------------------------------------------------------------
     else:
         segments = sorted(df[seg_col].drop_nulls().unique().to_list())
 
         for seg in segments:
             df_seg  = df.filter(pl.col(seg_col) == seg)
             years   = sorted(df_seg[year_col].drop_nulls().unique().to_list())
-            classes = sorted(df_seg[class_col].drop_nulls().unique().to_list())
-
-            t1 = (
-                df_seg.group_by([class_col, year_col])
-                .agg([
-                    pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
-                    pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
-                    n_expr,
-                ])
-                .sort([class_col, year_col])
-            )
-            t1_dict = {(r[class_col], r[year_col]): r for r in t1.iter_rows(named=True)}
-
-            t2 = (
-                df_seg.group_by(class_col)
-                .agg([
-                    pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
-                    pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
-                    pl.col(lgd_col).min().round(4).alias("min_lgd"),
-                    pl.col(lgd_col).max().round(4).alias("max_lgd"),
-                    n_expr,
-                ])
-                .sort(class_col)
-            )
+            classes = classes_by_lgd(df_seg, class_col, lgd_col)
 
             ws = wb.create_sheet(title=f"Seg_{seg}")
             r = 1
-            n_cols = 1 + len(years) * 3
 
-            # Section 1 : tableau par année
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-            sc(ws.cell(r, 1), f"{title} — Segment {seg} — LGD par classe et par année",
-               fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-            r += 1
+            # Tableau par année
+            r, _ = write_tableau(
+                ws, df_seg, classes, years, r_start=r,
+                section_title=f"{title} — Seg {seg} — LGD par classe × année (LGD croissante)"
+            )
 
-            sc(ws.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
-            for i, yr in enumerate(years):
-                cs = 2 + i * 3
-                ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
-                sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
-            r += 1
+            # Stats globales
+            r = write_stats_globales(
+                ws, df_seg, classes, r_start=r,
+                section_title=f"Stats globales — Segment {seg} (LGD croissante)"
+            )
 
-            sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
-            for i in range(len(years)):
-                cs = 2 + i * 3
-                for j, sub in enumerate(["mean_lgd", "std_lgd", count_label]):
-                    sc(ws.cell(r, cs+j), sub, fill=BLUE_LIGHT, font=FONT_BOLD)
-            r += 1
-
-            for idx, cls in enumerate(classes):
-                fill = WHITE if idx % 2 == 0 else GREY
-                sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
-                for i, yr in enumerate(years):
-                    cs = 2 + i * 3
-                    d = t1_dict.get((cls, yr), {})
-                    sc(ws.cell(r, cs),   d.get("mean_lgd",  ""), fill=fill)
-                    sc(ws.cell(r, cs+1), d.get("std_lgd",   ""), fill=fill)
-                    sc(ws.cell(r, cs+2), d.get(count_label, ""), fill=fill)
-                r += 1
-
-            r += 2
-
-            # Section 2 : stats globales
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
-            sc(ws.cell(r, 1), f"Stats globales — Segment {seg}",
-               fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-            r += 1
-
-            for j, h in enumerate(
-                [class_col, "mean_lgd", "std_lgd", count_label, "min_lgd", "max_lgd"]
-            ):
-                sc(ws.cell(r, j+1), h, fill=BLUE_LIGHT, font=FONT_BOLD)
-            r += 1
-
-            for idx, row in enumerate(t2.iter_rows(named=True)):
-                fill = WHITE if idx % 2 == 0 else GREY
-                sc(ws.cell(r, 1), row[class_col], fill=fill, align=LEFT)
-                for j, col in enumerate(
-                    ["mean_lgd", "std_lgd", count_label, "min_lgd", "max_lgd"], 2
-                ):
-                    sc(ws.cell(r, j), row[col], fill=fill)
-                r += 1
-
-            r += 2
-
-            # Section 3 : graphique
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+            # Graphique segment
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
             sc(ws.cell(r, 1), f"LGD moyenne par classe — Segment {seg}",
                fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
             r += 1
-            graph_row = r
-
-            fig, ax = plt.subplots(figsize=(12, 5))
-            colors = plt.cm.tab20.colors
-
-            for i, cls in enumerate(classes):
-                means, yrs_plot = [], []
-                for yr in years:
-                    d = t1_dict.get((cls, yr), {})
-                    if d.get("mean_lgd") is not None:
-                        means.append(d["mean_lgd"])
-                        yrs_plot.append(yr)
-                if means:
-                    ax.plot(yrs_plot, means, marker="o", label=cls,
-                            color=colors[i % len(colors)], linewidth=1.5)
-
-            ax.set_title(f"LGD moyenne par classe — Segment {seg}", fontsize=13)
-            ax.set_xlabel("Année")
-            ax.set_ylabel(f"{lgd_col} (moyenne)")
-            ax.legend(loc="upper left", bbox_to_anchor=(1, 1), fontsize=7, ncol=2)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-            plt.close(fig)
-            buf.seek(0)
-
-            img = XLImage(buf)
-            img.anchor = f"A{graph_row}"
-            ws.add_image(img)
+            write_graphique(
+                ws, df_seg, classes, years, r_start=r,
+                graph_title=f"LGD moyenne par classe — Segment {seg}"
+            )
             auto_width(ws)
 
         # Feuille GLOBAL
         ws_g = wb.create_sheet(title="GLOBAL")
-        r = 1
-        all_years   = sorted(df[year_col].drop_nulls().unique().to_list())
-        all_classes = sorted(df[class_col].drop_nulls().unique().to_list())
-
-        t_all = (
-            df.group_by([class_col, year_col])
-            .agg(pl.col(lgd_col).mean().round(4).alias("mean_lgd"))
-            .sort([class_col, year_col])
-        )
-        t_all_dict = {(r_[class_col], r_[year_col]): r_["mean_lgd"]
-                      for r_ in t_all.iter_rows(named=True)}
-
-        ws_g.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
-        sc(ws_g.cell(r, 1), f"{title} — LGD par classe (tous segments)",
+        all_classes = classes_by_lgd(df, class_col, lgd_col)
+        ws_g.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+        sc(ws_g.cell(1, 1), f"{title} — LGD tous segments (LGD croissante)",
            fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-        r += 1
-
-        n_classes = len(all_classes)
-        fig_h = max(6, n_classes * 0.3)
-        fig, ax = plt.subplots(figsize=(14, fig_h))
-        colors = plt.cm.tab20.colors
-
-        for i, cls in enumerate(all_classes):
-            means, yrs_plot = [], []
-            for yr in all_years:
-                val = t_all_dict.get((cls, yr))
-                if val is not None:
-                    means.append(val)
-                    yrs_plot.append(yr)
-            if means:
-                ax.plot(yrs_plot, means, marker="o", label=cls,
-                        color=colors[i % len(colors)],
-                        linewidth=1.5, alpha=0.85)
-
-        ax.set_title(f"LGD moyenne par classe — Tous segments ({title})", fontsize=13)
-        ax.set_xlabel("Année")
-        ax.set_ylabel(f"{lgd_col} (moyenne)")
-        ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
-                  fontsize=6, ncol=max(1, n_classes // 20))
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-
-        img = XLImage(buf)
-        img.anchor = f"A{r}"
-        ws_g.add_image(img)
+        write_graphique(
+            ws_g, df, all_classes, all_years, r_start=2,
+            graph_title=f"LGD moyenne — Tous segments ({title})"
+        )
         auto_width(ws_g)
 
     wb.save(output_path)
-    print(f"Excel sauvegardé : {output_path}")
+    print(f"Sauvegardé : {output_path}")
     return wb
 
 
@@ -370,50 +302,50 @@ def carto_excel(
 # APPELS PAR NOTEBOOK
 # =====================================================================
 
-# NOTEBOOK 1 — Jenks (pas d'obligor, n_facilities)
+# NOTEBOOK 1 — Jenks
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB1_jenks.xlsx",
-    class_col    = "Jenks_Submodel",
-    lgd_col      = "lgd_obligor",
-    obligor_col  = None,
-    count_label  = "n_facilities",
-    by_segment   = True,
-    title        = "NB1 - Jenks Submodel",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB1_jenks.xlsx",
+    class_col   = "Jenks_Submodel",
+    lgd_col     = "lgd_obligor",
+    obligor_col = None,
+    count_label = "n_facilities",
+    by_segment  = True,
+    title       = "NB1 - Jenks Submodel",
 )
 
-# NOTEBOOK 2 — Calcul lgd_obligor
+# NOTEBOOK 2 — LGD obligor
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB2_lgd.xlsx",
-    class_col    = "Jenks_Submodel",
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    count_label  = "n_obligors",
-    by_segment   = True,
-    title        = "NB2 - LGD Obligor",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB2_lgd.xlsx",
+    class_col   = "Jenks_Submodel",
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    count_label = "n_obligors",
+    by_segment  = True,
+    title       = "NB2 - LGD Obligor",
 )
 
 # NOTEBOOK 3A — Regroupement modèle
 carto_excel(
-    lf           = lf_LGD,
-    output_path  = output_path + r"\carto_NB3A_regroupement.xlsx",
-    class_col    = "CHR_model",
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    count_label  = "n_obligors",
-    by_segment   = True,
-    title        = "NB3A - Regroupement Modèle",
+    lf          = lf_LGD,
+    output_path = output_path + r"\carto_NB3A_regroupement.xlsx",
+    class_col   = "CHR_model",
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    count_label = "n_obligors",
+    by_segment  = False,
+    title       = "NB3A - Regroupement Modèle",
 )
 
-# NOTEBOOK 3B — Tests hétérogénéité (niveau modèle, pas de segment)
+# NOTEBOOK 3B — Tests hétérogénéité
 carto_excel(
-    lf           = df_base.lazy(),    # df_base APRES join avec CHR_apres_fusion
-    output_path  = output_path + r"\carto_NB3B_heterogeneite.xlsx",
-    class_col    = "CHR_apres_fusion",
-    lgd_col      = "lgd_obligor",
-    obligor_col  = "ID_CLIENT",
-    count_label  = "n_obligors",
-    by_segment   = False,             # 2 feuilles globales
-    title        = "NB3B - Tests Hétérogénéité",
+    lf          = df_base.lazy(),
+    output_path = output_path + r"\carto_NB3B_heterogeneite.xlsx",
+    class_col   = "CHR_apres_fusion",
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    count_label = "n_obligors",
+    by_segment  = False,
+    title       = "NB3B - Tests Hétérogénéité",
 )
