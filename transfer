@@ -1,62 +1,50 @@
-# ================================================================
-    # FEUILLE GLOBALE : toutes les classes, tous segments confondus
-    # ================================================================
-    ws_global = wb.create_sheet(title="GLOBAL")
-    r = 1
+# =====================================================================
+# PROPAGATION DES FUSIONS DANS df_base
+# =====================================================================
 
-    # Titre
-    ws_global.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
-    sc(ws_global.cell(r, 1),
-       f"{title} — LGD par classe (tous segments)",
-       fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-    r += 1
-    graph_row_global = r
+# 1. Construire le mapping : ancienne classe -> nouvelle classe fusionnée
+mapping_fusion = {}
+for h in history:
+    # A chaque fusion, la new_class remplace class_a et class_b
+    # mais il faut suivre la chaine : si class_a était déjà une fusion,
+    # son label a déjà changé dans reduced_lf
+    mapping_fusion[h["class_a"]] = h["new_class"]
+    mapping_fusion[h["class_b"]] = h["new_class"]
 
-    # Calcul global : toutes classes, toutes années
-    all_years = sorted(df[year_col].drop_nulls().unique().to_list())
-    all_classes = sorted(df[class_col].drop_nulls().unique().to_list())
+# 2. Fonction pour résoudre la chaine de fusions
+# (ex: 18->18_19->18_19_20 : il faut pointer vers la classe finale)
+def resolve_final(cls, mapping):
+    visited = set()
+    while cls in mapping and cls not in visited:
+        visited.add(cls)
+        cls = mapping[cls]
+    return cls
 
-    t_global = (
-        df.group_by([class_col, year_col])
-        .agg(pl.col(lgd_col).mean().round(4).alias("mean_lgd"))
-        .sort([class_col, year_col])
-    )
-    t_global_dict = {
-        (r_[class_col], r_[year_col]): r_["mean_lgd"]
-        for r_ in t_global.iter_rows(named=True)
-    }
+mapping_final_resolved = {
+    cls: resolve_final(cls, mapping_fusion)
+    for cls in mapping_fusion
+}
 
-    # Graphique
-    n_classes = len(all_classes)
-    fig_h = max(6, n_classes * 0.3)  # hauteur adaptative selon le nombre de classes
-    fig, ax = plt.subplots(figsize=(14, fig_h))
-    colors = plt.cm.tab20.colors
+# 3. Appliquer le mapping sur df_base via un join
+mapping_df = pl.DataFrame({
+    CLASS_COL:          list(mapping_final_resolved.keys()),
+    "CHR_apres_fusion": list(mapping_final_resolved.values()),
+})
 
-    for i, cls in enumerate(all_classes):
-        means, yrs_plot = [], []
-        for yr in all_years:
-            val = t_global_dict.get((cls, yr))
-            if val is not None:
-                means.append(val)
-                yrs_plot.append(yr)
-        if means:
-            ax.plot(yrs_plot, means, marker="o", label=cls,
-                    color=colors[i % len(colors)], linewidth=1.5,
-                    alpha=0.85)
+# Ajouter les classes qui n'ont pas fusionné (elles gardent leur label)
+classes_initiales = df_base.select(CLASS_COL).unique()
+classes_non_fusionnees = (
+    classes_initiales
+    .filter(~pl.col(CLASS_COL).is_in(mapping_df[CLASS_COL]))
+    .with_columns(pl.col(CLASS_COL).alias("CHR_apres_fusion"))
+)
 
-    ax.set_title(f"LGD moyenne par classe — Tous segments ({title})", fontsize=13)
-    ax.set_xlabel("Année")
-    ax.set_ylabel(f"{lgd_col} (moyenne)")
-    ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
-              fontsize=6, ncol=max(1, n_classes // 20))
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
+mapping_complet = pl.concat([mapping_df, classes_non_fusionnees])
 
-    buf_global = io.BytesIO()
-    fig.savefig(buf_global, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    buf_global.seek(0)
+# 4. Joindre sur df_base
+df_base = df_base.join(mapping_complet, on=CLASS_COL, how="left")
 
-    img_global = XLImage(buf_global)
-    img_global.anchor = f"A{graph_row_global}"
-    ws_global.add_image(img_global)
+print(f"Classes avant fusion : {df_base[CLASS_COL].n_unique()}")
+print(f"Classes après fusion : {df_base['CHR_apres_fusion'].n_unique()}")
+print("\nAperçu du mapping :")
+print(mapping_complet.sort(CLASS_COL).head(20))
