@@ -1,279 +1,107 @@
-import polars as pl
-import openpyxl
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import io
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.drawing.image import Image as XLImage
-
-def carto_chr_excel(
-    df,
-    output_path,
-    chr_col       = "CHR_apres_fusion",
-    jenks_col     = "Jenks_Submodel",
-    lgd_col       = "lgd_obligor",
-    obligor_col   = "ID_CLIENT",
-    year_col      = "year",
-    title         = "Carto CHR",
-):
+def fusion_glouton(
+    df: pl.LazyFrame,
+    nb_croisements_max: int = 0,
+    ans_strict: int = 0,
+    lgd_col: str = "lgd_obligor",
+    jenks_col: str = None,
+    log: bool = False,
+    obligor_col: str = 'ID_CLIENT',
+) -> Tuple[pl.LazyFrame, Optional[Dict[str, str]]]:
     """
-    4 feuilles :
-      1. Tableau_Simple    : mean_lgd simple par (CHR, year) + LRA
-      2. Graphique_Simple  : courbe par CHR, LGD simple
-      3. Tableau_Pondere   : mean_lgd pondérée par n_obligors Jenks par (CHR, year) + LRA
-      4. Graphique_Pondere : courbe par CHR, LGD pondérée
-    Classes triées par LGD moyenne croissante.
+    Applique itérativement la fusion des classes tant qu'une paire violante existe.
+    Retourne le DataFrame final et le dictionnaire `{ancienne_classe: nouvelle_classe}`.
+    L'argument `log` est propagé à `meilleur_candidat_fusion`.
+    
+    La réagrégation après fusion utilise une moyenne pondérée par n_obligors distincts
+    (grain obligor) pour calculer la LGD de la classe fusionnée, conformément à la
+    formule : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
     """
-    # ---- Styles ----
-    BLUE_DARK  = PatternFill("solid", fgColor="1F4E79")
-    BLUE_LIGHT = PatternFill("solid", fgColor="BDD7EE")
-    WHITE      = PatternFill("solid", fgColor="FFFFFF")
-    GREY       = PatternFill("solid", fgColor="F2F2F2")
-    FONT_WHITE  = Font(color="FFFFFF", bold=True, size=10)
-    FONT_BOLD   = Font(bold=True, size=10)
-    FONT_NORMAL = Font(size=10)
-    CENTER = Alignment(horizontal="center", vertical="center")
-    LEFT   = Alignment(horizontal="left",   vertical="center")
-    thin   = Side(style="thin", color="BFBFBF")
-    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+    mapping: Dict[str, str] = {}
 
-    def sc(cell, value, fill=WHITE, font=FONT_NORMAL, align=CENTER):
-        cell.value = value; cell.fill = fill
-        cell.font  = font;  cell.alignment = align; cell.border = BORDER
-
-    def auto_width(ws):
-        for col in ws.columns:
-            max_len = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len+4, 30)
-
-    def classes_by_lgd(data, col, lgd):
-        return (
-            data.group_by(col)
-            .agg(pl.col(lgd).mean().alias("_m"))
-            .sort("_m")
-            .get_column(col)
-            .to_list()
+    while True:
+        paire, debug_df = meilleur_candidat_fusion(
+            df,
+            nb_croisements_max=nb_croisements_max,
+            ans_strict=ans_strict,
+            lgd_col=lgd_col,
+            jenks_col=jenks_col,
+            log=log,
         )
 
-    all_years   = sorted(df[year_col].drop_nulls().unique().to_list())
-    all_classes = classes_by_lgd(df, chr_col, lgd_col)
+        if not paire:                               # plus rien à fusionner
+            nb_final = df.collect().select(jenks_col).n_unique()
+            print(f"SUCCES : {nb_final} classes finales.")
+            break
 
-    # ================================================================
-    # CALCUL 1 : LGD simple par (CHR, year)
-    # ================================================================
-    t_simple = (
-        df.group_by([chr_col, year_col])
-        .agg([
-            pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
-            pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
-            pl.col(obligor_col).n_unique().alias("n_obligors"),
-        ])
-    )
-    t_simple_dict = {
-        (r[chr_col], r[year_col]): r
-        for r in t_simple.iter_rows(named=True)
-    }
+        c1, c2 = paire
+        nouveau_nom = f"{c1}_{c2}"
+        print(f"Fusion de {c1} et de {c2} (sévérité = {debug_df['severite_totale'][0]})")
 
-    # LRA simple : moyenne des moyennes annuelles
-    lra_simple = (
-        t_simple
-        .group_by(chr_col)
-        .agg([
-            pl.col("mean_lgd").mean().round(4).alias("LRA"),
-            pl.col("n_obligors").sum().alias("n_obligors_total"),
-        ])
-    )
-    lra_simple_dict = {r[chr_col]: r for r in lra_simple.iter_rows(named=True)}
+        # ----------------------------------------------------------------
+        # Mise à jour du dictionnaire de mapping (chaînes déjà fusionnées)
+        # ----------------------------------------------------------------
+        for ancien, actuel in list(mapping.items()):
+            if actuel in (c1, c2):
+                mapping[ancien] = nouveau_nom
 
-    # ================================================================
-    # CALCUL 2 : LGD pondérée par n_obligors Jenks par (CHR, year)
-    # ================================================================
-    # Étape 1 : stats par (Jenks, CHR, year)
-    t_jenks = (
-        df.group_by([jenks_col, chr_col, year_col])
-        .agg([
-            pl.col(lgd_col).mean().round(4).alias("mean_lgd_jenks"),
-            pl.col(obligor_col).n_unique().alias("n_obligors_jenks"),
-        ])
-    )
+        for elem in (c1, c2):
+            if elem not in mapping:
+                mapping[elem] = nouveau_nom
 
-    # Étape 2 : moyenne pondérée par n_obligors_jenks -> (CHR, year)
-    t_pondere = (
-        t_jenks
-        .with_columns(
-            (pl.col("mean_lgd_jenks") * pl.col("n_obligors_jenks")).alias("_weighted")
+        replace_tmp = {c1: nouveau_nom, c2: nouveau_nom}
+        mapping.update(replace_tmp)
+
+        # ----------------------------------------------------------------
+        # Application de la fusion sur le DataFrame
+        # On reste au GRAIN CONTRAT — on renomme juste la classe
+        # ----------------------------------------------------------------
+        df = df.with_columns(
+            pl.col(jenks_col)
+              .cast(pl.Utf8)
+              .replace(replace_tmp)
+              .alias(jenks_col)
         )
-        .group_by([chr_col, year_col])
-        .agg([
-            (pl.col("_weighted").sum() / pl.col("n_obligors_jenks").sum())
-            .round(4).alias("mean_lgd_pond"),
-            pl.col("n_obligors_jenks").sum().alias("n_obligors"),
-        ])
-    )
-    t_pondere_dict = {
-        (r[chr_col], r[year_col]): r
-        for r in t_pondere.iter_rows(named=True)
-    }
 
-    # LRA pondérée : moyenne des moyennes pondérées annuelles
-    lra_pondere = (
-        t_pondere
-        .group_by(chr_col)
-        .agg([
-            pl.col("mean_lgd_pond").mean().round(4).alias("LRA_pond"),
-            pl.col("n_obligors").sum().alias("n_obligors_total"),
-        ])
-    )
-    lra_pondere_dict = {r[chr_col]: r for r in lra_pondere.iter_rows(named=True)}
+        # ----------------------------------------------------------------
+        # Réagrégation pour meilleur_candidat_fusion à l'itération suivante
+        # On calcule la LGD pondérée par n_obligors SANS toucher à df
+        # Étape 1 : grain contrat -> grain (classe, year, obligor)
+        # Étape 2 : grain (classe, year, obligor) -> grain (classe, year)
+        #           avec moyenne pondérée par n_obligors
+        # ----------------------------------------------------------------
+        df_pond = (
+            df
+            # Étape 1 : LGD moyenne par obligor (toutes ses facilités dans la classe)
+            .group_by([jenks_col, "year", obligor_col])
+            .agg(
+                pl.col(lgd_col).mean().alias("_lgd_obligor")
+            )
+            # Étape 2 : stats par (classe, year)
+            .group_by([jenks_col, "year"])
+            .agg([
+                pl.col("_lgd_obligor").mean().alias("_lgd_mean"),
+                pl.col(obligor_col).n_unique().alias("_n_obligors"),
+            ])
+            # Moyenne pondérée par n_obligors
+            .with_columns(
+                (pl.col("_lgd_mean") * pl.col("_n_obligors")).alias("_num")
+            )
+            .group_by(jenks_col)
+            .agg(
+                (pl.col("_num").sum() / pl.col("_n_obligors").sum())
+                .alias(lgd_col)
+            )
+        )
 
-    # ================================================================
-    # FONCTIONS D'ÉCRITURE
-    # ================================================================
-    def write_tableau(ws, t_dict, lgd_key, lra_key, classes, years,
-                      r_start, section_title, lra_dict):
-        r = r_start
-        n_cols = 1 + len(years) * 2 + 1  # classe + (mean, n) par année + LRA
+        # Left join sur df pour ramener la lgd pondérée sans perdre le grain contrat
+        df = (
+            df
+            .drop(lgd_col)                          # retire l'ancienne lgd
+            .join(
+                df_pond.select([jenks_col, lgd_col]),
+                on=jenks_col,
+                how="left"
+            )
+        )
 
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-        sc(ws.cell(r, 1), section_title,
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-        r += 1
-
-        # Header années
-        sc(ws.cell(r, 1), chr_col, fill=BLUE_DARK, font=FONT_WHITE)
-        for i, yr in enumerate(years):
-            cs = 2 + i * 2
-            ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+1)
-            sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
-        sc(ws.cell(r, 2 + len(years)*2), "LRA", fill=BLUE_DARK, font=FONT_WHITE)
-        r += 1
-
-        # Sous-header
-        sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
-        for i in range(len(years)):
-            cs = 2 + i * 2
-            sc(ws.cell(r, cs),   "mean_lgd",   fill=BLUE_LIGHT, font=FONT_BOLD)
-            sc(ws.cell(r, cs+1), "n_obligors",  fill=BLUE_LIGHT, font=FONT_BOLD)
-        sc(ws.cell(r, 2 + len(years)*2), "mean", fill=BLUE_LIGHT, font=FONT_BOLD)
-        r += 1
-
-        # Données
-        for idx, cls in enumerate(classes):
-            fill = WHITE if idx % 2 == 0 else GREY
-            sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
-            for i, yr in enumerate(years):
-                cs = 2 + i * 2
-                d = t_dict.get((cls, yr), {})
-                sc(ws.cell(r, cs),   d.get(lgd_key,      ""), fill=fill)
-                sc(ws.cell(r, cs+1), d.get("n_obligors",  ""), fill=fill)
-            lra_val = lra_dict.get(cls, {}).get(lra_key, "")
-            sc(ws.cell(r, 2 + len(years)*2), lra_val,
-               fill=fill, font=Font(bold=True, size=10))
-            r += 1
-
-        return r + 2
-
-    def write_graphique(ws, t_dict, lgd_key, classes, years, r_start, graph_title):
-        ws.merge_cells(start_row=r_start, start_column=1,
-                       end_row=r_start, end_column=10)
-        sc(ws.cell(r_start, 1), graph_title,
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-
-        n_classes = len(classes)
-        fig_h = max(5, n_classes * 0.25)
-        fig, ax = plt.subplots(figsize=(14, fig_h))
-        colors = plt.cm.tab20.colors
-
-        for i, cls in enumerate(classes):
-            means, yrs_plot = [], []
-            for yr in years:
-                val = t_dict.get((cls, yr), {}).get(lgd_key)
-                if val is not None:
-                    means.append(val)
-                    yrs_plot.append(yr)
-            if means:
-                ax.plot(yrs_plot, means, marker="o", label=cls,
-                        color=colors[i % len(colors)],
-                        linewidth=1.5, alpha=0.85)
-
-        ax.set_title(graph_title, fontsize=13)
-        ax.set_xlabel("Année")
-        ax.set_ylabel(f"{lgd_col}")
-        ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
-                  fontsize=6, ncol=max(1, n_classes // 20))
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-
-        img = XLImage(buf)
-        img.anchor = f"A{r_start + 1}"
-        ws.add_image(img)
-
-    # ================================================================
-    # CONSTRUCTION DU WORKBOOK
-    # ================================================================
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-
-    # Feuille 1 : Tableau simple
-    ws1 = wb.create_sheet(title="Tableau_Simple")
-    write_tableau(
-        ws1, t_simple_dict, "mean_lgd", "LRA",
-        all_classes, all_years, r_start=1,
-        section_title=f"{title} — LGD moyenne simple par classe × année",
-        lra_dict=lra_simple_dict,
-    )
-    auto_width(ws1)
-
-    # Feuille 2 : Graphique simple
-    ws2 = wb.create_sheet(title="Graphique_Simple")
-    write_graphique(
-        ws2, t_simple_dict, "mean_lgd",
-        all_classes, all_years, r_start=1,
-        graph_title=f"{title} — LGD moyenne simple par classe fusionnée",
-    )
-    auto_width(ws2)
-
-    # Feuille 3 : Tableau pondéré
-    ws3 = wb.create_sheet(title="Tableau_Pondere")
-    write_tableau(
-        ws3, t_pondere_dict, "mean_lgd_pond", "LRA_pond",
-        all_classes, all_years, r_start=1,
-        section_title=f"{title} — LGD pondérée par n_obligors Jenks × année",
-        lra_dict=lra_pondere_dict,
-    )
-    auto_width(ws3)
-
-    # Feuille 4 : Graphique pondéré
-    ws4 = wb.create_sheet(title="Graphique_Pondere")
-    write_graphique(
-        ws4, t_pondere_dict, "mean_lgd_pond",
-        all_classes, all_years, r_start=1,
-        graph_title=f"{title} — LGD pondérée par n_obligors Jenks",
-    )
-    auto_width(ws4)
-
-    wb.save(output_path)
-    print(f"Sauvegardé : {output_path}")
-    return wb
-
-
-# =====================================================================
-# APPEL
-# =====================================================================
-carto_chr_excel(
-    df          = df_base,          # base au grain obligor avec CHR_apres_fusion
-    output_path = output_path + r"\carto_NB3B_chr.xlsx",
-    chr_col     = "CHR_apres_fusion",
-    jenks_col   = "Jenks_Submodel",
-    lgd_col     = "lgd_obligor",
-    obligor_col = "ID_CLIENT",
-    year_col    = "year",
-    title       = "NB3B - Tests Hétérogénéité",
-)
+    return df, mapping
