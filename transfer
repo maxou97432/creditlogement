@@ -11,10 +11,9 @@ def fusion_glouton(
     Applique itérativement la fusion des classes tant qu'une paire violante existe.
     Retourne le DataFrame final et le dictionnaire `{ancienne_classe: nouvelle_classe}`.
     L'argument `log` est propagé à `meilleur_candidat_fusion`.
-    
-    La réagrégation après fusion utilise une moyenne pondérée par n_obligors distincts
-    (grain obligor) pour calculer la LGD de la classe fusionnée, conformément à la
-    formule : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
+
+    La réagrégation après fusion utilise une moyenne pondérée par nb_obligor
+    conformément à : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
     """
     mapping: Dict[str, str] = {}
 
@@ -53,55 +52,25 @@ def fusion_glouton(
 
         # ----------------------------------------------------------------
         # Application de la fusion sur le DataFrame
-        # On reste au GRAIN CONTRAT — on renomme juste la classe
         # ----------------------------------------------------------------
-        df = df.with_columns(
-            pl.col(jenks_col)
-              .cast(pl.Utf8)
-              .replace(replace_tmp)
-              .alias(jenks_col)
-        )
-
-        # ----------------------------------------------------------------
-        # Réagrégation pour meilleur_candidat_fusion à l'itération suivante
-        # On calcule la LGD pondérée par n_obligors SANS toucher à df
-        # Étape 1 : grain contrat -> grain (classe, year, obligor)
-        # Étape 2 : grain (classe, year, obligor) -> grain (classe, year)
-        #           avec moyenne pondérée par n_obligors
-        # ----------------------------------------------------------------
-        df_pond = (
-            df
-            # Étape 1 : LGD moyenne par obligor (toutes ses facilités dans la classe)
-            .group_by([jenks_col, "year", obligor_col])
-            .agg(
-                pl.col(lgd_col).mean().alias("_lgd_obligor")
+        df = (
+            df.with_columns(
+                pl.col(jenks_col)
+                  .cast(pl.Utf8)
+                  .replace(replace_tmp)
+                  .alias(jenks_col)         # on écrase la colonne d'origine
             )
-            # Étape 2 : stats par (classe, year)
+            # Moyenne pondérée par nb_obligor :
+            # LGD_[k->m],t = Σ(LGD_l,t * nb_obligor_l,t) / Σ(nb_obligor_l,t)
             .group_by([jenks_col, "year"])
             .agg([
-                pl.col("_lgd_obligor").mean().alias("_lgd_mean"),
-                pl.col(obligor_col).n_unique().alias("_n_obligors"),
+                (pl.col(lgd_col) * pl.col("nb_obligor")).sum().alias("_num"),
+                pl.col("nb_obligor").sum().alias("nb_obligor"),
             ])
-            # Moyenne pondérée par n_obligors
             .with_columns(
-                (pl.col("_lgd_mean") * pl.col("_n_obligors")).alias("_num")
+                (pl.col("_num") / pl.col("nb_obligor")).alias(lgd_col)
             )
-            .group_by(jenks_col)
-            .agg(
-                (pl.col("_num").sum() / pl.col("_n_obligors").sum())
-                .alias(lgd_col)
-            )
-        )
-
-        # Left join sur df pour ramener la lgd pondérée sans perdre le grain contrat
-        df = (
-            df
-            .drop(lgd_col)                          # retire l'ancienne lgd
-            .join(
-                df_pond.select([jenks_col, lgd_col]),
-                on=jenks_col,
-                how="left"
-            )
+            .drop("_num")
         )
 
     return df, mapping
