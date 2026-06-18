@@ -236,3 +236,44 @@ def carto_chr_excel(
     write_graphique(
         ws2, t_simple_dict, "mean_lgd",
         all_classes, all_years, r_start=1,
+        graph_title=f"{title} — LGD moyenne simple par classe fusionnée",
+    )
+    auto_width(ws2)
+
+    # Feuille 3 : Tableau pondéré
+    ws3 = wb.create_sheet(title="Tableau_Pondere")
+    write_tableau(
+        ws3, t_pondere_dict, "mean_lgd_pond", "LRA_pond",
+        all_classes, all_years, r_start=1,
+        section_title=f"{title} — LGD pondérée par n_obligors Jenks × année",
+        lra_dict=lra_pondere_dict,
+    )
+    auto_width(ws3)
+
+    # Feuille 4 : Graphique pondéré
+    ws4 = wb.create_sheet(title="Graphique_Pondere")
+    write_graphique(
+        ws4, t_pondere_dict, "mean_lgd_pond",
+        all_classes, all_years, r_start=1,
+        graph_title=f"{title} — LGD pondérée par n_obligors Jenks",
+    )
+    auto_width(ws4)
+
+    wb.save(output_path)
+    print(f"Sauvegardé : {output_path}")
+    return wb
+
+
+# =====================================================================
+# APPEL
+# =====================================================================
+carto_chr_excel(
+    df          = df_base,          # base au grain obligor avec CHR_apres_fusion
+    output_path = output_path + r"\carto_NB3B_chr.xlsx",
+    chr_col     = "CHR_apres_fusion",
+    jenks_col   = "Jenks_Submodel",
+    lgd_col     = "lgd_obligor",
+    obligor_col = "ID_CLIENT",
+    year_col    = "year",
+    title       = "NB3B - Tests Hétérogénéité",
+)
