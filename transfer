@@ -1,99 +1,376 @@
-def fusion_glouton(
-    df: pl.LazyFrame,
-    nb_croisements_max: int = 0,
-    ans_strict: int = 0,
-    lgd_col: str = "lgd_obligor",
-    jenks_col: str = None,
-    log: bool = False,
-    obligor_col: str = 'ID_CLIENT',
-) -> Tuple[pl.LazyFrame, Optional[Dict[str, str]]]:
+import polars as pl
+import openpyxl
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import io
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
+
+
+def carto_excel(
+    lf,
+    output_path,
+    class_col,
+    lgd_col,
+    obligor_col   = None,
+    seg_col       = "Seg",
+    year_col      = "year",
+    title         = "Carto",
+    count_label   = "n_obligors",
+    by_segment    = True,
+):
     """
-    Applique itérativement la fusion des classes tant qu'une paire violante existe.
-    Retourne le DataFrame final au grain (jenks_col, year) avec LGD pondérée
-    et le dictionnaire {ancienne_classe: nouvelle_classe}.
+    Génère un Excel de cartographie LGD par classe et par année.
 
-    Entrée  : df au grain facilité, avec lgd_obligor calculée par obligor.
-    Sortie  : df au grain (jenks_col, year) avec :
-                - lgd_col        : LGD pondérée par nb_obligors
-                - nb_obligor     : nb obligors distincts par (classe, year)
+    by_segment=True  (NB1, NB2) : une feuille par segment + feuille GLOBAL graphique
+    by_segment=False (NB3A, NB3B) : feuille tableau + feuille graphique
 
-    Pondération : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
+    Calcul de la LGD :
+    - Si obligor_col fourni (NB2, NB3A, NB3B) :
+        grain facilité -> grain (classe, year, obligor) -> grain (classe, year)
+        mean(lgd_obligor) par obligor = vraie moyenne pondérée par n_obligors
+    - Si obligor_col=None (NB1) :
+        grain facilité directement, pl.len() = n_facilités
+
+    LRA globale = moyenne simple des moyennes annuelles (chaque année pèse 1).
     """
-    mapping: Dict[str, str] = {}
 
-    while True:
-        # ----------------------------------------------------------------
-        # Agrégation au grain (jenks_col, year) pour meilleur_candidat_fusion
-        # Grain facilité -> grain obligor -> grain (classe, year)
-        # ----------------------------------------------------------------
-        df_agg = (
-            df
-            # Étape 1 : grain facilité -> grain (classe, year, obligor)
-            # lgd_obligor est déjà calculée correctement par obligor
-            .group_by([jenks_col, "year", obligor_col])
-            .agg(
-                pl.col(lgd_col).mean().alias("_lgd_obligor")
+    df = lf.collect() if isinstance(lf, pl.LazyFrame) else lf
+
+    # ----------------------------------------------------------------
+    # Styles
+    # ----------------------------------------------------------------
+    BLUE_DARK  = PatternFill("solid", fgColor="1F4E79")
+    BLUE_LIGHT = PatternFill("solid", fgColor="BDD7EE")
+    WHITE      = PatternFill("solid", fgColor="FFFFFF")
+    GREY       = PatternFill("solid", fgColor="F2F2F2")
+    FONT_WHITE  = Font(color="FFFFFF", bold=True, size=10)
+    FONT_BOLD   = Font(bold=True, size=10)
+    FONT_NORMAL = Font(size=10)
+    CENTER = Alignment(horizontal="center", vertical="center")
+    LEFT   = Alignment(horizontal="left",   vertical="center")
+    thin   = Side(style="thin", color="BFBFBF")
+    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def sc(cell, value, fill=WHITE, font=FONT_NORMAL, align=CENTER):
+        cell.value = value
+        cell.fill  = fill
+        cell.font  = font
+        cell.alignment = align
+        cell.border    = BORDER
+
+    def auto_width(ws):
+        for col in ws.columns:
+            max_len = max(
+                len(str(c.value)) if c.value is not None else 0
+                for c in col
             )
-            # Étape 2 : grain (classe, year, obligor) -> grain (classe, year)
-            # moyenne pondérée par nb_obligors
-            .group_by([jenks_col, "year"])
-            .agg([
-                pl.col("_lgd_obligor").mean().alias("_lgd_mean"),
-                pl.col(obligor_col).n_unique().alias("nb_obligor"),
-            ])
-            .with_columns(
-                (pl.col("_lgd_mean") * pl.col("nb_obligor")).alias("_num")
+            ws.column_dimensions[
+                get_column_letter(col[0].column)
+            ].width = min(max_len + 4, 30)
+
+    def classes_by_lgd(data, col):
+        """Retourne les classes triées par LGD moyenne croissante."""
+        return (
+            data.group_by(col)
+            .agg(pl.col(lgd_col).mean().alias("_m"))
+            .sort("_m")
+            .get_column(col)
+            .to_list()
+        )
+
+    # ----------------------------------------------------------------
+    # Calcul des stats agrégées (grain obligor si possible)
+    # ----------------------------------------------------------------
+    def compute_t_annuel(data):
+        """
+        Calcule mean_lgd, std_lgd, count_label par (class_col, year_col).
+        Si obligor_col fourni : passe d'abord au grain obligor.
+        """
+        if obligor_col is not None:
+            # grain facilité -> grain (classe, year, obligor)
+            tmp = (
+                data
+                .group_by([class_col, year_col, obligor_col])
+                .agg(pl.col(lgd_col).mean().alias("_lgd_obligor"))
             )
-            .group_by([jenks_col, "year"])
-            .agg([
-                (pl.col("_num").sum() / pl.col("nb_obligor").sum())
-                .alias(lgd_col),
-                pl.col("nb_obligor").sum().alias("nb_obligor"),
-            ])
-            .drop("_num")
+            return (
+                tmp
+                .group_by([class_col, year_col])
+                .agg([
+                    pl.col("_lgd_obligor").mean().round(4).alias("mean_lgd"),
+                    pl.col("_lgd_obligor").std(ddof=1).round(4).alias("std_lgd"),
+                    pl.col(obligor_col).n_unique().alias(count_label),
+                ])
+            )
+        else:
+            # NB1 : grain facilité direct
+            return (
+                data
+                .group_by([class_col, year_col])
+                .agg([
+                    pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
+                    pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
+                    pl.len().alias(count_label),
+                ])
+            )
+
+    def compute_lra(t_annuel):
+        """LRA = moyenne simple des moyennes annuelles (chaque année pèse 1)."""
+        return (
+            t_annuel
+            .group_by(class_col)
+            .agg(pl.col("mean_lgd").mean().round(4).alias("lra"))
         )
 
-        paire, debug_df = meilleur_candidat_fusion(
-            df_agg,
-            nb_croisements_max=nb_croisements_max,
-            ans_strict=ans_strict,
-            lgd_col=lgd_col,
-            jenks_col=jenks_col,
-            log=log,
+    # ----------------------------------------------------------------
+    # Fonctions d'écriture Excel
+    # ----------------------------------------------------------------
+    def write_tableau(ws, data, classes, years, r_start, section_title):
+        """
+        Écrit le tableau pivoté (classes × années) dans ws à partir de r_start.
+        Retourne la prochaine ligne disponible.
+        """
+        t_annuel = compute_t_annuel(data)
+        lra_df   = compute_lra(t_annuel)
+
+        t_dict   = {
+            (rw[class_col], rw[year_col]): rw
+            for rw in t_annuel.iter_rows(named=True)
+        }
+        lra_dict = {rw[class_col]: rw["lra"] for rw in lra_df.iter_rows(named=True)}
+
+        r      = r_start
+        n_cols = 1 + len(years) * 3 + 1  # classe + (mean, std, count) par année + LRA
+
+        # Titre section
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+        sc(ws.cell(r, 1), section_title,
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
+
+        # Header années
+        sc(ws.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
+        for i, yr in enumerate(years):
+            cs = 2 + i * 3
+            ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
+            sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
+        sc(ws.cell(r, 2 + len(years)*3), "LRA", fill=BLUE_DARK, font=FONT_WHITE)
+        r += 1
+
+        # Sous-header
+        sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
+        for i in range(len(years)):
+            cs = 2 + i * 3
+            sc(ws.cell(r, cs),   "mean_lgd",   fill=BLUE_LIGHT, font=FONT_BOLD)
+            sc(ws.cell(r, cs+1), "std_lgd",    fill=BLUE_LIGHT, font=FONT_BOLD)
+            sc(ws.cell(r, cs+2), count_label,  fill=BLUE_LIGHT, font=FONT_BOLD)
+        sc(ws.cell(r, 2 + len(years)*3), "mean", fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        # Données
+        for idx, cls in enumerate(classes):
+            fill = WHITE if idx % 2 == 0 else GREY
+            sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
+            for i, yr in enumerate(years):
+                cs = 2 + i * 3
+                d  = t_dict.get((cls, yr), {})
+                sc(ws.cell(r, cs),   d.get("mean_lgd",  ""), fill=fill)
+                sc(ws.cell(r, cs+1), d.get("std_lgd",   ""), fill=fill)
+                sc(ws.cell(r, cs+2), d.get(count_label, ""), fill=fill)
+            sc(ws.cell(r, 2 + len(years)*3),
+               lra_dict.get(cls, ""),
+               fill=fill, font=Font(bold=True, size=10))
+            r += 1
+
+        return r + 2
+
+    def write_stats_globales(ws, data, classes, r_start, section_title):
+        """
+        Écrit les stats globales (toutes années) par classe.
+        LRA = moyenne des moyennes annuelles.
+        """
+        t_annuel = compute_t_annuel(data)
+        lra_df   = compute_lra(t_annuel)
+
+        # Stats globales : LRA + n_total + min + max
+        if obligor_col is not None:
+            tmp = (
+                data
+                .group_by([class_col, obligor_col])
+                .agg(pl.col(lgd_col).mean().alias("_lgd_obligor"))
+            )
+            stats_glob = (
+                tmp
+                .group_by(class_col)
+                .agg([
+                    pl.col("_lgd_obligor").min().round(4).alias("min_lgd"),
+                    pl.col("_lgd_obligor").max().round(4).alias("max_lgd"),
+                    pl.col(obligor_col).n_unique().alias(count_label),
+                ])
+            )
+        else:
+            stats_glob = (
+                data
+                .group_by(class_col)
+                .agg([
+                    pl.col(lgd_col).min().round(4).alias("min_lgd"),
+                    pl.col(lgd_col).max().round(4).alias("max_lgd"),
+                    pl.len().alias(count_label),
+                ])
+            )
+
+        stats_glob = stats_glob.join(lra_df, on=class_col, how="left")
+        t2_dict = {rw[class_col]: rw for rw in stats_glob.iter_rows(named=True)}
+
+        r      = r_start
+        n_cols = 6
+
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+        sc(ws.cell(r, 1), section_title,
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+        r += 1
+
+        # Header
+        for j, h in enumerate(
+            [class_col, "LRA", "std_lgd", count_label, "min_lgd", "max_lgd"]
+        ):
+            sc(ws.cell(r, j+1), h, fill=BLUE_LIGHT, font=FONT_BOLD)
+        r += 1
+
+        # Données
+        for idx, cls in enumerate(classes):
+            fill = WHITE if idx % 2 == 0 else GREY
+            rw   = t2_dict.get(cls, {})
+            sc(ws.cell(r, 1), cls,                     fill=fill, align=LEFT)
+            sc(ws.cell(r, 2), rw.get("lra",        ""), fill=fill)
+            sc(ws.cell(r, 3), rw.get("std_lgd",    ""), fill=fill)
+            sc(ws.cell(r, 4), rw.get(count_label,  ""), fill=fill)
+            sc(ws.cell(r, 5), rw.get("min_lgd",    ""), fill=fill)
+            sc(ws.cell(r, 6), rw.get("max_lgd",    ""), fill=fill)
+            r += 1
+
+        return r + 2
+
+    def write_graphique(ws, data, classes, years, r_start, graph_title):
+        """Génère et insère le graphique LGD par classe dans ws."""
+        t_annuel = compute_t_annuel(data)
+        t_dict   = {
+            (rw[class_col], rw[year_col]): rw
+            for rw in t_annuel.iter_rows(named=True)
+        }
+
+        n_classes = len(classes)
+        fig_h     = max(5, n_classes * 0.25)
+        fig, ax   = plt.subplots(figsize=(14, fig_h))
+        colors    = plt.cm.tab20.colors
+
+        for i, cls in enumerate(classes):
+            means, yrs_plot = [], []
+            for yr in years:
+                val = t_dict.get((cls, yr), {}).get("mean_lgd")
+                if val is not None:
+                    means.append(val)
+                    yrs_plot.append(yr)
+            if means:
+                ax.plot(yrs_plot, means, marker="o", label=cls,
+                        color=colors[i % len(colors)],
+                        linewidth=1.5, alpha=0.85)
+
+        ax.set_title(graph_title, fontsize=13)
+        ax.set_xlabel("Année")
+        ax.set_ylabel(lgd_col)
+        ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
+                  fontsize=6, ncol=max(1, n_classes // 20))
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+
+        ws.merge_cells(start_row=r_start, start_column=1,
+                       end_row=r_start, end_column=10)
+        sc(ws.cell(r_start, 1), graph_title,
+           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+
+        img        = XLImage(buf)
+        img.anchor = f"A{r_start + 1}"
+        ws.add_image(img)
+
+    # ----------------------------------------------------------------
+    # Construction du workbook
+    # ----------------------------------------------------------------
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    all_years = sorted(df[year_col].drop_nulls().unique().to_list())
+
+    if by_segment:
+        # NB1, NB2 : une feuille par segment + GLOBAL graphique
+        segments = sorted(df[seg_col].drop_nulls().unique().to_list())
+
+        for seg in segments:
+            df_seg  = df.filter(pl.col(seg_col) == seg)
+            classes = classes_by_lgd(df_seg, class_col)
+
+            ws = wb.create_sheet(title=seg[:31])
+
+            r = write_tableau(
+                ws, df_seg, classes, all_years,
+                r_start=1,
+                section_title=f"{title} — {seg} — LGD par classe × année",
+            )
+            r = write_stats_globales(
+                ws, df_seg, classes,
+                r_start=r,
+                section_title=f"{title} — {seg} — Stats globales",
+            )
+            write_graphique(
+                ws, df_seg, classes, all_years,
+                r_start=r,
+                graph_title=f"{title} — {seg} — LGD par classe",
+            )
+            auto_width(ws)
+
+        # Feuille GLOBAL graphique
+        ws_glob    = wb.create_sheet(title="GLOBAL")
+        classes_gl = classes_by_lgd(df, class_col)
+        write_graphique(
+            ws_glob, df, classes_gl, all_years,
+            r_start=1,
+            graph_title=f"{title} — Toutes classes — LGD par classe",
         )
+        auto_width(ws_glob)
 
-        if not paire:                               # plus rien à fusionner
-            nb_final = df_agg.collect().select(jenks_col).n_unique()
-            print(f"SUCCES : {nb_final} classes finales.")
-            break
+    else:
+        # NB3A, NB3B : tableau global + graphique global
+        classes = classes_by_lgd(df, class_col)
 
-        c1, c2 = paire
-        nouveau_nom = f"{c1}_{c2}"
-        print(f"Fusion de {c1} et de {c2} (sévérité = {debug_df['severite_totale'][0]})")
-
-        # ----------------------------------------------------------------
-        # Mise à jour du dictionnaire de mapping (chaînes déjà fusionnées)
-        # ----------------------------------------------------------------
-        for ancien, actuel in list(mapping.items()):
-            if actuel in (c1, c2):
-                mapping[ancien] = nouveau_nom
-
-        for elem in (c1, c2):
-            if elem not in mapping:
-                mapping[elem] = nouveau_nom
-
-        replace_tmp = {c1: nouveau_nom, c2: nouveau_nom}
-        mapping.update(replace_tmp)
-
-        # ----------------------------------------------------------------
-        # Application de la fusion sur df GRAIN FACILITÉ
-        # On renomme juste la classe — grain facilité intact
-        # ----------------------------------------------------------------
-        df = df.with_columns(
-            pl.col(jenks_col)
-              .cast(pl.Utf8)
-              .replace(replace_tmp)
-              .alias(jenks_col)
+        ws_tab = wb.create_sheet(title="Classes_par_annee")
+        r = write_tableau(
+            ws_tab, df, classes, all_years,
+            r_start=1,
+            section_title=f"{title} — LGD par classe × année",
         )
+        write_stats_globales(
+            ws_tab, df, classes,
+            r_start=r,
+            section_title=f"{title} — Stats globales",
+        )
+        auto_width(ws_tab)
 
-    return df_agg, mapping
+        ws_graph = wb.create_sheet(title="Graphique_LGD")
+        write_graphique(
+            ws_graph, df, classes, all_years,
+            r_start=1,
+            graph_title=f"{title} — LGD par classe",
+        )
+        auto_width(ws_graph)
+
+    wb.save(output_path)
+    print(f"Sauvegardé : {output_path}")
+    return wb
