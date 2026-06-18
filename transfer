@@ -9,17 +9,52 @@ def fusion_glouton(
 ) -> Tuple[pl.LazyFrame, Optional[Dict[str, str]]]:
     """
     Applique itérativement la fusion des classes tant qu'une paire violante existe.
-    Retourne le DataFrame final et le dictionnaire `{ancienne_classe: nouvelle_classe}`.
-    L'argument `log` est propagé à `meilleur_candidat_fusion`.
+    Retourne le DataFrame final au grain (jenks_col, year) avec LGD pondérée
+    et le dictionnaire {ancienne_classe: nouvelle_classe}.
 
-    La réagrégation après fusion utilise une moyenne pondérée par nb_obligor
-    conformément à : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
+    Entrée  : df au grain facilité, avec lgd_obligor calculée par obligor.
+    Sortie  : df au grain (jenks_col, year) avec :
+                - lgd_col        : LGD pondérée par nb_obligors
+                - nb_obligor     : nb obligors distincts par (classe, year)
+
+    Pondération : LGD_[k->m],t = Σ(LGD_l,t * E_l,t) / Σ(E_l,t)
     """
     mapping: Dict[str, str] = {}
 
     while True:
+        # ----------------------------------------------------------------
+        # Agrégation au grain (jenks_col, year) pour meilleur_candidat_fusion
+        # Grain facilité -> grain obligor -> grain (classe, year)
+        # ----------------------------------------------------------------
+        df_agg = (
+            df
+            # Étape 1 : grain facilité -> grain (classe, year, obligor)
+            # lgd_obligor est déjà calculée correctement par obligor
+            .group_by([jenks_col, "year", obligor_col])
+            .agg(
+                pl.col(lgd_col).mean().alias("_lgd_obligor")
+            )
+            # Étape 2 : grain (classe, year, obligor) -> grain (classe, year)
+            # moyenne pondérée par nb_obligors
+            .group_by([jenks_col, "year"])
+            .agg([
+                pl.col("_lgd_obligor").mean().alias("_lgd_mean"),
+                pl.col(obligor_col).n_unique().alias("nb_obligor"),
+            ])
+            .with_columns(
+                (pl.col("_lgd_mean") * pl.col("nb_obligor")).alias("_num")
+            )
+            .group_by([jenks_col, "year"])
+            .agg([
+                (pl.col("_num").sum() / pl.col("nb_obligor").sum())
+                .alias(lgd_col),
+                pl.col("nb_obligor").sum().alias("nb_obligor"),
+            ])
+            .drop("_num")
+        )
+
         paire, debug_df = meilleur_candidat_fusion(
-            df,
+            df_agg,
             nb_croisements_max=nb_croisements_max,
             ans_strict=ans_strict,
             lgd_col=lgd_col,
@@ -28,7 +63,7 @@ def fusion_glouton(
         )
 
         if not paire:                               # plus rien à fusionner
-            nb_final = df.collect().select(jenks_col).n_unique()
+            nb_final = df_agg.collect().select(jenks_col).n_unique()
             print(f"SUCCES : {nb_final} classes finales.")
             break
 
@@ -51,26 +86,14 @@ def fusion_glouton(
         mapping.update(replace_tmp)
 
         # ----------------------------------------------------------------
-        # Application de la fusion sur le DataFrame
+        # Application de la fusion sur df GRAIN FACILITÉ
+        # On renomme juste la classe — grain facilité intact
         # ----------------------------------------------------------------
-        df = (
-            df.with_columns(
-                pl.col(jenks_col)
-                  .cast(pl.Utf8)
-                  .replace(replace_tmp)
-                  .alias(jenks_col)         # on écrase la colonne d'origine
-            )
-            # Moyenne pondérée par nb_obligor :
-            # LGD_[k->m],t = Σ(LGD_l,t * nb_obligor_l,t) / Σ(nb_obligor_l,t)
-            .group_by([jenks_col, "year"])
-            .agg([
-                (pl.col(lgd_col) * pl.col("nb_obligor")).sum().alias("_num"),
-                pl.col("nb_obligor").sum().alias("nb_obligor"),
-            ])
-            .with_columns(
-                (pl.col("_num") / pl.col("nb_obligor")).alias(lgd_col)
-            )
-            .drop("_num")
+        df = df.with_columns(
+            pl.col(jenks_col)
+              .cast(pl.Utf8)
+              .replace(replace_tmp)
+              .alias(jenks_col)
         )
 
-    return df, mapping
+    return df_agg, mapping
