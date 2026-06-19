@@ -1,135 +1,142 @@
-Compris, c'est l'option (b) avec diagnostic complet en sortie. Point de départ = `CHR_apres_fusion` (déjà existant), classes finales = nouveau nom pour ne pas écraser, et la chaîne de labels doit s'enchaîner sur l'historique existant.
 
-## Guide notebook — Tests d'hétérogénéité sur classes déjà fusionnées (niveau Modèle)
-
-### Cellule 1 — Imports et chargement
-
-```python
-import polars as pl
-import numpy as np
-from tests_heterogeneite import HeterogeneityTestSuite, FusionComparator
-
-df_brut = pl.read_parquet("chemin/vers/base_post_fusion_glouton.parquet")
-
-lgd_col      = "lgd_obligor"
-obligor_col  = "ID_CLIENT"
-chr_col      = "CHR_apres_fusion"   # point de départ : déjà fusionné niveau Modèle
-chr_final_col = "HLC_test_heterogeneite"  # nom différencié pour la sortie de ce notebook
-```
-
-### Cellule 2 — Vérifier le point de départ
-
-```python
-df_brut.group_by(chr_col).len().sort(chr_col)
-```
-
-### Cellule 3 — Construire le comparateur sur les classes CHR existantes
-
-```python
-cmp = FusionComparator(
-    df_brut,
-    class_col=chr_col,
-    lgd_col=lgd_col,
-    obligor_col=obligor_col,
-    pairs="adjacent",
-    lgd_gap_threshold=3.0,
-)
-cmp.run()
-```
-
-### Cellule 4 — Diagnostic complet : statistiques, p-values, fusionnable par test
-
-```python
-detail = cmp.detail()   # long format : (paire, test, statistic, p_value, fusion_suggeree)
-detail
-```
-
-```python
-matrice = cmp.matrix()  # une ligne par paire, une colonne par test (oui/non)
-matrice
-```
-
-```python
-cmp.consensus()         # taux de fusion par test + accord avec l'OVL
-```
-
-```python
-cmp.plot_heatmap()       # vert = fusion suggérée, rouge = non, ? = test n/a
-```
-
-### Cellule 5 — Inspecter une paire précise si besoin (debug visuel)
-
-```python
-a = df_brut.filter(pl.col(chr_col) == "A_16_B_15_C_5").get_column(lgd_col).to_numpy()
-b = df_brut.filter(pl.col(chr_col) == "A_3").get_column(lgd_col).to_numpy()
-
-suite = HeterogeneityTestSuite(a, b, label_a="A_16_B_15_C_5", label_b="A_3").fit_all()
-print(suite.summary())
-suite.plot_all()
-```
-
-### Cellule 6 — Comparer plusieurs critères avant de trancher
-
-```python
-for crit in ["ovl", "combined", "Welch"]:
-    s = cmp.solve(criterion=crit, label_style="glouton")
-    print(f"{crit:10s} -> {s['n_final']} classes")
-```
-
-### Cellule 7 — Appliquer le critère retenu, enchaîné sur l'historique existant
-
-`label_style="glouton"` part des étiquettes déjà présentes dans `chr_col` (donc `A_16_B_15_C_5`) et les concatène en cas de nouvelle fusion (ex. `A_16_B_15_C_5` + `A_3` → `A_16_B_15_C_5_A_3`), pas de redémarrage à zéro.
-
-```python
-df_final, solution = cmp.apply_to_base(
-    criterion="ovl",            # critère retenu après comparaison cellule 6
-    out_col=chr_final_col,
-    label_style="glouton",
-    return_solution=True,
-)
-
-print(f"{solution['n_initial']} classes -> {solution['n_final']} classes")
-solution["composition"]
-```
-
-```python
-solution["log"]   # journal : iteration, groupe_a, groupe_b, score, gap_lgd, label_fusionne
-```
-
-### Cellule 8 — Vérification : la base contient maintenant les deux colonnes
-
-```python
-df_final.select([chr_col, chr_final_col]).unique().sort(chr_col)
-```
-
-```python
-df_final.group_by(chr_final_col).len().sort(chr_final_col)
-```
-
-### Cellule 9 — Export du diagnostic complet pour le dossier validateur
-
-```python
-with pl.Config(tbl_rows=-1):
-    pass  # juste pour l'affichage complet si besoin en interactif
-
-detail.write_excel("diagnostic_heterogeneite_detail.xlsx")
-matrice.write_excel("diagnostic_heterogeneite_matrice.xlsx")
-cmp.consensus().write_excel("diagnostic_heterogeneite_consensus.xlsx")
-solution["log"].write_excel("journal_fusion_heterogeneite.xlsx")
-```
-
-### Cellule 10 — `df_final` continue la pipeline
-
-```python
-# df_final contient désormais :
-#   CHR_apres_fusion          -> classes issues de la fusion glouton niveau Modèle (inchangé)
-#   HLC_test_heterogeneite    -> classes finales après tests d'hétérogénéité (à utiliser en aval)
-df_final.write_parquet("base_post_tests_heterogeneite.parquet")
-```
-
----
-
-**Points à vérifier :**
-- `chr_col = "CHR_apres_fusion"` — confirme que c'est bien le nom exact de la colonne dans ta base à ce stade du pipeline.
-- `chr_final_col = "HLC_test_heterogeneite"` — nom provisoire, dis-moi si tu préfères un autre nom (ex. `CHR_final`, `HLC_v2`...) pour rester cohérent avec ta convention de nommage (`HLC_fin` était utilisé pour la réassignation de segment dominant, pas pour ça — donc à ne pas confondre).
-- Si certaines classes `CHR_apres_fusion` ont des effectifs très faibles, le comparateur les écarte silencieusement (n<2) — vérifie `cmp.arrays.keys()` vs `df_brut[chr_col].unique()` pour repérer d'éventuelles classes orphelines.
+# -*- coding: utf-8 -*-
+"""
+tests_heterogeneite.py
+======================
+ 
+Batterie de tests d'hétérogénéité / homogénéité + outils de fusion de classes
+de risque IRB LGD (CHR_model / Jenks_Submodel / CHR_apres_fusion).
+ 
+================================================================================
+MODE D'EMPLOI
+================================================================================
+ 
+CONTEXTE
+--------
+Pipeline IRB LGD : segments -> classes Jenks par segment -> rassemblement
+niveau Modèle (fusion glouton transversale aux segments, produit des labels
+type "A_16_B_15_C_5") -> CE MODULE évalue l'hétérogénéité résiduelle entre
+ces classes déjà fusionnées et permet une fusion complémentaire documentée.
+ 
+Toutes les fonctions/classes attendent du LGD au grain obligor
+(`lgd_obligor`, échelle 0-100, EAD-pondérée en amont). Si on part du grain
+facilité, passer `obligor_col` à FusionComparator pour l'agrégation
+automatique (group_by([class_col, obligor_col]).mean(lgd_col)).
+ 
+ 
+1. TESTER UNE SEULE PAIRE DE CLASSES (exploration / debug)
+------------------------------------------------------------------------------
+    from tests_heterogeneite import HeterogeneityTestSuite
+ 
+    a = df.filter(pl.col(class_col) == "A_16").get_column(lgd_col).to_numpy()
+    b = df.filter(pl.col(class_col) == "A_3").get_column(lgd_col).to_numpy()
+ 
+    suite = HeterogeneityTestSuite(a, b, label_a="A_16", label_b="A_3").fit_all()
+    print(suite.summary())          # DataFrame Polars : test, statistic, p_value, ...
+    suite.plot_all()                # tableau de bord matplotlib (distributions, OVL, ECDF...)
+    suite.get_verdict("ovl")        # verdict consolidé selon un critère
+ 
+ 
+2. DIAGNOSTIC + FUSION SUR TOUTE LA BASE (usage notebook standard)
+------------------------------------------------------------------------------
+    from tests_heterogeneite import FusionComparator
+ 
+    cmp = FusionComparator(
+        df_brut,
+        class_col="CHR_apres_fusion",   # colonne de classe existante (déjà fusionnée niveau Modèle)
+        lgd_col="lgd_obligor",
+        obligor_col="ID_CLIENT",        # mettre None si df_brut est déjà au grain obligor
+        pairs="adjacent",               # paires consécutives triées par LGD moyenne
+        lgd_gap_threshold=3.0,          # seuil métier (pts LGD), utilisé seulement par criterion="combined"
+    ).run()
+ 
+    # --- diagnostic (à documenter dans le dossier validateur) ---
+    cmp.detail()          # long format : (paire, test, statistic, p_value, fusion_suggeree)
+    cmp.matrix()          # une ligne par paire, une colonne oui/non par test + verdicts
+    cmp.consensus()        # par test : taux de fusion suggéré + accord avec l'OVL
+    cmp.plot_heatmap()     # carte paires x tests (✓ fusion / ✗ non / ? n/a)
+ 
+    # --- comparer plusieurs critères avant de trancher ---
+    for crit in ["ovl", "combined", "Welch"]:
+        s = cmp.solve(criterion=crit, label_style="glouton")
+        print(crit, "->", s["n_final"], "classes")
+ 
+    # --- appliquer le critère retenu à la base ---
+    df_final, solution = cmp.apply_to_base(
+        criterion="ovl",                       # critère retenu (cf. décisions méthodologiques ci-dessous)
+        out_col="HLC_test_heterogeneite",       # nouvelle colonne, distincte de CHR_apres_fusion
+        label_style="glouton",                  # enchaîne sur les labels existants : "A_16_B_15_C_5" + "A_3" -> "A_16_B_15_C_5_A_3"
+        return_solution=True,
+    )
+    solution["composition"]   # {classe_finale: [classes d'origine fusionnées]}
+    solution["log"]           # journal de fusion itération par itération (export validateur)
+ 
+ 
+3. CRITÈRES DE FUSION DISPONIBLES (paramètre `criterion`)
+------------------------------------------------------------------------------
+    "ovl"      -> fusionnable si code OVL dans {0, 1}            [critère RETENU, indépendant de n]
+    "cohen"    -> fusionnable si |Cohen's d| < 0.20
+    "combined" -> écart LGD absolu < lgd_gap_threshold ET |d| < 0.20
+    "<NomDuTest>" -> n'importe quel test par son nom (ex. "Welch", "OVL", "Hedges"),
+                     utilise son `fusion_suggeree` natif. Les tests classiques
+                     (Welch/Kruskal-Wallis/ANOVA/KS) sont DOCUMENTAIRES : ils
+                     saturent à grand n (p≈0 systématique) et ne doivent pas
+                     servir de critère de décision en production.
+ 
+ 
+4. AJOUTER UN NOUVEAU TEST
+------------------------------------------------------------------------------
+    from tests_heterogeneite import HeterogeneityTest, ALPHA
+ 
+    class MonTest(HeterogeneityTest):
+        name = "Mon test"          # apparaît dans summary()/matrix()/consensus()
+        is_effect_size = False     # True si distance/effet sans p-value (comme OVL, Wasserstein)
+ 
+        def _compute(self, a: np.ndarray, b: np.ndarray) -> dict:
+            stat, p = ...           # ton calcul (a, b déjà nettoyés des NaN)
+            return {
+                "statistic": float(stat),
+                "p_value": float(p),               # None si pas de p-value
+                "interpretation": f"...",           # phrase lisible, dossier validateur
+                "fusionnable": None,                # None si documentaire, sinon bool
+                "fusion_suggeree": bool(...),       # TOUJOURS un bool, jamais None
+            }
+ 
+    Utilisation :
+        suite = HeterogeneityTestSuite(a, b, tests=[MonTest()]).fit_all()
+        # ou ajouté à la suite par défaut :
+        mes_tests = _default_suite() + [MonTest()]
+        cmp = FusionComparator(df, class_col=..., tests=mes_tests)
+        cmp.solve(criterion="Mon test", label_style="glouton")
+ 
+    Pour l'intégrer en permanence à la suite standard du projet, l'ajouter
+    dans la fonction `_default_suite()` plus bas dans ce fichier.
+ 
+    Règle impérative : `fusion_suggeree` doit toujours être un booléen
+    (jamais None), sauf si le test est structurellement incapable de trancher
+    (NaN). Sinon `FusionComparator.solve(criterion="Mon test")` lèvera une
+    erreur si on tente de l'utiliser comme critère de fusion.
+ 
+ 
+5. STYLES DE LABEL POUR LES CLASSES FUSIONNÉES (paramètre `label_style`)
+------------------------------------------------------------------------------
+    "glouton"        -> enchaîne sur l'historique existant : "A_16_B_15_C_5_A_3"
+                        (à utiliser quand on repart de CHR_apres_fusion existant)
+    "ordinal"        -> renumérote 1..K par LGD croissante (perd la traçabilité)
+    "concat"         -> "+".join(classes), ordre alphabétique
+    "representative" -> nom de la classe d'origine la plus peuplée du groupe
+ 
+ 
+6. DÉCISIONS MÉTHODOLOGIQUES (cf. dossier validateur)
+------------------------------------------------------------------------------
+- Welch / Kruskal-Wallis / ANOVA / KS saturent à grand n (p≈0 systématique
+  sur 64+ paires) -> DOCUMENTAIRES, ne sont pas des critères de décision.
+- OVL (Weitzman 1970) = critère de fusion retenu : indépendant de n et de la
+  forme de la distribution.
+- Cohen's d / Hedges' g / Wasserstein : métriques d'effet pour décrire les
+  paires (IC de Cohen's d non fiables hors normalité, 62/64 paires non gaussiennes).
+ 
+Réfs OVL : Weitzman (1970) ; Inman & Bradley (1989) ; Eidous & Al-Talafha
+(2020, Taylor & Francis).
+================================================================================
+"""
