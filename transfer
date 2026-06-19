@@ -1,26 +1,24 @@
-# 3-4. décision (option A) : OVL observé (médiane) >= seuil H0.
-        # "l'overlap A vs B est au moins aussi bon que ce qu'on verrait 95% du
-        #  temps si A et B étaient une seule population" -- symétrique, non biaisé.
-        decision = bool(ovl_obs >= seuil_h0)
-        if self.min_ovl is not None:
-            decision = bool(decision and ovl_obs >= self.min_ovl)
+# -- visualisation ------------------------------------------------------
 
-        floor_txt = "" if self.min_ovl is None else f" et >= plancher {self.min_ovl:.2f}"
-        return {
-            "statistic": ovl_obs,                # OVL-2 observé (médiane bootstrap)
-            "p_value": p_perm,                   # documentaire (sature à grand n)
-            "ovl_obs": ovl_obs,
-            "ovl_lower": ovl_lower,              # borne basse, conservée pour info
-            "seuil_h0": seuil_h0,                # seuil calibré par permutation
-            "percentile": self.percentile,
-            "n_a_eff": int(na_eff),
-            "n_b_eff": int(nb_eff),
-            "interpretation": (
-                f"OVL-2={ovl_obs:.3f} vs seuil H0={seuil_h0:.3f} -> "
-                + ("FUSION" if decision else "PAS DE FUSION")
-                + f" (observé {'>=' if ovl_obs >= seuil_h0 else '<'} seuil{floor_txt})"
-                + f" ; borne basse={ovl_lower:.3f} ; p_perm={p_perm:.2e} (documentaire)"
-            ),
-            "fusionnable": decision,
-            "fusion_suggeree": decision,
-        }
+    def plot(self, ax=None):
+        if ax is None:
+            _, ax = plt.subplots(figsize=(6, 4))
+        if self._h0_ovl is None:
+            raise RuntimeError(f"{self.name}: appeler fit() avant plot().")
+        r = self.result
+        ax.hist(self._h0_ovl, bins=40, density=True, alpha=0.45,
+                color="#c44e52", label="H0 (pool repartitionné)")
+        ax.hist(self._boot_ovl, bins=40, density=True, alpha=0.45,
+                color="#4c72b0", label="OVL observé (bootstrap A vs B)")
+        ax.axvline(r["seuil_h0"], color="#c44e52", ls="--", lw=1.8,
+                   label=f"seuil H0 ({100 - r['percentile']:.0f}%) = {r['seuil_h0']:.3f}")
+        ax.axvline(r["ovl_obs"], color="#4c72b0", ls="-", lw=2.0,
+                   label=f"OVL observé (médiane) = {r['ovl_obs']:.3f}")
+        ax.axvline(r["ovl_lower"], color="#4c72b0", ls=":", lw=1.5,
+                   label=f"borne basse = {r['ovl_lower']:.3f}")
+        ax.set_xlabel("OVL-2")
+        ax.set_ylabel("densité")
+        ax.set_title(f"{self.name} : "
+                     + ("FUSION" if r["fusionnable"] else "PAS DE FUSION"))
+        ax.legend(fontsize=7)
+        return ax
