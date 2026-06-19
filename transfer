@@ -1,24 +1,17 @@
-# -- visualisation ------------------------------------------------------
+cmp = FusionComparator(
+    df,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    obligor_col="ID_CLIENT",
+    pairs="adjacent",
+    tests=[OVLPermutationTest()],   # uniquement celui-là
+).run()
 
-    def plot(self, ax=None):
-        if ax is None:
-            _, ax = plt.subplots(figsize=(6, 4))
-        if self._h0_ovl is None:
-            raise RuntimeError(f"{self.name}: appeler fit() avant plot().")
-        r = self.result
-        ax.hist(self._h0_ovl, bins=40, density=True, alpha=0.45,
-                color="#c44e52", label="H0 (pool repartitionné)")
-        ax.hist(self._boot_ovl, bins=40, density=True, alpha=0.45,
-                color="#4c72b0", label="OVL observé (bootstrap A vs B)")
-        ax.axvline(r["seuil_h0"], color="#c44e52", ls="--", lw=1.8,
-                   label=f"seuil H0 ({100 - r['percentile']:.0f}%) = {r['seuil_h0']:.3f}")
-        ax.axvline(r["ovl_obs"], color="#4c72b0", ls="-", lw=2.0,
-                   label=f"OVL observé (médiane) = {r['ovl_obs']:.3f}")
-        ax.axvline(r["ovl_lower"], color="#4c72b0", ls=":", lw=1.5,
-                   label=f"borne basse = {r['ovl_lower']:.3f}")
-        ax.set_xlabel("OVL-2")
-        ax.set_ylabel("densité")
-        ax.set_title(f"{self.name} : "
-                     + ("FUSION" if r["fusionnable"] else "PAS DE FUSION"))
-        ax.legend(fontsize=7)
-        return ax
+# vue détaillée longue : une ligne par (paire, test)
+cmp.detail()
+
+# vue large : une ligne par paire, colonnes = tests, avec OVL et verdicts
+cmp.matrix()
+
+# heatmap visuelle
+cmp.plot_heatmap()
