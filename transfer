@@ -29,41 +29,46 @@ def build_tableau_detail(
     stats_origine: pl.LazyFrame,
     mapping_df: pl.LazyFrame,
     jenks_col: str,
+    lgd_col: str,
     obligor_col: str,
 ) -> pl.LazyFrame:
     """Construit le tableau détaillé contenant les statistiques avant/après fusion ainsi que le LGD long terme.
 
-    nb_obligor (après fusion) est recalculé directement sur base_df (grain facilité) après
-    application du mapping, et non sommé depuis les nb_obligor par sous-classe Jenks --
-    une somme sur-compte les obligors présents dans plusieurs sous-classes fusionnées
-    ensemble la même année.
+    nb_obligor_apres_fusion et LGD moyenne annuelle (après fusion) sont tous les deux
+    recalculés directement sur base_df (grain facilité) après application du mapping,
+    en passant par le grain (classe, année, obligor) avant de moyenner -- et non en
+    sommant/pondérant des agrégats déjà calculés par sous-classe Jenks d'origine.
+    Sommer ou pondérer par des comptes pré-agrégés par sous-classe sur-compte (et biaise
+    la moyenne) pour tout obligor présent dans plusieurs sous-classes fusionnées ensemble
+    la même année.
     """
     tableau = (
         stats_origine
         .join(mapping_df, on=jenks_col, how="left")
         .rename({jenks_col: "CHR avant fusion", "year": "Année"})
         .with_columns(pl.col("CHR après fusion").fill_null(pl.col("CHR avant fusion")))
-        .with_columns((
-            (pl.col("LGD moyenne annuelle\n(avant fusion)") * pl.col("nb_obligor")).sum()
-            .over(["CHR après fusion", "Année"])
-            / pl.col("nb_obligor").sum().over(["CHR après fusion", "Année"])
-        ).alias("LGD moyenne annuelle\n(après fusion)"))
         .filter(pl.col("CHR avant fusion").is_not_null())
     )
 
-    # nb_obligor correct : recalculé sur les données brutes après application du mapping,
-    # pour éviter le double comptage des obligors à double appartenance entre sous-classes
-    nb_obligor_apres_fusion = (
+    # nb_obligor + LGD moyenne après fusion : recalculés sur les données brutes après
+    # mapping, en passant par le grain obligor -- corrige le double comptage ET le biais
+    # de pondération pour les obligors à double appartenance entre sous-classes fusionnées
+    stats_apres_fusion = (
         base_df
         .join(mapping_df, on=jenks_col, how="left")
         .rename({jenks_col: "CHR avant fusion", "year": "Année"})
         .with_columns(pl.col("CHR après fusion").fill_null(pl.col("CHR avant fusion")))
+        .group_by(["CHR après fusion", "Année", obligor_col])
+        .agg(pl.col(lgd_col).mean().alias("_lgd_obligor"))
         .group_by(["CHR après fusion", "Année"])
-        .agg(pl.col(obligor_col).n_unique().alias("nb_obligor_apres_fusion"))
+        .agg([
+            pl.col(obligor_col).n_unique().alias("nb_obligor_apres_fusion"),
+            pl.col("_lgd_obligor").mean().alias("LGD moyenne annuelle\n(après fusion)"),
+        ])
     )
 
     tableau = tableau.join(
-        nb_obligor_apres_fusion, on=["CHR après fusion", "Année"], how="left"
+        stats_apres_fusion, on=["CHR après fusion", "Année"], how="left"
     )
 
     lra_avant = (
