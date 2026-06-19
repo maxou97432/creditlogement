@@ -1,142 +1,116 @@
+def compute_stats_origine(
+    base_df: pl.LazyFrame,
+    jenks_col: str,
+    lgd_col: str,
+    obligor_col: str = 'ID_CLIENT',
+) -> pl.LazyFrame:
+    """Calcule le nombre d'observations, le min, le max et le LGD moyen annuel (avant fusion)."""
+    return base_df.group_by([jenks_col, "year"]).agg([
+        pl.col(obligor_col).n_unique().alias("nb_obligor"),
+        pl.col(lgd_col).min().alias("Min LGD"),
+        pl.col(lgd_col).max().alias("Max LGD"),
+        pl.col(lgd_col).mean().alias("LGD moyenne annuelle\n(avant fusion)"),
+    ])
 
-# -*- coding: utf-8 -*-
-"""
-tests_heterogeneite.py
-======================
- 
-Batterie de tests d'hétérogénéité / homogénéité + outils de fusion de classes
-de risque IRB LGD (CHR_model / Jenks_Submodel / CHR_apres_fusion).
- 
-================================================================================
-MODE D'EMPLOI
-================================================================================
- 
-CONTEXTE
---------
-Pipeline IRB LGD : segments -> classes Jenks par segment -> rassemblement
-niveau Modèle (fusion glouton transversale aux segments, produit des labels
-type "A_16_B_15_C_5") -> CE MODULE évalue l'hétérogénéité résiduelle entre
-ces classes déjà fusionnées et permet une fusion complémentaire documentée.
- 
-Toutes les fonctions/classes attendent du LGD au grain obligor
-(`lgd_obligor`, échelle 0-100, EAD-pondérée en amont). Si on part du grain
-facilité, passer `obligor_col` à FusionComparator pour l'agrégation
-automatique (group_by([class_col, obligor_col]).mean(lgd_col)).
- 
- 
-1. TESTER UNE SEULE PAIRE DE CLASSES (exploration / debug)
-------------------------------------------------------------------------------
-    from tests_heterogeneite import HeterogeneityTestSuite
- 
-    a = df.filter(pl.col(class_col) == "A_16").get_column(lgd_col).to_numpy()
-    b = df.filter(pl.col(class_col) == "A_3").get_column(lgd_col).to_numpy()
- 
-    suite = HeterogeneityTestSuite(a, b, label_a="A_16", label_b="A_3").fit_all()
-    print(suite.summary())          # DataFrame Polars : test, statistic, p_value, ...
-    suite.plot_all()                # tableau de bord matplotlib (distributions, OVL, ECDF...)
-    suite.get_verdict("ovl")        # verdict consolidé selon un critère
- 
- 
-2. DIAGNOSTIC + FUSION SUR TOUTE LA BASE (usage notebook standard)
-------------------------------------------------------------------------------
-    from tests_heterogeneite import FusionComparator
- 
-    cmp = FusionComparator(
-        df_brut,
-        class_col="CHR_apres_fusion",   # colonne de classe existante (déjà fusionnée niveau Modèle)
-        lgd_col="lgd_obligor",
-        obligor_col="ID_CLIENT",        # mettre None si df_brut est déjà au grain obligor
-        pairs="adjacent",               # paires consécutives triées par LGD moyenne
-        lgd_gap_threshold=3.0,          # seuil métier (pts LGD), utilisé seulement par criterion="combined"
-    ).run()
- 
-    # --- diagnostic (à documenter dans le dossier validateur) ---
-    cmp.detail()          # long format : (paire, test, statistic, p_value, fusion_suggeree)
-    cmp.matrix()          # une ligne par paire, une colonne oui/non par test + verdicts
-    cmp.consensus()        # par test : taux de fusion suggéré + accord avec l'OVL
-    cmp.plot_heatmap()     # carte paires x tests (✓ fusion / ✗ non / ? n/a)
- 
-    # --- comparer plusieurs critères avant de trancher ---
-    for crit in ["ovl", "combined", "Welch"]:
-        s = cmp.solve(criterion=crit, label_style="glouton")
-        print(crit, "->", s["n_final"], "classes")
- 
-    # --- appliquer le critère retenu à la base ---
-    df_final, solution = cmp.apply_to_base(
-        criterion="ovl",                       # critère retenu (cf. décisions méthodologiques ci-dessous)
-        out_col="HLC_test_heterogeneite",       # nouvelle colonne, distincte de CHR_apres_fusion
-        label_style="glouton",                  # enchaîne sur les labels existants : "A_16_B_15_C_5" + "A_3" -> "A_16_B_15_C_5_A_3"
-        return_solution=True,
+
+def build_mapping_df(
+    mapping: dict,
+    jenks_col: str,
+) -> pl.LazyFrame:
+    """Crée la table contenant la correspondance ancienne classe -> classe après fusion."""
+    return pl.DataFrame({
+        jenks_col: list(mapping.keys()),
+        "CHR après fusion": list(mapping.values()),
+    }).lazy()
+
+
+def build_tableau_detail(
+    base_df: pl.LazyFrame,
+    stats_origine: pl.LazyFrame,
+    mapping_df: pl.LazyFrame,
+    jenks_col: str,
+    obligor_col: str,
+) -> pl.LazyFrame:
+    """Construit le tableau détaillé contenant les statistiques avant/après fusion ainsi que le LGD long terme.
+
+    nb_obligor (après fusion) est recalculé directement sur base_df (grain facilité) après
+    application du mapping, et non sommé depuis les nb_obligor par sous-classe Jenks --
+    une somme sur-compte les obligors présents dans plusieurs sous-classes fusionnées
+    ensemble la même année.
+    """
+    tableau = (
+        stats_origine
+        .join(mapping_df, on=jenks_col, how="left")
+        .rename({jenks_col: "CHR avant fusion", "year": "Année"})
+        .with_columns(pl.col("CHR après fusion").fill_null(pl.col("CHR avant fusion")))
+        .with_columns((
+            (pl.col("LGD moyenne annuelle\n(avant fusion)") * pl.col("nb_obligor")).sum()
+            .over(["CHR après fusion", "Année"])
+            / pl.col("nb_obligor").sum().over(["CHR après fusion", "Année"])
+        ).alias("LGD moyenne annuelle\n(après fusion)"))
+        .filter(pl.col("CHR avant fusion").is_not_null())
     )
-    solution["composition"]   # {classe_finale: [classes d'origine fusionnées]}
-    solution["log"]           # journal de fusion itération par itération (export validateur)
- 
- 
-3. CRITÈRES DE FUSION DISPONIBLES (paramètre `criterion`)
-------------------------------------------------------------------------------
-    "ovl"      -> fusionnable si code OVL dans {0, 1}            [critère RETENU, indépendant de n]
-    "cohen"    -> fusionnable si |Cohen's d| < 0.20
-    "combined" -> écart LGD absolu < lgd_gap_threshold ET |d| < 0.20
-    "<NomDuTest>" -> n'importe quel test par son nom (ex. "Welch", "OVL", "Hedges"),
-                     utilise son `fusion_suggeree` natif. Les tests classiques
-                     (Welch/Kruskal-Wallis/ANOVA/KS) sont DOCUMENTAIRES : ils
-                     saturent à grand n (p≈0 systématique) et ne doivent pas
-                     servir de critère de décision en production.
- 
- 
-4. AJOUTER UN NOUVEAU TEST
-------------------------------------------------------------------------------
-    from tests_heterogeneite import HeterogeneityTest, ALPHA
- 
-    class MonTest(HeterogeneityTest):
-        name = "Mon test"          # apparaît dans summary()/matrix()/consensus()
-        is_effect_size = False     # True si distance/effet sans p-value (comme OVL, Wasserstein)
- 
-        def _compute(self, a: np.ndarray, b: np.ndarray) -> dict:
-            stat, p = ...           # ton calcul (a, b déjà nettoyés des NaN)
-            return {
-                "statistic": float(stat),
-                "p_value": float(p),               # None si pas de p-value
-                "interpretation": f"...",           # phrase lisible, dossier validateur
-                "fusionnable": None,                # None si documentaire, sinon bool
-                "fusion_suggeree": bool(...),       # TOUJOURS un bool, jamais None
-            }
- 
-    Utilisation :
-        suite = HeterogeneityTestSuite(a, b, tests=[MonTest()]).fit_all()
-        # ou ajouté à la suite par défaut :
-        mes_tests = _default_suite() + [MonTest()]
-        cmp = FusionComparator(df, class_col=..., tests=mes_tests)
-        cmp.solve(criterion="Mon test", label_style="glouton")
- 
-    Pour l'intégrer en permanence à la suite standard du projet, l'ajouter
-    dans la fonction `_default_suite()` plus bas dans ce fichier.
- 
-    Règle impérative : `fusion_suggeree` doit toujours être un booléen
-    (jamais None), sauf si le test est structurellement incapable de trancher
-    (NaN). Sinon `FusionComparator.solve(criterion="Mon test")` lèvera une
-    erreur si on tente de l'utiliser comme critère de fusion.
- 
- 
-5. STYLES DE LABEL POUR LES CLASSES FUSIONNÉES (paramètre `label_style`)
-------------------------------------------------------------------------------
-    "glouton"        -> enchaîne sur l'historique existant : "A_16_B_15_C_5_A_3"
-                        (à utiliser quand on repart de CHR_apres_fusion existant)
-    "ordinal"        -> renumérote 1..K par LGD croissante (perd la traçabilité)
-    "concat"         -> "+".join(classes), ordre alphabétique
-    "representative" -> nom de la classe d'origine la plus peuplée du groupe
- 
- 
-6. DÉCISIONS MÉTHODOLOGIQUES (cf. dossier validateur)
-------------------------------------------------------------------------------
-- Welch / Kruskal-Wallis / ANOVA / KS saturent à grand n (p≈0 systématique
-  sur 64+ paires) -> DOCUMENTAIRES, ne sont pas des critères de décision.
-- OVL (Weitzman 1970) = critère de fusion retenu : indépendant de n et de la
-  forme de la distribution.
-- Cohen's d / Hedges' g / Wasserstein : métriques d'effet pour décrire les
-  paires (IC de Cohen's d non fiables hors normalité, 62/64 paires non gaussiennes).
- 
-Réfs OVL : Weitzman (1970) ; Inman & Bradley (1989) ; Eidous & Al-Talafha
-(2020, Taylor & Francis).
-================================================================================
-"""
+
+    # nb_obligor correct : recalculé sur les données brutes après application du mapping,
+    # pour éviter le double comptage des obligors à double appartenance entre sous-classes
+    nb_obligor_apres_fusion = (
+        base_df
+        .join(mapping_df, on=jenks_col, how="left")
+        .rename({jenks_col: "CHR avant fusion", "year": "Année"})
+        .with_columns(pl.col("CHR après fusion").fill_null(pl.col("CHR avant fusion")))
+        .group_by(["CHR après fusion", "Année"])
+        .agg(pl.col(obligor_col).n_unique().alias("nb_obligor_apres_fusion"))
+    )
+
+    tableau = tableau.join(
+        nb_obligor_apres_fusion, on=["CHR après fusion", "Année"], how="left"
+    )
+
+    lra_avant = (
+        tableau.unique(subset=["CHR avant fusion", "Année"])
+        .group_by("CHR avant fusion")
+        .agg(pl.col("LGD moyenne annuelle\n(avant fusion)").mean().alias("LGD long terme par CHR\n(avant fusion)"))
+    )
+    lra_apres = (
+        tableau.unique(subset=["CHR après fusion", "Année"])
+        .group_by("CHR après fusion")
+        .agg(pl.col("LGD moyenne annuelle\n(après fusion)").mean().alias("LGD long terme par CHR\n(après fusion)"))
+    )
+
+    return (
+        tableau
+        .join(lra_avant, on="CHR avant fusion", how="left")
+        .join(lra_apres, on="CHR après fusion", how="left")
+        .sort(["LGD long terme par CHR\n(avant fusion)", "Année"])
+        .select([
+            pl.all().exclude("CHR après fusion"),
+            pl.col("CHR après fusion"),
+        ])
+    )
+
+
+def build_tableau_recap(
+    tableau_detail: pl.LazyFrame,
+) -> pl.DataFrame:
+    """Agrège les statistiques détaillées par classe après fusion et par année."""
+    return (
+        tableau_detail
+        .select([
+            pl.col("CHR après fusion"),
+            pl.col("Année"),
+            pl.col("nb_obligor_apres_fusion"),
+            pl.col("Min LGD"),
+            pl.col("Max LGD"),
+            pl.col("LGD moyenne annuelle\n(après fusion)"),
+            pl.col("LGD long terme par CHR\n(après fusion)"),
+        ])
+        .group_by(["CHR après fusion", "Année"])
+        .agg([
+            pl.col("nb_obligor_apres_fusion").first().alias("Effectifs (obligors)"),
+            pl.col("Min LGD").min(),
+            pl.col("Max LGD").max(),
+            pl.col("LGD moyenne annuelle\n(après fusion)").first(),
+            pl.col("LGD long terme par CHR\n(après fusion)").first(),
+        ])
+        .sort(["LGD long terme par CHR\n(après fusion)", "Année"])
+    )
