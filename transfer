@@ -1,376 +1,1147 @@
+# -*- coding: utf-8 -*-
+"""
+tests_heterogeneite.py
+======================
+
+Batterie de tests d'hétérogénéité / homogénéité pour le regroupement de
+classes de risque IRB LGD (CHR_model / Jenks_Submodel).
+
+Chaque test prend en entrée deux arrays numpy de LGD au grain obligor
+(`lgd_obligor`, échelle 0-100, EAD-pondérée en amont). L'extraction depuis
+Polars se fait via :
+
+    a = df.filter(pl.col(class_col) == "A").get_column(lgd_col).to_numpy()
+    b = df.filter(pl.col(class_col) == "B").get_column(lgd_col).to_numpy()
+
+Décisions méthodologiques (cf. dossier validateur) :
+- Welch / Kruskal-Wallis / ANOVA / KS saturent à grand n (p≈0 systématique
+  sur 64+ paires) -> DOCUMENTAIRES, ne sont pas des critères de décision.
+- OVL (Weitzman 1970) = critère de fusion retenu : indépendant de n et de la
+  forme de la distribution.
+- Cohen's d / Hedges' g / Wasserstein : métriques d'effet pour décrire les
+  paires (IC de Cohen's d non fiables hors normalité, 62/64 paires non gaussiennes).
+
+Réfs OVL : Weitzman (1970) ; Inman & Bradley (1989) ; Eidous & Al-Talafha
+(2020, Taylor & Francis).
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
 import polars as pl
-import openpyxl
-import matplotlib
-matplotlib.use('Agg')
+from scipy import stats
+from scipy.stats import gaussian_kde, wasserstein_distance
+
 import matplotlib.pyplot as plt
-import io
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.drawing.image import Image as XLImage
+
+# ---------------------------------------------------------------------------
+# Constantes
+# ---------------------------------------------------------------------------
+
+# Seuils OVL retenus (Weitzman's measure)
+OVL_STRICT = 0.75            # code 0 -- fusion recommandée
+OVL_MODERE = 0.50            # code 1 -- fusion possible
+CODES_FUSIONNABLES = {0, 1}
+
+# Effet (Cohen's d) : seuil de négligeabilité
+COHEN_NEGLIGEABLE = 0.20
+
+# Wasserstein : seuil heuristique sur W1 normalisée par l'étendue commune
+WASSERSTEIN_REL_MAX = 0.10
+
+# Bascule normalité Shapiro -> moments
+N_SHAPIRO_MAX = 5000
+SKEW_MAX = 2.0
+KURT_MAX = 7.0
+
+ALPHA = 0.05
 
 
-def carto_excel(
-    lf,
-    output_path,
-    class_col,
-    lgd_col,
-    obligor_col   = None,
-    seg_col       = "Seg",
-    year_col      = "year",
-    title         = "Carto",
-    count_label   = "n_obligors",
-    by_segment    = True,
-):
+# ---------------------------------------------------------------------------
+# Classe abstraite
+# ---------------------------------------------------------------------------
+
+class HeterogeneityTest(ABC):
+    """Classe de base pour un test d'hétérogénéité entre deux classes.
+
+    Cycle de vie :
+        t = WelchTest().fit(a, b)
+        t.result        # dict
+        t.summary()     # str
+        t.plot(ax=...)  # matplotlib
     """
-    Génère un Excel de cartographie LGD par classe et par année.
 
-    by_segment=True  (NB1, NB2) : une feuille par segment + feuille GLOBAL graphique
-    by_segment=False (NB3A, NB3B) : feuille tableau + feuille graphique
+    name: str = "base"
+    # True => la notion de p-value n'a pas de sens (effet/distance pures)
+    is_effect_size: bool = False
 
-    Calcul de la LGD :
-    - Si obligor_col fourni (NB2, NB3A, NB3B) :
-        grain facilité -> grain (classe, year, obligor) -> grain (classe, year)
-        mean(lgd_obligor) par obligor = vraie moyenne pondérée par n_obligors
-    - Si obligor_col=None (NB1) :
-        grain facilité directement, pl.len() = n_facilités
+    def __init__(self) -> None:
+        self._result: Optional[dict] = None
+        self.a: Optional[np.ndarray] = None
+        self.b: Optional[np.ndarray] = None
 
-    LRA globale = moyenne simple des moyennes annuelles (chaque année pèse 1).
-    """
+    # -- API publique -------------------------------------------------------
 
-    df = lf.collect() if isinstance(lf, pl.LazyFrame) else lf
-
-    # ----------------------------------------------------------------
-    # Styles
-    # ----------------------------------------------------------------
-    BLUE_DARK  = PatternFill("solid", fgColor="1F4E79")
-    BLUE_LIGHT = PatternFill("solid", fgColor="BDD7EE")
-    WHITE      = PatternFill("solid", fgColor="FFFFFF")
-    GREY       = PatternFill("solid", fgColor="F2F2F2")
-    FONT_WHITE  = Font(color="FFFFFF", bold=True, size=10)
-    FONT_BOLD   = Font(bold=True, size=10)
-    FONT_NORMAL = Font(size=10)
-    CENTER = Alignment(horizontal="center", vertical="center")
-    LEFT   = Alignment(horizontal="left",   vertical="center")
-    thin   = Side(style="thin", color="BFBFBF")
-    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    def sc(cell, value, fill=WHITE, font=FONT_NORMAL, align=CENTER):
-        cell.value = value
-        cell.fill  = fill
-        cell.font  = font
-        cell.alignment = align
-        cell.border    = BORDER
-
-    def auto_width(ws):
-        for col in ws.columns:
-            max_len = max(
-                len(str(c.value)) if c.value is not None else 0
-                for c in col
+    def fit(self, data_a: Sequence[float], data_b: Sequence[float]) -> "HeterogeneityTest":
+        a = self._clean(data_a)
+        b = self._clean(data_b)
+        if a.size < 2 or b.size < 2:
+            raise ValueError(
+                f"{self.name}: au moins 2 observations finies par classe "
+                f"(n_a={a.size}, n_b={b.size})."
             )
-            ws.column_dimensions[
-                get_column_letter(col[0].column)
-            ].width = min(max_len + 4, 30)
+        self.a, self.b = a, b
+        self._result = self._compute(a, b)
+        # garanties minimales sur le contrat de result
+        self._result.setdefault("test", self.name)
+        self._result.setdefault("statistic", np.nan)
+        self._result.setdefault("p_value", None)
+        self._result.setdefault("interpretation", "")
+        self._result.setdefault("fusionnable", None)
+        # suggestion native du test (toujours un bool) -- sert à comparer les
+        # tests entre eux ; pour les tests documentaires elle vaut (p >= alpha)
+        self._result.setdefault("fusion_suggeree", None)
+        self._result.setdefault("n_a", int(a.size))
+        self._result.setdefault("n_b", int(b.size))
+        return self
 
-    def classes_by_lgd(data, col):
-        """Retourne les classes triées par LGD moyenne croissante."""
-        return (
-            data.group_by(col)
-            .agg(pl.col(lgd_col).mean().alias("_m"))
-            .sort("_m")
-            .get_column(col)
-            .to_list()
-        )
+    @property
+    def result(self) -> dict:
+        if self._result is None:
+            raise RuntimeError(f"{self.name}: appeler fit() avant d'accéder à result.")
+        return self._result
 
-    # ----------------------------------------------------------------
-    # Calcul des stats agrégées (grain obligor si possible)
-    # ----------------------------------------------------------------
-    def compute_t_annuel(data):
-        """
-        Calcule mean_lgd, std_lgd, count_label par (class_col, year_col).
-        Si obligor_col fourni : passe d'abord au grain obligor.
-        """
-        if obligor_col is not None:
-            # grain facilité -> grain (classe, year, obligor)
-            tmp = (
-                data
-                .group_by([class_col, year_col, obligor_col])
-                .agg(pl.col(lgd_col).mean().alias("_lgd_obligor"))
-            )
-            return (
-                tmp
-                .group_by([class_col, year_col])
-                .agg([
-                    pl.col("_lgd_obligor").mean().round(4).alias("mean_lgd"),
-                    pl.col("_lgd_obligor").std(ddof=1).round(4).alias("std_lgd"),
-                    pl.col(obligor_col).n_unique().alias(count_label),
-                ])
-            )
-        else:
-            # NB1 : grain facilité direct
-            return (
-                data
-                .group_by([class_col, year_col])
-                .agg([
-                    pl.col(lgd_col).mean().round(4).alias("mean_lgd"),
-                    pl.col(lgd_col).std(ddof=1).round(4).alias("std_lgd"),
-                    pl.len().alias(count_label),
-                ])
-            )
+    def summary(self) -> str:
+        r = self.result
+        p = r.get("p_value")
+        p_str = "n/a" if p is None else f"{p:.3e}"
+        lines = [
+            f"[{r['test']}]  n_a={r['n_a']}  n_b={r['n_b']}",
+            f"    statistic = {r['statistic']:.6g}    p_value = {p_str}",
+            f"    -> {r['interpretation']}",
+        ]
+        if r.get("fusionnable") is not None:
+            lines.append(f"    fusionnable = {r['fusionnable']}")
+        return "\n".join(lines)
 
-    def compute_lra(t_annuel):
-        """LRA = moyenne simple des moyennes annuelles (chaque année pèse 1)."""
-        return (
-            t_annuel
-            .group_by(class_col)
-            .agg(pl.col("mean_lgd").mean().round(4).alias("lra"))
-        )
+    def plot(self, ax: Optional[plt.Axes] = None) -> plt.Axes:
+        """Vue par défaut : distributions superposées (KDE + histogramme)."""
+        if ax is None:
+            _, ax = plt.subplots(figsize=(6, 4))
+        self._plot_overlay(ax)
+        ax.set_title(f"{self.name}")
+        return ax
 
-    # ----------------------------------------------------------------
-    # Fonctions d'écriture Excel
-    # ----------------------------------------------------------------
-    def write_tableau(ws, data, classes, years, r_start, section_title):
-        """
-        Écrit le tableau pivoté (classes × années) dans ws à partir de r_start.
-        Retourne la prochaine ligne disponible.
-        """
-        t_annuel = compute_t_annuel(data)
-        lra_df   = compute_lra(t_annuel)
+    # -- À implémenter ------------------------------------------------------
 
-        t_dict   = {
-            (rw[class_col], rw[year_col]): rw
-            for rw in t_annuel.iter_rows(named=True)
-        }
-        lra_dict = {rw[class_col]: rw["lra"] for rw in lra_df.iter_rows(named=True)}
+    @abstractmethod
+    def _compute(self, a: np.ndarray, b: np.ndarray) -> dict:
+        ...
 
-        r      = r_start
-        n_cols = 1 + len(years) * 3 + 1  # classe + (mean, std, count) par année + LRA
+    # -- Helpers ------------------------------------------------------------
 
-        # Titre section
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-        sc(ws.cell(r, 1), section_title,
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-        r += 1
+    @staticmethod
+    def _clean(x: Sequence[float]) -> np.ndarray:
+        arr = np.asarray(x, dtype=float).ravel()
+        return arr[np.isfinite(arr)]
 
-        # Header années
-        sc(ws.cell(r, 1), class_col, fill=BLUE_DARK, font=FONT_WHITE)
-        for i, yr in enumerate(years):
-            cs = 2 + i * 3
-            ws.merge_cells(start_row=r, start_column=cs, end_row=r, end_column=cs+2)
-            sc(ws.cell(r, cs), str(yr), fill=BLUE_DARK, font=FONT_WHITE)
-        sc(ws.cell(r, 2 + len(years)*3), "LRA", fill=BLUE_DARK, font=FONT_WHITE)
-        r += 1
+    def _plot_overlay(self, ax: plt.Axes) -> None:
+        a, b = self.a, self.b
+        lo = min(a.min(), b.min())
+        hi = max(a.max(), b.max())
+        bins = np.linspace(lo, hi, 60)
+        ax.hist(a, bins=bins, density=True, alpha=0.35, label=f"A (n={a.size})")
+        ax.hist(b, bins=bins, density=True, alpha=0.35, label=f"B (n={b.size})")
+        for arr, ls in ((a, "-"), (b, "--")):
+            try:
+                kde = gaussian_kde(arr)
+                xs = np.linspace(lo, hi, 300)
+                ax.plot(xs, kde(xs), ls, lw=1.5)
+            except Exception:
+                pass
+        ax.set_xlabel("lgd_obligor")
+        ax.set_ylabel("densité")
+        ax.legend(fontsize=8)
 
-        # Sous-header
-        sc(ws.cell(r, 1), "", fill=BLUE_LIGHT, font=FONT_BOLD)
-        for i in range(len(years)):
-            cs = 2 + i * 3
-            sc(ws.cell(r, cs),   "mean_lgd",   fill=BLUE_LIGHT, font=FONT_BOLD)
-            sc(ws.cell(r, cs+1), "std_lgd",    fill=BLUE_LIGHT, font=FONT_BOLD)
-            sc(ws.cell(r, cs+2), count_label,  fill=BLUE_LIGHT, font=FONT_BOLD)
-        sc(ws.cell(r, 2 + len(years)*3), "mean", fill=BLUE_LIGHT, font=FONT_BOLD)
-        r += 1
 
-        # Données
-        for idx, cls in enumerate(classes):
-            fill = WHITE if idx % 2 == 0 else GREY
-            sc(ws.cell(r, 1), cls, fill=fill, font=FONT_NORMAL, align=LEFT)
-            for i, yr in enumerate(years):
-                cs = 2 + i * 3
-                d  = t_dict.get((cls, yr), {})
-                sc(ws.cell(r, cs),   d.get("mean_lgd",  ""), fill=fill)
-                sc(ws.cell(r, cs+1), d.get("std_lgd",   ""), fill=fill)
-                sc(ws.cell(r, cs+2), d.get(count_label, ""), fill=fill)
-            sc(ws.cell(r, 2 + len(years)*3),
-               lra_dict.get(cls, ""),
-               fill=fill, font=Font(bold=True, size=10))
-            r += 1
+# ---------------------------------------------------------------------------
+# Tests classiques (documentaires : saturent à grand n)
+# ---------------------------------------------------------------------------
 
-        return r + 2
+class WelchTest(HeterogeneityTest):
+    name = "Welch t-test"
 
-    def write_stats_globales(ws, data, classes, r_start, section_title):
-        """
-        Écrit les stats globales (toutes années) par classe.
-        LRA = moyenne des moyennes annuelles.
-        """
-        t_annuel = compute_t_annuel(data)
-        lra_df   = compute_lra(t_annuel)
-
-        # Stats globales : LRA + n_total + min + max
-        if obligor_col is not None:
-            tmp = (
-                data
-                .group_by([class_col, obligor_col])
-                .agg(pl.col(lgd_col).mean().alias("_lgd_obligor"))
-            )
-            stats_glob = (
-                tmp
-                .group_by(class_col)
-                .agg([
-                    pl.col("_lgd_obligor").min().round(4).alias("min_lgd"),
-                    pl.col("_lgd_obligor").max().round(4).alias("max_lgd"),
-                    pl.col(obligor_col).n_unique().alias(count_label),
-                ])
-            )
-        else:
-            stats_glob = (
-                data
-                .group_by(class_col)
-                .agg([
-                    pl.col(lgd_col).min().round(4).alias("min_lgd"),
-                    pl.col(lgd_col).max().round(4).alias("max_lgd"),
-                    pl.len().alias(count_label),
-                ])
-            )
-
-        stats_glob = stats_glob.join(lra_df, on=class_col, how="left")
-        t2_dict = {rw[class_col]: rw for rw in stats_glob.iter_rows(named=True)}
-
-        r      = r_start
-        n_cols = 6
-
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
-        sc(ws.cell(r, 1), section_title,
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
-        r += 1
-
-        # Header
-        for j, h in enumerate(
-            [class_col, "LRA", "std_lgd", count_label, "min_lgd", "max_lgd"]
-        ):
-            sc(ws.cell(r, j+1), h, fill=BLUE_LIGHT, font=FONT_BOLD)
-        r += 1
-
-        # Données
-        for idx, cls in enumerate(classes):
-            fill = WHITE if idx % 2 == 0 else GREY
-            rw   = t2_dict.get(cls, {})
-            sc(ws.cell(r, 1), cls,                     fill=fill, align=LEFT)
-            sc(ws.cell(r, 2), rw.get("lra",        ""), fill=fill)
-            sc(ws.cell(r, 3), rw.get("std_lgd",    ""), fill=fill)
-            sc(ws.cell(r, 4), rw.get(count_label,  ""), fill=fill)
-            sc(ws.cell(r, 5), rw.get("min_lgd",    ""), fill=fill)
-            sc(ws.cell(r, 6), rw.get("max_lgd",    ""), fill=fill)
-            r += 1
-
-        return r + 2
-
-    def write_graphique(ws, data, classes, years, r_start, graph_title):
-        """Génère et insère le graphique LGD par classe dans ws."""
-        t_annuel = compute_t_annuel(data)
-        t_dict   = {
-            (rw[class_col], rw[year_col]): rw
-            for rw in t_annuel.iter_rows(named=True)
+    def _compute(self, a, b) -> dict:
+        t, p = stats.ttest_ind(a, b, equal_var=False)
+        stat = abs(float(t))  # convention projet : |t|
+        return {
+            "statistic": stat,
+            "p_value": float(p),
+            "interpretation": (
+                f"|t|={stat:.2f} ; "
+                + ("écart de moyenne significatif" if p < ALPHA else "écart non significatif")
+                + " (documentaire : sature à grand n)"
+            ),
+            "fusionnable": None,
+            "fusion_suggeree": bool(p >= ALPHA),
+            "mean_a": float(a.mean()),
+            "mean_b": float(b.mean()),
         }
 
-        n_classes = len(classes)
-        fig_h     = max(5, n_classes * 0.25)
-        fig, ax   = plt.subplots(figsize=(14, fig_h))
-        colors    = plt.cm.tab20.colors
 
-        for i, cls in enumerate(classes):
-            means, yrs_plot = [], []
-            for yr in years:
-                val = t_dict.get((cls, yr), {}).get("mean_lgd")
-                if val is not None:
-                    means.append(val)
-                    yrs_plot.append(yr)
-            if means:
-                ax.plot(yrs_plot, means, marker="o", label=cls,
-                        color=colors[i % len(colors)],
-                        linewidth=1.5, alpha=0.85)
+class KruskalWallisTest(HeterogeneityTest):
+    name = "Kruskal-Wallis"
 
-        ax.set_title(graph_title, fontsize=13)
-        ax.set_xlabel("Année")
-        ax.set_ylabel(lgd_col)
-        ax.legend(loc="upper left", bbox_to_anchor=(1, 1),
-                  fontsize=6, ncol=max(1, n_classes // 20))
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+    def _compute(self, a, b) -> dict:
+        h, p = stats.kruskal(a, b)
+        return {
+            "statistic": float(h),
+            "p_value": float(p),
+            "interpretation": (
+                f"H={h:.2f} ; "
+                + ("distributions de rangs différentes" if p < ALPHA else "rangs comparables")
+                + " (documentaire : sature à grand n)"
+            ),
+            "fusionnable": None,
+            "fusion_suggeree": bool(p >= ALPHA),
+        }
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
 
-        ws.merge_cells(start_row=r_start, start_column=1,
-                       end_row=r_start, end_column=10)
-        sc(ws.cell(r_start, 1), graph_title,
-           fill=BLUE_DARK, font=Font(color="FFFFFF", bold=True, size=12))
+class ANOVATest(HeterogeneityTest):
+    name = "ANOVA (F + eta2)"
 
-        img        = XLImage(buf)
-        img.anchor = f"A{r_start + 1}"
-        ws.add_image(img)
+    def _compute(self, a, b) -> dict:
+        f, p = stats.f_oneway(a, b)
+        k = 2
+        n = a.size + b.size
+        denom = f * (k - 1) + (n - k)
+        eta2 = float(f * (k - 1) / denom) if denom > 0 else np.nan
+        return {
+            "statistic": float(f),
+            "p_value": float(p),
+            "eta2": eta2,
+            "interpretation": (
+                f"F={f:.2f} ; eta²={eta2:.4f} "
+                f"({'effet substantiel' if eta2 >= 0.06 else 'effet faible/négligeable'})"
+                " (documentaire : F sature à grand n)"
+            ),
+            "fusionnable": None,
+            "fusion_suggeree": bool(p >= ALPHA),
+        }
 
-    # ----------------------------------------------------------------
-    # Construction du workbook
-    # ----------------------------------------------------------------
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
 
-    all_years = sorted(df[year_col].drop_nulls().unique().to_list())
+class KolmogorovSmirnovTest(HeterogeneityTest):
+    name = "Kolmogorov-Smirnov"
 
-    if by_segment:
-        # NB1, NB2 : une feuille par segment + GLOBAL graphique
-        segments = sorted(df[seg_col].drop_nulls().unique().to_list())
+    def _compute(self, a, b) -> dict:
+        d, p = stats.ks_2samp(a, b)
+        return {
+            "statistic": float(d),
+            "p_value": float(p),
+            "interpretation": (
+                f"D={d:.3f} (écart max des ECDF) ; "
+                + ("distributions différentes" if p < ALPHA else "distributions comparables")
+                + " (documentaire : sature à grand n)"
+            ),
+            "fusionnable": None,
+            "fusion_suggeree": bool(p >= ALPHA),
+        }
 
-        for seg in segments:
-            df_seg  = df.filter(pl.col(seg_col) == seg)
-            classes = classes_by_lgd(df_seg, class_col)
+    def plot(self, ax=None):
+        if ax is None:
+            _, ax = plt.subplots(figsize=(6, 4))
+        a, b = np.sort(self.a), np.sort(self.b)
+        ca = np.arange(1, a.size + 1) / a.size
+        cb = np.arange(1, b.size + 1) / b.size
+        ax.step(a, ca, where="post", label="ECDF A")
+        ax.step(b, cb, where="post", label="ECDF B")
+        # localisation approximative de l'écart max
+        grid = np.union1d(a, b)
+        fa = np.searchsorted(a, grid, side="right") / a.size
+        fb = np.searchsorted(b, grid, side="right") / b.size
+        i = int(np.argmax(np.abs(fa - fb)))
+        ax.vlines(grid[i], min(fa[i], fb[i]), max(fa[i], fb[i]),
+                  color="red", lw=2, label=f"D={self.result['statistic']:.3f}")
+        ax.set_xlabel("lgd_obligor")
+        ax.set_ylabel("F(x)")
+        ax.set_title(self.name)
+        ax.legend(fontsize=8)
+        return ax
 
-            ws = wb.create_sheet(title=seg[:31])
 
-            r = write_tableau(
-                ws, df_seg, classes, all_years,
-                r_start=1,
-                section_title=f"{title} — {seg} — LGD par classe × année",
+# ---------------------------------------------------------------------------
+# Tailles d'effet
+# ---------------------------------------------------------------------------
+
+class CohensDTest(HeterogeneityTest):
+    name = "Cohen's d"
+    is_effect_size = True
+
+    def _compute(self, a, b) -> dict:
+        n_a, n_b = a.size, b.size
+        s_pooled = np.sqrt(
+            ((n_a - 1) * a.var(ddof=1) + (n_b - 1) * b.var(ddof=1))
+            / (n_a + n_b - 2)
+        )
+        d = float((a.mean() - b.mean()) / s_pooled) if s_pooled > 0 else 0.0
+        # SE (Hedges 1981) + IC95 -- non fiable hors normalité, fourni pour info
+        se = float(np.sqrt(
+            (n_a + n_b) / (n_a * n_b) + d ** 2 / (2 * (n_a + n_b - 2))
+        ))
+        ic_low, ic_high = d - 1.96 * se, d + 1.96 * se
+        ad = abs(d)
+        label = ("négligeable" if ad < 0.20 else
+                 "petit" if ad < 0.50 else
+                 "moyen" if ad < 0.80 else "grand")
+        return {
+            "statistic": d,
+            "p_value": None,
+            "se": se,
+            "ic95": (ic_low, ic_high),
+            "interpretation": f"d={d:.3f} [{ic_low:.3f}, {ic_high:.3f}] -- effet {label} (IC non fiable si non gaussien)",
+            "fusionnable": bool(ad < COHEN_NEGLIGEABLE),
+            "fusion_suggeree": bool(ad < COHEN_NEGLIGEABLE),
+        }
+
+
+class HedgesGTest(HeterogeneityTest):
+    name = "Hedges' g"
+    is_effect_size = True
+
+    def _compute(self, a, b) -> dict:
+        n_a, n_b = a.size, b.size
+        s_pooled = np.sqrt(
+            ((n_a - 1) * a.var(ddof=1) + (n_b - 1) * b.var(ddof=1))
+            / (n_a + n_b - 2)
+        )
+        d = (a.mean() - b.mean()) / s_pooled if s_pooled > 0 else 0.0
+        # facteur de correction petit échantillon
+        J = 1.0 - 3.0 / (4.0 * (n_a + n_b) - 9.0)
+        g = float(J * d)
+        se_d = np.sqrt((n_a + n_b) / (n_a * n_b) + d ** 2 / (2 * (n_a + n_b - 2)))
+        se_g = float(J * se_d)
+        ag = abs(g)
+        label = ("négligeable" if ag < 0.20 else
+                 "petit" if ag < 0.50 else
+                 "moyen" if ag < 0.80 else "grand")
+        return {
+            "statistic": g,
+            "p_value": None,
+            "J": float(J),
+            "se": se_g,
+            "interpretation": f"g={g:.3f} (J={J:.4f}) -- effet {label}",
+            "fusionnable": bool(ag < COHEN_NEGLIGEABLE),
+            "fusion_suggeree": bool(ag < COHEN_NEGLIGEABLE),
+        }
+
+
+class WassersteinTest(HeterogeneityTest):
+    name = "Wasserstein (W1)"
+    is_effect_size = True
+
+    def _compute(self, a, b) -> dict:
+        w = float(wasserstein_distance(a, b))
+        # normalisation par l'étendue commune pour lecture relative
+        rng = max(a.max(), b.max()) - min(a.min(), b.min())
+        w_rel = float(w / rng) if rng > 0 else np.nan
+        return {
+            "statistic": w,
+            "p_value": None,
+            "w_relative": w_rel,
+            "interpretation": (
+                f"W1={w:.3f} pts LGD ({w_rel:.1%} de l'étendue) -- "
+                "distance de transport entre distributions"
+            ),
+            "fusionnable": None,
+            "fusion_suggeree": (bool(w_rel < WASSERSTEIN_REL_MAX)
+                                if np.isfinite(w_rel) else None),
+        }
+
+
+# ---------------------------------------------------------------------------
+# OVL -- critère de fusion retenu (Weitzman 1970)
+# ---------------------------------------------------------------------------
+
+class OVLTest(HeterogeneityTest):
+    """Overlapping coefficient : Δ = ∫ min{f_A(x), f_B(x)} dx.
+
+    method="hist" : 100 bins, density=True.
+    method="kde"  : gaussian_kde, 300 points.
+    """
+
+    name = "OVL (Weitzman)"
+    is_effect_size = True
+
+    def __init__(self, method: str = "kde") -> None:
+        super().__init__()
+        if method not in ("hist", "kde"):
+            raise ValueError("method doit être 'hist' ou 'kde'.")
+        self.method = method
+
+    @staticmethod
+    def _ovl_hist(a, b) -> float:
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        bins = np.linspace(lo, hi, 101)
+        ha, _ = np.histogram(a, bins=bins, density=True)
+        hb, _ = np.histogram(b, bins=bins, density=True)
+        return float(np.sum(np.minimum(ha, hb)) * (bins[1] - bins[0]))
+
+    @staticmethod
+    def _ovl_kde(a, b) -> float:
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        ka, kb = gaussian_kde(a), gaussian_kde(b)
+        x = np.linspace(lo, hi, 300)
+        return float(np.sum(np.minimum(ka(x), kb(x))) * (x[1] - x[0]))
+
+    def _compute(self, a, b) -> dict:
+        ovl_hist = self._ovl_hist(a, b)
+        try:
+            ovl_kde = self._ovl_kde(a, b)
+        except Exception:
+            ovl_kde = np.nan
+        ovl = ovl_kde if (self.method == "kde" and np.isfinite(ovl_kde)) else ovl_hist
+
+        if ovl >= OVL_STRICT:
+            code, verdict = 0, "fusion recommandée"
+        elif ovl >= OVL_MODERE:
+            code, verdict = 1, "fusion possible"
+        else:
+            code, verdict = 2, "fusion non recommandée"
+
+        return {
+            "statistic": float(ovl),
+            "p_value": None,
+            "ovl_hist": ovl_hist,
+            "ovl_kde": ovl_kde,
+            "method": self.method,
+            "code": code,
+            "interpretation": f"OVL={ovl:.3f} (code {code}) -- {verdict}",
+            "fusionnable": bool(code in CODES_FUSIONNABLES),
+            "fusion_suggeree": bool(code in CODES_FUSIONNABLES),
+        }
+
+    def plot(self, ax=None):
+        if ax is None:
+            _, ax = plt.subplots(figsize=(6, 4))
+        a, b = self.a, self.b
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        x = np.linspace(lo, hi, 300)
+        try:
+            fa, fb = gaussian_kde(a)(x), gaussian_kde(b)(x)
+        except Exception:
+            fa = np.histogram(a, bins=np.linspace(lo, hi, 301), density=True)[0]
+            fb = np.histogram(b, bins=np.linspace(lo, hi, 301), density=True)[0]
+            x = x[:-1] if len(x) != len(fa) else x
+        ax.plot(x, fa, "-", lw=1.5, label="A")
+        ax.plot(x, fb, "--", lw=1.5, label="B")
+        ax.fill_between(x, np.minimum(fa, fb), alpha=0.4, color="green",
+                        label=f"OVL={self.result['statistic']:.3f}")
+        ax.set_xlabel("lgd_obligor")
+        ax.set_ylabel("densité")
+        ax.set_title(f"{self.name} [{self.method}]")
+        ax.legend(fontsize=8)
+        return ax
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic de normalité (helper utilitaire)
+# ---------------------------------------------------------------------------
+
+def diagnostic_normalite(x: Sequence[float]) -> dict:
+    """Shapiro-Wilk si n<5000, sinon test sur moments (skew/kurt)."""
+    arr = np.asarray(x, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    n = arr.size
+    if n < N_SHAPIRO_MAX:
+        w, p = stats.shapiro(arr)
+        return {"methode": "shapiro", "n": n, "statistic": float(w),
+                "p_value": float(p), "gaussien": bool(p >= ALPHA)}
+    sk = float(stats.skew(arr))
+    ku = float(stats.kurtosis(arr, fisher=True))
+    gaussien = (abs(sk) <= SKEW_MAX) and (abs(ku) <= KURT_MAX)
+    return {"methode": "moments", "n": n, "skewness": sk, "kurtosis": ku,
+            "gaussien": bool(gaussien)}
+
+
+# ---------------------------------------------------------------------------
+# Suite de tests
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TESTS: List[HeterogeneityTest] = None  # construit dynamiquement
+
+
+def _default_suite() -> List[HeterogeneityTest]:
+    return [
+        WelchTest(),
+        KruskalWallisTest(),
+        ANOVATest(),
+        KolmogorovSmirnovTest(),
+        CohensDTest(),
+        HedgesGTest(),
+        WassersteinTest(),
+        OVLTest(method="kde"),
+    ]
+
+
+class HeterogeneityTestSuite:
+    """Exécute une batterie de tests sur une paire de classes (A, B)."""
+
+    def __init__(
+        self,
+        data_a: Sequence[float],
+        data_b: Sequence[float],
+        tests: Optional[List[HeterogeneityTest]] = None,
+        label_a: str = "A",
+        label_b: str = "B",
+    ) -> None:
+        self.a = HeterogeneityTest._clean(data_a)
+        self.b = HeterogeneityTest._clean(data_b)
+        self.label_a = label_a
+        self.label_b = label_b
+        self.tests: List[HeterogeneityTest] = tests if tests is not None else _default_suite()
+        self._fitted = False
+
+    def fit_all(self) -> "HeterogeneityTestSuite":
+        for t in self.tests:
+            t.fit(self.a, self.b)
+        self._fitted = True
+        return self
+
+    def _ensure_fitted(self) -> None:
+        if not self._fitted:
+            self.fit_all()
+
+    def get_test(self, name: str) -> HeterogeneityTest:
+        for t in self.tests:
+            if t.name.lower().startswith(name.lower()):
+                return t
+        raise KeyError(name)
+
+    # -- récapitulatif ------------------------------------------------------
+
+    def summary(self) -> pl.DataFrame:
+        """DataFrame Polars : une ligne par test."""
+        self._ensure_fitted()
+        rows = []
+        for t in self.tests:
+            r = t.result
+            rows.append({
+                "test": r["test"],
+                "statistic": float(r["statistic"]),
+                "p_value": (None if r["p_value"] is None else float(r["p_value"])),
+                "interpretation": r["interpretation"],
+                "fusionnable": r["fusionnable"],
+            })
+        return pl.DataFrame(rows, schema_overrides={
+            "p_value": pl.Float64,
+            "fusionnable": pl.Boolean,
+        })
+
+    # -- verdict consolidé --------------------------------------------------
+
+    def get_verdict(
+        self,
+        strategy: str = "ovl",
+        lgd_gap_threshold: float = 1.0,
+    ) -> dict:
+        """Verdict de fusion consolidé.
+
+        strategy:
+            "ovl"      : fusionnable si code OVL ∈ {0, 1}        (critère retenu)
+            "cohen"    : fusionnable si |d| < 0.20
+            "combined" : |moyennes A-B| < lgd_gap_threshold ET |d| < 0.20
+        lgd_gap_threshold : seuil métier d'écart absolu de LGD (pts), pour "combined".
+        """
+        self._ensure_fitted()
+
+        if strategy == "ovl":
+            try:
+                ovl = self.get_test("OVL").result
+            except KeyError:
+                return {"strategy": "ovl", "fusionnable": None,
+                        "raison": "test OVL absent de la suite utilisée"}
+            return {
+                "strategy": "ovl",
+                "fusionnable": bool(ovl["fusionnable"]),
+                "ovl": ovl["statistic"],
+                "code": ovl["code"],
+                "raison": ovl["interpretation"],
+            }
+
+        if strategy == "cohen":
+            try:
+                d = self.get_test("Cohen").result
+            except KeyError:
+                return {"strategy": "cohen", "fusionnable": None,
+                        "raison": "test Cohen's d absent de la suite utilisée"}
+            return {
+                "strategy": "cohen",
+                "fusionnable": bool(d["fusionnable"]),
+                "cohen_d": d["statistic"],
+                "raison": d["interpretation"],
+            }
+
+        if strategy == "combined":
+            try:
+                d = self.get_test("Cohen").result
+            except KeyError:
+                return {"strategy": "combined", "fusionnable": None,
+                        "raison": "test Cohen's d absent de la suite utilisée"}
+            gap = abs(float(self.a.mean() - self.b.mean()))
+            gap_ok = gap < lgd_gap_threshold
+            d_ok = abs(d["statistic"]) < COHEN_NEGLIGEABLE
+            return {
+                "strategy": "combined",
+                "fusionnable": bool(gap_ok and d_ok),
+                "lgd_gap": gap,
+                "lgd_gap_threshold": lgd_gap_threshold,
+                "cohen_d": d["statistic"],
+                "raison": (
+                    f"écart LGD={gap:.3f} pts ({'<' if gap_ok else '>='} {lgd_gap_threshold}) "
+                    f"ET |d|={abs(d['statistic']):.3f} ({'<' if d_ok else '>='} {COHEN_NEGLIGEABLE})"
+                ),
+            }
+
+        raise ValueError("strategy doit être 'ovl', 'cohen' ou 'combined'.")
+
+    # -- visualisation ------------------------------------------------------
+
+    def plot_all(self, figsize=(14, 9)):
+        """Tableau de bord : distributions, OVL, ECDF, tailles d'effet, box, table."""
+        self._ensure_fitted()
+        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        a, b = self.a, self.b
+        la, lb = self.label_a, self.label_b
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+
+        # (0,0) histogrammes + KDE
+        ax = axes[0, 0]
+        bins = np.linspace(lo, hi, 60)
+        ax.hist(a, bins=bins, density=True, alpha=0.35, label=f"{la} (n={a.size})")
+        ax.hist(b, bins=bins, density=True, alpha=0.35, label=f"{lb} (n={b.size})")
+        ax.set_title("Distributions"); ax.legend(fontsize=8)
+        ax.set_xlabel("lgd_obligor"); ax.set_ylabel("densité")
+
+        # (0,1) OVL visualisé
+        self.get_test("OVL").plot(ax=axes[0, 1])
+
+        # (0,2) ECDF / KS
+        self.get_test("Kolmogorov").plot(ax=axes[0, 2])
+
+        # (1,0) tailles d'effet
+        ax = axes[1, 0]
+        d = self.get_test("Cohen").result["statistic"]
+        g = self.get_test("Hedges").result["statistic"]
+        ovl = self.get_test("OVL").result["statistic"]
+        ax.bar(["|d|", "|g|", "OVL"], [abs(d), abs(g), ovl],
+               color=["#4c72b0", "#4c72b0", "#55a868"])
+        ax.axhline(COHEN_NEGLIGEABLE, ls=":", color="grey")
+        ax.axhline(OVL_MODERE, ls="--", color="orange")
+        ax.axhline(OVL_STRICT, ls="--", color="green")
+        ax.set_title("Tailles d'effet / OVL")
+
+        # (1,1) boxplot
+        ax = axes[1, 1]
+        ax.boxplot([a, b], labels=[la, lb], showmeans=True)
+        ax.set_title("Comparaison"); ax.set_ylabel("lgd_obligor")
+
+        # (1,2) table récap
+        ax = axes[1, 2]; ax.axis("off")
+        sm = self.summary()
+        cell = [[r["test"],
+                 f"{r['statistic']:.3g}",
+                 ("n/a" if r["p_value"] is None else f"{r['p_value']:.1e}"),
+                 ("-" if r["fusionnable"] is None else ("oui" if r["fusionnable"] else "non"))]
+                for r in sm.iter_rows(named=True)]
+        tbl = ax.table(cellText=cell,
+                       colLabels=["test", "stat", "p", "fus."],
+                       loc="center", cellLoc="center")
+        tbl.auto_set_font_size(False); tbl.set_fontsize(7); tbl.scale(1, 1.3)
+        ax.set_title("Récapitulatif")
+
+        v = self.get_verdict("ovl")
+        fig.suptitle(
+            f"{la} vs {lb}  |  verdict OVL : "
+            f"{'FUSIONNABLE' if v['fusionnable'] else 'NON FUSIONNABLE'} "
+            f"(OVL={v['ovl']:.3f}, code {v['code']})",
+            fontsize=12,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        return fig
+
+    # -- export -------------------------------------------------------------
+
+    def export_report(self, path: str) -> str:
+        """Export markdown (.md) ou Excel (.xlsx) selon l'extension."""
+        self._ensure_fitted()
+        sm = self.summary()
+        verdict = self.get_verdict("ovl")
+
+        if path.lower().endswith((".xlsx", ".xls")):
+            sm.write_excel(path)
+            return path
+
+        # markdown par défaut
+        lines = [
+            f"# Tests d'hétérogénéité : {self.label_a} vs {self.label_b}",
+            "",
+            f"- n({self.label_a}) = {self.a.size} ; n({self.label_b}) = {self.b.size}",
+            f"- moyenne {self.label_a} = {self.a.mean():.3f} ; "
+            f"moyenne {self.label_b} = {self.b.mean():.3f} ; "
+            f"écart = {abs(self.a.mean() - self.b.mean()):.3f} pts",
+            f"- **Verdict OVL** : "
+            f"{'FUSIONNABLE' if verdict['fusionnable'] else 'NON FUSIONNABLE'} "
+            f"(OVL={verdict['ovl']:.3f}, code {verdict['code']})",
+            "",
+            "| test | statistic | p_value | interpretation | fusionnable |",
+            "|------|-----------|---------|----------------|-------------|",
+        ]
+        for r in sm.iter_rows(named=True):
+            p = "n/a" if r["p_value"] is None else f"{r['p_value']:.3e}"
+            fus = "-" if r["fusionnable"] is None else ("oui" if r["fusionnable"] else "non")
+            lines.append(
+                f"| {r['test']} | {r['statistic']:.4g} | {p} | "
+                f"{r['interpretation']} | {fus} |"
             )
-            r = write_stats_globales(
-                ws, df_seg, classes,
-                r_start=r,
-                section_title=f"{title} — {seg} — Stats globales",
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return path
+
+
+# ---------------------------------------------------------------------------
+# Comparateur de fusions sur l'ensemble des paires
+# ---------------------------------------------------------------------------
+
+class FusionComparator:
+    """Balaye les paires de classes et compare les fusions suggérées par test.
+
+    Permet de voir si les différents tests convergent vers les mêmes fusions,
+    et où l'OVL diverge des tests classiques (typiquement : classiques refusent
+    partout par saturation, OVL tranche).
+
+    Entrée :
+        df          : DataFrame ou LazyFrame Polars (grain facilité ou obligor)
+        class_col   : colonne de classe (ex. "CHR_apres_fusion" ou "Jenks_Submodel")
+        lgd_col     : colonne LGD ("lgd_obligor", échelle 0-100)
+        obligor_col : si fourni, agrégation préalable au grain obligor
+                      group_by([class_col, obligor_col]).mean(lgd_col)
+        pairs       : "adjacent" (classes consécutives en LGD) ou "all"
+        lgd_gap_threshold : seuil métier (pts LGD) pour la stratégie "combined"
+    """
+
+    def __init__(
+        self,
+        df: "pl.DataFrame | pl.LazyFrame",
+        class_col: str,
+        lgd_col: str = "lgd_obligor",
+        obligor_col: Optional[str] = None,
+        pairs: str = "adjacent",
+        tests: Optional[List[HeterogeneityTest]] = None,
+        lgd_gap_threshold: float = 1.0,
+    ) -> None:
+        if pairs not in ("adjacent", "all"):
+            raise ValueError("pairs doit être 'adjacent' ou 'all'.")
+        self.class_col = class_col
+        self.lgd_col = lgd_col
+        self.pairs_mode = pairs
+        self.lgd_gap_threshold = lgd_gap_threshold
+        self._tests_factory = tests
+
+        if isinstance(df, pl.LazyFrame):
+            df = df.collect()
+
+        # base d'origine conservée pour rattacher la colonne de fusion
+        self._df_base = df
+        self._base_class_col = class_col
+
+        # passage au grain obligor si demandé (copie de travail)
+        work = df
+        if obligor_col is not None:
+            work = (
+                df.group_by([class_col, obligor_col])
+                .agg(pl.col(lgd_col).mean().alias(lgd_col))
             )
-            write_graphique(
-                ws, df_seg, classes, all_years,
-                r_start=r,
-                graph_title=f"{title} — {seg} — LGD par classe",
-            )
-            auto_width(ws)
 
-        # Feuille GLOBAL graphique
-        ws_glob    = wb.create_sheet(title="GLOBAL")
-        classes_gl = classes_by_lgd(df, class_col)
-        write_graphique(
-            ws_glob, df, classes_gl, all_years,
-            r_start=1,
-            graph_title=f"{title} — Toutes classes — LGD par classe",
+        # arrays par classe
+        self.arrays: Dict[str, np.ndarray] = {}
+        for cls, sub in work.group_by(class_col):
+            key = cls[0] if isinstance(cls, tuple) else cls
+            arr = sub.get_column(lgd_col).to_numpy()
+            arr = arr[np.isfinite(arr)]
+            if arr.size >= 2:
+                self.arrays[str(key)] = arr
+
+        if len(self.arrays) < 2:
+            raise ValueError("Au moins 2 classes valides nécessaires.")
+
+        # ordre par LGD moyenne croissante (proxy LRA)
+        self.order: List[str] = sorted(self.arrays, key=lambda c: self.arrays[c].mean())
+
+        if pairs == "adjacent":
+            self.pair_list = list(zip(self.order, self.order[1:]))
+        else:
+            from itertools import combinations
+            self.pair_list = list(combinations(self.order, 2))
+
+        self._runs: list = []  # [(meta_dict, {test_name: result_dict})]
+
+    # -- exécution ----------------------------------------------------------
+
+    def run(self) -> "FusionComparator":
+        self._runs = []
+        for ca, cb in self.pair_list:
+            a, b = self.arrays[ca], self.arrays[cb]
+            tests = self._tests_factory if self._tests_factory is not None else _default_suite()
+            suite = HeterogeneityTestSuite(a, b, tests=tests, label_a=ca, label_b=cb).fit_all()
+            per_test = {t.name: t.result for t in suite.tests}
+            v_ovl = suite.get_verdict("ovl")
+            v_comb = suite.get_verdict("combined", lgd_gap_threshold=self.lgd_gap_threshold)
+            meta = {
+                "class_a": ca, "class_b": cb,
+                "n_a": int(a.size), "n_b": int(b.size),
+                "mean_a": float(a.mean()), "mean_b": float(b.mean()),
+                "gap_lgd": float(abs(a.mean() - b.mean())),
+                "verdict_ovl": v_ovl["fusionnable"],          # peut être None si OVL absent
+                "verdict_combined": v_comb["fusionnable"],    # peut être None si Cohen absent
+            }
+            self._runs.append((meta, per_test))
+        return self
+
+    def _ensure_run(self) -> None:
+        if not self._runs:
+            self.run()
+
+    @property
+    def test_names(self) -> List[str]:
+        self._ensure_run()
+        return list(self._runs[0][1].keys())
+
+    # -- sorties ------------------------------------------------------------
+
+    def detail(self) -> pl.DataFrame:
+        """Long format : une ligne par (paire, test)."""
+        self._ensure_run()
+        rows = []
+        for meta, per_test in self._runs:
+            for tname, r in per_test.items():
+                rows.append({
+                    "class_a": meta["class_a"],
+                    "class_b": meta["class_b"],
+                    "gap_lgd": meta["gap_lgd"],
+                    "test": tname,
+                    "statistic": float(r["statistic"]),
+                    "p_value": (None if r["p_value"] is None else float(r["p_value"])),
+                    "fusion_suggeree": r["fusion_suggeree"],
+                })
+        return pl.DataFrame(rows, schema_overrides={
+            "p_value": pl.Float64, "fusion_suggeree": pl.Boolean,
+        })
+
+    def matrix(self, as_bool: bool = False) -> pl.DataFrame:
+        """Wide : une ligne par paire, une colonne par test (oui/non).
+
+        as_bool=True renvoie des booléens au lieu de 'oui'/'non'/'-'.
+        Ajoute n_pour_fusion, accord_total, et les verdicts OVL/combined.
+        """
+        self._ensure_run()
+        names = self.test_names
+
+        def fmt(v):
+            if as_bool:
+                return v
+            return "-" if v is None else ("oui" if v else "non")
+
+        rows = []
+        has_ovl = "OVL (Weitzman)" in self.test_names
+        for meta, per_test in self._runs:
+            row = {
+                "class_a": meta["class_a"], "class_b": meta["class_b"],
+                "n_a": meta["n_a"], "n_b": meta["n_b"],
+                "gap_lgd": round(meta["gap_lgd"], 3),
+                "ovl": (round(per_test["OVL (Weitzman)"]["statistic"], 3)
+                       if has_ovl else None),
+            }
+            sugg = []
+            for n in names:
+                v = per_test[n]["fusion_suggeree"]
+                row[n] = fmt(v)
+                if v is not None:
+                    sugg.append(bool(v))
+            row["n_pour_fusion"] = int(sum(sugg))
+            row["accord_total"] = bool(len(set(sugg)) == 1)  # tous d'accord
+            row["verdict_ovl"] = meta["verdict_ovl"]
+            row["verdict_combined"] = meta["verdict_combined"]
+            rows.append(row)
+
+        col_order = (["class_a", "class_b", "n_a", "n_b", "gap_lgd", "ovl"]
+                     + names
+                     + ["n_pour_fusion", "accord_total", "verdict_ovl", "verdict_combined"])
+        return pl.DataFrame(rows).select(col_order)
+
+    def consensus(self) -> pl.DataFrame:
+        """Par test : nombre de fusions suggérées et accord avec l'OVL."""
+        self._ensure_run()
+        names = self.test_names
+        has_ovl = "OVL (Weitzman)" in names
+        ovl_decisions = ([per_test["OVL (Weitzman)"]["fusion_suggeree"]
+                         for _, per_test in self._runs] if has_ovl
+                        else [None] * len(self._runs))
+        rows = []
+        for n in names:
+            decisions = [per_test[n]["fusion_suggeree"] for _, per_test in self._runs]
+            valid = [(d, o) for d, o in zip(decisions, ovl_decisions) if d is not None]
+            n_fusion = sum(1 for d in decisions if d)
+            n_accord_ovl = sum(1 for d, o in valid if d == o)
+            rows.append({
+                "test": n,
+                "n_paires": len(decisions),
+                "n_fusions_suggerees": int(n_fusion),
+                "taux_fusion": round(n_fusion / len(decisions), 3),
+                "accord_avec_ovl": (round(n_accord_ovl / len(valid), 3) if valid else None),
+            })
+        return pl.DataFrame(rows)
+
+    # -- résolution des fusions (transitive) --------------------------------
+
+    def _eval_pair(self, a, b, criterion, lgd_gap_threshold):
+        """Retourne (mergeable: bool, score: float). score plus haut = plus fusionnable."""
+        tests = self._tests_factory if self._tests_factory is not None else _default_suite()
+        suite = HeterogeneityTestSuite(a, b, tests=tests).fit_all()
+        c = criterion.lower()
+        if c in ("ovl", "cohen", "combined"):
+            v = (suite.get_verdict("combined", lgd_gap_threshold=lgd_gap_threshold)
+                 if c == "combined" else suite.get_verdict(c))
+            if v["fusionnable"] is None:
+                raise ValueError(
+                    f"criterion='{criterion}' nécessite que le test correspondant "
+                    f"(OVL et/ou Cohen's d) soit présent dans la suite de tests utilisée. "
+                    f"Suite actuelle : {[t.name for t in tests]}"
+                )
+            mergeable = bool(v["fusionnable"])
+            if c == "ovl":
+                score = v["ovl"]
+            elif c == "cohen":
+                score = -abs(v["cohen_d"])
+            else:
+                score = -v["lgd_gap"]
+            return mergeable, float(score)
+        t = suite.get_test(criterion)
+        r = t.result
+        mergeable = bool(r["fusion_suggeree"])
+        if r["p_value"] is not None:
+            score = r["p_value"]                 # p élevée = homogène
+        elif t.name.startswith("OVL"):
+            score = r["statistic"]               # OVL élevé = homogène
+        else:
+            score = -abs(r["statistic"])         # effet/distance faible = homogène
+        return mergeable, float(score)
+
+    def solve(
+        self,
+        criterion: str = "ovl",
+        label_style: str = "ordinal",
+        k_min: int = 1,
+        lgd_gap_threshold: Optional[float] = None,
+    ) -> dict:
+        """Fusion séquentielle transitive selon le critère choisi.
+
+        À chaque itération : ordonner les groupes par LGD, évaluer les paires
+        ADJACENTES, fusionner la plus homogène (meilleur score), puis recalculer
+        -- ce qui gère la transitivité (A~B et B~C -> A∪B∪C).
+
+        criterion    : "ovl" | "cohen" | "combined" | nom d'un test ("Welch", "OVL", ...)
+        label_style  : "ordinal" (1,2,3 par LGD), "concat" (C1+C2, alphabétique),
+                       "glouton" (historique de fusion, ex. "A_16_B_15_C_5",
+                       reproduit le format fusion_glouton), "representative"
+        k_min        : nombre minimal de classes à conserver
+        Retour : dict {mapping, composition, groups, log, n_initial, n_final}
+        """
+        if lgd_gap_threshold is None:
+            lgd_gap_threshold = self.lgd_gap_threshold
+
+        arrays = dict(self.arrays)
+        groups: List[List[str]] = [[c] for c in self.order]
+        # label "historique" par groupe : reproduit fusion_glouton (f"{c1}_{c2}")
+        glouton_label: Dict[int, str] = {id(g): c for g, c in zip(groups, self.order)}
+
+        def garr(g: List[str]) -> np.ndarray:
+            return np.concatenate([arrays[c] for c in g])
+
+        log: List[dict] = []
+        it = 0
+        while len(groups) > k_min:
+            groups.sort(key=lambda g: garr(g).mean())
+            best = None  # (score, i)
+            for i in range(len(groups) - 1):
+                mergeable, score = self._eval_pair(
+                    garr(groups[i]), garr(groups[i + 1]), criterion, lgd_gap_threshold
+                )
+                if mergeable and (best is None or score > best[0]):
+                    best = (score, i)
+            if best is None:
+                break
+            it += 1
+            i = best[1]
+            ga, gb = groups[i], groups[i + 1]
+            new_group = ga + gb
+            glouton_label[id(new_group)] = f"{glouton_label[id(ga)]}_{glouton_label[id(gb)]}"
+            log.append({
+                "iteration": it,
+                "groupe_a": "+".join(ga), "groupe_b": "+".join(gb),
+                "n_a": int(garr(ga).size), "n_b": int(garr(gb).size),
+                "critere": criterion,
+                "score": float(best[0]),
+                "mean_a": round(float(garr(ga).mean()), 4),
+                "mean_b": round(float(garr(gb).mean()), 4),
+                "gap_lgd": round(float(abs(garr(ga).mean() - garr(gb).mean())), 4),
+                "label_fusionne": glouton_label[id(new_group)],
+            })
+            groups = groups[:i] + [new_group] + groups[i + 2:]
+
+        groups.sort(key=lambda g: garr(g).mean())
+        mapping: Dict[str, str] = {}
+        composition: Dict[str, list] = {}
+        for idx, g in enumerate(groups):
+            if label_style == "ordinal":
+                label = str(idx + 1)
+            elif label_style == "concat":
+                label = "+".join(sorted(g))
+            elif label_style == "glouton":
+                # reproduit le format historique fusion_glouton : "A_16_B_15_C_5"
+                label = glouton_label[id(g)]
+            elif label_style == "representative":
+                label = max(g, key=lambda c: arrays[c].size)
+            else:
+                raise ValueError(
+                    "label_style: 'ordinal' | 'concat' | 'glouton' | 'representative'"
+                )
+            for c in g:
+                mapping[str(c)] = label
+            composition[label] = sorted(g)
+
+        log_schema = {
+            "iteration": pl.Int64, "groupe_a": pl.Utf8, "groupe_b": pl.Utf8,
+            "n_a": pl.Int64, "n_b": pl.Int64, "critere": pl.Utf8,
+            "score": pl.Float64, "mean_a": pl.Float64, "mean_b": pl.Float64,
+            "gap_lgd": pl.Float64, "label_fusionne": pl.Utf8,
+        }
+        log_df = pl.DataFrame(log, schema=log_schema) if log else pl.DataFrame(schema=log_schema)
+
+        return {
+            "mapping": mapping,
+            "composition": composition,
+            "groups": [sorted(g) for g in groups],
+            "log": log_df,
+            "n_initial": len(self.order),
+            "n_final": len(groups),
+        }
+
+    def apply_to_base(
+        self,
+        criterion: str = "ovl",
+        out_col: str = "CHR_apres_fusion",
+        df: "pl.DataFrame | pl.LazyFrame | None" = None,
+        label_style: str = "ordinal",
+        k_min: int = 1,
+        lgd_gap_threshold: Optional[float] = None,
+        return_solution: bool = False,
+    ):
+        """Résout les fusions et ajoute `out_col` à la base.
+
+        df : si None, utilise la base passée au constructeur. Accepte un autre
+             DataFrame/LazyFrame partageant la même colonne de classe (ex. base
+             complète grain facilité). Les classes absentes du mapping (écartées
+             car n<2) gardent leur valeur d'origine.
+        """
+        sol = self.solve(criterion, label_style=label_style, k_min=k_min,
+                         lgd_gap_threshold=lgd_gap_threshold)
+        target = self._df_base if df is None else (
+            df.collect() if isinstance(df, pl.LazyFrame) else df
         )
-        auto_width(ws_glob)
-
-    else:
-        # NB3A, NB3B : tableau global + graphique global
-        classes = classes_by_lgd(df, class_col)
-
-        ws_tab = wb.create_sheet(title="Classes_par_annee")
-        r = write_tableau(
-            ws_tab, df, classes, all_years,
-            r_start=1,
-            section_title=f"{title} — LGD par classe × année",
+        out = target.with_columns(
+            pl.col(self._base_class_col).cast(pl.Utf8)
+            .replace(sol["mapping"])
+            .alias(out_col)
         )
-        write_stats_globales(
-            ws_tab, df, classes,
-            r_start=r,
-            section_title=f"{title} — Stats globales",
-        )
-        auto_width(ws_tab)
+        if return_solution:
+            return out, sol
+        return out
 
-        ws_graph = wb.create_sheet(title="Graphique_LGD")
-        write_graphique(
-            ws_graph, df, classes, all_years,
-            r_start=1,
-            graph_title=f"{title} — LGD par classe",
-        )
-        auto_width(ws_graph)
+    # -- visualisation ------------------------------------------------------
 
-    wb.save(output_path)
-    print(f"Sauvegardé : {output_path}")
-    return wb
+    def plot_heatmap(self, figsize=None):
+        """Carte paires × tests : vert = fusion suggérée, rouge = non, gris = n/a."""
+        self._ensure_run()
+        names = self.test_names
+        pairs_lbl = [f"{m['class_a']}|{m['class_b']}" for m, _ in self._runs]
+
+        M = np.full((len(self._runs), len(names)), np.nan)
+        for i, (_, per_test) in enumerate(self._runs):
+            for j, n in enumerate(names):
+                v = per_test[n]["fusion_suggeree"]
+                M[i, j] = np.nan if v is None else (1.0 if v else 0.0)
+
+        from matplotlib.colors import ListedColormap
+        cmap = ListedColormap(["#c44e52", "#55a868"])  # 0=rouge, 1=vert
+        if figsize is None:
+            figsize = (1.1 * len(names) + 3, 0.5 * len(self._runs) + 2)
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.imshow(np.ma.masked_invalid(M), cmap=cmap, vmin=0, vmax=1, aspect="auto")
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(len(pairs_lbl)))
+        ax.set_yticklabels(pairs_lbl, fontsize=8)
+        for i in range(M.shape[0]):
+            for j in range(M.shape[1]):
+                txt = "?" if np.isnan(M[i, j]) else ("✓" if M[i, j] == 1 else "✗")
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8, color="white")
+        ax.set_title("Fusions suggérées par test (✓ = fusion, ✗ = non, ? = n/a)")
+        fig.tight_layout()
+        return fig
+
+
+# ---------------------------------------------------------------------------
+# Démo / test rapide
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    # deux classes proches (devraient être fusionnables)
+    a = np.clip(rng.normal(42, 12, 20000), 0, 100)
+    b = np.clip(rng.normal(44, 12, 35000), 0, 100)
+
+    suite = HeterogeneityTestSuite(a, b, label_a="C3", label_b="C4").fit_all()
+    print(suite.summary())
+    print()
+    print(suite.get_verdict("ovl"))
+    print(suite.get_verdict("combined", lgd_gap_threshold=3.0))
+
+    # --- comparaison sur plusieurs classes ---
+    print("\n=== FusionComparator ===")
+    parts = []
+    for cls, (mu, n) in {
+        "C1": (20, 12000), "C2": (23, 18000),   # proches -> fusion attendue
+        "C3": (40, 30000), "C4": (44, 25000),   # proches
+        "C5": (70, 9000),                        # isolée
+    }.items():
+        v = np.clip(rng.normal(mu, 11, n), 0, 100)
+        parts.append(pl.DataFrame({"CHR": [cls] * n, "lgd_obligor": v}))
+    df = pl.concat(parts)
+
+    cmp = FusionComparator(df, class_col="CHR", lgd_col="lgd_obligor",
+                           pairs="adjacent", lgd_gap_threshold=3.0).run()
+    print(cmp.matrix())
+    print()
+    print(cmp.consensus())
+
+    # --- résolution + rattachement à la base ---
+    print("\n=== solve() + apply_to_base() (critère OVL) ===")
+    out, sol = cmp.apply_to_base(criterion="ovl", out_col="CHR_apres_fusion",
+                                 label_style="concat", return_solution=True)
+    print(f"{sol['n_initial']} classes -> {sol['n_final']} classes")
+    print("composition:", sol["composition"])
+    print(sol["log"])
+    print(out.group_by("CHR_apres_fusion").len().sort("CHR_apres_fusion"))
