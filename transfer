@@ -1,17 +1,20 @@
-cmp = FusionComparator(
-    df,
-    class_col="CHR_apres_fusion",
-    lgd_col="lgd_obligor",
-    obligor_col="ID_CLIENT",
-    pairs="adjacent",
-    tests=[OVLPermutationTest()],   # uniquement celui-là
-).run()
+import importlib, tests_heterogeneite
+importlib.reload(tests_heterogeneite)
+from tests_heterogeneite import OVLPermutationTest
 
-# vue détaillée longue : une ligne par (paire, test)
-cmp.detail()
+# prends ta paire la PLUS proche, ex. C1/C2 dans ton jeu réel
+a = df.filter(pl.col(class_col) == "TA_CLASSE_A").get_column(lgd_col).to_numpy()
+b = df.filter(pl.col(class_col) == "TA_CLASSE_B").get_column(lgd_col).to_numpy()
 
-# vue large : une ligne par paire, colonnes = tests, avec OVL et verdicts
-cmp.matrix()
-
-# heatmap visuelle
-cmp.plot_heatmap()
+t = OVLPermutationTest(n_boot=200, n_perm=200, random_state=0).fit(a, b)
+r = t.result
+print("n_a, n_b           :", a.size, b.size)
+print("mean_a, mean_b      :", a.mean(), b.mean())
+print("ovl_obs (médiane)   :", r["ovl_obs"])
+print("ovl_lower (5e pct)  :", r["ovl_lower"])
+print("seuil_h0  (5e pct)  :", r["seuil_h0"])
+print("p_perm              :", r["p_value"])
+print("decision            :", r["fusionnable"])
+print()
+print("distribution boot   :", t._boot_ovl.min(), t._boot_ovl.max(), t._boot_ovl.mean())
+print("distribution H0     :", t._h0_ovl.min(), t._h0_ovl.max(), t._h0_ovl.mean())
