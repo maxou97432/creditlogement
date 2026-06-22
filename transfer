@@ -1,123 +1,39 @@
-def calibrer_seuil_ovl(
-    cmp: "FusionComparator",
-    df: pl.DataFrame,
-    class_col: str,
-    lgd_col: str,
-    year_col: str = "year",
-    seg_col: str = "Seg",
-    obligor_col: Optional[str] = None,
-    seuils: Optional[list] = None,
-    poids_temporel: float = 0.5,
-    poids_segment: float = 0.5,
-) -> pl.DataFrame:
-    """Calibration empirique du seuil OVL par validation croisée.
+# Cellule 1 - reload + imports
+import importlib
+import polars as pl
+import tests_heterogeneite as th
+importlib.reload(th)
+from tests_heterogeneite import (
+    FusionComparator, OVLTest, OVLPermutationTest, calibrer_seuil_ovl,
+)
 
-    Prend un FusionComparator DÉJÀ exécuté (run()) -- les OVL sont
-    réutilisés sans recalcul. Pour chaque seuil candidat, construit
-    le mapping de fusion transitive et évalue la qualité via deux
-    métriques indépendantes :
-        - stabilité temporelle  : variance inter-annuelle des LGD
-        - homogénéité inter-segment : dispersion LGD entre segments
+# Cellule 2 - run() une seule fois (~30 sec)
+cmp = FusionComparator(
+    df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    obligor_col="ID_CLIENT",
+    pairs="adjacent",
+    tests=[OVLTest(method="kde")],
+).run()
 
-    Le seuil optimal minimise le score composite (moyenne pondérée).
+# Cellule 3 - calibration sur le cache (~2 min pour 10 seuils)
+df_calibration = calibrer_seuil_ovl(
+    cmp=cmp,
+    df=df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    year_col="year",
+    seg_col="Seg",
+    obligor_col="ID_CLIENT",
+    poids_temporel=0.5,
+    poids_segment=0.5,
+)
+print(df_calibration)
 
-    Paramètres
-    ----------
-    cmp             : FusionComparator déjà run()
-    df              : DataFrame brut (pour évaluer les métriques)
-    class_col       : colonne de classe dans df
-    lgd_col         : colonne LGD dans df
-    year_col        : colonne année dans df
-    seg_col         : colonne segment dans df
-    obligor_col     : colonne obligor (agrégation si grain facilité)
-    seuils          : liste de seuils à tester (défaut : 0.30 à 0.75)
-    poids_temporel  : poids stabilité temporelle dans le score composite
-    poids_segment   : poids homogénéité inter-segment (doit sommer à 1)
-    """
-    if not cmp._runs:
-        raise ValueError("FusionComparator doit avoir run() exécuté avant calibrer_seuil_ovl.")
-    if abs(poids_temporel + poids_segment - 1.0) > 1e-6:
-        raise ValueError(
-            f"poids_temporel + poids_segment doit valoir 1.0 "
-            f"(reçu {poids_temporel + poids_segment:.3f})."
-        )
-    if seuils is None:
-        seuils = [round(s, 2) for s in np.arange(0.30, 0.76, 0.05)]
-
-    # -- extraire les OVL déjà calculés, une fois pour toutes --------------
-    paires_ovl: dict[tuple, float] = {}
-    for meta, per_test in cmp._runs:
-        ca, cb = meta["class_a"], meta["class_b"]
-        if "OVL (Weitzman)" not in per_test:
-            raise KeyError(
-                "OVLTest absent des résultats. Lancer FusionComparator "
-                "avec tests=[OVLTest(...), ...] avant calibrer_seuil_ovl."
-            )
-        paires_ovl[(ca, cb)] = float(per_test["OVL (Weitzman)"]["statistic"])
-
-    # -- helper : fusion transitive pour un seuil donné --------------------
-    def mapping_pour_seuil(seuil: float) -> dict[str, str]:
-        arrays = dict(cmp.arrays)
-        groups: list[list[str]] = [[c] for c in cmp.order]
-        glouton_label: dict[int, str] = {
-            id(g): c for g, c in zip(groups, cmp.order)
-        }
-
-        def garr(g):
-            return np.concatenate([arrays[c] for c in g])
-
-        def get_ovl(ga, gb) -> float:
-            for a_cls in ga:
-                for b_cls in gb:
-                    if (a_cls, b_cls) in paires_ovl:
-                        return paires_ovl[(a_cls, b_cls)]
-                    if (b_cls, a_cls) in paires_ovl:
-                        return paires_ovl[(b_cls, a_cls)]
-            return 0.0  # paire non trouvée -> refus
-
-        while len(groups) > 1:
-            groups.sort(key=lambda g: garr(g).mean())
-            best = None
-            for i in range(len(groups) - 1):
-                ovl = get_ovl(groups[i], groups[i + 1])
-                if ovl >= seuil and (best is None or ovl > best[0]):
-                    best = (ovl, i)
-            if best is None:
-                break
-            i = best[1]
-            ga, gb = groups[i], groups[i + 1]
-            new_group = ga + gb
-            glouton_label[id(new_group)] = (
-                f"{glouton_label[id(ga)]}_{glouton_label[id(gb)]}"
-            )
-            groups = groups[:i] + [new_group] + groups[i + 2:]
-
-        groups.sort(key=lambda g: garr(g).mean())
-        mapping: dict[str, str] = {}
-        for idx, g in enumerate(groups):
-            label = glouton_label[id(g)]
-            for c in g:
-                mapping[str(c)] = label
-        return mapping
-
-    # -- sweep sur les seuils ----------------------------------------------
-    resultats = []
-    for seuil in seuils:
-        mapping = mapping_pour_seuil(seuil)
-        n_final = len(set(mapping.values()))
-        stab = stabilite_temporelle(
-            df, mapping, class_col, lgd_col, year_col, obligor_col
-        )
-        homo = homogeneite_intersegment(
-            df, mapping, class_col, lgd_col, seg_col, obligor_col
-        )
-        score = poids_temporel * stab + poids_segment * homo
-        resultats.append({
-            "seuil_ovl": float(seuil),
-            "n_classes": int(n_final),
-            "stabilite_temporelle": round(stab, 4),
-            "homogeneite_intersegment": round(homo, 4),
-            "score_composite": round(score, 4),
-        })
-
-    return pl.DataFrame(resultats).sort("seuil_ovl")
+seuil_optimal = float(
+    df_calibration
+    .filter(pl.col("score_composite") == pl.col("score_composite").min())
+    ["seuil_ovl"][0]
+)
+print(f"\nSeuil OVL retenu : {seuil_optimal}")
