@@ -1,149 +1,56 @@
-def calibrer_seuil_ovl_stabilite(
-    cmp: "FusionComparator",
-    seuils: Optional[list] = None,
-    n_bootstrap: int = 100,
-    n_subsample: int = 300,
-    method: str = "kde",
-    random_state: Optional[int] = 42,
-) -> pl.DataFrame:
-    """Calibration du seuil OVL par stabilité bootstrap (Adjusted Rand Index).
+# Cellule 1 - reload + imports
+import importlib
+import polars as pl
+import tests_heterogeneite as th
+importlib.reload(th)
+from tests_heterogeneite import FusionComparator, OVLTest, calibrer_seuil_ovl_stabilite
 
-    Règle statistique sans hyperparamètre arbitraire : le seuil retenu est
-    celui qui maximise la reproductibilité du partitionnement sous
-    rééchantillonnage des obligors. Un bon seuil produit des fusions stables
-    (ARI proche de 1) ; un mauvais seuil produit des fusions erratiques.
+# Cellule 2 - construire le comparateur (pas besoin de run() ici)
+cmp = FusionComparator(
+    df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    obligor_col="ID_CLIENT",
+    pairs="adjacent",
+    tests=[OVLTest(method="kde")],
+)
 
-    Méthode (Lange et al. 2004, "Stability-based validation of clustering
-    solutions") :
-        Pour chaque réplicat bootstrap :
-            - rééchantillonnage stratifié par classe (avec remise) des arrays
-              CHR_apres_fusion contenus dans cmp.arrays
-            - calcul des OVL entre classes adjacentes (recalculé : les données
-              changent à chaque réplicat)
-            - fusion transitive pour CHAQUE seuil candidat (réutilise les OVL
-              du réplicat -> découplage seuil/bootstrap, cf. coût)
-        Pour chaque seuil :
-            - ARI moyen pairwise entre les n_bootstrap mappings (Hubert &
-              Arabie 1985, corrigé du hasard)
+# Cellule 3 - calibration par stabilité bootstrap (~3-4 min)
+df_stab = calibrer_seuil_ovl_stabilite(
+    cmp,
+    n_bootstrap=100,
+    n_subsample=300,
+    method="kde",
+    random_state=42,
+)
+print(df_stab)
 
-    Le découplage seuil/bootstrap est essentiel : les OVL ne dépendent pas du
-    seuil, donc on les calcule une fois par réplicat et on les réutilise sur
-    tous les seuils -> coût divisé par len(seuils).
+seuil_optimal = float(
+    df_stab.filter(pl.col("ari_moyen") == pl.col("ari_moyen").max())["seuil_ovl"][0]
+)
+print(f"\nSeuil OVL retenu (max ARI) : {seuil_optimal}")
 
-    Paramètres
-    ----------
-    cmp          : FusionComparator construit (run() non requis, on lit
-                   cmp.arrays et cmp.order). Doit contenir les classes
-                   CHR_apres_fusion à tester.
-    seuils       : seuils OVL candidats (défaut : 0.30 à 0.75 par 0.05)
-    n_bootstrap  : nombre de réplicats bootstrap
-    n_subsample  : taille de sous-échantillon par classe (cap sur l'effectif)
-    method       : "kde" ou "hist" pour l'estimateur OVL
-    random_state : graine (reproductibilité dossier validateur)
 
-    Retourne un DataFrame Polars trié par seuil :
-        seuil_ovl, ari_moyen, ari_std, n_classes_median
-    Le seuil optimal = argmax(ari_moyen).
-    """
-    if seuils is None:
-        seuils = [round(s, 2) for s in np.arange(0.30, 0.76, 0.05)]
-    if method not in ("hist", "kde"):
-        raise ValueError("method doit être 'hist' ou 'kde'.")
+# Cellule 4 - visualiser la courbe ARI (lecture du pic non-trivial)
+import matplotlib.pyplot as plt
 
-    rng = np.random.default_rng(random_state)
-    classes = list(cmp.order)               # ordre par LGD croissante
-    arrays = {c: cmp.arrays[c] for c in classes}
+s = df_stab["seuil_ovl"].to_numpy()
+ari = df_stab["ari_moyen"].to_numpy()
+std = df_stab["ari_std"].to_numpy()
 
-    # -- estimateur OVL (réutilise la logique d'OVLTest) -------------------
-    def _ovl(a: np.ndarray, b: np.ndarray) -> float:
-        if method == "kde":
-            try:
-                return OVLTest._ovl_kde(a, b)
-            except Exception:
-                return OVLTest._ovl_hist(a, b)
-        return OVLTest._ovl_hist(a, b)
+fig, ax1 = plt.subplots(figsize=(8, 5))
+ax1.errorbar(s, ari, yerr=std, fmt="o-", color="black", lw=2,
+             capsize=3, label="ARI moyen ± écart-type")
+ax1.axvline(seuil_optimal, color="green", ls=":", lw=2,
+            label=f"seuil retenu = {seuil_optimal}")
+ax1.set_xlabel("seuil OVL")
+ax1.set_ylabel("ARI (stabilité du partitionnement)")
+ax1.set_ylim(0, 1.05)
+ax1.legend(fontsize=9)
+ax1.set_title("Stabilité bootstrap du partitionnement (Hubert & Arabie 1985)")
 
-    # -- fusion transitive pour un set d'OVL et un seuil -------------------
-    # encode chaque classe d'origine par un entier (label de groupe) pour ARI
-    def _fusion_labels(ovl_par_paire: dict, seuil: float) -> np.ndarray:
-        # groupes initiaux : un par classe, identifiés par index dans `classes`
-        groups: list[list[int]] = [[i] for i in range(len(classes))]
-
-        def gmean(g):
-            return np.concatenate([arrays[classes[i]] for i in g]).mean()
-
-        def get_ovl(ga, gb) -> float:
-            # OVL entre groupes = OVL de la meilleure paire de composantes
-            # disponible dans le cache du réplicat (adjacentes pré-calculées)
-            for i in ga:
-                for j in gb:
-                    key = (min(i, j), max(i, j))
-                    if key in ovl_par_paire:
-                        return ovl_par_paire[key]
-            return 0.0
-
-        while len(groups) > 1:
-            groups.sort(key=gmean)
-            best = None
-            for k in range(len(groups) - 1):
-                o = get_ovl(groups[k], groups[k + 1])
-                if o >= seuil and (best is None or o > best[0]):
-                    best = (o, k)
-            if best is None:
-                break
-            k = best[1]
-            groups = groups[:k] + [groups[k] + groups[k + 1]] + groups[k + 2:]
-
-        # vecteur de labels : labels[i] = id du groupe de la classe i
-        labels = np.empty(len(classes), dtype=int)
-        for gid, g in enumerate(groups):
-            for i in g:
-                labels[i] = gid
-        return labels
-
-    # -- boucle bootstrap : mappings[seuil] = liste de vecteurs de labels --
-    mappings: dict[float, list] = {s: [] for s in seuils}
-
-    for _ in range(n_bootstrap):
-        # 1. rééchantillonnage stratifié par classe
-        boot_arrays = {}
-        for c in classes:
-            src = arrays[c]
-            n_eff = min(src.size, n_subsample)
-            boot_arrays[c] = src[rng.integers(0, src.size, n_eff)]
-
-        # 2. OVL entre classes adjacentes (recalculé pour ce réplicat),
-        #    indexées par (i, i+1) dans l'ordre LGD courant des classes
-        #    NB : on ordonne par moyenne du réplicat pour rester cohérent
-        order_idx = sorted(range(len(classes)),
-                           key=lambda i: boot_arrays[classes[i]].mean())
-        ovl_par_paire: dict[tuple, float] = {}
-        for pos in range(len(order_idx) - 1):
-            i, j = order_idx[pos], order_idx[pos + 1]
-            o = _ovl(boot_arrays[classes[i]], boot_arrays[classes[j]])
-            ovl_par_paire[(min(i, j), max(i, j))] = o
-
-        # 3. fusion pour chaque seuil (réutilise les OVL du réplicat)
-        for s in seuils:
-            mappings[s].append(_fusion_labels(ovl_par_paire, s))
-
-    # -- ARI moyen pairwise par seuil --------------------------------------
-    from sklearn.metrics import adjusted_rand_score
-
-    resultats = []
-    for s in seuils:
-        labs = mappings[s]
-        n_rep = len(labs)
-        aris = []
-        for i in range(n_rep):
-            for j in range(i + 1, n_rep):
-                aris.append(adjusted_rand_score(labs[i], labs[j]))
-        n_classes_rep = [len(np.unique(l)) for l in labs]
-        resultats.append({
-            "seuil_ovl": float(s),
-            "ari_moyen": float(np.mean(aris)) if aris else 1.0,
-            "ari_std": float(np.std(aris)) if aris else 0.0,
-            "n_classes_median": int(np.median(n_classes_rep)),
-        })
-
-    return pl.DataFrame(resultats).sort("seuil_ovl")
+ax2 = ax1.twinx()
+ax2.plot(s, df_stab["n_classes_median"].to_numpy(), "d--", color="grey", alpha=0.4)
+ax2.set_ylabel("n classes (médiane)", color="grey")
+plt.tight_layout()
+plt.show()
