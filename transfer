@@ -1,24 +1,76 @@
-cmp = (
-    FusionComparator(
-        df_brut,
-        class_col="CHR_apres_fusion",
-        lgd_col="lgd_obligor",
-        obligor_col="ID_CLIENT",
-        pairs="adjacent",
-        tests=[OVLTest(method="kde")],
-    )
-    .run()
-    .calibrate(
-        seuils=[round(s, 2) for s in np.arange(0.50, 0.76, 0.05)],
-        n_bootstrap=200,
-        n_subsample=300,
-        random_state=42,
-    )
+# Cellule 0 — Imports + reload
+import importlib
+import polars as pl
+import numpy as np
+import matplotlib.pyplot as plt
+
+import tests_heterogeneite as th
+importlib.reload(th)
+
+from tests_heterogeneite import (
+    FusionComparator,
+    OVLTest,
+    HeterogeneityTestSuite,
+    _default_suite,
 )
 
-print(f"Seuil calibré : {cmp.seuil_calibre}")
-print(cmp.df_calibration)
+CLASS_COL   = "CHR_apres_fusion"
+LGD_COL     = "lgd_obligor"
+OBLIGOR_COL = "ID_CLIENT"
+YEAR_COL    = "year"
+SEG_COL     = "Seg"
+OUT_COL     = "HLC_test_heterogeneite"
 
-# solve() utilise automatiquement seuil_calibre
+# Cellule 5 — Fusion transitive
 sol = cmp.solve(criterion="ovl", label_style="glouton")
-print(f"{sol['n_initial']} → {sol['n_final']} classes")
+
+print(f"{sol['n_initial']} classes → {sol['n_final']} classes finales")
+print()
+print(sol["log"])
+
+
+# Cellule 6 — Composition des classes finales
+for classe, composantes in sorted(sol["composition"].items()):
+    print(f"  {classe} <- {composantes}")
+
+# Cellule 7 — Diagnostic documentaire (tous les tests)
+cmp_doc = FusionComparator(
+    df_brut,
+    class_col=CLASS_COL,
+    lgd_col=LGD_COL,
+    obligor_col=OBLIGOR_COL,
+    pairs="adjacent",
+    tests=[
+        OVLTest(
+            method="kde",
+            ovl_modere=cmp.seuil_calibre,
+            ovl_strict=min(cmp.seuil_calibre + 0.25, 1.0),
+        ),
+    ] + [t for t in _default_suite() if not isinstance(t, OVLTest)],
+).run()
+
+print(cmp_doc.matrix())
+
+
+# Cellule 8 — Consensus + heatmap
+print(cmp_doc.consensus())
+cmp_doc.plot_heatmap()
+plt.show()
+
+# Cellule 10 — Application à la base
+df_final = df_brut.with_columns(
+    pl.col(CLASS_COL)
+    .cast(pl.Utf8)
+    .replace(sol["mapping"])
+    .alias(OUT_COL)
+)
+
+print(
+    df_final
+    .group_by(OUT_COL)
+    .agg(
+        pl.col(OBLIGOR_COL).n_unique().alias("n_obligors"),
+        pl.col(LGD_COL).mean().alias("lgd_moyenne"),
+    )
+    .sort("lgd_moyenne")
+)
