@@ -1,21 +1,107 @@
-# comparateur léger, mêmes données, juste pour solve()
-cmp_light = FusionComparator(
-    df,
-    class_col="CHR_apres_fusion",
-    lgd_col="lgd_obligor",
-    obligor_col="ID_CLIENT",
-    pairs="adjacent",
-    tests=[
-        OVLPermutationTest(
-            n_boot=30,        # juste pour la décision bool
-            n_perm=30,        # idem
-            n_subsample=50,   # idem
-            min_ovl=0.5,
-            random_state=42,
-        ),
-    ],
-)
+class OVLTest(HeterogeneityTest):
+    """Overlapping coefficient : Δ = ∫ min{f_A(x), f_B(x)} dx.
 
-sol = cmp_light.solve(criterion="OVL-Perm", label_style="glouton")
-print(f"{sol['n_initial']} -> {sol['n_final']} classes")
-print(sol["log"])
+    method     : "hist" (100 bins) ou "kde" (gaussian_kde, 300 points).
+    ovl_strict : seuil au-dessus duquel la fusion est recommandée (code 0).
+    ovl_modere : seuil au-dessus duquel la fusion est possible (code 1).
+                 En dessous -> fusion non recommandée (code 2).
+
+    Les seuils sont paramétrables pour permettre la calibration empirique
+    (validation croisée sur stabilité temporelle + homogénéité inter-segment).
+    Valeurs par défaut cohérentes avec Weitzman (1970) et la doctrine projet.
+    """
+
+    name = "OVL (Weitzman)"
+    is_effect_size = True
+
+    def __init__(
+        self,
+        method: str = "kde",
+        ovl_strict: float = OVL_STRICT,   # 0.75 par défaut
+        ovl_modere: float = OVL_MODERE,   # 0.50 par défaut
+    ) -> None:
+        super().__init__()
+        if method not in ("hist", "kde"):
+            raise ValueError("method doit être 'hist' ou 'kde'.")
+        if not (0.0 <= ovl_modere < ovl_strict <= 1.0):
+            raise ValueError(
+                f"Seuils incohérents : ovl_modere={ovl_modere} doit être "
+                f"< ovl_strict={ovl_strict}, tous deux dans [0,1]."
+            )
+        self.method = method
+        self.ovl_strict = ovl_strict
+        self.ovl_modere = ovl_modere
+
+    @staticmethod
+    def _ovl_hist(a, b) -> float:
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        bins = np.linspace(lo, hi, 101)
+        ha, _ = np.histogram(a, bins=bins, density=True)
+        hb, _ = np.histogram(b, bins=bins, density=True)
+        return float(np.sum(np.minimum(ha, hb)) * (bins[1] - bins[0]))
+
+    @staticmethod
+    def _ovl_kde(a, b) -> float:
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        ka, kb = gaussian_kde(a), gaussian_kde(b)
+        x = np.linspace(lo, hi, 300)
+        return float(np.sum(np.minimum(ka(x), kb(x))) * (x[1] - x[0]))
+
+    def _compute(self, a, b) -> dict:
+        ovl_hist = self._ovl_hist(a, b)
+        try:
+            ovl_kde = self._ovl_kde(a, b)
+        except Exception:
+            ovl_kde = np.nan
+        ovl = ovl_kde if (self.method == "kde" and np.isfinite(ovl_kde)) else ovl_hist
+
+        if ovl >= self.ovl_strict:
+            code, verdict = 0, "fusion recommandée"
+        elif ovl >= self.ovl_modere:
+            code, verdict = 1, "fusion possible"
+        else:
+            code, verdict = 2, "fusion non recommandée"
+
+        return {
+            "statistic": float(ovl),
+            "p_value": None,
+            "ovl_hist": ovl_hist,
+            "ovl_kde": ovl_kde,
+            "method": self.method,
+            "ovl_strict": self.ovl_strict,
+            "ovl_modere": self.ovl_modere,
+            "code": code,
+            "interpretation": (
+                f"OVL={ovl:.3f} (code {code}) -- {verdict} "
+                f"[seuils: strict={self.ovl_strict:.2f}, "
+                f"modere={self.ovl_modere:.2f}]"
+            ),
+            "fusionnable": bool(code in CODES_FUSIONNABLES),
+            "fusion_suggeree": bool(code in CODES_FUSIONNABLES),
+        }
+
+    def plot(self, ax=None):
+        if ax is None:
+            _, ax = plt.subplots(figsize=(6, 4))
+        a, b = self.a, self.b
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        x = np.linspace(lo, hi, 300)
+        try:
+            fa, fb = gaussian_kde(a)(x), gaussian_kde(b)(x)
+        except Exception:
+            fa = np.histogram(a, bins=np.linspace(lo, hi, 301), density=True)[0]
+            fb = np.histogram(b, bins=np.linspace(lo, hi, 301), density=True)[0]
+            x = x[:-1] if len(x) != len(fa) else x
+        ax.plot(x, fa, "-", lw=1.5, label="A")
+        ax.plot(x, fb, "--", lw=1.5, label="B")
+        ax.fill_between(x, np.minimum(fa, fb), alpha=0.4, color="green",
+                        label=f"OVL={self.result['statistic']:.3f}")
+        ax.axvline(self.ovl_modere, color="orange", ls=":", lw=1.2,
+                   label=f"seuil modéré={self.ovl_modere:.2f}")
+        ax.axvline(self.ovl_strict, color="green", ls=":", lw=1.2,
+                   label=f"seuil strict={self.ovl_strict:.2f}")
+        ax.set_xlabel("lgd_obligor")
+        ax.set_ylabel("densité")
+        ax.set_title(f"{self.name} [{self.method}]")
+        ax.legend(fontsize=8)
+        return ax
