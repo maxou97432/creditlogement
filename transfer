@@ -1,76 +1,55 @@
-# Cellule 0 — Imports + reload
-import importlib
-import polars as pl
-import numpy as np
-import matplotlib.pyplot as plt
+def consensus_avec_solve(
+    self,
+    label_style: str = "glouton",
+    k_min: int = 1,
+    lgd_gap_threshold: Optional[float] = None,
+) -> pl.DataFrame:
+    """Consensus étendu : lance solve() pour chaque test et retourne
+    le nombre de classes finales + la composition par test.
 
-import tests_heterogeneite as th
-importlib.reload(th)
+    Retourne un DataFrame avec une ligne par test :
+        test, n_paires_fusionnables, n_classes_finales, composition
 
-from tests_heterogeneite import (
-    FusionComparator,
-    OVLTest,
-    HeterogeneityTestSuite,
-    _default_suite,
-)
+    composition : dict {label_final: [classes_origine]} après fusion
+                  transitive — reflète la vraie structure du modèle
+                  final pour ce critère.
 
-CLASS_COL   = "CHR_apres_fusion"
-LGD_COL     = "lgd_obligor"
-OBLIGOR_COL = "ID_CLIENT"
-YEAR_COL    = "year"
-SEG_COL     = "Seg"
-OUT_COL     = "HLC_test_heterogeneite"
+    Note : les tests documentaires (Welch/KS/ANOVA) ne suggèrent aucune
+    fusion à grand n (saturation) -> n_classes_finales = n_initial.
+    Les tests effet (OVL, Cohen, Hedges) produisent des fusions réelles.
+    """
+    self._ensure_run()
+    names = self.test_names
 
-# Cellule 5 — Fusion transitive
-sol = cmp.solve(criterion="ovl", label_style="glouton")
+    rows = []
+    for name in names:
+        # n_paires_fusionnables depuis le cache (pas de recalcul)
+        n_paires = sum(
+            1 for _, per_test in self._runs
+            if per_test[name]["fusion_suggeree"]
+        )
 
-print(f"{sol['n_initial']} classes → {sol['n_final']} classes finales")
-print()
-print(sol["log"])
+        # solve() pour ce test
+        try:
+            sol = self.solve(
+                criterion=name,
+                label_style=label_style,
+                k_min=k_min,
+                lgd_gap_threshold=lgd_gap_threshold,
+            )
+            n_final = sol["n_final"]
+            composition = sol["composition"]
+        except Exception as e:
+            n_final = None
+            composition = {"erreur": str(e)}
 
+        rows.append({
+            "test": name,
+            "n_paires_fusionnables": int(n_paires),
+            "n_classes_finales": n_final,
+            "composition": str(composition),
+        })
 
-# Cellule 6 — Composition des classes finales
-for classe, composantes in sorted(sol["composition"].items()):
-    print(f"  {classe} <- {composantes}")
-
-# Cellule 7 — Diagnostic documentaire (tous les tests)
-cmp_doc = FusionComparator(
-    df_brut,
-    class_col=CLASS_COL,
-    lgd_col=LGD_COL,
-    obligor_col=OBLIGOR_COL,
-    pairs="adjacent",
-    tests=[
-        OVLTest(
-            method="kde",
-            ovl_modere=cmp.seuil_calibre,
-            ovl_strict=min(cmp.seuil_calibre + 0.25, 1.0),
-        ),
-    ] + [t for t in _default_suite() if not isinstance(t, OVLTest)],
-).run()
-
-print(cmp_doc.matrix())
-
-
-# Cellule 8 — Consensus + heatmap
-print(cmp_doc.consensus())
-cmp_doc.plot_heatmap()
-plt.show()
-
-# Cellule 10 — Application à la base
-df_final = df_brut.with_columns(
-    pl.col(CLASS_COL)
-    .cast(pl.Utf8)
-    .replace(sol["mapping"])
-    .alias(OUT_COL)
-)
-
-print(
-    df_final
-    .group_by(OUT_COL)
-    .agg(
-        pl.col(OBLIGOR_COL).n_unique().alias("n_obligors"),
-        pl.col(LGD_COL).mean().alias("lgd_moyenne"),
-    )
-    .sort("lgd_moyenne")
-)
+    return pl.DataFrame(rows, schema_overrides={
+        "n_classes_finales": pl.Int64,
+    })
