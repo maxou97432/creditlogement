@@ -1,162 +1,25 @@
-# ---------------------------------------------------------------------------
-# Calibration empirique du seuil OVL par validation croisée
-# ---------------------------------------------------------------------------
+import importlib
+import tests_heterogeneite as th
+importlib.reload(th)
+from tests_heterogeneite import calibrer_seuil_ovl
 
-def stabilite_temporelle(
-    df: pl.DataFrame,
-    mapping: dict,
-    class_col: str,
-    lgd_col: str,
-    year_col: str = "year",
-    obligor_col: Optional[str] = None,
-) -> float:
-    """Variance inter-annuelle moyenne des LGD par classe fusionnée.
+# sweep complet (~2 minutes : OVLTest est déterministe, pas de bootstrap)
+df_calibration = calibrer_seuil_ovl(
+    df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    year_col="year",
+    seg_col="Seg",
+    obligor_col="ID_CLIENT",
+    poids_temporel=0.5,
+    poids_segment=0.5,
+)
+print(df_calibration)
 
-    Mesure la stabilité temporelle du modèle après fusion :
-    une classe bien formée doit avoir une LGD stable d'année en année
-    (critère IRB de stabilité du modèle dans le temps).
-
-    Retourne la moyenne des écarts-types inter-annuels par classe.
-    Faible = classes stables = bon seuil OVL.
-    """
-    df_mapped = df.with_columns(
-        pl.col(class_col).cast(pl.Utf8)
-        .replace(mapping)
-        .alias("_classe_finale")
-    )
-    if obligor_col is not None:
-        df_mapped = (
-            df_mapped
-            .group_by(["_classe_finale", year_col, obligor_col])
-            .agg(pl.col(lgd_col).mean())
-        )
-    lgd_annuelle = (
-        df_mapped
-        .group_by(["_classe_finale", year_col])
-        .agg(pl.col(lgd_col).mean().alias("lgd_mean"))
-    )
-    variance_par_classe = (
-        lgd_annuelle
-        .group_by("_classe_finale")
-        .agg(pl.col("lgd_mean").std(ddof=1).alias("std_interannuelle"))
-        .filter(pl.col("std_interannuelle").is_not_null())
-    )
-    return float(variance_par_classe["std_interannuelle"].mean())
-
-
-def homogeneite_intersegment(
-    df: pl.DataFrame,
-    mapping: dict,
-    class_col: str,
-    lgd_col: str,
-    seg_col: str = "Seg",
-    obligor_col: Optional[str] = None,
-) -> float:
-    """Dispersion inter-segment des LGD moyennes par classe fusionnée.
-
-    Mesure la cohérence des segments au sein de chaque classe :
-    une classe fusionnée qui mélange des segments aux comportements LGD
-    très différents est suspecte (critère de cohérence métier).
-
-    Retourne la moyenne des écarts-types inter-segment par classe.
-    Faible = segments cohérents = bon seuil OVL.
-    """
-    df_mapped = df.with_columns(
-        pl.col(class_col).cast(pl.Utf8)
-        .replace(mapping)
-        .alias("_classe_finale")
-    )
-    if obligor_col is not None:
-        df_mapped = (
-            df_mapped
-            .group_by(["_classe_finale", seg_col, obligor_col])
-            .agg(pl.col(lgd_col).mean())
-        )
-    lgd_par_segment = (
-        df_mapped
-        .group_by(["_classe_finale", seg_col])
-        .agg(pl.col(lgd_col).mean().alias("lgd_mean"))
-    )
-    dispersion_par_classe = (
-        lgd_par_segment
-        .group_by("_classe_finale")
-        .agg(pl.col("lgd_mean").std(ddof=1).alias("std_intersegment"))
-        .filter(pl.col("std_intersegment").is_not_null())
-    )
-    return float(dispersion_par_classe["std_intersegment"].mean())
-
-
-def calibrer_seuil_ovl(
-    df: pl.DataFrame,
-    class_col: str,
-    lgd_col: str,
-    year_col: str = "year",
-    seg_col: str = "Seg",
-    obligor_col: Optional[str] = None,
-    seuils: Optional[list] = None,
-    poids_temporel: float = 0.5,
-    poids_segment: float = 0.5,
-    pairs: str = "adjacent",
-) -> pl.DataFrame:
-    """Sweep empirique pour calibrer le seuil OVL par validation croisée.
-
-    Pour chaque seuil candidat :
-        1. Construit le mapping de fusion OVL Weitzman avec ce seuil
-        2. Calcule la stabilité temporelle et l'homogénéité inter-segment
-        3. Calcule un score composite (moyenne pondérée, plus bas = mieux)
-
-    Le seuil optimal est celui qui minimise le score composite -- il
-    correspond au coude de la courbe variance/seuil, au-delà duquel
-    fusionner davantage dégrade la qualité de la segmentation.
-
-    Paramètres
-    ----------
-    poids_temporel  : poids de la stabilité temporelle dans le score composite
-    poids_segment   : poids de l'homogénéité inter-segment (doit sommer à 1
-                      avec poids_temporel)
-    seuils          : liste de seuils à tester (défaut : 0.30 à 0.75 par 0.05)
-
-    Retourne un DataFrame Polars trié par seuil avec :
-        seuil_ovl, n_classes, stabilite_temporelle,
-        homogeneite_intersegment, score_composite
-    """
-    if abs(poids_temporel + poids_segment - 1.0) > 1e-6:
-        raise ValueError(
-            f"poids_temporel + poids_segment doit valoir 1.0 "
-            f"(reçu {poids_temporel + poids_segment:.3f})."
-        )
-    if seuils is None:
-        seuils = [round(s, 2) for s in np.arange(0.30, 0.76, 0.05)]
-
-    resultats = []
-    for seuil in seuils:
-        # OVLTest paramétré avec ce seuil
-        # ovl_strict = seuil + 0.25, capé à 1.0
-        ovl_strict = min(seuil + 0.25, 1.0)
-        cmp_cv = FusionComparator(
-            df,
-            class_col=class_col,
-            lgd_col=lgd_col,
-            obligor_col=obligor_col,
-            pairs=pairs,
-            tests=[OVLTest(method="kde", ovl_strict=ovl_strict, ovl_modere=seuil)],
-        )
-        sol = cmp_cv.solve(criterion="OVL (Weitzman)", label_style="glouton")
-
-        stab = stabilite_temporelle(
-            df, sol["mapping"], class_col, lgd_col, year_col, obligor_col
-        )
-        homo = homogeneite_intersegment(
-            df, sol["mapping"], class_col, lgd_col, seg_col, obligor_col
-        )
-        score = poids_temporel * stab + poids_segment * homo
-
-        resultats.append({
-            "seuil_ovl": float(seuil),
-            "n_classes": int(sol["n_final"]),
-            "stabilite_temporelle": round(stab, 4),
-            "homogeneite_intersegment": round(homo, 4),
-            "score_composite": round(score, 4),
-        })
-
-    return pl.DataFrame(resultats).sort("seuil_ovl")
+# seuil optimal = celui qui minimise le score composite
+seuil_optimal = float(
+    df_calibration
+    .filter(pl.col("score_composite") == pl.col("score_composite").min())
+    ["seuil_ovl"][0]
+)
+print(f"\nSeuil OVL retenu : {seuil_optimal}")
