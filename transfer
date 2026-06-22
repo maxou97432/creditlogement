@@ -1,9 +1,3 @@
-import importlib
-import tests_heterogeneite as th
-importlib.reload(th)
-from tests_heterogeneite import calibrer_seuil_ovl
-
-# sweep complet (~2 minutes : OVLTest est déterministe, pas de bootstrap)
 df_calibration = calibrer_seuil_ovl(
     df_brut,
     class_col="CHR_apres_fusion",
@@ -16,10 +10,82 @@ df_calibration = calibrer_seuil_ovl(
 )
 print(df_calibration)
 
-# seuil optimal = celui qui minimise le score composite
 seuil_optimal = float(
     df_calibration
     .filter(pl.col("score_composite") == pl.col("score_composite").min())
     ["seuil_ovl"][0]
 )
 print(f"\nSeuil OVL retenu : {seuil_optimal}")
+
+import matplotlib.pyplot as plt
+
+fig, ax1 = plt.subplots(figsize=(8, 5))
+s = df_calibration["seuil_ovl"].to_numpy()
+
+ax1.plot(s, df_calibration["score_composite"].to_numpy(),
+         "o-", color="black", lw=2, label="score composite")
+ax1.plot(s, df_calibration["stabilite_temporelle"].to_numpy(),
+         "s--", color="#4c72b0", alpha=0.7, label="stabilité temporelle")
+ax1.plot(s, df_calibration["homogeneite_intersegment"].to_numpy(),
+         "^--", color="#c44e52", alpha=0.7, label="homogénéité inter-segment")
+ax1.axvline(seuil_optimal, color="green", ls=":", lw=2,
+            label=f"seuil retenu = {seuil_optimal}")
+ax1.set_xlabel("seuil OVL")
+ax1.set_ylabel("écart-type LGD (pts)")
+ax1.legend(fontsize=9)
+ax1.set_title("Calibration empirique du seuil OVL")
+
+ax2 = ax1.twinx()
+ax2.plot(s, df_calibration["n_classes"].to_numpy(),
+         "d-", color="grey", alpha=0.4)
+ax2.set_ylabel("n classes finales", color="grey")
+plt.tight_layout()
+plt.show()
+
+
+cmp_weitzman = FusionComparator(
+    df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    obligor_col="ID_CLIENT",
+    pairs="adjacent",
+    tests=[OVLTest(method="kde",
+                   ovl_modere=seuil_optimal,
+                   ovl_strict=min(seuil_optimal + 0.25, 1.0))],
+)
+sol_weitzman = cmp_weitzman.solve(criterion="OVL (Weitzman)", label_style="glouton")
+print(f"OVL Weitzman : {sol_weitzman['n_initial']} -> {sol_weitzman['n_final']} classes")
+print(sol_weitzman["log"])
+
+
+cmp_perm = FusionComparator(
+    df_brut,
+    class_col="CHR_apres_fusion",
+    lgd_col="lgd_obligor",
+    obligor_col="ID_CLIENT",
+    pairs="adjacent",
+    tests=[OVLPermutationTest(
+        n_boot=100, n_perm=100, n_subsample=100,
+        min_ovl=seuil_optimal, random_state=42,
+    )],
+)
+sol_perm = cmp_perm.solve(criterion="OVL-Perm", label_style="glouton")
+print(f"OVL-Perm     : {sol_perm['n_initial']} -> {sol_perm['n_final']} classes")
+print(sol_perm["log"])
+
+
+m_w = sol_weitzman["mapping"]
+m_p = sol_perm["mapping"]
+
+print("Weitzman :", sol_weitzman["n_final"], "classes")
+print("Perm     :", sol_perm["n_final"], "classes")
+print("Mappings identiques :", m_w == m_p)
+
+# si différents, voir où ça diverge
+if m_w != m_p:
+    classes = sorted(set(m_w) | set(m_p))
+    diff = [(c, m_w.get(c), m_p.get(c)) for c in classes
+            if m_w.get(c) != m_p.get(c)]
+    print("Divergences (classe, Weitzman, Perm) :")
+    for d in diff:
+        print("  ", d)
