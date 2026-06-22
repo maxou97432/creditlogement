@@ -1,48 +1,52 @@
-def calibrate(
+def solve(
         self,
-        seuils: Optional[list] = None,
-        n_bootstrap: int = 200,
-        n_subsample: int = 300,
-        method: str = "kde",
-        random_state: Optional[int] = 42,
-    ) -> "FusionComparator":
-        """Calibre le seuil OVL par stabilité bootstrap (ARI, Hubert & Arabie 1985).
+        criterion: str = "ovl",
+        label_style: str = "ordinal",
+        k_min: int = 1,
+        lgd_gap_threshold: Optional[float] = None,
+        ovl_threshold: Optional[float] = None,
+    ) -> dict:
+        """...docstring existante...
 
-        Lance calibrer_seuil_ovl_stabilite() sur les arrays de ce comparateur,
-        stocke le seuil optimal dans self.seuil_calibre et le DataFrame de
-        calibration dans self.df_calibration.
-
-        Retourne self pour permettre le chaînage :
-            cmp = FusionComparator(...).run().calibrate()
-
-        Le seuil calibré est automatiquement utilisé par solve() si aucun
-        ovl_threshold n'est passé explicitement.
+        ovl_threshold : seuil OVL pour la décision de fusion si criterion="ovl".
+                        Si None, utilise self.seuil_calibre si disponible,
+                        sinon retombe sur OVL_MODERE/OVL_STRICT par défaut.
         """
-        if seuils is None:
-            seuils = [round(s, 2) for s in np.arange(0.50, 0.76, 0.05)]
+        if lgd_gap_threshold is None:
+            lgd_gap_threshold = self.lgd_gap_threshold
 
-        self.df_calibration = calibrer_seuil_ovl_stabilite(
-            cmp=self,
-            seuils=seuils,
-            n_bootstrap=n_bootstrap,
-            n_subsample=n_subsample,
-            method=method,
-            random_state=random_state,
-        )
+        # résoudre le seuil OVL effectif
+        seuil_ovl_effectif = ovl_threshold or self.seuil_calibre
 
-        n_initial = len(self.order)
-        df_valide = self.df_calibration.filter(
-            (pl.col("n_classes_median") > 1) &
-            (pl.col("n_classes_median") < n_initial)
-        )
-        if df_valide.is_empty():
-            raise ValueError(
-                "Aucune partition non-triviale trouvée. "
-                "Vérifier les seuils candidats ou les données."
-            )
-        self.seuil_calibre = float(
-            df_valide
-            .filter(pl.col("ari_moyen") == pl.col("ari_moyen").max())
-            ["seuil_ovl"][0]
-        )
-        return self
+        # construire la factory de tests avec le bon seuil OVL
+        def _make_tests():
+            if self._tests_factory is not None:
+                if seuil_ovl_effectif is not None:
+                    # remplacer OVLTest par une version avec le seuil calibré
+                    tests = []
+                    for t in self._tests_factory:
+                        if isinstance(t, OVLTest):
+                            tests.append(OVLTest(
+                                method=t.method,
+                                ovl_modere=seuil_ovl_effectif,
+                                ovl_strict=min(seuil_ovl_effectif + 0.25, 1.0),
+                            ))
+                        else:
+                            tests.append(t)
+                    return tests
+                return self._tests_factory
+            # suite par défaut avec seuil calibré si disponible
+            if seuil_ovl_effectif is not None:
+                return [
+                    WelchTest(), KruskalWallisTest(), ANOVATest(),
+                    KolmogorovSmirnovTest(), CohensDTest(), HedgesGTest(),
+                    WassersteinTest(),
+                    OVLTest(
+                        method="kde",
+                        ovl_modere=seuil_ovl_effectif,
+                        ovl_strict=min(seuil_ovl_effectif + 0.25, 1.0),
+                    ),
+                ]
+            return _default_suite()
+
+        # ... reste de solve() inchangé, sauf _eval_pair qui utilise _make_tests
