@@ -1,56 +1,29 @@
-# Cellule 1 - reload + imports
-import importlib
-import polars as pl
-import tests_heterogeneite as th
-importlib.reload(th)
-from tests_heterogeneite import FusionComparator, OVLTest, calibrer_seuil_ovl_stabilite
+# -- ARI moyen pairwise par seuil --------------------------------------
+    from sklearn.metrics import adjusted_rand_score
 
-# Cellule 2 - construire le comparateur (pas besoin de run() ici)
-cmp = FusionComparator(
-    df_brut,
-    class_col="CHR_apres_fusion",
-    lgd_col="lgd_obligor",
-    obligor_col="ID_CLIENT",
-    pairs="adjacent",
-    tests=[OVLTest(method="kde")],
-)
+    n_initial = len(classes)
+    resultats = []
+    for s in seuils:
+        labs = mappings[s]
+        n_rep = len(labs)
+        aris = []
+        for i in range(n_rep):
+            for j in range(i + 1, n_rep):
+                aris.append(adjusted_rand_score(labs[i], labs[j]))
+        n_classes_rep = [len(np.unique(l)) for l in labs]
+        n_cl_med = int(np.median(n_classes_rep))
+        # exclusion structurelle des partitions dégénérées :
+        # n_classes=1 (tout fusionné) et n_classes=n_initial (rien fusionné)
+        # rendent l'ARI mathématiquement non-informatif (sature à 1.0 par
+        # construction). Ce n'est pas un hyperparamètre mais une borne du
+        # domaine de validité de l'ARI.
+        valide = bool(1 < n_cl_med < n_initial)
+        resultats.append({
+            "seuil_ovl": float(s),
+            "ari_moyen": float(np.mean(aris)) if aris else 1.0,
+            "ari_std": float(np.std(aris)) if aris else 0.0,
+            "n_classes_median": n_cl_med,
+            "valide": valide,
+        })
 
-# Cellule 3 - calibration par stabilité bootstrap (~3-4 min)
-df_stab = calibrer_seuil_ovl_stabilite(
-    cmp,
-    n_bootstrap=100,
-    n_subsample=300,
-    method="kde",
-    random_state=42,
-)
-print(df_stab)
-
-seuil_optimal = float(
-    df_stab.filter(pl.col("ari_moyen") == pl.col("ari_moyen").max())["seuil_ovl"][0]
-)
-print(f"\nSeuil OVL retenu (max ARI) : {seuil_optimal}")
-
-
-# Cellule 4 - visualiser la courbe ARI (lecture du pic non-trivial)
-import matplotlib.pyplot as plt
-
-s = df_stab["seuil_ovl"].to_numpy()
-ari = df_stab["ari_moyen"].to_numpy()
-std = df_stab["ari_std"].to_numpy()
-
-fig, ax1 = plt.subplots(figsize=(8, 5))
-ax1.errorbar(s, ari, yerr=std, fmt="o-", color="black", lw=2,
-             capsize=3, label="ARI moyen ± écart-type")
-ax1.axvline(seuil_optimal, color="green", ls=":", lw=2,
-            label=f"seuil retenu = {seuil_optimal}")
-ax1.set_xlabel("seuil OVL")
-ax1.set_ylabel("ARI (stabilité du partitionnement)")
-ax1.set_ylim(0, 1.05)
-ax1.legend(fontsize=9)
-ax1.set_title("Stabilité bootstrap du partitionnement (Hubert & Arabie 1985)")
-
-ax2 = ax1.twinx()
-ax2.plot(s, df_stab["n_classes_median"].to_numpy(), "d--", color="grey", alpha=0.4)
-ax2.set_ylabel("n classes (médiane)", color="grey")
-plt.tight_layout()
-plt.show()
+    return pl.DataFrame(resultats).sort("seuil_ovl")
