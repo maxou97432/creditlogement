@@ -1,107 +1,162 @@
-class OVLTest(HeterogeneityTest):
-    """Overlapping coefficient : Δ = ∫ min{f_A(x), f_B(x)} dx.
+# ---------------------------------------------------------------------------
+# Calibration empirique du seuil OVL par validation croisée
+# ---------------------------------------------------------------------------
 
-    method     : "hist" (100 bins) ou "kde" (gaussian_kde, 300 points).
-    ovl_strict : seuil au-dessus duquel la fusion est recommandée (code 0).
-    ovl_modere : seuil au-dessus duquel la fusion est possible (code 1).
-                 En dessous -> fusion non recommandée (code 2).
+def stabilite_temporelle(
+    df: pl.DataFrame,
+    mapping: dict,
+    class_col: str,
+    lgd_col: str,
+    year_col: str = "year",
+    obligor_col: Optional[str] = None,
+) -> float:
+    """Variance inter-annuelle moyenne des LGD par classe fusionnée.
 
-    Les seuils sont paramétrables pour permettre la calibration empirique
-    (validation croisée sur stabilité temporelle + homogénéité inter-segment).
-    Valeurs par défaut cohérentes avec Weitzman (1970) et la doctrine projet.
+    Mesure la stabilité temporelle du modèle après fusion :
+    une classe bien formée doit avoir une LGD stable d'année en année
+    (critère IRB de stabilité du modèle dans le temps).
+
+    Retourne la moyenne des écarts-types inter-annuels par classe.
+    Faible = classes stables = bon seuil OVL.
     """
+    df_mapped = df.with_columns(
+        pl.col(class_col).cast(pl.Utf8)
+        .replace(mapping)
+        .alias("_classe_finale")
+    )
+    if obligor_col is not None:
+        df_mapped = (
+            df_mapped
+            .group_by(["_classe_finale", year_col, obligor_col])
+            .agg(pl.col(lgd_col).mean())
+        )
+    lgd_annuelle = (
+        df_mapped
+        .group_by(["_classe_finale", year_col])
+        .agg(pl.col(lgd_col).mean().alias("lgd_mean"))
+    )
+    variance_par_classe = (
+        lgd_annuelle
+        .group_by("_classe_finale")
+        .agg(pl.col("lgd_mean").std(ddof=1).alias("std_interannuelle"))
+        .filter(pl.col("std_interannuelle").is_not_null())
+    )
+    return float(variance_par_classe["std_interannuelle"].mean())
 
-    name = "OVL (Weitzman)"
-    is_effect_size = True
 
-    def __init__(
-        self,
-        method: str = "kde",
-        ovl_strict: float = OVL_STRICT,   # 0.75 par défaut
-        ovl_modere: float = OVL_MODERE,   # 0.50 par défaut
-    ) -> None:
-        super().__init__()
-        if method not in ("hist", "kde"):
-            raise ValueError("method doit être 'hist' ou 'kde'.")
-        if not (0.0 <= ovl_modere < ovl_strict <= 1.0):
-            raise ValueError(
-                f"Seuils incohérents : ovl_modere={ovl_modere} doit être "
-                f"< ovl_strict={ovl_strict}, tous deux dans [0,1]."
-            )
-        self.method = method
-        self.ovl_strict = ovl_strict
-        self.ovl_modere = ovl_modere
+def homogeneite_intersegment(
+    df: pl.DataFrame,
+    mapping: dict,
+    class_col: str,
+    lgd_col: str,
+    seg_col: str = "Seg",
+    obligor_col: Optional[str] = None,
+) -> float:
+    """Dispersion inter-segment des LGD moyennes par classe fusionnée.
 
-    @staticmethod
-    def _ovl_hist(a, b) -> float:
-        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-        bins = np.linspace(lo, hi, 101)
-        ha, _ = np.histogram(a, bins=bins, density=True)
-        hb, _ = np.histogram(b, bins=bins, density=True)
-        return float(np.sum(np.minimum(ha, hb)) * (bins[1] - bins[0]))
+    Mesure la cohérence des segments au sein de chaque classe :
+    une classe fusionnée qui mélange des segments aux comportements LGD
+    très différents est suspecte (critère de cohérence métier).
 
-    @staticmethod
-    def _ovl_kde(a, b) -> float:
-        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-        ka, kb = gaussian_kde(a), gaussian_kde(b)
-        x = np.linspace(lo, hi, 300)
-        return float(np.sum(np.minimum(ka(x), kb(x))) * (x[1] - x[0]))
+    Retourne la moyenne des écarts-types inter-segment par classe.
+    Faible = segments cohérents = bon seuil OVL.
+    """
+    df_mapped = df.with_columns(
+        pl.col(class_col).cast(pl.Utf8)
+        .replace(mapping)
+        .alias("_classe_finale")
+    )
+    if obligor_col is not None:
+        df_mapped = (
+            df_mapped
+            .group_by(["_classe_finale", seg_col, obligor_col])
+            .agg(pl.col(lgd_col).mean())
+        )
+    lgd_par_segment = (
+        df_mapped
+        .group_by(["_classe_finale", seg_col])
+        .agg(pl.col(lgd_col).mean().alias("lgd_mean"))
+    )
+    dispersion_par_classe = (
+        lgd_par_segment
+        .group_by("_classe_finale")
+        .agg(pl.col("lgd_mean").std(ddof=1).alias("std_intersegment"))
+        .filter(pl.col("std_intersegment").is_not_null())
+    )
+    return float(dispersion_par_classe["std_intersegment"].mean())
 
-    def _compute(self, a, b) -> dict:
-        ovl_hist = self._ovl_hist(a, b)
-        try:
-            ovl_kde = self._ovl_kde(a, b)
-        except Exception:
-            ovl_kde = np.nan
-        ovl = ovl_kde if (self.method == "kde" and np.isfinite(ovl_kde)) else ovl_hist
 
-        if ovl >= self.ovl_strict:
-            code, verdict = 0, "fusion recommandée"
-        elif ovl >= self.ovl_modere:
-            code, verdict = 1, "fusion possible"
-        else:
-            code, verdict = 2, "fusion non recommandée"
+def calibrer_seuil_ovl(
+    df: pl.DataFrame,
+    class_col: str,
+    lgd_col: str,
+    year_col: str = "year",
+    seg_col: str = "Seg",
+    obligor_col: Optional[str] = None,
+    seuils: Optional[list] = None,
+    poids_temporel: float = 0.5,
+    poids_segment: float = 0.5,
+    pairs: str = "adjacent",
+) -> pl.DataFrame:
+    """Sweep empirique pour calibrer le seuil OVL par validation croisée.
 
-        return {
-            "statistic": float(ovl),
-            "p_value": None,
-            "ovl_hist": ovl_hist,
-            "ovl_kde": ovl_kde,
-            "method": self.method,
-            "ovl_strict": self.ovl_strict,
-            "ovl_modere": self.ovl_modere,
-            "code": code,
-            "interpretation": (
-                f"OVL={ovl:.3f} (code {code}) -- {verdict} "
-                f"[seuils: strict={self.ovl_strict:.2f}, "
-                f"modere={self.ovl_modere:.2f}]"
-            ),
-            "fusionnable": bool(code in CODES_FUSIONNABLES),
-            "fusion_suggeree": bool(code in CODES_FUSIONNABLES),
-        }
+    Pour chaque seuil candidat :
+        1. Construit le mapping de fusion OVL Weitzman avec ce seuil
+        2. Calcule la stabilité temporelle et l'homogénéité inter-segment
+        3. Calcule un score composite (moyenne pondérée, plus bas = mieux)
 
-    def plot(self, ax=None):
-        if ax is None:
-            _, ax = plt.subplots(figsize=(6, 4))
-        a, b = self.a, self.b
-        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-        x = np.linspace(lo, hi, 300)
-        try:
-            fa, fb = gaussian_kde(a)(x), gaussian_kde(b)(x)
-        except Exception:
-            fa = np.histogram(a, bins=np.linspace(lo, hi, 301), density=True)[0]
-            fb = np.histogram(b, bins=np.linspace(lo, hi, 301), density=True)[0]
-            x = x[:-1] if len(x) != len(fa) else x
-        ax.plot(x, fa, "-", lw=1.5, label="A")
-        ax.plot(x, fb, "--", lw=1.5, label="B")
-        ax.fill_between(x, np.minimum(fa, fb), alpha=0.4, color="green",
-                        label=f"OVL={self.result['statistic']:.3f}")
-        ax.axvline(self.ovl_modere, color="orange", ls=":", lw=1.2,
-                   label=f"seuil modéré={self.ovl_modere:.2f}")
-        ax.axvline(self.ovl_strict, color="green", ls=":", lw=1.2,
-                   label=f"seuil strict={self.ovl_strict:.2f}")
-        ax.set_xlabel("lgd_obligor")
-        ax.set_ylabel("densité")
-        ax.set_title(f"{self.name} [{self.method}]")
-        ax.legend(fontsize=8)
-        return ax
+    Le seuil optimal est celui qui minimise le score composite -- il
+    correspond au coude de la courbe variance/seuil, au-delà duquel
+    fusionner davantage dégrade la qualité de la segmentation.
+
+    Paramètres
+    ----------
+    poids_temporel  : poids de la stabilité temporelle dans le score composite
+    poids_segment   : poids de l'homogénéité inter-segment (doit sommer à 1
+                      avec poids_temporel)
+    seuils          : liste de seuils à tester (défaut : 0.30 à 0.75 par 0.05)
+
+    Retourne un DataFrame Polars trié par seuil avec :
+        seuil_ovl, n_classes, stabilite_temporelle,
+        homogeneite_intersegment, score_composite
+    """
+    if abs(poids_temporel + poids_segment - 1.0) > 1e-6:
+        raise ValueError(
+            f"poids_temporel + poids_segment doit valoir 1.0 "
+            f"(reçu {poids_temporel + poids_segment:.3f})."
+        )
+    if seuils is None:
+        seuils = [round(s, 2) for s in np.arange(0.30, 0.76, 0.05)]
+
+    resultats = []
+    for seuil in seuils:
+        # OVLTest paramétré avec ce seuil
+        # ovl_strict = seuil + 0.25, capé à 1.0
+        ovl_strict = min(seuil + 0.25, 1.0)
+        cmp_cv = FusionComparator(
+            df,
+            class_col=class_col,
+            lgd_col=lgd_col,
+            obligor_col=obligor_col,
+            pairs=pairs,
+            tests=[OVLTest(method="kde", ovl_strict=ovl_strict, ovl_modere=seuil)],
+        )
+        sol = cmp_cv.solve(criterion="OVL (Weitzman)", label_style="glouton")
+
+        stab = stabilite_temporelle(
+            df, sol["mapping"], class_col, lgd_col, year_col, obligor_col
+        )
+        homo = homogeneite_intersegment(
+            df, sol["mapping"], class_col, lgd_col, seg_col, obligor_col
+        )
+        score = poids_temporel * stab + poids_segment * homo
+
+        resultats.append({
+            "seuil_ovl": float(seuil),
+            "n_classes": int(sol["n_final"]),
+            "stabilite_temporelle": round(stab, 4),
+            "homogeneite_intersegment": round(homo, 4),
+            "score_composite": round(score, 4),
+        })
+
+    return pl.DataFrame(resultats).sort("seuil_ovl")
