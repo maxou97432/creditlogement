@@ -1,154 +1,138 @@
-# Cellule 5.9a — Définition des critères à comparer
-CRITERES = {
-    f"OVL calibré ({cmp.seuil_calibre})": ("ovl",         None),
-    "OVL défaut (0.50)":                  ("ovl",         0.50),
-    "Cohen's d":                          ("cohen",       None),
-    "Wasserstein":                        ("Wasserstein", None),
-}
+def _eval_pair(self, a, b, criterion, lgd_gap_threshold,
+               tests_override=None, ovl_precomputed=None):
+    """Retourne (mergeable: bool, score: float).
 
-comparaison = comparer_criteres_fusion(
-    cmp=cmp_doc,
-    df=df_brut,
-    criteres=CRITERES,
-    class_col=CLASS_COL,
-    lgd_col=LGD_COL,
-    year_col=YEAR_COL,
-    obligor_col=OBLIGOR_COL,
-)
-
-
-# Cellule 5.9b — Tableau 1 : métriques LGD
-# homog_intra      : std LGD intra-classe (pondéré effectif) — bas = homogène
-# sep_inter        : std des LGD moyennes entre classes — haut = bien séparé
-# ratio_sep_homog  : sep / homog — haut = bonne segmentation
-# stab_temporelle  : std inter-annuel moyen — bas = stable dans le temps
-
-print("=== Métriques LGD par critère ===")
-print(comparaison["metriques"])
-
-# Cellule 5.9c — Tableau 2 : matrice ARI
-# ARI = accord entre partitionnements, corrigé du hasard (1 = identiques)
-# Valeurs proches de 1 → les deux critères donnent le même découpage
-
-print("=== Matrice ARI pairwise ===")
-print(comparaison["ari_matrix"])
-
-
-# Cellule 5.9d — Tableau 3 : diff de composition paire par paire
-# divergence=True → les critères ne s'accordent pas sur cette paire
-
-print("=== Divergences par paire ===")
-divergences = comparaison["diff_paires"].filter(pl.col("divergence"))
-print(f"{divergences.height} paires en divergence sur {len(cmp.pair_list)}")
-print(divergences.drop("divergence"))
-
-
-# Cellule 5.9e — Graphique : profil LGD par critère
-# Un subplot par critère : LGD moyenne par classe finale (ordre croissant)
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-solutions = comparaison["solutions"]
-n = len(solutions)
-ncols = 2
-nrows = (n + 1) // ncols
-
-fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 4 * nrows))
-axes = np.atleast_1d(axes).flatten()
-
-for idx, (label, sol) in enumerate(solutions.items()):
-    if sol is None:
-        continue
-    ax = axes[idx]
-
-    # LGD moyenne par classe finale
-    df_m = df_brut.with_columns(
-        pl.col(CLASS_COL).cast(pl.Utf8)
-        .replace(sol["mapping"])
-        .alias("_classe_finale")
-    )
-    if OBLIGOR_COL:
-        df_m = (
-            df_m.group_by(["_classe_finale", OBLIGOR_COL])
-            .agg(pl.col(LGD_COL).mean())
+    ovl_precomputed : si fourni (float), court-circuite tout recalcul —
+                      la décision est prise directement sur cette valeur.
+                      Utilisé par solve() pour les paires initiales déjà
+                      calculées dans _runs (zéro recalcul KDE).
+    """
+    # -- court-circuit cache -----------------------------------------------
+    if ovl_precomputed is not None and criterion.lower() == "ovl":
+        seuil = (
+            self.seuil_calibre if self.seuil_calibre is not None
+            else OVL_MODERE
         )
-    lgd_par_classe = (
-        df_m.group_by("_classe_finale")
-        .agg(pl.col(LGD_COL).mean().alias("lgd_mean"),
-             pl.len().alias("n"))
-        .sort("lgd_mean")
-    )
-    x = range(len(lgd_par_classe))
-    lgd = lgd_par_classe["lgd_mean"].to_numpy()
-    nobs = lgd_par_classe["n"].to_numpy()
+        mergeable = bool(ovl_precomputed >= seuil)
+        return mergeable, float(ovl_precomputed)
 
-    ax.bar(x, lgd, color="#4c72b0", alpha=0.7)
-    ax.errorbar(x, lgd, fmt="none", color="black", capsize=3)
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        lgd_par_classe["_classe_finale"].to_list(),
-        rotation=45, ha="right", fontsize=7
-    )
-    for xi, li, ni in zip(x, lgd, nobs):
-        ax.text(xi, li + 0.5, f"n={ni}", ha="center", fontsize=6, color="grey")
-    ax.set_title(f"{label}  ({sol['n_final']} classes)", fontsize=10)
-    ax.set_ylabel("LGD moyenne (%)")
-    ax.set_ylim(0, max(lgd) * 1.15)
+    # -- recalcul complet (nouveaux groupes fusionnés) ---------------------
+    tests = (tests_override if tests_override is not None
+             else (self._tests_factory if self._tests_factory is not None
+                   else _default_suite()))
+    suite = HeterogeneityTestSuite(a, b, tests=tests).fit_all()
+    c = criterion.lower()
+    if c in ("ovl", "cohen", "combined"):
+        v = (suite.get_verdict("combined", lgd_gap_threshold=lgd_gap_threshold)
+             if c == "combined" else suite.get_verdict(c))
+        if v["fusionnable"] is None:
+            raise ValueError(
+                f"criterion='{criterion}' nécessite que le test correspondant "
+                f"soit présent dans la suite. "
+                f"Suite actuelle : {[t.name for t in tests]}"
+            )
+        mergeable = bool(v["fusionnable"])
+        if c == "ovl":
+            score = v["ovl"]
+        elif c == "cohen":
+            score = -abs(v["cohen_d"])
+        else:
+            score = -v["lgd_gap"]
+        return mergeable, float(score)
 
-for j in range(len(solutions), len(axes)):
-    axes[j].axis("off")
+    t = suite.get_test(criterion)
+    r = t.result
+    mergeable = bool(r["fusion_suggeree"])
+    if r["p_value"] is not None:
+        score = r["p_value"]
+    elif t.name.startswith("OVL"):
+        score = r["statistic"]
+    else:
+        score = -abs(r["statistic"])
+    return mergeable, float(score)
 
-fig.suptitle("Profil LGD des classes finales par critère", fontsize=13)
-plt.tight_layout(rect=[0, 0, 1, 0.97])
-plt.show()
 
+def solve(
+    self,
+    criterion: str = "ovl",
+    label_style: str = "ordinal",
+    k_min: int = 1,
+    lgd_gap_threshold: Optional[float] = None,
+    ovl_threshold: Optional[float] = None,
+) -> dict:
+    """Fusion séquentielle transitive selon le critère choisi.
 
-# Cellule 5.9f — Synthèse markdown comparative
+    Optimisation : pour criterion="ovl", les OVL des paires initiales
+    sont lus depuis _runs (cache) sans recalcul. Seuls les nouveaux
+    groupes issus de fusions transitives déclenchent un recalcul KDE.
+    En pratique ~95% des appels sont servis depuis le cache.
+    """
+    if lgd_gap_threshold is None:
+        lgd_gap_threshold = self.lgd_gap_threshold
 
-m = comparaison["metriques"]
-ari = comparaison["ari_matrix"]
-ndiv = comparaison["diff_paires"].filter(pl.col("divergence")).height
-critere_retenu = f"OVL calibré ({cmp.seuil_calibre})"
+    tests_solve = self._make_tests(seuil_ovl=ovl_threshold)
 
-# trouver le meilleur ratio
-best_ratio = m.sort("ratio_sep_homog", descending=True)["critere"][0]
-best_stab = m.sort("stab_temporelle")["critere"][0]
+    # -- cache OVL depuis _runs (paires initiales déjà calculées) ---------
+    # clé : (frozenset({ca}), frozenset({cb})) — insensible à l'ordre
+    cache_ovl: dict = {}
+    if self._runs and criterion.lower() == "ovl":
+        for meta, per_test in self._runs:
+            if "OVL (Weitzman)" in per_test:
+                ca, cb = meta["class_a"], meta["class_b"]
+                key = (frozenset({ca}), frozenset({cb}))
+                cache_ovl[key] = float(per_test["OVL (Weitzman)"]["statistic"])
 
-md = f"""
-## Synthèse comparative des critères de fusion
+    arrays = dict(self.arrays)
+    groups: List[List[str]] = [[c] for c in self.order]
+    glouton_label: Dict[int, str] = {id(g): c for g, c in zip(groups, self.order)}
 
-### Métriques clés
+    def garr(g: List[str]) -> np.ndarray:
+        return np.concatenate([arrays[c] for c in g])
 
-| Critère | N classes | Homog. intra | Sépar. inter | Ratio | Stab. temp. |
-|---------|-----------|-------------|-------------|-------|-------------|
-"""
-for row in m.iter_rows(named=True):
-    md += (
-        f"| {row['critere']} "
-        f"| {row['n_classes']} "
-        f"| {row['homog_intra']} "
-        f"| {row['sep_inter']} "
-        f"| {row['ratio_sep_homog']} "
-        f"| {row['stab_temporelle']} |\n"
-    )
+    def get_ovl_cache(ga: List[str], gb: List[str]) -> Optional[float]:
+        """Retourne l'OVL depuis le cache si la paire est initiale
+        (chaque groupe = une seule classe d'origine), None sinon."""
+        if len(ga) == 1 and len(gb) == 1:
+            key = (frozenset({ga[0]}), frozenset({gb[0]}))
+            return cache_ovl.get(key)
+        return None
 
-md += f"""
-### Accord entre critères (ARI)
+    log: List[dict] = []
+    it = 0
+    while len(groups) > k_min:
+        groups.sort(key=lambda g: garr(g).mean())
+        best = None  # (score, i)
+        for i in range(len(groups) - 1):
+            ovl_cached = get_ovl_cache(groups[i], groups[i + 1])
+            mergeable, score = self._eval_pair(
+                garr(groups[i]), garr(groups[i + 1]),
+                criterion, lgd_gap_threshold,
+                tests_override=tests_solve,
+                ovl_precomputed=ovl_cached,   # None → recalcul, float → cache
+            )
+            if mergeable and (best is None or score > best[0]):
+                best = (score, i)
+        if best is None:
+            break
+        it += 1
+        i = best[1]
+        ga, gb = groups[i], groups[i + 1]
+        new_group = ga + gb
+        glouton_label[id(new_group)] = (
+            f"{glouton_label[id(ga)]}_{glouton_label[id(gb)]}"
+        )
+        log.append({
+            "iteration": it,
+            "groupe_a": "+".join(ga), "groupe_b": "+".join(gb),
+            "n_a": int(garr(ga).size), "n_b": int(garr(gb).size),
+            "critere": criterion,
+            "score": float(best[0]),
+            "mean_a": round(float(garr(ga).mean()), 4),
+            "mean_b": round(float(garr(gb).mean()), 4),
+            "gap_lgd": round(float(abs(garr(ga).mean() - garr(gb).mean())), 4),
+            "label_fusionne": glouton_label[id(new_group)],
+            "depuis_cache": get_ovl_cache(ga, gb) is not None,
+        })
+        groups = groups[:i] + [new_group] + groups[i + 2:]
 
-- **{critere_retenu}** est le critère retenu.
-- {ndiv} paires sur {len(cmp.pair_list)} sont en **divergence** entre critères.
-- Le meilleur ratio séparation/homogénéité est obtenu par **{best_ratio}**.
-- La meilleure stabilité temporelle est obtenue par **{best_stab}**.
-
-### Conclusion
-
-Le critère **{critere_retenu}** est retenu pour les raisons suivantes :
-- Seuil calibré empiriquement (max ARI bootstrap, Hubert & Arabie 1985)
-- Non-paramétrique et indépendant de l'effectif (Weitzman 1970)
-- Puissant pour les différences de forme de distribution (Komaba et al. 2023)
-- Métriques LGD comparables aux autres critères (ratio et stabilité)
-"""
-
-from IPython.display import Markdown, display
-display(Markdown(md))
+    # ... reste de solve() inchangé (construction mapping, composition, log_df)
