@@ -1,9 +1,130 @@
-cs = cmp_doc.consensus_avec_solve(label_style="glouton")
+def comparer_criteres_fusion(
+    cmp: "FusionComparator",
+    df: pl.DataFrame,
+    criteres: dict,
+    class_col: str,
+    lgd_col: str,
+    year_col: str = "year",
+    obligor_col: Optional[str] = None,
+) -> dict:
+    """Compare les partitionnements finaux de plusieurs critères de fusion.
 
-for row in cs.iter_rows(named=True):
-    if row["n_classes_finales"] is not None and row["n_classes_finales"] < row["n_initial"]:
-        compo = eval(row["composition"])  # str -> dict
-        fusions = {k: v for k, v in compo.items() if len(v) > 1}
-        print(f"\n[{row['test']}] {row['n_initial']} → {row['n_classes_finales']} classes")
-        for label, composantes in fusions.items():
-            print(f"  {' + '.join(composantes)} → {label}")
+    criteres : dict {label: (criterion, ovl_threshold)}
+        ex: {
+            "OVL calibré": ("ovl", None),
+            "OVL 0.50":    ("ovl", 0.50),
+            "Cohen's d":   ("cohen", None),
+        }
+
+    Retourne un dict avec :
+        "metriques"    : DataFrame métriques LGD par critère
+        "ari_matrix"   : DataFrame matrice ARI pairwise
+        "diff_paires"  : DataFrame diff de composition paire par paire
+        "solutions"    : dict {label: sol} — les solutions brutes
+    """
+    from sklearn.metrics import adjusted_rand_score
+
+    classes = list(cmp.order)
+    n_initial = len(classes)
+
+    # -- 1. résoudre chaque critère ----------------------------------------
+    solutions = {}
+    for label, (criterion, ovl_threshold) in criteres.items():
+        try:
+            solutions[label] = cmp.solve(
+                criterion=criterion,
+                label_style="glouton",
+                ovl_threshold=ovl_threshold,
+            )
+        except Exception as e:
+            solutions[label] = None
+            print(f"[WARN] {label} : {e}")
+
+    labels_valides = [l for l, s in solutions.items() if s is not None]
+
+    # -- 2. métriques LGD par critère --------------------------------------
+    def metriques_lgd(sol, df, class_col, lgd_col, year_col, obligor_col):
+        df_m = df.with_columns(
+            pl.col(class_col).cast(pl.Utf8)
+            .replace(sol["mapping"])
+            .alias("_classe_finale")
+        )
+        if obligor_col is not None:
+            df_m = (
+                df_m.group_by(["_classe_finale", obligor_col])
+                .agg(pl.col(lgd_col).mean())
+            )
+        # homogénéité intra : std moyen des LGD intra-classe
+        intra = (
+            df_m.group_by("_classe_finale")
+            .agg(
+                pl.col(lgd_col).std(ddof=1).alias("std_intra"),
+                pl.col(lgd_col).mean().alias("lgd_mean"),
+                pl.len().alias("n"),
+            )
+            .filter(pl.col("std_intra").is_not_null())
+        )
+        homog = float(
+            (intra["std_intra"] * intra["n"]).sum() / intra["n"].sum()
+        )
+        # séparation inter : std des LGD moyennes entre classes
+        sep = float(intra["lgd_mean"].std(ddof=1))
+        ratio = round(sep / homog, 3) if homog > 0 else None
+        # stabilité temporelle
+        stab = stabilite_temporelle(
+            df, sol["mapping"], class_col, lgd_col, year_col, obligor_col
+        )
+        return {
+            "n_classes": sol["n_final"],
+            "homog_intra": round(homog, 3),
+            "sep_inter": round(sep, 3),
+            "ratio_sep_homog": ratio,
+            "stab_temporelle": round(stab, 3),
+        }
+
+    rows_metriques = []
+    for label in labels_valides:
+        m = metriques_lgd(
+            solutions[label], df, class_col, lgd_col, year_col, obligor_col
+        )
+        rows_metriques.append({"critere": label, **m})
+    df_metriques = pl.DataFrame(rows_metriques)
+
+    # -- 3. matrice ARI pairwise -------------------------------------------
+    # vecteur de labels : classes[i] → groupe final (int)
+    def to_label_vector(sol):
+        mapping = sol["mapping"]
+        groups = sorted(set(mapping.values()))
+        g2i = {g: i for i, g in enumerate(groups)}
+        return np.array([g2i[mapping[str(c)]] for c in classes])
+
+    vectors = {l: to_label_vector(solutions[l]) for l in labels_valides}
+    ari_rows = []
+    for l1 in labels_valides:
+        row = {"critere": l1}
+        for l2 in labels_valides:
+            ari = adjusted_rand_score(vectors[l1], vectors[l2])
+            row[l2] = round(ari, 3)
+        ari_rows.append(row)
+    df_ari = pl.DataFrame(ari_rows)
+
+    # -- 4. diff de composition paire par paire ----------------------------
+    diff_rows = []
+    for ca, cb in cmp.pair_list:
+        row = {"class_a": ca, "class_b": cb}
+        for label in labels_valides:
+            m = solutions[label]["mapping"]
+            ensemble = str(m[str(ca)]) == str(m[str(cb)])
+            row[label] = "✓ ensemble" if ensemble else "✗ séparées"
+        # marquer les divergences
+        verdicts = [row[l] for l in labels_valides]
+        row["divergence"] = len(set(verdicts)) > 1
+        diff_rows.append(row)
+    df_diff = pl.DataFrame(diff_rows)
+
+    return {
+        "metriques": df_metriques,
+        "ari_matrix": df_ari,
+        "diff_paires": df_diff,
+        "solutions": solutions,
+    }
