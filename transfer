@@ -1,11 +1,67 @@
-ovls = (cmp.detail()
-        .filter(pl.col("test") == "OVL (Weitzman)")
-        ["statistic"].to_numpy())
+def plot_all_pairs(self, ncols: int = 3, figsize_per: tuple = (5, 3.5)):
+    """Grille des densités LGD superposées pour chaque paire adjacente.
 
-plt.hist(ovls, bins=20, edgecolor="black")
-plt.axvline(cmp.seuil_calibre, color="green", ls=":", lw=2,
-            label=f"seuil = {cmp.seuil_calibre}")
-plt.xlabel("OVL")
-plt.ylabel("nombre de paires")
-plt.legend()
-plt.show()
+    Pour chaque paire : les deux densités KDE, l'aire de recouvrement
+    (OVL) en vert, et le titre indique la valeur OVL + si elle dépasse
+    le seuil calibré (✓ fusion / ✗ non).
+
+    Nécessite run(). Utilise self.seuil_calibre si disponible (sinon
+    OVL_MODERE) pour le marquage ✓/✗.
+    """
+    self._ensure_run()
+    seuil = self.seuil_calibre if self.seuil_calibre is not None else OVL_MODERE
+
+    pairs = self.pair_list
+    n = len(pairs)
+    nrows = (n + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(figsize_per[0] * ncols, figsize_per[1] * nrows),
+    )
+    axes = np.atleast_1d(axes).flatten()
+
+    # index rapide des OVL déjà calculés
+    ovl_par_paire = {
+        (m["class_a"], m["class_b"]): per["OVL (Weitzman)"]["statistic"]
+        for m, per in self._runs
+        if "OVL (Weitzman)" in per
+    }
+
+    for idx, (ca, cb) in enumerate(pairs):
+        ax = axes[idx]
+        a, b = self.arrays[ca], self.arrays[cb]
+        lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+        x = np.linspace(lo, hi, 300)
+        try:
+            fa, fb = gaussian_kde(a)(x), gaussian_kde(b)(x)
+        except Exception:
+            bins = np.linspace(lo, hi, 60)
+            fa = np.histogram(a, bins=bins, density=True)[0]
+            fb = np.histogram(b, bins=bins, density=True)[0]
+            x = (bins[:-1] + bins[1:]) / 2
+
+        ovl = ovl_par_paire.get((ca, cb))
+        ax.plot(x, fa, "-", lw=1.3, label=ca)
+        ax.plot(x, fb, "--", lw=1.3, label=cb)
+        ax.fill_between(x, np.minimum(fa, fb), alpha=0.4, color="green")
+
+        if ovl is not None:
+            fusion = "✓" if ovl >= seuil else "✗"
+            ax.set_title(f"{ca} | {cb}   OVL={ovl:.2f} {fusion}", fontsize=9)
+        else:
+            ax.set_title(f"{ca} | {cb}", fontsize=9)
+        ax.legend(fontsize=7)
+        ax.set_xlabel("lgd_obligor")
+        ax.set_ylabel("densité")
+
+    # masquer les axes vides
+    for j in range(n, len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle(
+        f"Distributions LGD par paire adjacente (seuil OVL = {seuil:.2f})",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    return fig
