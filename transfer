@@ -1,42 +1,62 @@
-_FLAG_EMOJI = {FLAG_GREEN: "🟢", FLAG_ORANGE: "🟠", FLAG_RED: "🔴", None: "⚪"}
+    def inversions(self, emoji: bool = True, include_orange: bool = False) -> pl.DataFrame:
+        """Phase A : détecte les anomalies d'ordonnancement (inversion test).
 
-    def flags(self, emoji: bool = True) -> pl.DataFrame:
-        """Phase A : tableau de flags par paire et par test.
+        Une inversion = paire NON adjacente en rang LGD jugée homogène (RED)
+        alors qu'une paire éloignée devrait l'être moins. L'OVL décroît
+        normalement avec l'écart de LGD ; une exception signale un problème.
 
-        emoji=True  -> 🟢 GREEN (hétérogène, garder) / 🟠 ORANGE / 🔴 RED (fusionner)
-        emoji=False -> libellés texte "GREEN"/"ORANGE"/"RED".
+        inversion_forte = True : au moins une paire adjacente INTERMÉDIAIRE est
+        GREEN (hétérogène) -> la paire éloignée « saute » par-dessus une classe
+        distincte = vraie incohérence à arbitrer.
 
-        flag_consensus = 🔴 seulement si TOUS les tests concluent RED
-        (consensus strict pour fusionner) ; 🟢 si au moins un GREEN ; 🟠 sinon.
+        Nécessite un comparateur construit avec pairs='all'.
         """
         self._ensure_run()
-        names = self.test_names
+        if self.pairs_mode != "all":
+            raise ValueError(
+                "inversions() nécessite pairs='all' (diagnostic toutes paires, Phase A)."
+            )
+        rank = {c: i for i, c in enumerate(self.order)}
+
+        ovl_flag, ovl_val = {}, {}
+        for meta, per_test in self._runs:
+            key = frozenset({meta["class_a"], meta["class_b"]})
+            ovl_flag[key] = meta.get("flag_ovl")
+            if "OVL (Weitzman)" in per_test:
+                ovl_val[key] = float(per_test["OVL (Weitzman)"]["statistic"])
+
+        cibles = {FLAG_RED} if not include_orange else {FLAG_RED, FLAG_ORANGE}
 
         def show(f):
             return _FLAG_EMOJI.get(f, "⚪") if emoji else (f if f is not None else "n/a")
 
         rows = []
-        for meta, per_test in self._runs:
-            row = {
-                "class_a": meta["class_a"], "class_b": meta["class_b"],
-                "gap_lgd": round(meta["gap_lgd"], 3),
-                "ovl": (round(per_test["OVL (Weitzman)"]["statistic"], 3)
-                        if "OVL (Weitzman)" in per_test else None),
-            }
-            flags = []
-            for n in names:
-                f = per_test[n].get("flag")
-                row[n] = show(f)
-                if f is not None:
-                    flags.append(f)
-            if flags and all(f == FLAG_RED for f in flags):
-                cons = FLAG_RED
-            elif FLAG_GREEN in flags:
-                cons = FLAG_GREEN
-            elif flags:
-                cons = FLAG_ORANGE
-            else:
-                cons = None
-            row["consensus"] = show(cons)
-            rows.append(row)
-        return pl.DataFrame(rows)
+        for meta in (m for m, _ in self._runs):
+            ca, cb = meta["class_a"], meta["class_b"]
+            ra, rb = rank[ca], rank[cb]
+            if rb - ra <= 1:                       # adjacente -> pas une inversion
+                continue
+            f = meta.get("flag_ovl")
+            if f not in cibles:
+                continue
+            inter = self.order[ra:rb + 1]
+            adj_flags = [ovl_flag.get(frozenset({inter[k], inter[k + 1]}))
+                         for k in range(len(inter) - 1)]
+            n_green = sum(1 for af in adj_flags if af == FLAG_GREEN)
+            rows.append({
+                "class_a": ca, "class_b": cb,
+                "ecart_rang": rb - ra,
+                "ovl": round(ovl_val.get(frozenset({ca, cb}), float("nan")), 3),
+                "flag": show(f),
+                "classes_intermediaires": ", ".join(self.order[ra + 1:rb]),
+                "adjacentes_GREEN": n_green,
+                "inversion_forte": bool(n_green > 0),
+            })
+        schema = {"ecart_rang": pl.Int64, "adjacentes_GREEN": pl.Int64,
+                  "inversion_forte": pl.Boolean}
+        if not rows:
+            return pl.DataFrame(schema={
+                "class_a": pl.Utf8, "class_b": pl.Utf8, **schema,
+                "ovl": pl.Float64, "flag": pl.Utf8, "classes_intermediaires": pl.Utf8,
+            })
+        return pl.DataFrame(rows).sort(["inversion_forte", "ovl"], descending=[True, True])
