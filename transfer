@@ -1,12 +1,42 @@
-# Phase A — niveau sous-modèle : diagnostic toutes paires
-cmp_A = FusionComparator(df_sousmodele, class_col="HLC", obligor_col=OBLIGOR_COL,
-                         pairs="all").run()
-cmp_A.flags()          # matrice GREEN/ORANGE/RED 2-à-2
-cmp_A.plot_flags()     # carte couleur
+_FLAG_EMOJI = {FLAG_GREEN: "🟢", FLAG_ORANGE: "🟠", FLAG_RED: "🔴", None: "⚪"}
 
-# Phase B — niveau modèle : fusion sur paires consécutives
-cmp_B = FusionComparator(df_modele, class_col="HLC", obligor_col=OBLIGOR_COL,
-                         pairs="adjacent").run()
-cmp_B.calibrate(seuils=[round(s,2) for s in np.arange(0.53, 0.63, 0.01)])  # grille NON vide
-sol = cmp_B.solve(criterion="ovl", orange_policy="keep")      # conservateur (défaut)
-# sol = cmp_B.solve(criterion="ovl", orange_policy="merge")   # = ancien comportement (14 classes)
+    def flags(self, emoji: bool = True) -> pl.DataFrame:
+        """Phase A : tableau de flags par paire et par test.
+
+        emoji=True  -> 🟢 GREEN (hétérogène, garder) / 🟠 ORANGE / 🔴 RED (fusionner)
+        emoji=False -> libellés texte "GREEN"/"ORANGE"/"RED".
+
+        flag_consensus = 🔴 seulement si TOUS les tests concluent RED
+        (consensus strict pour fusionner) ; 🟢 si au moins un GREEN ; 🟠 sinon.
+        """
+        self._ensure_run()
+        names = self.test_names
+
+        def show(f):
+            return _FLAG_EMOJI.get(f, "⚪") if emoji else (f if f is not None else "n/a")
+
+        rows = []
+        for meta, per_test in self._runs:
+            row = {
+                "class_a": meta["class_a"], "class_b": meta["class_b"],
+                "gap_lgd": round(meta["gap_lgd"], 3),
+                "ovl": (round(per_test["OVL (Weitzman)"]["statistic"], 3)
+                        if "OVL (Weitzman)" in per_test else None),
+            }
+            flags = []
+            for n in names:
+                f = per_test[n].get("flag")
+                row[n] = show(f)
+                if f is not None:
+                    flags.append(f)
+            if flags and all(f == FLAG_RED for f in flags):
+                cons = FLAG_RED
+            elif FLAG_GREEN in flags:
+                cons = FLAG_GREEN
+            elif flags:
+                cons = FLAG_ORANGE
+            else:
+                cons = None
+            row["consensus"] = show(cons)
+            rows.append(row)
+        return pl.DataFrame(rows)
