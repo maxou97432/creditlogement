@@ -1,29 +1,40 @@
-cmp = FusionComparator(
-    df_modele, class_col=CLASS_COL, lgd_col=LGD_COL,
-    obligor_col=OBLIGOR_COL, pairs="adjacent",
-).run()
+    def flags(self, emoji: bool = True) -> pl.DataFrame:
+        """Phase A : tableau de flags par paire et par test.
 
-with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
-    print(cmp.matrix())        # OVL + flag_ovl + fusion suggérée par test, par paire adjacente
+        emoji=True  -> 🟢 GREEN (hétérogène, garder) / 🟠 ORANGE / 🔴 RED (fusionner)
+        emoji=False -> libellés texte "GREEN"/"ORANGE"/"RED".
 
-cmp.calibrate(
-    seuils=[round(s, 2) for s in np.arange(0.53, 0.63, 0.01)],   # start < stop
-    n_bootstrap=400,
-    n_subsample=1000,
-    random_state=42,
-    n_jobs=-1,             # parallélisé
-)
-print(cmp.df_calibration)
-print(f"\nSeuil OVL modéré retenu (max ARI) : {cmp.seuil_calibre}")
+        flag_consensus = 🔴 seulement si TOUS les tests concluent RED
+        (consensus strict pour fusionner) ; 🟢 si au moins un GREEN ; 🟠 sinon.
+        """
+        self._ensure_run()
+        names = self.test_names
 
-# défaut conservateur : ne fusionne que RED (>= seuil strict = modéré + 0.25)
-sol = cmp.solve(criterion="ovl", label_style="glouton", orange_policy="keep")
+        def show(f):
+            return _FLAG_EMOJI.get(f, "⚪") if emoji else (f if f is not None else "n/a")
 
-print(f"{sol['n_initial']} classes → {sol['n_final']} classes finales "
-      f"({sol['n_initial'] - sol['n_final']} fusions)\n")
-with pl.Config(fmt_str_lengths=200, tbl_rows=-1):
-    print(sol["log"])
-
-print("\nComposition finale :")
-for label, membres in sorted(sol["composition"].items()):
-    print(f"  {label} : {' + '.join(membres)}")
+        rows = []
+        for meta, per_test in self._runs:
+            row = {
+                "class_a": meta["class_a"], "class_b": meta["class_b"],
+                "gap_lgd": round(meta["gap_lgd"], 3),
+                "ovl": (round(per_test["OVL (Weitzman)"]["statistic"], 3)
+                        if "OVL (Weitzman)" in per_test else None),
+            }
+            flags = []
+            for n in names:
+                f = per_test[n].get("flag")
+                row[n] = show(f)
+                if f is not None:
+                    flags.append(f)
+            if flags and all(f == FLAG_RED for f in flags):
+                cons = FLAG_RED
+            elif FLAG_GREEN in flags:
+                cons = FLAG_GREEN
+            elif flags:
+                cons = FLAG_ORANGE
+            else:
+                cons = None
+            row["consensus"] = show(cons)
+            rows.append(row)
+        return pl.DataFrame(rows)
