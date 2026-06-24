@@ -1,20 +1,29 @@
-# Pour chaque sous-modèle : tests 2-à-2 + flags + détection d'inversions
-diagnostics = {}
-for sm in df_brut[SUBMODEL_COL].unique().sort().to_list():
-    df_sm = df_brut.filter(pl.col(SUBMODEL_COL) == sm)
-    cmp_A = FusionComparator(
-        df_sm, class_col=CLASS_COL, lgd_col=LGD_COL,
-        obligor_col=OBLIGOR_COL, pairs="all",
-    ).run()
-    diagnostics[sm] = cmp_A
+cmp = FusionComparator(
+    df_modele, class_col=CLASS_COL, lgd_col=LGD_COL,
+    obligor_col=OBLIGOR_COL, pairs="adjacent",
+).run()
 
-    print(f"\n========== Sous-modèle {sm} : flags d'hétérogénéité ==========")
-    with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
-        print(cmp_A.flags())                       # tableau emoji 🟢🟠🔴
+with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
+    print(cmp.matrix())        # OVL + flag_ovl + fusion suggérée par test, par paire adjacente
 
-    inv = cmp_A.inversions()
-    if inv.height:
-        print(f"  ⚠️  {inv.height} inversion(s) détectée(s) :")
-        print(inv)
-    else:
-        print("  ✅ aucune inversion — grille saine.")
+cmp.calibrate(
+    seuils=[round(s, 2) for s in np.arange(0.53, 0.63, 0.01)],   # start < stop
+    n_bootstrap=400,
+    n_subsample=1000,
+    random_state=42,
+    n_jobs=-1,             # parallélisé
+)
+print(cmp.df_calibration)
+print(f"\nSeuil OVL modéré retenu (max ARI) : {cmp.seuil_calibre}")
+
+# défaut conservateur : ne fusionne que RED (>= seuil strict = modéré + 0.25)
+sol = cmp.solve(criterion="ovl", label_style="glouton", orange_policy="keep")
+
+print(f"{sol['n_initial']} classes → {sol['n_final']} classes finales "
+      f"({sol['n_initial'] - sol['n_final']} fusions)\n")
+with pl.Config(fmt_str_lengths=200, tbl_rows=-1):
+    print(sol["log"])
+
+print("\nComposition finale :")
+for label, membres in sorted(sol["composition"].items()):
+    print(f"  {label} : {' + '.join(membres)}")
