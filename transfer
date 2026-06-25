@@ -1,23 +1,139 @@
-### Kolmogorov-Smirnov (KS)
+Pipeline réutilisable pour **comparer des classes sur leur distribution d'une variable continue**
+(typiquement la LGD) et décider lesquelles sont distinctes (à garder) ou redondantes (à fusionner).
 
-- **Description** : test non-paramétrique à deux échantillons qui compare les deux distributions de LGD via leurs **fonctions de répartition cumulées (CDF)** empiriques. Il mesure le plus grand écart vertical entre les deux courbes cumulées.
-- **Statistique de test** :
+Ce notebook est **indépendant de tout contexte amont** (Jenks, segment, etc.). Il prend en entrée
+une table avec :
 
-$$D_{n,m} = \sup_x \left| F_A(x) - F_B(x) \right|$$
+- une colonne **classe** (l'identifiant de regroupement à tester),
+- une colonne **valeur continue** (la LGD ou autre),
+- optionnellement une colonne **obligor** (pour agréger au niveau obligor avant test).
 
-  où $F_A$ et $F_B$ sont les CDF empiriques des deux classes ($n$ et $m$ observations). $D$ est l'écart vertical maximal entre les deux courbes ; sous $H_0$, $\sqrt{\tfrac{nm}{n+m}}\,D$ suit la distribution de Kolmogorov.
-- **Hypothèses** :
-  - $H_0$ : les deux échantillons proviennent de la **même distribution** ($F_A = F_B$ pour tout $x$).
-  - $H_1$ : les distributions **diffèrent** ($F_A(x) \neq F_B(x)$ pour au moins un $x$) — test bilatéral.
-  - Décision : p-value < 0.05 → rejet de $H_0$ → distributions différentes → classes distinctes 🟢.
-- **Différence avec KW/Welch** : KW regarde la tendance centrale, KS capte **toute** différence de forme (variance, asymétrie, bimodalité). Deux classes de même moyenne mais formes différentes → KW dit « pareil », KS dit « différent ».
-- **Faiblesse** : sensible à la taille d'échantillon, et peu sensible aux différences dans les **queues** (la statistique sup est dominée par le centre des distributions, où la masse est la plus forte).
+Étapes :
 
-- **Description** : ce n'est **pas un test d'hypothèse** mais une **métrique de distance** entre deux distributions (aussi appelée « earth mover's distance »). Elle quantifie le « coût de transport » minimal pour transformer la distribution A en distribution B, c.-à-d. la masse de probabilité à déplacer × la distance de déplacement.
-- **Statistique (distance, ordre 1)** : pour deux distributions 1D, elle se calcule directement comme l'aire entre les deux CDF :
+1. **Diagnostic** toutes paires (Phase A) — état d'hétérogénéité de chaque couple de classes.
+2. **Calibration** empirique du seuil OVL (stabilité bootstrap ARI).
+3. **Fusion** par paires adjacentes (Phase B).
+4. **Inversions** — anomalies d'ordonnancement.
+5. **Validation finale** des classes obtenues.
+6. **Export**.
 
-$$W_1(A, B) = \int_{-\infty}^{+\infty} \left| F_A(x) - F_B(x) \right| \, dx$$
+Voir `docs/heterogeneite_tests_explication.md` pour le détail de chaque test.
 
-  À comparer avec KS qui prend le **sup** (écart vertical max) là où Wasserstein prend l'**intégrale** (aire totale entre les CDF). Sortie ≥ 0, dans l'unité de la LGD ; 0 = distributions identiques.
-- **Hypothèses** : **aucune** — Wasserstein n'a pas de $H_0$ / $H_1$ ni de p-value. C'est une mesure descriptive d'éloignement, à interpréter via un seuil (calibré ou métier), pas par un test de significativité. Son avantage : **insensible à la taille d'échantillon**, contrairement aux p-values de KS/KW/Welch.
-- **Différence avec OVL** : OVL mesure le *recouvrement*, Wasserstein mesure *l'éloignement* en tenant compte de **combien** les valeurs diffèrent (pas juste si elles se chevauchent). Deux distributions disjointes mais proches → Wasserstein petit ; deux disjointes mais lointaines → Wasserstein grand. OVL = 0 dans les deux cas.
+# --- Source des données ---------------------------------------------------
+DATA_PATH   = "chemin/vers/ta_table.parquet"   # .parquet / .csv / DataFrame déjà chargé
+
+# --- Colonnes -------------------------------------------------------------
+CLASS_COL   = "classe"        # identifiant de la classe à tester
+VALUE_COL   = "lgd"           # variable continue comparée entre classes
+OBLIGOR_COL = None            # ex. "id_obligor" pour agréger par obligor, sinon None
+
+# --- Tests à calculer -----------------------------------------------------
+# valides : welch, kruskal, anova, ks, cohen, hedges, wasserstein, ovl
+TESTS = ["kruskal", "welch", "ovl", "cohen"]
+
+# --- Sortie ---------------------------------------------------------------
+OUT_PATH    = "output/classes_validees.parquet"
+
+# Chargement générique (adapte selon ton format)
+if DATA_PATH.endswith(".parquet"):
+    df = pl.read_parquet(DATA_PATH)
+elif DATA_PATH.endswith(".csv"):
+    df = pl.read_csv(DATA_PATH)
+else:
+    raise ValueError("Format non reconnu — charge `df` manuellement (pl.DataFrame).")
+
+print(f"{df.height:,} lignes — {df[CLASS_COL].n_unique()} classes distinctes")
+df.head()
+
+## 1. Diagnostic — toutes paires (Phase A)
+
+`pairs="all"` compare **chaque couple** de classes (pas seulement les voisines). Aucune fusion ici :
+on observe simplement l'état d'hétérogénéité. C'est le bon mode pour un **diagnostic** et pour
+détecter les inversions.
+
+cmp_diag = FusionComparator(
+    df, class_col=CLASS_COL, lgd_col=VALUE_COL,
+    obligor_col=OBLIGOR_COL, pairs="all", tests=TESTS,
+).run()
+
+# Tableau de flags (une ligne par paire, une colonne par test + consensus)
+with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
+    print(cmp_diag.flags())
+
+
+## 2. Calibration empirique du seuil OVL
+
+Plutôt que de fixer un seuil OVL arbitraire (pourquoi 0.50 et pas 0.60 ?), on le calibre sur les
+données par **stabilité** (Lange et al. 2004) : pour chaque seuil candidat on simule `n_bootstrap`
+rééchantillonnages, puis on mesure la reproductibilité du partitionnement via l'Adjusted Rand Index
+(ARI). Le seuil retenu maximise la stabilité.
+
+> Optionnel — saute cette cellule pour utiliser le seuil par défaut `OVL_MODERE = 0.50`.
+
+
+seuil = cmp_diag.calibrate(
+    seuils=np.arange(0.40, 0.70, 0.02),
+    n_bootstrap=200,
+    n_jobs=-1,
+)
+print(f"Seuil OVL calibré : {cmp_diag.seuil_calibre:.3f}")
+cmp_diag.df_calibration
+
+
+## 3. Fusion par paires adjacentes (Phase B)
+
+`pairs="adjacent"` ordonne les classes par valeur moyenne croissante et n'évalue que les **couples
+voisins**. `solve()` fusionne de proche en proche selon le critère choisi.
+
+- `criterion="ovl"` → fusionne si recouvrement > seuil (calibré ou par défaut).
+- `orange_policy="keep"` (défaut, conservateur) → seules les paires 🔴 RED fusionnent.
+- `orange_policy="merge"` → 🟠 ORANGE + 🔴 RED fusionnent.
+
+
+cmp_fus = FusionComparator(
+    df, class_col=CLASS_COL, lgd_col=VALUE_COL,
+    obligor_col=OBLIGOR_COL, pairs="adjacent", tests=TESTS,
+).run()
+
+# reporte le seuil calibré à l'étape 2 (sinon défaut)
+if cmp_diag.seuil_calibre is not None:
+    cmp_fus.seuil_calibre = cmp_diag.seuil_calibre
+
+sol = cmp_fus.solve(criterion="ovl", orange_policy="keep")
+print(f"{sol['n_initial']} -> {sol['n_final']} classes")
+print(sol["log"])
+
+
+## 4. Inversions — anomalies d'ordonnancement
+
+Une **inversion** = deux classes *éloignées* dans le classement par valeur, mais pourtant homogènes
+(consensus RED sur une paire non-adjacente). Cela signale un problème d'ordre. `inversion_forte=True`
+quand une paire adjacente intermédiaire est, elle, GREEN.
+
+L'inversion se lit sur le **consensus** des tests choisis (pas un test unique).
+
+inv = cmp_diag.inversions()   # nécessite pairs='all' -> on réutilise cmp_diag
+if inv.height:
+    print(f"{inv.height} inversion(s) detectee(s) :")
+    print(inv)
+else:
+    print("Aucune inversion — grille saine (classes bien ordonnees et distinctes).")
+
+
+## 5. Validation finale
+
+On vérifie que les classes **après fusion** sont bien distinctes. Critère d'acceptation : toutes les
+paires **adjacentes** doivent être 🟢 GREEN. Des 🟠 ORANGE sur des paires non-adjacentes éloignées
+sont acceptables.
+
+df_final = cmp_fus.apply_to_base()   # base avec la nouvelle colonne de classe fusionnee
+
+cmp_check = FusionComparator(
+    df_final, class_col=CLASS_COL, lgd_col=VALUE_COL,
+    obligor_col=OBLIGOR_COL, pairs="all", tests=TESTS,
+).run()
+
+flags = cmp_check.flags(emoji=False)
+print(flags.group_by("flag_consensus").len())
+with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
+    print(cmp_check.flags())
