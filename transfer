@@ -1,114 +1,23 @@
-# Tests d'hétérogénéité — explication de chaque test
-
-Ce document décrit les tests statistiques utilisés pour **comparer deux classes de risque sur leur distribution de LGD**, afin de décider si elles sont distinctes (à garder) ou redondantes (à fusionner).
-
-Convention de flag (état d'hétérogénéité, pas décision de fusion) :
-
-- 🟢 **GREEN** = classes distinctes → garder
-- 🟠 **ORANGE** = borderline
-- 🔴 **RED** = classes redondantes → fusionner
-
-Les tests sont regroupés par **ce qu'ils mesurent**, car c'est ce qui guide l'interprétation.
-
----
-
-## 1. Tests de différence de moyenne
-
-### Welch (t-test)
-
-- **Question** : les deux classes ont-elles une LGD *moyenne* différente ?
-- **Sortie** : p-value. Petite p (< 0.05) → moyennes significativement différentes → classes distinctes 🟢.
-- **Particularité** : version du t-test qui **n'exige pas des variances égales** entre les deux classes (contrairement au t-test de Student classique). C'est pourquoi on prend Welch et pas Student.
-- **Faiblesse** : sur **gros échantillons**, la p-value devient minuscule pour des écarts de moyenne infimes. Tout devient « significatif ». Avec des millions d'obligors, Welch déclare presque tout distinct.
-
-### ANOVA
-
-- **Question** : identique à Welch pour 2 groupes (« les moyennes diffèrent-elles ? »), mais généralisable à ≥ 3 groupes.
-- **Sortie** : p-value (via statistique F).
-- **À noter** : pour exactement 2 classes, ANOVA et le t-test de Student donnent **mathématiquement le même résultat** (F = t²). Redondant avec Welch, sauf qu'ANOVA suppose les variances égales. Inutile si l'on a déjà Welch.
-
----
-
-## 2. Test de différence de distribution (rangs, non-paramétrique)
-
-### Kruskal-Wallis (KW)
-
-- **Question** : une classe a-t-elle tendance à avoir des LGD *plus élevées* que l'autre ? — basé sur les **rangs**, pas les valeurs brutes.
-- **Sortie** : p-value.
-- **Pourquoi c'est le test de référence du diagnostic (Phase A)** :
-  - **non-paramétrique** → ne suppose aucune forme de distribution (les LGD ne sont pas gaussiennes, souvent bimodales 0/1) ;
-  - robuste aux valeurs extrêmes.
-- **Faiblesse** : comme Welch, **sensible à la taille d'échantillon**. Gros n → p-value écrasée.
-
----
-
-## 3. Test de forme complète de distribution
-
 ### Kolmogorov-Smirnov (KS)
 
-- **Question** : les deux distributions de LGD ont-elles la *même forme globale* ? — compare les fonctions de répartition cumulées (CDF).
-- **Sortie** : p-value + statistique D (= écart vertical max entre les deux CDF).
+- **Description** : test non-paramétrique à deux échantillons qui compare les deux distributions de LGD via leurs **fonctions de répartition cumulées (CDF)** empiriques. Il mesure le plus grand écart vertical entre les deux courbes cumulées.
+- **Statistique de test** :
+
+$$D_{n,m} = \sup_x \left| F_A(x) - F_B(x) \right|$$
+
+  où $F_A$ et $F_B$ sont les CDF empiriques des deux classes ($n$ et $m$ observations). $D$ est l'écart vertical maximal entre les deux courbes ; sous $H_0$, $\sqrt{\tfrac{nm}{n+m}}\,D$ suit la distribution de Kolmogorov.
+- **Hypothèses** :
+  - $H_0$ : les deux échantillons proviennent de la **même distribution** ($F_A = F_B$ pour tout $x$).
+  - $H_1$ : les distributions **diffèrent** ($F_A(x) \neq F_B(x)$ pour au moins un $x$) — test bilatéral.
+  - Décision : p-value < 0.05 → rejet de $H_0$ → distributions différentes → classes distinctes 🟢.
 - **Différence avec KW/Welch** : KW regarde la tendance centrale, KS capte **toute** différence de forme (variance, asymétrie, bimodalité). Deux classes de même moyenne mais formes différentes → KW dit « pareil », KS dit « différent ».
-- **Faiblesse** : sensible à la taille d'échantillon, et peu sensible aux différences dans les queues.
+- **Faiblesse** : sensible à la taille d'échantillon, et peu sensible aux différences dans les **queues** (la statistique sup est dominée par le centre des distributions, où la masse est la plus forte).
 
----
+- **Description** : ce n'est **pas un test d'hypothèse** mais une **métrique de distance** entre deux distributions (aussi appelée « earth mover's distance »). Elle quantifie le « coût de transport » minimal pour transformer la distribution A en distribution B, c.-à-d. la masse de probabilité à déplacer × la distance de déplacement.
+- **Statistique (distance, ordre 1)** : pour deux distributions 1D, elle se calcule directement comme l'aire entre les deux CDF :
 
-## 4. Tailles d'effet (INSENSIBLES à n — c'est leur intérêt)
+$$W_1(A, B) = \int_{-\infty}^{+\infty} \left| F_A(x) - F_B(x) \right| \, dx$$
 
-Ces mesures quantifient **l'ampleur** de la différence, pas sa significativité statistique. C'est ici que l'on règle le problème de la p-value écrasée sur gros volume.
-
-### Cohen's d
-
-- **Question** : de combien d'écarts-types les deux moyennes sont-elles séparées ?
-- **Formule** : `d = (moyenne_A − moyenne_B) / écart-type_groupé`
-- **Sortie** : un nombre. Repères usuels :
-  - |d| < 0.2 → négligeable (classes ≈ identiques 🔴)
-  - 0.2–0.5 → petit
-  - 0.5–0.8 → moyen
-  - \> 0.8 → grand (distinctes 🟢)
-- **Intérêt majeur** : **ne dépend pas de n**. 2 millions d'obligors ou 200, si l'écart réel est petit, d reste petit. C'est l'antidote à « tout est significatif ».
-
-### Hedges' g
-
-- **Identique à Cohen's d**, mais avec une **correction pour petits échantillons** (réduit le biais quand n est faible).
-- Pour gros volumes, g ≈ d (la correction tend vers 1). Utile surtout sur les petites classes.
-
----
-
-## 5. Chevauchement de distributions
-
-### OVL (Overlapping Coefficient, Weitzman 1970)
-
-- **Question** : quelle fraction des deux distributions de LGD se **superpose** ?
-- **Formule** : `OVL = ∫ min{f_A(x), f_B(x)} dx` (aire commune sous les deux densités, estimées par KDE).
-- **Sortie** : un nombre **entre 0 et 1**, directement interprétable :
-  - OVL = 0 → aucun recouvrement, classes totalement séparées 🟢
-  - OVL = 1 → distributions identiques, à fusionner 🔴
-  - OVL = 0.50 → moitié commune
-- **Pourquoi c'est le critère de fusion principal** :
-  - lisible métier (« ces classes se chevauchent à 70 % ») ;
-  - **insensible à n** (comme les tailles d'effet) ;
-  - calibrable par bootstrap ARI au lieu d'un seuil arbitraire.
-
-### Wasserstein (distance)
-
-- **Question** : quel « coût de transport » pour transformer la distribution A en distribution B ? — la distance qu'il faut déplacer la masse de probabilité.
-- **Sortie** : une distance (≥ 0, dans l'unité de la LGD). 0 = distributions identiques.
+  À comparer avec KS qui prend le **sup** (écart vertical max) là où Wasserstein prend l'**intégrale** (aire totale entre les CDF). Sortie ≥ 0, dans l'unité de la LGD ; 0 = distributions identiques.
+- **Hypothèses** : **aucune** — Wasserstein n'a pas de $H_0$ / $H_1$ ni de p-value. C'est une mesure descriptive d'éloignement, à interpréter via un seuil (calibré ou métier), pas par un test de significativité. Son avantage : **insensible à la taille d'échantillon**, contrairement aux p-values de KS/KW/Welch.
 - **Différence avec OVL** : OVL mesure le *recouvrement*, Wasserstein mesure *l'éloignement* en tenant compte de **combien** les valeurs diffèrent (pas juste si elles se chevauchent). Deux distributions disjointes mais proches → Wasserstein petit ; deux disjointes mais lointaines → Wasserstein grand. OVL = 0 dans les deux cas.
-
----
-
-## Récapitulatif — lequel pour quoi
-
-| Test | Mesure | Sensible à n ? | Rôle |
-|------|--------|:---:|---------|
-| **Welch** | différence de moyenne | ⚠️ oui | fusion niveau modèle, peu fiable gros n |
-| **ANOVA** | différence de moyenne | ⚠️ oui | redondant avec Welch |
-| **Kruskal-Wallis** | différence de rangs | ⚠️ oui | **diagnostic (référence)** |
-| **KS** | forme globale CDF | ⚠️ oui | complément forme |
-| **Cohen's d** | ampleur (écarts-types) | ✅ non | décision robuste |
-| **Hedges' g** | ampleur corrigée | ✅ non | idem, petites classes |
-| **OVL** | recouvrement [0,1] | ✅ non | **critère fusion principal** |
-| **Wasserstein** | éloignement | ✅ non | complément OVL |
-
-**Logique d'ensemble** : les p-values (Welch, KW, KS) disent *s'il y a* une différence — mais sur gros volume elles disent toujours oui. Les tailles d'effet et OVL/Wasserstein disent *si la différence est assez grande pour compter* — c'est sur eux que se fonde réellement la décision de fusion.
