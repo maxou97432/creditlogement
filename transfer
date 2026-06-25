@@ -1,139 +1,64 @@
-Pipeline réutilisable pour **comparer des classes sur leur distribution d'une variable continue**
-(typiquement la LGD) et décider lesquelles sont distinctes (à garder) ou redondantes (à fusionner).
+    def _eval_pair(self, a, b, criterion, lgd_gap_threshold,
+                   tests_override=None, ovl_precomputed=None):
+        """Retourne (mergeable, score). Ne calcule QUE le critère demandé.
 
-Ce notebook est **indépendant de tout contexte amont** (Jenks, segment, etc.). Il prend en entrée
-une table avec :
+        OVL : RED (>= strict) toujours fusionnable ; ORANGE (modéré..strict)
+        fusionnable seulement si orange_policy == 'merge' ; GREEN jamais.
+        Tout autre critère : décision basée sur le flag 'fusion_suggeree'
+        du test correspondant (welch, kruskal, anova, ks, hedges, wasserstein...).
+        """
+        c = criterion.lower()
 
-- une colonne **classe** (l'identifiant de regroupement à tester),
-- une colonne **valeur continue** (la LGD ou autre),
-- optionnellement une colonne **obligor** (pour agréger au niveau obligor avant test).
+        # --- Fast path OVL (garde le cache de calibration) ---
+        if "ovl" in c:
+            if ovl_precomputed is None:
+                try:
+                    ovl_precomputed = OVLTest._ovl_kde(a, b)
+                except Exception:
+                    ovl_precomputed = OVLTest._ovl_hist(a, b)
+            modere = self._ovl_modere_eff if self._ovl_modere_eff is not None else OVL_MODERE
+            strict = self._ovl_strict_eff if self._ovl_strict_eff is not None else OVL_STRICT
+            if ovl_precomputed >= strict:
+                mergeable = True                              # RED
+            elif ovl_precomputed >= modere:
+                mergeable = (self._orange_policy == "merge")  # ORANGE
+            else:
+                mergeable = False                             # GREEN
+            return bool(mergeable), float(ovl_precomputed)
 
-Étapes :
+        # --- Fast path Cohen's d ---
+        if c.startswith("cohen"):
+            d = self._cohen_d(a, b)
+            return bool(abs(d) < COHEN_NEGLIGEABLE), float(-abs(d))
 
-1. **Diagnostic** toutes paires (Phase A) — état d'hétérogénéité de chaque couple de classes.
-2. **Calibration** empirique du seuil OVL (stabilité bootstrap ARI).
-3. **Fusion** par paires adjacentes (Phase B).
-4. **Inversions** — anomalies d'ordonnancement.
-5. **Validation finale** des classes obtenues.
-6. **Export**.
+        # --- Critère composite ---
+        if c == "combined":
+            d = self._cohen_d(a, b)
+            gap = abs(float(a.mean() - b.mean()))
+            ok = (gap < lgd_gap_threshold) and (abs(d) < COHEN_NEGLIGEABLE)
+            return bool(ok), float(-gap)
 
-Voir `docs/heterogeneite_tests_explication.md` pour le détail de chaque test.
-
-# --- Source des données ---------------------------------------------------
-DATA_PATH   = "chemin/vers/ta_table.parquet"   # .parquet / .csv / DataFrame déjà chargé
-
-# --- Colonnes -------------------------------------------------------------
-CLASS_COL   = "classe"        # identifiant de la classe à tester
-VALUE_COL   = "lgd"           # variable continue comparée entre classes
-OBLIGOR_COL = None            # ex. "id_obligor" pour agréger par obligor, sinon None
-
-# --- Tests à calculer -----------------------------------------------------
-# valides : welch, kruskal, anova, ks, cohen, hedges, wasserstein, ovl
-TESTS = ["kruskal", "welch", "ovl", "cohen"]
-
-# --- Sortie ---------------------------------------------------------------
-OUT_PATH    = "output/classes_validees.parquet"
-
-# Chargement générique (adapte selon ton format)
-if DATA_PATH.endswith(".parquet"):
-    df = pl.read_parquet(DATA_PATH)
-elif DATA_PATH.endswith(".csv"):
-    df = pl.read_csv(DATA_PATH)
-else:
-    raise ValueError("Format non reconnu — charge `df` manuellement (pl.DataFrame).")
-
-print(f"{df.height:,} lignes — {df[CLASS_COL].n_unique()} classes distinctes")
-df.head()
-
-## 1. Diagnostic — toutes paires (Phase A)
-
-`pairs="all"` compare **chaque couple** de classes (pas seulement les voisines). Aucune fusion ici :
-on observe simplement l'état d'hétérogénéité. C'est le bon mode pour un **diagnostic** et pour
-détecter les inversions.
-
-cmp_diag = FusionComparator(
-    df, class_col=CLASS_COL, lgd_col=VALUE_COL,
-    obligor_col=OBLIGOR_COL, pairs="all", tests=TESTS,
-).run()
-
-# Tableau de flags (une ligne par paire, une colonne par test + consensus)
-with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
-    print(cmp_diag.flags())
-
-
-## 2. Calibration empirique du seuil OVL
-
-Plutôt que de fixer un seuil OVL arbitraire (pourquoi 0.50 et pas 0.60 ?), on le calibre sur les
-données par **stabilité** (Lange et al. 2004) : pour chaque seuil candidat on simule `n_bootstrap`
-rééchantillonnages, puis on mesure la reproductibilité du partitionnement via l'Adjusted Rand Index
-(ARI). Le seuil retenu maximise la stabilité.
-
-> Optionnel — saute cette cellule pour utiliser le seuil par défaut `OVL_MODERE = 0.50`.
-
-
-seuil = cmp_diag.calibrate(
-    seuils=np.arange(0.40, 0.70, 0.02),
-    n_bootstrap=200,
-    n_jobs=-1,
-)
-print(f"Seuil OVL calibré : {cmp_diag.seuil_calibre:.3f}")
-cmp_diag.df_calibration
-
-
-## 3. Fusion par paires adjacentes (Phase B)
-
-`pairs="adjacent"` ordonne les classes par valeur moyenne croissante et n'évalue que les **couples
-voisins**. `solve()` fusionne de proche en proche selon le critère choisi.
-
-- `criterion="ovl"` → fusionne si recouvrement > seuil (calibré ou par défaut).
-- `orange_policy="keep"` (défaut, conservateur) → seules les paires 🔴 RED fusionnent.
-- `orange_policy="merge"` → 🟠 ORANGE + 🔴 RED fusionnent.
-
-
-cmp_fus = FusionComparator(
-    df, class_col=CLASS_COL, lgd_col=VALUE_COL,
-    obligor_col=OBLIGOR_COL, pairs="adjacent", tests=TESTS,
-).run()
-
-# reporte le seuil calibré à l'étape 2 (sinon défaut)
-if cmp_diag.seuil_calibre is not None:
-    cmp_fus.seuil_calibre = cmp_diag.seuil_calibre
-
-sol = cmp_fus.solve(criterion="ovl", orange_policy="keep")
-print(f"{sol['n_initial']} -> {sol['n_final']} classes")
-print(sol["log"])
-
-
-## 4. Inversions — anomalies d'ordonnancement
-
-Une **inversion** = deux classes *éloignées* dans le classement par valeur, mais pourtant homogènes
-(consensus RED sur une paire non-adjacente). Cela signale un problème d'ordre. `inversion_forte=True`
-quand une paire adjacente intermédiaire est, elle, GREEN.
-
-L'inversion se lit sur le **consensus** des tests choisis (pas un test unique).
-
-inv = cmp_diag.inversions()   # nécessite pairs='all' -> on réutilise cmp_diag
-if inv.height:
-    print(f"{inv.height} inversion(s) detectee(s) :")
-    print(inv)
-else:
-    print("Aucune inversion — grille saine (classes bien ordonnees et distinctes).")
-
-
-## 5. Validation finale
-
-On vérifie que les classes **après fusion** sont bien distinctes. Critère d'acceptation : toutes les
-paires **adjacentes** doivent être 🟢 GREEN. Des 🟠 ORANGE sur des paires non-adjacentes éloignées
-sont acceptables.
-
-df_final = cmp_fus.apply_to_base()   # base avec la nouvelle colonne de classe fusionnee
-
-cmp_check = FusionComparator(
-    df_final, class_col=CLASS_COL, lgd_col=VALUE_COL,
-    obligor_col=OBLIGOR_COL, pairs="all", tests=TESTS,
-).run()
-
-flags = cmp_check.flags(emoji=False)
-print(flags.group_by("flag_consensus").len())
-with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
-    print(cmp_check.flags())
+        # --- Cas générique : on instancie le test DEMANDÉ depuis la suite complète ---
+        # IMPORTANT : on cherche dans _default_suite() (instances, 8 tests dispo) et
+        # NON dans self._tests_factory, qui (a) peut contenir des str, (b) ne sert
+        # qu'au diagnostic. Le critère de fusion est indépendant des tests choisis.
+        suite = tests_override if tests_override is not None else _default_suite()
+        t = None
+        for tt in suite:
+            n = tt.name.lower()
+            if n.startswith(c) or c in n:
+                t = tt
+                break
+        if t is None:
+            raise ValueError(f"criterion='{criterion}' introuvable parmi "
+                             f"{[tt.name for tt in suite]}")
+        t.fit(a, b)
+        r = t.result
+        mergeable = bool(r["fusion_suggeree"])
+        if r["p_value"] is not None:
+            score = r["p_value"]
+        elif t.name.startswith("OVL"):
+            score = r["statistic"]
+        else:
+            score = -abs(r["statistic"])
+        return bool(mergeable), float(score)
