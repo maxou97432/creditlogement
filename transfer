@@ -1,64 +1,7 @@
-    def _eval_pair(self, a, b, criterion, lgd_gap_threshold,
-                   tests_override=None, ovl_precomputed=None):
-        """Retourne (mergeable, score). Ne calcule QUE le critère demandé.
+> ### ⚙️ C'EST ICI qu'on choisit le test qui pilote la fusion
+> Le paramètre **`criterion`** de `solve()` détermine **quel test statistique décide** si deux classes
+> voisines doivent être fusionnées. Changer ce seul argument suffit à changer toute la logique de
+> regroupement — le reste de la cellule est générique.
 
-        OVL : RED (>= strict) toujours fusionnable ; ORANGE (modéré..strict)
-        fusionnable seulement si orange_policy == 'merge' ; GREEN jamais.
-        Tout autre critère : décision basée sur le flag 'fusion_suggeree'
-        du test correspondant (welch, kruskal, anova, ks, hedges, wasserstein...).
-        """
-        c = criterion.lower()
-
-        # --- Fast path OVL (garde le cache de calibration) ---
-        if "ovl" in c:
-            if ovl_precomputed is None:
-                try:
-                    ovl_precomputed = OVLTest._ovl_kde(a, b)
-                except Exception:
-                    ovl_precomputed = OVLTest._ovl_hist(a, b)
-            modere = self._ovl_modere_eff if self._ovl_modere_eff is not None else OVL_MODERE
-            strict = self._ovl_strict_eff if self._ovl_strict_eff is not None else OVL_STRICT
-            if ovl_precomputed >= strict:
-                mergeable = True                              # RED
-            elif ovl_precomputed >= modere:
-                mergeable = (self._orange_policy == "merge")  # ORANGE
-            else:
-                mergeable = False                             # GREEN
-            return bool(mergeable), float(ovl_precomputed)
-
-        # --- Fast path Cohen's d ---
-        if c.startswith("cohen"):
-            d = self._cohen_d(a, b)
-            return bool(abs(d) < COHEN_NEGLIGEABLE), float(-abs(d))
-
-        # --- Critère composite ---
-        if c == "combined":
-            d = self._cohen_d(a, b)
-            gap = abs(float(a.mean() - b.mean()))
-            ok = (gap < lgd_gap_threshold) and (abs(d) < COHEN_NEGLIGEABLE)
-            return bool(ok), float(-gap)
-
-        # --- Cas générique : on instancie le test DEMANDÉ depuis la suite complète ---
-        # IMPORTANT : on cherche dans _default_suite() (instances, 8 tests dispo) et
-        # NON dans self._tests_factory, qui (a) peut contenir des str, (b) ne sert
-        # qu'au diagnostic. Le critère de fusion est indépendant des tests choisis.
-        suite = tests_override if tests_override is not None else _default_suite()
-        t = None
-        for tt in suite:
-            n = tt.name.lower()
-            if n.startswith(c) or c in n:
-                t = tt
-                break
-        if t is None:
-            raise ValueError(f"criterion='{criterion}' introuvable parmi "
-                             f"{[tt.name for tt in suite]}")
-        t.fit(a, b)
-        r = t.result
-        mergeable = bool(r["fusion_suggeree"])
-        if r["p_value"] is not None:
-            score = r["p_value"]
-        elif t.name.startswith("OVL"):
-            score = r["statistic"]
-        else:
-            score = -abs(r["statistic"])
-        return bool(mergeable), float(score)
+`pairs="adjacent"` ordonne les classes par valeur moyenne croissante et n'évalue que les **couples
+voisins**. `solve()` fusionne ensuite de proche en proche selon le critère retenu.
