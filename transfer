@@ -1,7 +1,38 @@
-> ### ⚙️ C'EST ICI qu'on choisit le test qui pilote la fusion
-> Le paramètre **`criterion`** de `solve()` détermine **quel test statistique décide** si deux classes
-> voisines doivent être fusionnées. Changer ce seul argument suffit à changer toute la logique de
-> regroupement — le reste de la cellule est générique.
+# ============ COMMUN ============
+paths:
+  working: "C:/Users/j21338/OneDrive - BNP Paribas/python - Documents/Pack Python/branche_polars/RiskQuant/RiskQuant - Reboot"
+  output:  "OutputNI"               # relatif à working
 
-`pairs="adjacent"` ordonne les classes par valeur moyenne croissante et n'évalue que les **couples
-voisins**. `solve()` fusionne ensuite de proche en proche selon le critère retenu.
+columns:                            # noms de colonnes partagés
+  lgd:         LGD_3ANS_finale
+  ead:         ead_fin
+  obligor:     ID_CLIENT
+  facility:    FACILITY
+  date_defaut: datdef
+
+# ============ 1B — CRÉATION CHR (Jenks) ============
+jenks:
+  segment_col:    segment
+  score_col:      score
+  k_min:          2
+  k_max:          15
+  min_weight_pct: 0.05
+
+# ============ 2B — CALCUL LRA ============
+lra:
+  downturn_years: [2009, 2020]
+  lag:            1
+  alpha:          0.05
+  ponderation:    true
+
+# ============ 3B — HÉTÉROGÉNÉITÉ / FUSION ============
+heterogeneite:
+  class_in:        CHR_apres_fusion
+  class_out:       classe_fusionnee
+  tests:           [kruskal, welch, ovl, cohen]
+  critere_fusion:  ovl
+  orange_policy:   merge
+  calibration:
+    seuils:      {start: 0.40, stop: 0.70, step: 0.02}
+    n_bootstrap: 200
+    n_jobs:      -1
