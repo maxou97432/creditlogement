@@ -1,15 +1,11 @@
-# Cellule 1 — Phase A : diagnostic toutes paires sur CHR_apres_fusion
-cmp_A = FusionComparator(
-    df_brut, class_col=CLASS_COL, lgd_col=LGD_COL,
-    obligor_col=OBLIGOR_COL, pairs="all",
-).run()
-
-with pl.Config(fmt_str_lengths=100, tbl_rows=-1):
-    print(cmp_A.flags())
-
-inv = cmp_A.inversions()
-if inv.height:
-    print(f"⚠️ {inv.height} inversion(s) détectée(s) :")
-    print(inv)
-else:
-    print("✅ aucune inversion — grille saine.")
+def _get_test_registry():
+    return {
+        "welch":        WelchTest,
+        "kruskal":      KruskalWallisTest,
+        "anova":        ANOVATest,
+        "ks":           KolmogorovSmirnovTest,
+        "cohen":        CohensDTest,
+        "hedges":       HedgesGTest,
+        "wasserstein":  WassersteinTest,
+        "ovl":          OVLTest,
+    }
