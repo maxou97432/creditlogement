@@ -1,74 +1,93 @@
-def extrapolate_on_dtm_lazy(
-    dtm: pl.LazyFrame,
-    extr_marg: Union[pl.LazyFrame, pl.DataFrame, pd.DataFrame],
-    cum_field: str,
-    TTW: int,
-    final_value_col: str,
-    date_fin: str = "date_fin",
-    datdef: str = "datdef_ap_mdef",
-) -> pl.LazyFrame:
-    """
-    Applique les marges extrapolées (Horizon 1 … Horizon TTW) aux colonnes
-    cumulatives. Les marges sont renommées M_1 … M_TTW pour éviter toute collision.
+import pandas as pd
+import polars as pl
+import importlib
+importlib.reload(SR_mod)   # s'assure que le fix est chargé
 
-    Règle (alignée sur le pandas extrapolate_on_dtm) :
-      - cellule NON observée (generation + h > max_gen) ET ouverte  -> cum_prev + marge
-      - cellule NON observée ET fermée                              -> cum_prev
-      - cellule observée (hors triangle) OU marge nulle             -> on GARDE cum_cur
-    """
-    # 0) Normalisation de l'entrée marginale (reset_index pour conserver 'generation')
-    if isinstance(extr_marg, pd.DataFrame):
-        extr_marg = pl.from_pandas(extr_marg.reset_index())
-    if isinstance(extr_marg, pl.DataFrame):
-        extr_marg = extr_marg.lazy()
+# ======================================================================
+# PARAMÈTRES (repris de ta cellule [6])
+# ======================================================================
+CAT             = 6.0
+ANNEE_COURANTE  = 2020
+CATEGORY_COLUMN = "HLC"
+FIELDS          = ["CRR_", "CA_"]
+MARGINAL_FIELDS = ["RR_", "AD_"]
 
-    # 1) Filtrer les générations valides (Horizon TTW non nul)
-    sub = extr_marg.filter(pl.col(f"Horizon {TTW}").is_not_null())
-    if "generation" not in sub.collect_schema().names():
-        sub = sub.with_row_index("generation")
+# ======================================================================
+# 1) Restriction à UNE catégorie (sur dtmlz2, déjà préparé)
+# ======================================================================
+dtm_cat = dtmlz2.filter(pl.col(CATEGORY_COLUMN) == CAT)
 
-    # 2) Renommer Horizon -> M_* et ne garder que generation + marges
-    rename_exprs = [pl.col(f"Horizon {h}").alias(f"M_{h}") for h in range(1, TTW + 1)]
-    sub = sub.select(pl.col("generation"), *rename_exprs)
-
-    # 3) Padding côté gauche pour homogénéité de schéma
-    dtm = _pad_missing_horizons(dtm, target_TTW=TTW)
-
-    # 4) Jointure lazy (aucune colonne Horizon en commun)
-    joined = dtm.join(sub, on="generation", how="left")
-
-    # 5) Sécuriser le type des dates
-    joined = joined.with_columns([
-        pl.col(date_fin).cast(pl.Date).alias(date_fin),
-        pl.col(datdef).cast(pl.Date).alias(datdef),
+dtm_pl = dtm_cat
+dtm_pd = (
+    dtm_cat
+    .with_columns([
+        pl.col("datdef_corr").alias("datdef_ap_mdef"),   # alias attendu par le pandas
+        pl.col("HLC").alias("categories"),               # pour l'assert hardcodé du pandas
     ])
+    .collect()
+    .to_pandas()
+)
+print(f"{dtm_pd.shape[0]:,} lignes pour HLC={CAT}")
 
-    # 6) Reconstruction des cumuls (avec porte « triangle » par cellule)
-    max_gen = pl.col("generation").max()   # broadcast scalaire (lazy-safe)
-    exprs: List[pl.Expr] = []
-    for h in range(2, TTW + 1):
-        cum_prev = f"{cum_field}1an" if h == 2 else f"{cum_field}{h-1}ans"
-        cum_cur = f"{cum_field}{h}ans"
-        margin_col = f"M_{h}"
+# ======================================================================
+# 2) Pipeline PANDAS (référence) — on GARDE les results
+# ======================================================================
+res_pd_all, filled_pd = extrapolate_all_categories(
+    annee_courante=ANNEE_COURANTE,
+    dtm_in=dtm_pd,
+    category_column=CATEGORY_COLUMN,
+    fields=FIELDS,
+    final_suffix="_final",
+    marginal_fields=MARGINAL_FIELDS,
+    stepwise_SR=True,
+    weighted_facility=True,
+)
 
-        # cellule réellement non-observée (comme `y + h > sub.index.max()` en pandas)
-        unobserved = (pl.col("generation") + h) > max_gen
+# ======================================================================
+# 3) Pipeline POLARS (à valider) — on GARDE les results
+# ======================================================================
+res_pl_all, filled_pl_lazy = SR_mod.extrapolate_all_categories_lazy(
+    annee_courante=ANNEE_COURANTE,
+    dtm_in=dtm_pl,
+    category_column=CATEGORY_COLUMN,
+    fields=FIELDS,
+    final_suffix="_final",
+    date_fin="date_fin",
+    datdef="datdef_corr",
+    marginal_fields=MARGINAL_FIELDS,
+    stepwise_SR=True,
+    weighted_facility=True,
+)
+filled_pl = filled_pl_lazy.collect()
 
-        open_cond = (
-            (pl.col(date_fin) - pl.col(datdef)).dt.total_days() > 365 * (h - 1)
-        )
+# ======================================================================
+# 4) Comparaison des tables INTERMÉDIAIRES (toutes pandas, indexées generation)
+# ======================================================================
+res_pd = res_pd_all[CAT]
+res_pl = res_pl_all[CAT]
 
-        new_cum = (
-            pl.when(unobserved & open_cond & pl.col(margin_col).is_not_null())
-              .then(pl.col(cum_prev) + pl.col(margin_col))   # cible ouverte
-            .when(unobserved & pl.col(margin_col).is_not_null())
-              .then(pl.col(cum_prev))                         # cible fermée
-            .otherwise(pl.col(cum_cur))                       # observé / hors triangle -> garder
-            .alias(cum_cur)
-        )
-        exprs.append(new_cum)
+def diff(a, b, name):
+    # aligne sur index + colonnes communes avant de soustraire
+    a2, b2 = a.align(b, join="inner")
+    d = (a2 - b2).abs().max().max()
+    print(f"{name:22s} écart max = {d:.3e}")
 
-    # 7) Colonne finale (copie du dernier cumul)
-    exprs.append(pl.col(f"{cum_field}{TTW}ans").alias(final_value_col))
+print(f"\n=== Tables intermédiaires HLC={CAT} ===")
+diff(res_pd["n_open_cases"],     res_pl["n_open_cases"],     "n_open_cases")
+diff(res_pd["CRR_"],             res_pl["CRR_"],             "CRR_ (mean)")
+diff(res_pd["unobs_SR"],         res_pl["unobs_SR"],         "unobs_SR")
+diff(res_pd["extrapolated_RR_"], res_pl["extrapolated_RR_"], "extrapolated_RR_")
 
-    return joined.with_columns(exprs)
+# ======================================================================
+# 5) Comparaison de la sortie finale par génération
+# ======================================================================
+FINAL_COL = "CRR__final"
+r = (filled_pd[filled_pd[CATEGORY_COLUMN] == CAT]
+       .groupby("generation")[FINAL_COL].mean().rename("pandas"))
+n = (filled_pl.filter(pl.col(CATEGORY_COLUMN) == CAT)
+       .group_by("generation").agg(pl.col(FINAL_COL).mean().alias("polars"))
+       .sort("generation").to_pandas().set_index("generation")["polars"])
+cmp = pd.concat([r, n], axis=1).sort_index()
+cmp["ecart_abs"] = (cmp["pandas"] - cmp["polars"]).abs()
+print(f"\n=== Sortie finale {FINAL_COL} ===")
+print(cmp)
