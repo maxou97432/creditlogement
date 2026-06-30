@@ -1,7 +1,13 @@
-print("dtype base2 :", base2.schema[CLASS])
-print("dtype df_dt  :", df_dt.schema["Segment"])
-print("ex. base2 :", base2[CLASS].unique().head(10).to_list())
-print("ex. df_dt :", df_dt["Segment"].unique().head(10).to_list())
-
-inter = set(base2[CLASS].unique().to_list()) & set(df_dt["Segment"].unique().to_list())
-print("clés communes :", len(inter))
+def to_str_key(col_name: str, df) -> pl.Expr:
+    """Normalise une clé de jointure en str canonique.
+    "1.0", 1.0, "1", 1  -> "1"   |   "B_3_A_1" -> "B_3_A_1" (inchangé)
+    """
+    s = pl.col(col_name)
+    # tentative numérique -> int -> str ; null si non numérique (ex. label composite)
+    as_int = (
+        s.cast(pl.Float64, strict=False)   # "1.0"->1.0 ; "B_3_A_1"->null
+         .cast(pl.Int64,   strict=False)   # 1.0 -> 1
+         .cast(pl.Utf8)                    # -> "1"
+    )
+    # si la version numérique a échoué (null), on garde la string d'origine
+    return pl.coalesce([as_int, s.cast(pl.Utf8)]).alias(col_name)
