@@ -1,10 +1,90 @@
-# sur UNE catégorie, compare pandas (référence) et polars
-cat = 1.0
-ref  = extrapolate_all_categories(...)        # version pandas
-new  = extrapolate_all_categories_lazy(...)    # version polars
+import pandas as pd
+import polars as pl
 
-r = ref[1].query("categories == @cat").groupby("generation")["CRR__final"].mean()
-n = (new[1].filter(pl.col("categories")==cat)
-        .group_by("generation").agg(pl.col("CRR__final").mean())
-        .collect().to_pandas().set_index("generation")["CRR__final"])
-print(pd.concat([r, n], axis=1, keys=["pandas","polars"]))
+# ======================================================================
+# PARAMÈTRES — à adapter à ton cas
+# ======================================================================
+CAT             = 1.0                    # catégorie à comparer
+ANNEE_COURANTE  = 2020                   # même valeur dans les deux pipelines
+CATEGORY_COLUMN = "categories"           # nom EXACT de la colonne catégorie
+FIELDS          = ["CRR_"]               # champs cumulés
+MARGINAL_FIELDS = ["mCRR_"]              # marginaux associés (même longueur)
+FINAL_SUFFIX    = "_final"
+DATE_FIN        = "date_fin"
+DATDEF          = "datdef_ap_mdef"
+
+FINAL_COL = f"{FIELDS[0]}{FINAL_SUFFIX}"   # -> "CRR__final" (double underscore)
+
+# dtm_pd  : DataFrame pandas  (entrée de la version pandas)
+# dtm_pl  : LazyFrame polars  (entrée de la version polars)
+# Si tu n'as qu'un seul des deux, convertis :
+#   dtm_pl = pl.from_pandas(dtm_pd).lazy()
+#   dtm_pd = dtm_pl.collect().to_pandas()
+
+# ======================================================================
+# 1) Pipeline PANDAS (référence)
+# ======================================================================
+_, filled_pd = extrapolate_all_categories(
+    annee_courante=ANNEE_COURANTE,
+    dtm_in=dtm_pd,
+    category_column=CATEGORY_COLUMN,
+    fields=FIELDS,
+    final_suffix=FINAL_SUFFIX,
+    marginal_fields=MARGINAL_FIELDS,
+)
+
+# ======================================================================
+# 2) Pipeline POLARS (à valider)
+# ======================================================================
+_, filled_pl_lazy = extrapolate_all_categories_lazy(
+    annee_courante=ANNEE_COURANTE,
+    dtm_in=dtm_pl,
+    category_column=CATEGORY_COLUMN,
+    fields=FIELDS,
+    final_suffix=FINAL_SUFFIX,
+    date_fin=DATE_FIN,
+    datdef=DATDEF,
+    marginal_fields=MARGINAL_FIELDS,
+)
+filled_pl = filled_pl_lazy.collect()
+
+# ======================================================================
+# 3) Agrégation par génération sur la catégorie CAT
+# ======================================================================
+# --- pandas ---
+r = (
+    filled_pd[filled_pd[CATEGORY_COLUMN] == CAT]
+    .groupby("generation")[FINAL_COL]
+    .mean()
+    .rename("pandas")
+)
+
+# --- polars ---
+n = (
+    filled_pl.filter(pl.col(CATEGORY_COLUMN) == CAT)
+    .group_by("generation")
+    .agg(pl.col(FINAL_COL).mean().alias("polars"))
+    .sort("generation")
+    .to_pandas()
+    .set_index("generation")["polars"]
+)
+
+# ======================================================================
+# 4) Comparaison côte à côte + écart
+# ======================================================================
+cmp = pd.concat([r, n], axis=1).sort_index()
+cmp["ecart_abs"] = (cmp["pandas"] - cmp["polars"]).abs()
+cmp["ecart_rel_%"] = 100 * cmp["ecart_abs"] / cmp["pandas"].abs()
+
+pd.set_option("display.float_format", lambda x: f"{x:,.4f}")
+print(f"=== Catégorie {CAT} — colonne {FINAL_COL} ===")
+print(cmp)
+print(f"\nÉcart absolu max  : {cmp['ecart_abs'].max():.6f}")
+print(f"Écart relatif max : {cmp['ecart_rel_%'].max():.4f} %")
+
+# verdict rapide
+if cmp["ecart_abs"].max() < 1e-6:
+    print("\n✅ IDENTIQUE — les deux pipelines coïncident.")
+else:
+    print("\n⚠️ DIVERGENCE — regarde les générations où ecart_abs est élevé "
+          "(souvent les générations récentes = problème d'alignement).")
