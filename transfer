@@ -1,13 +1,511 @@
-def to_str_key(col_name: str, df) -> pl.Expr:
-    """Normalise une clé de jointure en str canonique.
-    "1.0", 1.0, "1", 1  -> "1"   |   "B_3_A_1" -> "B_3_A_1" (inchangé)
-    """
-    s = pl.col(col_name)
-    # tentative numérique -> int -> str ; null si non numérique (ex. label composite)
-    as_int = (
-        s.cast(pl.Float64, strict=False)   # "1.0"->1.0 ; "B_3_A_1"->null
-         .cast(pl.Int64,   strict=False)   # 1.0 -> 1
-         .cast(pl.Utf8)                    # -> "1"
+from __future__ import annotations
+import logging
+import pandas as pd
+import numpy as np
+import polars as pl
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from typing import List, Mapping, Sequence, Any, Union, Tuple
+
+log = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# HELPERS « TTW » (lazy ↔ pandas)
+# ----------------------------------------------------------------------
+def _get_TTW_lazy(lf: pl.LazyFrame, ttw_col: str = "TTW") -> int:
+    uniq = (
+        lf.select(pl.col(ttw_col).unique())
+          .collect()
+          .get_column(ttw_col)
     )
-    # si la version numérique a échoué (null), on garde la string d'origine
-    return pl.coalesce([as_int, s.cast(pl.Utf8)]).alias(col_name)
+    if uniq.len() != 1:
+        raise AssertionError(f"TTW doit être unique, trouvé: {uniq.to_list()}")
+    return int(uniq[0])
+
+
+def _get_TTW(df: Union[pl.LazyFrame, pl.DataFrame, pd.DataFrame],
+             ttw_col: str = "TTW") -> int:
+    if isinstance(df, pl.LazyFrame):
+        return _get_TTW_lazy(df, ttw_col=ttw_col)
+    if isinstance(df, pl.DataFrame):
+        uniq = df.select(pl.col(ttw_col).unique())
+        if uniq.shape[0] != 1:
+            raise AssertionError(f"TTW must be unique, got {uniq}")
+        return int(uniq[ttw_col][0])
+    uniq = pd.unique(df[ttw_col])
+    if len(uniq) != 1:
+        raise AssertionError(f"TTW must be unique, got {uniq}")
+    return int(uniq[0])
+
+
+# ----------------------------------------------------------------------
+# 1) add_is_open_lazy
+# ----------------------------------------------------------------------
+def add_is_open_lazy(
+    lf: pl.LazyFrame,
+    TTW: int,
+    date_fin: str = "date_fin",
+    datdef: str = "datdef_ap_mdef",
+) -> pl.LazyFrame:
+    days = (pl.col(date_fin) - pl.col(datdef)).dt.total_days()
+    exprs = [
+        (days >= 365 * (h - 1)).alias(f"open_H{h}") for h in range(1, TTW + 1)
+    ]
+    return lf.with_columns(exprs)
+
+
+# ----------------------------------------------------------------------
+# 2) add_marginal_value_lazy
+# ----------------------------------------------------------------------
+def add_marginal_value_lazy(
+    lf: pl.LazyFrame, cum_name: str, marg_name: str, TTW: int,
+) -> pl.LazyFrame:
+    if TTW < 1:
+        return lf
+
+    exprs: List[pl.Expr] = [
+        pl.col(f"{cum_name}1an").alias(f"{marg_name}1an")  # horizon 1 = même valeur
+    ]
+    for h in range(2, TTW + 1):
+        cur = pl.col(f"{cum_name}{h}ans")
+        prev = pl.col(f"{cum_name}{h-1}ans") if h > 2 else pl.col(f"{cum_name}1an")
+        exprs.append((cur - prev).alias(f"{marg_name}{h}ans"))
+
+    return lf.with_columns(exprs)
+
+
+# ----------------------------------------------------------------------
+# 3) add_required_fields_lazy
+# ----------------------------------------------------------------------
+def add_required_fields_lazy(
+    lf: pl.LazyFrame,
+    cum_names: Sequence[str],
+    marg_names: Sequence[str],
+    TTW: int,
+    date_fin: str = "date_fin",
+    datdef: str = "datdef_ap_mdef",
+) -> pl.LazyFrame:
+    if len(cum_names) != len(marg_names):
+        raise ValueError("cum_names and marg_names must have the same length")
+
+    lf = add_is_open_lazy(lf, TTW, date_fin=date_fin, datdef=datdef)
+    for cum, marg in zip(cum_names, marg_names):
+        lf = add_marginal_value_lazy(lf, cum, marg, TTW)
+    return lf
+
+
+# ----------------------------------------------------------------------
+# 4) get_mean_lazy
+# ----------------------------------------------------------------------
+def get_mean_lazy(
+    lf: pl.LazyFrame, cum_field_name: str, TTW: int,
+) -> pd.DataFrame:
+    cum_cols = [f"{cum_field_name}1an"] + [
+        f"{cum_field_name}{h}ans" for h in range(2, TTW + 1)
+    ]
+
+    aggr = (
+        lf.select(["generation"] + cum_cols)
+          .group_by("generation")
+          .agg(
+              [pl.col(c).mean().alias(f"Horizon {i}") for i, c in enumerate(cum_cols, 1)]
+              + [pl.len().alias("population")]
+          )
+    ).collect().to_pandas().set_index("generation").sort_index()
+
+    max_gen = aggr.index.max()
+    for gen in range(max_gen, max_gen - TTW, -1):
+        for h in range(1, TTW + 1):
+            if gen + h > max_gen:
+                aggr.loc[gen, f"Horizon {h}"] = np.nan
+
+    return aggr
+
+
+# ----------------------------------------------------------------------
+# 5) get_n_open_lazy
+# ----------------------------------------------------------------------
+def get_n_open_lazy(
+    lf: pl.LazyFrame, TTW: int,
+) -> pd.DataFrame:
+    open_cols = [f"open_H{i}" for i in range(1, TTW + 1)]
+
+    aggr = (
+        lf.select(["generation"] + open_cols)
+          .group_by("generation")
+          .agg(
+              [pl.col(col).sum().alias(f"Horizon {i}") for i, col in enumerate(open_cols, 1)]
+              + [pl.len().alias("population")]
+          )
+    )
+
+    max_gen = aggr.select(pl.max("generation")).collect().item()
+
+    masked = aggr.select(
+        pl.col("generation"),
+        pl.col("population"),
+        *[
+            pl.when(pl.col("generation") + i > pl.lit(max_gen + 1))
+              .then(pl.lit(None))
+              .otherwise(pl.col(f"Horizon {i}"))
+              .alias(f"Horizon {i}")
+            for i in range(1, TTW + 1)
+        ],
+    )
+
+    df = (
+        masked.collect()
+              .to_pandas()
+              .set_index("generation")
+              .sort_index()
+    )
+    return df[["population"] + [f"Horizon {i}" for i in range(1, TTW + 1)]]
+
+
+# ----------------------------------------------------------------------
+# 6) _pad_missing_horizons
+# ----------------------------------------------------------------------
+def _pad_missing_horizons(
+    lf: pl.LazyFrame,
+    target_TTW: int,
+    date_fin: str = "date_fin",
+    datdef: str = "datdef_ap_mdef",
+) -> pl.LazyFrame:
+    existing = set(lf.collect_schema().names())
+    open_exprs = [
+        pl.lit(False).alias(f"open_H{i}") if f"open_H{i}" not in existing else pl.col(f"open_H{i}")
+        for i in range(1, target_TTW + 1)
+    ]
+    horizon_exprs = [
+        pl.lit(None).cast(pl.Float64).alias(f"Horizon {i}") if f"Horizon {i}" not in existing
+        else pl.col(f"Horizon {i}")
+        for i in range(1, target_TTW + 1)
+    ]
+    return lf.with_columns(open_exprs + horizon_exprs)
+
+
+# ----------------------------------------------------------------------
+# 7) extrapolate_on_dtm_lazy
+# ----------------------------------------------------------------------
+def extrapolate_on_dtm_lazy(
+    dtm: pl.LazyFrame,
+    extr_marg: Union[pl.LazyFrame, pl.DataFrame, pd.DataFrame],
+    cum_field: str,
+    TTW: int,
+    final_value_col: str,
+    date_fin: str = "date_fin",
+    datdef: str = "datdef_ap_mdef",
+) -> pl.LazyFrame:
+    """
+    Applique les marges extrapolées (Horizon 1 … Horizon TTW) aux colonnes
+    cumulatives. Les marges sont renommées M_1 … M_TTW pour éviter toute collision.
+
+    Règle (alignée sur le pandas) :
+      - cellule extrapolée (marge non nulle) & contrat ouvert  -> cum_prev + marge
+      - cellule extrapolée & contrat fermé                     -> cum_prev
+      - cellule observée (marge nulle)                         -> on GARDE cum_cur d'origine
+    """
+    # 0) Normalisation de l'entrée marginale (⚠️ reset_index pour conserver 'generation')
+    if isinstance(extr_marg, pd.DataFrame):
+        extr_marg = pl.from_pandas(extr_marg.reset_index())
+    if isinstance(extr_marg, pl.DataFrame):
+        extr_marg = extr_marg.lazy()
+
+    # 1) Filtrer les générations valides
+    sub = extr_marg.filter(pl.col(f"Horizon {TTW}").is_not_null())
+    if "generation" not in sub.collect_schema().names():
+        sub = sub.with_row_index("generation")
+
+    # 2) Renommer Horizon -> M_* et ne garder que generation + marges
+    rename_exprs = [pl.col(f"Horizon {h}").alias(f"M_{h}") for h in range(1, TTW + 1)]
+    sub = sub.select(pl.col("generation"), *rename_exprs)
+
+    # 3) Padding côté gauche pour homogénéité de schéma
+    dtm = _pad_missing_horizons(dtm, target_TTW=TTW)
+
+    # 4) Jointure lazy (aucune colonne Horizon en commun)
+    joined = dtm.join(sub, on="generation", how="left")
+
+    # 5) Sécuriser le type des dates
+    joined = joined.with_columns([
+        pl.col(date_fin).cast(pl.Date).alias(date_fin),
+        pl.col(datdef).cast(pl.Date).alias(datdef),
+    ])
+
+    # 6) Reconstruction des cumuls
+    exprs: List[pl.Expr] = []
+    for h in range(2, TTW + 1):
+        cum_prev = f"{cum_field}1an" if h == 2 else f"{cum_field}{h-1}ans"
+        cum_cur = f"{cum_field}{h}ans"
+        margin_col = f"M_{h}"
+
+        open_cond = (
+            (pl.col(date_fin) - pl.col(datdef)).dt.total_days() > 365 * (h - 1)
+        )
+
+        new_cum = (
+            pl.when(open_cond & pl.col(margin_col).is_not_null())
+              .then(pl.col(cum_prev) + pl.col(margin_col))   # cible ouverte
+            .when(pl.col(margin_col).is_not_null())
+              .then(pl.col(cum_prev))                         # cible fermée
+            .otherwise(pl.col(cum_cur))                       # observé : garder l'original
+            .alias(cum_cur)
+        )
+        exprs.append(new_cum)
+
+    # 7) Colonne finale (copie du dernier cumul)
+    exprs.append(pl.col(f"{cum_field}{TTW}ans").alias(final_value_col))
+
+    return joined.with_columns(exprs)
+
+
+# ----------------------------------------------------------------------
+# 8) extrapolate_survival_rate_lazy
+# ----------------------------------------------------------------------
+def extrapolate_survival_rate_lazy(
+    annee_courante: int,
+    TTW: int,
+    fields: Sequence[str] = ("CRR_",),
+    *,
+    inputs: Mapping[str, Any] | None = None,
+    dtm_in: pl.LazyFrame | None = None,
+    stepwise_SR: bool = False,
+    weighted_facility: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """
+    Cœur algorithmique (matriciel) délégué aux fonctions pandas existantes :
+    get_RR_open, get_dev_factor, get_unobserved_survival_rate /
+    get_unobserved_SR_stepwise, get_extrapolated_RR — qui opèrent sur les
+    DataFrames pandas indexés par 'generation' renvoyés par les agrégations lazy.
+    """
+    results: dict[str, Any] = {}
+
+    # 1) Tables de base
+    if inputs is None:
+        if dtm_in is None:
+            raise ValueError("Either `inputs` or `dtm_in` must be provided.")
+        results["n_open_cases"] = get_n_open_lazy(dtm_in, TTW)
+        for f in fields:
+            results[f] = get_mean_lazy(dtm_in, f, TTW=TTW)
+    else:  # mode test
+        results["cum"] = inputs["cum"]
+        results["cum_open"] = inputs["cum_open"]
+        results["n_open_cases"] = inputs["n_open"]
+
+    # 2) Facteurs de développement
+    for f in fields:
+        results[f"m{f}_open"] = get_RR_open(
+            results[f], results["n_open_cases"], TTW=TTW
+        )
+        results[f"dev_factor_m{f}"] = get_dev_factor(
+            results[f"m{f}_open"],
+            results["n_open_cases"],
+            weighted_facility=weighted_facility,
+            TTW=TTW,
+        )
+
+    # 3) Taux de survie non-observé
+    first_field = fields[0]
+    if stepwise_SR:
+        results["unobs_SR"] = get_unobserved_SR_stepwise(
+            results["n_open_cases"], results[first_field],
+            TTW=TTW, weighted_facility=weighted_facility,
+        )
+    else:
+        results["unobs_SR"] = get_unobserved_survival_rate(
+            results["n_open_cases"], results[first_field], TTW=TTW,
+        )
+
+    # 4) Extrapolation des RR (clé alignée sur le pandas : f[1:])
+    for f in fields:
+        results[f"extrapolated_{f[1:]}"] = get_extrapolated_RR(
+            results["unobs_SR"],
+            results[f"dev_factor_m{f}"],
+            results["n_open_cases"],
+            annee_courante - 1,
+            TTW=TTW,
+        )
+
+    # 5) Cas « inputs »
+    if inputs is not None:
+        # ⚠️ NON CONFIRMÉ : fonction source non retrouvée dans les captures
+        results["extrapolated_CRR_open"] = get_extrapolated_RR(
+            results["cum_open"],
+            results[f"extrapolated_{fields[0][1:]}"],
+            results["n_open_cases"],
+            annee_courante - 1,
+            TTW=TTW,
+        )
+
+    return results
+
+
+# ----------------------------------------------------------------------
+# 9) extrapolate_all_categories_lazy
+# ----------------------------------------------------------------------
+def extrapolate_all_categories_lazy(
+    annee_courante: int,
+    dtm_in: pl.LazyFrame,
+    category_column: str,
+    fields: Sequence[str],
+    final_suffix: str = "_final",
+    date_fin: str = "date_fin",
+    datdef: str = "datdef_ap_mdef",
+    **kwargs: Any,
+) -> Tuple[dict[Any, Any], pl.LazyFrame]:
+    global_TTW = int(
+        dtm_in.select(pl.col("TTW")).collect().get_column("TTW").max()
+    )
+
+    cats = (
+        dtm_in.select(pl.col(category_column))
+              .unique()
+              .collect()
+              .to_series()
+    )
+
+    results: dict[Any, Any] = {}
+    frames_per_category: List[pl.LazyFrame] = []
+
+    for cat in cats:
+        sub = dtm_in.filter(pl.col(category_column) == cat)
+        sub = _pad_missing_horizons(sub, target_TTW=global_TTW)
+
+        try:
+            TTW_local = _get_TTW_lazy(sub)
+        except Exception as exc:
+            log.warning("Catégorie %s : impossible de récupérer TTW (%s)", cat, exc)
+            continue
+
+        sub = add_required_fields_lazy(
+            sub,
+            cum_names=fields,
+            marg_names=kwargs.get("marginal_fields", []),
+            TTW=TTW_local,
+            date_fin=date_fin,
+            datdef=datdef,
+        )
+
+        results[cat] = extrapolate_survival_rate_lazy(
+            annee_courante,
+            TTW_local,
+            fields=fields,
+            dtm_in=sub,
+            **kwargs,
+        )
+
+        enriched = sub
+        for f in fields:
+            final_col = f"{f}{final_suffix}"
+            enriched = extrapolate_on_dtm_lazy(
+                enriched,
+                results[cat][f"extrapolated_{f[1:]}"],
+                f,
+                TTW_local,
+                final_col,
+                date_fin,
+                datdef,
+            )
+
+        frames_per_category.append(enriched)
+
+    # concat diagonal : tolère des schémas différents entre catégories (TTW variables)
+    dtm_filled = (
+        pl.concat(frames_per_category, how="diagonal")
+        if frames_per_category
+        else pl.LazyFrame()
+    )
+    return results, dtm_filled
+
+
+# ----------------------------------------------------------------------
+# 10) visualize_extrapolation_lazy
+# ----------------------------------------------------------------------
+def visualize_extrapolation_lazy(
+    dtm_in: Union[pl.LazyFrame, pd.DataFrame],
+    dtm_filled: Union[pl.LazyFrame, pd.DataFrame],
+    fields: Sequence[str],
+    *,
+    category_column: str | None = None,
+    final_suffix: str = "_final",
+    show_all: bool = False,
+) -> None:
+    if isinstance(dtm_in, pl.LazyFrame):
+        dtm_in = dtm_in.collect()
+    if isinstance(dtm_filled, pl.LazyFrame):
+        dtm_filled = dtm_filled.collect()
+
+    dtm_in = dtm_in.with_columns(pl.col("date_fin").cast(pl.Date))
+    dtm_filled = dtm_filled.with_columns(pl.col("date_fin").cast(pl.Date))
+
+    def _draw_one(
+        df_in: pd.DataFrame,
+        df_filled: pd.DataFrame,
+        TTW: int,
+        field: str,
+        ax: plt.Axes,
+        title: str | None = None,
+    ) -> None:
+        # colonnes observées 2..TTW (aligné sur le pandas)
+        obs_cols = [f"{field}{h}ans" for h in range(2, TTW + 1)]
+        observed = df_in.groupby("generation")[obs_cols].mean()
+
+        for i, col in enumerate(observed.columns):
+            observed.iloc[-2 - i:, i] = np.nan
+
+        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        cmap = {c: colors[i % len(colors)] for i, c in enumerate(obs_cols)}
+
+        if show_all:
+            observed.plot(ax=ax, linewidth=1)
+            for col in observed.columns:
+                s = observed[col].dropna()
+                if not s.empty:
+                    ax.plot(s.index[-1], s.iloc[-1], marker="o", markersize=4,
+                            color=cmap[col], linestyle="")
+            mask = observed[f"{field}{TTW}ans"].isna()
+        else:
+            col_last = f"{field}{TTW}ans"
+            ax.plot(observed[col_last], color=cmap[col_last])
+            for col in obs_cols:
+                s = observed[col].dropna()
+                if not s.empty:
+                    ax.plot(s.index[-1], s.iloc[-1], marker="o", ms=4,
+                            color=cmap[col], linestyle="", label=f"Observé: {col}")
+            mask = observed[col_last].isna()
+
+        extrap = (
+            df_filled.groupby("generation")[f"{field}{final_suffix}"]
+            .mean()
+            .loc[mask]
+        )
+        extrap.plot(ax=ax, label=f"Extrapolé: {TTW}ans", color="black",
+                    linestyle="--", linewidth=0.8, marker="o", markersize=3)
+
+        ax.set_title(title or f"{field} - horizon {TTW}")
+        ax.legend()
+
+    if category_column is None:
+        TTW = _get_TTW(dtm_in)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        _draw_one(dtm_in.to_pandas(), dtm_filled.to_pandas(), TTW, fields[0], ax)
+        plt.show()
+    else:
+        cats = dtm_filled[category_column].unique()
+        n_rows, n_cols = len(cats), len(fields)
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(5 * n_cols, 3 * n_rows), squeeze=False
+        )
+        for i, cat in enumerate(cats):
+            sub_in = dtm_in.filter(pl.col(category_column) == cat).to_pandas()
+            sub_filled = dtm_filled.filter(pl.col(category_column) == cat).to_pandas()
+            TTW = _get_TTW(sub_in)
+            for j, field in enumerate(fields):
+                ax = axes[i, j]
+                _draw_one(sub_in, sub_filled, TTW, field, ax,
+                          title=f"Cat: {cat} - {field}")
+                ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        plt.tight_layout()
+        plt.show()
