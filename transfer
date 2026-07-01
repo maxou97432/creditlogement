@@ -1,3 +1,10 @@
-usr = res_pl_all[CAT]["unobs_SR"]     # table indexée par génération (pandas)
-print("index unique ?", usr.index.is_unique)
-print(usr.index.value_counts().head())   # montre les générations dupliquées
+out = filled_pl.filter(pl.col("HLC") == CAT)
+
+# pour des générations toutes observées, final DOIT égaler le cumul brut à l'horizon TTW
+TTW_cat = SR_mod._get_TTW_lazy(dtmlz2.filter(pl.col("HLC")==CAT))
+col_ttw = f"CRR_{TTW_cat}ans"
+
+check = out.select(
+    (pl.col("CRR__final") - pl.col(col_ttw)).abs().max().alias("ecart_max_vs_observe")
+).item()
+print(f"TTW={TTW_cat} | écart final vs cumul observé {col_ttw} : {check:.3e}")
