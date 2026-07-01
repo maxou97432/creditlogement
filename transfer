@@ -1,93 +1,67 @@
-# ----------------------------------------------------------------------
-# 4) Construction du tableau résumé HHI (format demandé)
-# ----------------------------------------------------------------------
-def build_hhi_summary_polars(
-    df_agg: pl.LazyFrame,
+def _compute_psi_lazy(
+    lf: pl.LazyFrame,
     class_col: str = DEFAULT_CLASS_COL,
     time_col: str = DEFAULT_TIME_COL,
-    global_vol: Union[float, None] = None,
-    global_exp: Union[float, None] = None,
 ) -> pl.DataFrame:
-    # ------------------------------------------------------------------
-    # 1) HHI par année - volume
-    # ------------------------------------------------------------------
-    per_vol = (
-        df_agg.group_by([time_col, class_col])
-              .agg(pl.sum("volume").alias("w"))
-    ).collect()
-
-    per_vol = per_vol.with_columns(
-        (pl.col("w") / pl.sum("w").over(time_col)).alias("share")
+    # Référence : toutes les lignes (toutes périodes confondues)
+    ref = (
+        lf.group_by(class_col)
+          .agg(pl.len().alias("Freq_ref"))
+          .with_columns(
+              (pl.col("Freq_ref") / pl.sum("Freq_ref")).alias("Percent_ref")
+          )
     )
 
-    volume_hhi: dict[int, float] = {}
-    for year_key, sub in per_vol.group_by(time_col):
-        year = year_key[0] if isinstance(year_key, tuple) else year_key
-        shares = sub["share"].to_numpy()
-        volume_hhi[int(year)] = round(_calc_normalized_hhi(shares) * 100, 2)
+    # Dernière période
+    t_max = lf.select(pl.max(time_col).alias("t_max")).collect()["t_max"][0]
 
-    # ------------------------------------------------------------------
-    # 2) HHI par année - exposure
-    # ------------------------------------------------------------------
-    per_exp = (
-        df_agg.group_by([time_col, class_col])
-              .agg(pl.sum("exposure").alias("w"))
-    ).collect()
-
-    per_exp = per_exp.with_columns(
-        (pl.col("w") / pl.sum("w").over(time_col)).alias("share")
+    # Période évaluée (dernière année)
+    asses = (
+        lf.filter(pl.col(time_col) == t_max)
+          .group_by(class_col)
+          .agg(pl.len().alias("Freq_asses"))
+          .with_columns(
+              pl.lit(t_max).alias(time_col),
+              (pl.col("Freq_asses") / pl.sum("Freq_asses")).alias("Percent_asses"),
+          )
     )
 
-    exposure_hhi: dict[int, float] = {}
-    for year_key, sub in per_exp.group_by(time_col):
-        year = year_key[0] if isinstance(year_key, tuple) else year_key
-        shares = sub["share"].to_numpy()
-        exposure_hhi[int(year)] = round(_calc_normalized_hhi(shares) * 100, 2)
-
-    # ------------------------------------------------------------------
-    # 3) Construction du tableau final
-    # ------------------------------------------------------------------
-    years = sorted(volume_hhi.keys())
-    rows = {
-        "Year": [f"HHI{y}" for y in years],
-        "Herfindahl_volume": [volume_hhi[y] for y in years],
-        "Herfindahl_expo": [exposure_hhi[y] for y in years],
-    }
-    df_out = pl.DataFrame(rows)
-
-    # ------------------------------------------------------------------
-    # 4) Valeurs globales (moyenne simple) si non fournies
-    # ------------------------------------------------------------------
-    if global_vol is None:
-        global_vol = float(df_out["Herfindahl_volume"].mean())
-    if global_exp is None:
-        global_exp = float(df_out["Herfindahl_expo"].mean())
-
-    # ------------------------------------------------------------------
-    # 5) Ajout ligne "Global Year"
-    # ------------------------------------------------------------------
-    df_out = df_out.vstack(
-        pl.DataFrame({
-            "Year": ["Global Year"],
-            "Herfindahl_volume": [global_vol],
-            "Herfindahl_expo": [global_exp],
-        })
+    psi = (
+        ref.join(asses, on=class_col, how="left")
+           # ⚠️ CORRIGÉ : fill_null(dict) n'existe pas en Polars pour cibler
+           # des colonnes — ça castait "year" en struct par erreur.
+           # On cible chaque colonne explicitement à la place.
+           .with_columns([
+               pl.col("Freq_asses").fill_null(0),
+               pl.col("Percent_asses").fill_null(1e-12),
+           ])
+           .with_columns(
+               (
+                   (pl.col("Percent_asses") - pl.col("Percent_ref"))
+                   * (pl.col("Percent_asses") / pl.col("Percent_ref")).log()
+               ).cast(pl.Float64).alias("PSI_HEC")
+           )
+           .with_columns(pl.col("PSI_HEC").sum().alias("PSI_total"))
+           .with_columns(
+               pl.when(pl.col("PSI_total") <= 0.10)
+                 .then(pl.lit("GREEN"))
+                 .when(pl.col("PSI_total") <= 0.25)
+                 .then(pl.lit("AMBER"))
+                 .otherwise(pl.lit("RED"))
+                 .alias("Color")
+           )
+           .rename({class_col: "HEC"})
+           .collect()
     )
 
-    # ------------------------------------------------------------------
-    # 6) Formatage 0,00 %
-    # ------------------------------------------------------------------
-    # ⚠️ CORRIGÉ : pl.format("{:.2f}%", ...) n'est PAS un format Python.
-    # Dans Polars, {} attend un NOM DE COLONNE, pas une spec de format
-    # (":.2f"), ce qui causait l'InvalidOperationError. On utilise
-    # map_elements avec le f-string Python classique à la place.
-    df_out = df_out.with_columns([
-        pl.col("Herfindahl_volume").map_elements(
-            lambda x: f"{x:.2f}%".replace(".", ","), return_dtype=pl.Utf8
-        ).alias("Herfindahl_volume"),
-        pl.col("Herfindahl_expo").map_elements(
-            lambda x: f"{x:.2f}%".replace(".", ","), return_dtype=pl.Utf8
-        ).alias("Herfindahl_expo"),
+    return psi.select([
+        "HEC",
+        "Freq_ref",
+        "Percent_ref",
+        time_col,
+        "Freq_asses",
+        "Percent_asses",
+        "PSI_HEC",
+        "PSI_total",
+        "Color",
     ])
-
-    return df_out
