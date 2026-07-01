@@ -1,71 +1,103 @@
-def extrapolate_on_dtm_lazy(
-    dtm: pl.LazyFrame,
-    extr_marg: Union[pl.LazyFrame, pl.DataFrame, pd.DataFrame],
-    cum_field: str,
-    TTW: int,
-    final_value_col: str,
-    date_fin: str = "date_fin",
-    datdef: str = "datdef_ap_mdef",
-) -> pl.LazyFrame:
-    """
-    Reconstruit les cumuls extrapolés, à l'identique du pandas extrapolate_on_dtm :
-      - traitement SÉQUENTIEL des horizons (cum_h utilise cum_{h-1} DÉJÀ mis à jour) ;
-      - seules les générations sub.index[:-2] sont remplies ;
-      - seule la cellule non-observée (generation + h > sub_max) est remplie ;
-      - ouvert -> cum_prev + marge ; fermé -> cum_prev ; sinon -> cum_cur d'origine.
-    """
-    # 0) Normalisation de l'entrée marginale (reset_index pour garder 'generation')
-    if isinstance(extr_marg, pd.DataFrame):
-        extr_marg = pl.from_pandas(extr_marg.reset_index())
-    if isinstance(extr_marg, pl.DataFrame):
-        extr_marg = extr_marg.lazy()
+import pandas as pd
+import polars as pl
+import importlib
+importlib.reload(SR_mod)
 
-    # 1) Générations cibles (Horizon TTW non nul)
-    sub = extr_marg.filter(pl.col(f"Horizon {TTW}").is_not_null())
-    if "generation" not in sub.collect_schema().names():
-        sub = sub.with_row_index("generation")
+# ======================================================================
+# PARAMÈTRES
+# ======================================================================
+CAT             = 9.0            # <-- change ici la HLC à tester
+ANNEE_COURANTE  = 2020
+CATEGORY_COLUMN = "HLC"
+FIELDS          = ["CRR_", "CA_"]
+MARGINAL_FIELDS = ["RR_", "AD_"]
+FINAL_COL       = "CRR__final"   # ou "CA__final"
 
-    # 2) Renommer Horizon -> M_* (garder generation + marges)
-    rename_exprs = [pl.col(f"Horizon {h}").alias(f"M_{h}") for h in range(1, TTW + 1)]
-    sub = sub.select(pl.col("generation"), *rename_exprs)
-
-    # 3) Padding côté gauche + jointure
-    dtm = _pad_missing_horizons(dtm, target_TTW=TTW)
-    joined = dtm.join(sub, on="generation", how="left")
-
-    # 4) Sécuriser les dates
-    joined = joined.with_columns([
-        pl.col(date_fin).cast(pl.Date).alias(date_fin),
-        pl.col(datdef).cast(pl.Date).alias(datdef),
+# ======================================================================
+# 1) Restriction à UNE catégorie
+# ======================================================================
+dtm_cat = dtmlz2.filter(pl.col(CATEGORY_COLUMN) == CAT)
+dtm_pl  = dtm_cat
+dtm_pd  = (
+    dtm_cat
+    .with_columns([
+        pl.col("datdef_corr").alias("datdef_ap_mdef"),
+        pl.col("HLC").alias("categories"),
     ])
+    .collect()
+    .to_pandas()
+)
+gens = sorted(dtm_pd["generation"].unique())
+print(f"{dtm_pd.shape[0]:,} lignes | HLC={CAT} | {len(gens)} générations {gens}")
 
-    # 5) Bornes (équivalent pandas)
-    #    sub_max = max génération ayant une marge (== sub.index.max())
-    sub_max = pl.col("generation").filter(pl.col(f"M_{TTW}").is_not_null()).max()
-    #    sub.index[:-2] : on exclut les 2 dernières générations de sub
-    fillable_gen = pl.col("generation") <= (sub_max - 2)
+# ======================================================================
+# 2) Pipeline POLARS (toujours exécuté)
+# ======================================================================
+res_pl_all, filled_pl_lazy = SR_mod.extrapolate_all_categories_lazy(
+    annee_courante=ANNEE_COURANTE,
+    dtm_in=dtm_pl,
+    category_column=CATEGORY_COLUMN,
+    fields=FIELDS,
+    final_suffix="_final",
+    date_fin="date_fin",
+    datdef="datdef_corr",
+    marginal_fields=MARGINAL_FIELDS,
+    stepwise_SR=True,
+    weighted_facility=True,
+)
+filled_pl = filled_pl_lazy.collect()
 
-    # 6) Reconstruction SÉQUENTIELLE horizon par horizon
-    for h in range(2, TTW + 1):
-        cum_prev = f"{cum_field}1an" if h == 2 else f"{cum_field}{h-1}ans"
-        cum_cur = f"{cum_field}{h}ans"
-        margin_col = f"M_{h}"
+# ======================================================================
+# 3) Pipeline PANDAS (tolérant au crash)
+# ======================================================================
+pandas_ok = True
+try:
+    res_pd_all, filled_pd = extrapolate_all_categories(
+        annee_courante=ANNEE_COURANTE,
+        dtm_in=dtm_pd,
+        category_column=CATEGORY_COLUMN,
+        fields=FIELDS,
+        final_suffix="_final",
+        marginal_fields=MARGINAL_FIELDS,
+        stepwise_SR=True,
+        weighted_facility=True,
+    )
+except Exception as e:
+    pandas_ok = False
+    print(f"\n⚠️ PANDAS crashe sur HLC={CAT} : {type(e).__name__} — {e}")
+    print("   -> pas de référence, on valide polars en STANDALONE.\n")
 
-        unobserved = (pl.col("generation") + h) > sub_max
-        target = fillable_gen & unobserved & pl.col(margin_col).is_not_null()
-        open_cond = (
-            (pl.col(date_fin) - pl.col(datdef)).dt.total_days() > 365 * (h - 1)
-        )
+# ======================================================================
+# 4A) Si pandas OK -> comparaison côte à côte
+# ======================================================================
+if pandas_ok:
+    r = (filled_pd[filled_pd[CATEGORY_COLUMN] == CAT]
+           .groupby("generation")[FINAL_COL].mean().rename("pandas"))
+    n = (filled_pl.filter(pl.col(CATEGORY_COLUMN) == CAT)
+           .group_by("generation").agg(pl.col(FINAL_COL).mean().alias("polars"))
+           .sort("generation").to_pandas().set_index("generation")["polars"])
+    cmp = pd.concat([r, n], axis=1).sort_index()
+    cmp["ecart_abs"] = (cmp["pandas"] - cmp["polars"]).abs()
+    print(f"=== Comparaison {FINAL_COL} — HLC {CAT} ===")
+    print(cmp)
+    print(f"\nÉcart absolu max : {cmp['ecart_abs'].max():.3e}")
+    print("✅ IDENTIQUE" if cmp["ecart_abs"].max() < 1e-6 else "⚠️ DIVERGENCE")
 
-        new_cum = (
-            pl.when(target & open_cond).then(pl.col(cum_prev) + pl.col(margin_col))  # ouvert
-            .when(target).then(pl.col(cum_prev))                                     # fermé
-            .otherwise(pl.col(cum_cur))                                              # garder
-            .alias(cum_cur)
-        )
-        # SÉQUENTIEL : un with_columns par horizon -> cum_prev voit la maj précédente
-        joined = joined.with_columns(new_cum)
+# ======================================================================
+# 4B) Si pandas KO -> validation standalone du polars
+# ======================================================================
+else:
+    out = filled_pl.filter(pl.col(CATEGORY_COLUMN) == CAT)
+    fin = (out.group_by("generation")
+              .agg(pl.col(FINAL_COL).mean().alias(FINAL_COL))
+              .sort("generation"))
+    print(f"=== {FINAL_COL} par génération (polars standalone) — HLC {CAT} ===")
+    print(fin.to_pandas().to_string(index=False))
 
-    # 7) Colonne finale
-    joined = joined.with_columns(pl.col(f"{cum_field}{TTW}ans").alias(final_value_col))
-    return joined
+    # contrôles de cohérence
+    n_nan  = out.select(pl.col(FINAL_COL).is_null().sum()).item()
+    n_neg  = out.select((pl.col(FINAL_COL) < 0).sum()).item()
+    croiss = out.select((pl.col(FINAL_COL) >= pl.col("CRR_1an")).all()).item()
+    print(f"\nNaN dans {FINAL_COL}      : {n_nan}")
+    print(f"Valeurs négatives        : {n_neg}")
+    print(f"final >= CRR_1an (cumul) : {croiss}")
