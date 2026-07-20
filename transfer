@@ -2,7 +2,7 @@
 # 1. LRA / moyenne globale : number-weighted (definition EBA / standard BNPP p23)
 # ----------------------------------------------------------------------
 def calcule_lra(df: pl.DataFrame, lgd_col: str, freq: str, ponderation: str = "weighted") -> float:
-    """LRA = moyenne number-weighted des LGD annuelles = Σ n_i·LGD_i / Σ n_i (= moyenne poolee)."""
+    """LRA = moyenne number-weighted des LGD annuelles = Σ n_i·LGD_i / Σ n_i."""
     yr = (df.group_by(freq, maintain_order=True)
             .agg([pl.col(lgd_col).mean().alias("lgd_i"),
                   pl.col(lgd_col).count().alias("n_i")])
@@ -13,7 +13,7 @@ def calcule_lra(df: pl.DataFrame, lgd_col: str, freq: str, ponderation: str = "w
 
 
 # ----------------------------------------------------------------------
-# 2. Periodes candidates (inchange)
+# 2. Periodes candidates
 # ----------------------------------------------------------------------
 def periode_candidates(downturn: list, lag: int, freq: str) -> list:
     periods = []
@@ -34,26 +34,19 @@ def periode_candidates(downturn: list, lag: int, freq: str) -> list:
 # ----------------------------------------------------------------------
 def t_test_dt(yearly: pl.DataFrame, annee, date_col: str,
               lgd_bar: float, sigma: float, n_years: int, alpha: float) -> dict:
-    """Teste si la LGD de l'annee candidate est significativement > LGD_bar."""
-    base_nan = {
-        "annee": annee, "n_obs": 0, "LGD_annee": float("nan"),
-        "X_stat": None, "seuil": None, "p_value": None,
-        "significatif": False, "moc_annee": float("nan"),
-    }
+    base_nan = {"annee": annee, "n_obs": 0, "LGD_annee": float("nan"),
+                "X_stat": None, "seuil": None, "p_value": None,
+                "significatif": False, "moc_annee": float("nan")}
     row = yearly.filter(pl.col(date_col) == annee)
     if row.height == 0 or sigma is None or sigma == 0 or not math.isfinite(sigma) or n_years < 2:
         return base_nan
-
     lgd_i = float(row["lgd_annee"][0])
     n_i   = int(row["n_i"][0])
     X     = math.sqrt(n_years) * (lgd_i - lgd_bar) / sigma
-    crit  = float(t_dist.ppf(1 - alpha, n_years - 1))   # unilateral droit
-    p_val = float(t_dist.sf(X, n_years - 1))
-    return {
-        "annee": annee, "n_obs": n_i, "LGD_annee": lgd_i,
-        "X_stat": X, "seuil": crit, "p_value": p_val,
-        "significatif": bool(X > crit), "moc_annee": lgd_i - lgd_bar,
-    }
+    crit  = float(t_dist.ppf(1 - alpha, n_years - 1))
+    return {"annee": annee, "n_obs": n_i, "LGD_annee": lgd_i,
+            "X_stat": X, "seuil": crit, "p_value": float(t_dist.sf(X, n_years - 1)),
+            "significatif": bool(X > crit), "moc_annee": lgd_i - lgd_bar}
 
 
 # ----------------------------------------------------------------------
@@ -63,20 +56,24 @@ def select_pire_periode(tests_df: pl.DataFrame, lgd_bar: float, ponderation: str
     valid = tests_df.filter(pl.col("LGD_annee").is_finite())
     sig   = valid.filter(pl.col("significatif") == True)
 
-    # Case 1 : aucune annee significative -> LGD_DT = LRA (marge nulle)
+    # Case 1 : aucune annee significative -> LGD_DT = LRA
     if sig.is_empty():
-        return {"annee": "LRA (pas d'impact DT)", "annee_sig": [], "n_obs": None,
-                "LGD_DT": lgd_bar, "X_stat": None, "significatif": False, "case": "1"}
+        return {"annee": "LRA (pas d'impact DT)", "annee_sig": [], "annees_sig_all": [],
+                "X_stats": {}, "n_obs": None, "LGD_DT": lgd_bar, "X_stat": None,
+                "significatif": False, "case": "1"}
 
     sig_sorted = sig.sort("annee")
     sig_years  = sig_sorted["annee"].to_list()
+    # dictionnaire {annee: X_stat} pour toutes les annees significatives
+    x_stats = {r["annee"]: round(float(r["X_stat"]), 4)
+               for r in sig_sorted.iter_rows(named=True) if r["X_stat"] is not None}
 
-    # Case 2a : une seule annee significative -> LGD_DT = LGD(Y_i)
+    # Case 2a : une seule annee significative
     if len(sig_years) == 1:
         r = sig_sorted.row(0, named=True)
-        return {"annee": str(sig_years[0]), "annee_sig": [sig_years[0]], "n_obs": int(r["n_obs"]),
-                "LGD_DT": float(r["LGD_annee"]), "X_stat": float(r["X_stat"]),
-                "significatif": True, "case": "2a"}
+        return {"annee": str(sig_years[0]), "annee_sig": [sig_years[0]], "annees_sig_all": sig_years,
+                "X_stats": x_stats, "n_obs": int(r["n_obs"]), "LGD_DT": float(r["LGD_annee"]),
+                "X_stat": float(r["X_stat"]), "significatif": True, "case": "2a"}
 
     # Case 2b : plusieurs annees -> blocs consecutifs, moyenne number-weighted, bloc le plus severe
     blocks, current = [], [sig_years[0]]
@@ -103,21 +100,22 @@ def select_pire_periode(tests_df: pl.DataFrame, lgd_bar: float, ponderation: str
     best = max(block_result, key=lambda x: x["lgd_dt"])
     label = (f"{best['annee_sig'][0]}-{best['annee_sig'][-1]}"
              if len(best["annee_sig"]) > 1 else str(best["annee_sig"][0]))
-    return {"annee": label, "annee_sig": best["annee_sig"], "n_obs": best["n_obs"],
-            "LGD_DT": best["lgd_dt"], "X_stat": None, "significatif": True, "case": "2b"}
+    return {"annee": label, "annee_sig": best["annee_sig"], "annees_sig_all": sig_years,
+            "X_stats": x_stats, "n_obs": best["n_obs"], "LGD_DT": best["lgd_dt"],
+            "X_stat": None, "significatif": True, "case": "2b"}
 
 
 # ----------------------------------------------------------------------
-# 5. MoC et amplification (inchanges, conformes p29)
+# 5. MoC et amplification (conformes p29)
 # ----------------------------------------------------------------------
 def calcule_moc(lgd_dt: float, lra: float) -> float:
     return lgd_dt - lra
 
 
 def calcule_downturn(df: pl.DataFrame) -> pl.DataFrame:
-    coef_dt      = (df["lgd_dt"] - df["lra_globale"]) / df["lra_globale"]   # Delta^LGD
-    downturn_v   = coef_dt * df["lra_globale"]
-    lgd_down     = df["lra_globale"] + downturn_v                           # = lgd_dt
+    coef_dt    = (df["lgd_dt"] - df["lra_globale"]) / df["lra_globale"]   # Delta^LGD
+    downturn_v = coef_dt * df["lra_globale"]
+    lgd_down   = df["lra_globale"] + downturn_v                           # = lgd_dt
     return pl.DataFrame({
         "Segment": df["segment"], "LGD DT": df["lgd_dt"], "LRA": df["lra_globale"],
         "Coefficient Downturn": coef_dt, "Downturn": downturn_v,
@@ -145,7 +143,7 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
         seg_label = str(seg) if seg is not None else "Global"
         df_seg = base.filter(pl.col(segment_col) == seg) if seg is not None else base
 
-        # --- Serie annuelle realisee + stats globales (number-weighted) ---
+        # Serie annuelle realisee + stats globales (number-weighted)
         yearly = (df_seg.group_by(date_col)
                     .agg([pl.col(lgd_col).mean().alias("lgd_annee"),
                           pl.col(lgd_col).count().alias("n_i")])
@@ -160,7 +158,6 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
 
         candidate_dt = periode_candidates(downturn, lag, freq)
 
-        # --- T-tests sur toutes les annees candidates ---
         tests_results = []
         for (dt_year, periode) in candidate_dt:
             res = t_test_dt(yearly, periode, date_col, lgd_bar, sigma, n_years, alpha)
@@ -169,7 +166,6 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
         tests_df = pl.DataFrame(tests_results)
         all_tests.append(tests_df)
 
-        # --- Selection par annee DT ---
         worst_by_dt = []
         for dt_year in downturn:
             sub = tests_df.filter(pl.col("downturn").cast(pl.String) == str(dt_year))
@@ -181,7 +177,6 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
             picked["downturn"] = dt_year
             worst_by_dt.append(picked)
 
-        # --- Periode DT globale (plus forte LGD_DT) ---
         worst_overall = max(worst_by_dt, key=lambda x: x["LGD_DT"])
         moc_dt = calcule_moc(worst_overall["LGD_DT"], lgd_bar)
 
@@ -194,9 +189,11 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
             periode_label = "LRA (pas d'impact DT)"
 
         print("=" * 50)
-        print(f"RESULTATS -- Segment {seg_label}  [case {worst_overall.get('case')}]")
+        print(f"RESULTATS -- Segment {seg_label}")
         print(f"  LRA                : {lgd_bar:.4f}")
         print(f"  Periode DT retenue : {periode_label}")
+        print(f"  Annees signif.     : {worst_overall.get('annees_sig_all', [])}")
+        print(f"  X_stats            : {worst_overall.get('X_stats', {})}")
         print(f"  LGD downturn       : {worst_overall['LGD_DT']:.4f}%")
         print(f"  MoC DT             : {moc_dt:.4f}")
         print("=" * 50)
@@ -204,9 +201,10 @@ def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
         final_results.append({
             "segment": seg_label,
             "downturn": worst_overall["downturn"],
-            "case": worst_overall.get("case"),
             "annee_sig": (f"{annee_sig[0]} a {annee_sig[-1]}" if len(annee_sig) > 1
                           else (str(annee_sig[0]) if annee_sig else "-")),
+            "annees_significatives": ", ".join(str(y) for y in worst_overall.get("annees_sig_all", [])) or "-",
+            "X_stats": str(worst_overall.get("X_stats", {})),
             "n_obs": worst_overall.get("n_obs"),
             "lgd_dt": worst_overall["LGD_DT"],
             "lra_globale": lgd_bar,
