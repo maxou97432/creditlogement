@@ -1,84 +1,151 @@
-def select_pire_periode(
-    sub: pl.DataFrame,
-    df_seg: pl.DataFrame,      # données brutes du segment (pour le t-test de bloc)
+def execution(
+    base: pl.DataFrame,
+    segment_col,
     lgd_col: str,
-    date_col: str,
-    lra: float,
+    ponderation: str,
+    freq: str,
+    downturn,
     alpha: float,
-    ponderation: str = "simple",
-    freq: str = FREQ,
-) -> dict | None:
-    """Sélectionne la pire période (significative si possible) parmi les candidats d'un downturn."""
-    # 1. On ne garde que les LGD numériques réelles
-    sub = sub.filter(pl.col("LGD_moyenne_DT").is_finite())
-    if sub.is_empty():
-        return None
+    lag: int,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Exécute l'ensemble de la chaîne d'analyse Downturn.
+    Retourne (df_final, df_all_test).
+    """
+    # 1. Garantir que `downturn` est itérable
+    if not isinstance(downturn, (list, tuple, set)):
+        downturn = [downturn]
 
-    # 2. Périodes significatives
-    sig = sub.filter(pl.col("significatif") == True)
+    # Colonne de date cohérente avec la fréquence (point 4)
+    date_col = "annee" if freq == "annee" else "year_quarter"
 
-    if not sig.is_empty():
-        sig_sorted = sig.sort("annee")
-        sig_years  = sig_sorted["annee"].to_list()
-
-        # 2.1 Blocs d'années consécutives
-        blocks: list[list] = []
-        current_block = [sig_years[0]]
-        for i in range(1, len(sig_years)):
-            try:
-                if int(sig_years[i]) - int(sig_years[i - 1]) == 1:
-                    current_block.append(sig_years[i])
-                else:
-                    blocks.append(current_block)
-                    current_block = [sig_years[i]]
-            except Exception:
-                blocks.append(current_block.copy())
-                current_block = [sig_years[i]]
-        blocks.append(current_block)
-
-        # 2.2 LGD moyenne par bloc
-        block_result = []
-        for blk in blocks:
-            df_blk = sig_sorted.filter(pl.col("annee").is_in(blk))
-            if ponderation == "weighted":
-                avg = float((df_blk["LGD_moyenne_DT"] * df_blk["nb_obs"]).sum()
-                            / df_blk["nb_obs"].sum())
-            else:
-                avg = float(df_blk["LGD_moyenne_DT"].mean())
-            block_result.append({"lgd_dt": avg, "annee_sig": blk})
-
-        best_block = max(block_result, key=lambda x: x["lgd_dt"])
-
-        # 2.3 Résultat au niveau du bloc + t-test sur les LGD brutes du bloc
-        result = sig_sorted.filter(pl.col("annee").is_in(best_block["annee_sig"])).head(1).to_dicts()[0]
-        result["LGD_moyenne_DT"] = best_block["lgd_dt"]
-        result["annee_sig"]      = best_block["annee_sig"]
-        result["annee"] = (
-            f"{best_block['annee_sig'][0]}-{best_block['annee_sig'][-1]}"
-            if len(best_block["annee_sig"]) > 1 else str(best_block["annee_sig"][0])
-        )
-
-        block_lgd = (
-            df_seg.filter(pl.col(date_col).is_in(best_block["annee_sig"]))
-                  .get_column(lgd_col).drop_nulls()
-        )
-        result["nb_obs"] = int(len(block_lgd))
-        if len(block_lgd) >= 2:
-            arr = block_lgd.to_numpy()
-            t_stat, p_bil = ttest_1samp(arr, popmean=lra)
-            p_uni = p_bil / 2 if t_stat > 0 else 1.0
-            result["t_stat"]      = float(t_stat)
-            result["p_value"]     = float(p_uni)
-            result["significatif"] = bool((p_uni < alpha) and (t_stat > 0))
-        else:
-            result["t_stat"] = None
-            result["p_value"] = None
-
+    # 2. Gestion du segment (global ou par groupe)
+    if segment_col is None or segment_col not in base.columns:
+        segment_list = [None]                       # analyse globale
     else:
-        # Aucune période significative -> plus forte LGD disponible
-        result = sub.sort("LGD_moyenne_DT", descending=True).head(1).to_dicts()[0]
-        result["annee_sig"] = [result["annee"]]
-        result["annee"]     = str(result["annee"])
-        print("Pas de période significative")
+        segment_list = base.select(pl.col(segment_col).unique()).to_series().to_list()
 
-    return result
+    final_results: list[dict] = []
+    all_tests: list[pl.DataFrame] = []
+
+    # 3. Boucle sur chaque segment
+    for seg in segment_list:
+        seg_label = str(seg) if seg is not None else "Global"
+        df_seg = base.filter(pl.col(segment_col) == seg) if seg is not None else base
+
+        # LRA globale du segment
+        lra = calcule_lra(df_seg, lgd_col, freq, ponderation)
+
+        # Périodes candidates ± lag
+        candidate_dt = periode_candidates(downturn, lag, freq)
+
+        # 4. T-tests sur toutes les périodes candidates
+        tests_results: list[dict] = []
+        for (dt_year, periode) in candidate_dt:
+            res = t_test_dt(
+                df_seg,
+                downturn=dt_year,
+                annee=periode,
+                lgd_col=lgd_col,
+                date_col=date_col,
+                lra=lra,
+                alpha=alpha,
+            )
+            res["segment"]  = seg_label
+            res["downturn"] = dt_year
+            tests_results.append(res)
+
+        df_tests = pl.DataFrame(tests_results)
+        all_tests.append(df_tests)
+
+        # 5. Sélection de la pire période pour chaque année DT
+        worst_by_dt: list[dict] = []
+        for dt_year in downturn:
+            print(f"--- DT Year = {dt_year} ---")
+            sub = (
+                df_tests
+                .filter(pl.col("downturn").cast(pl.String) == str(dt_year))
+                .filter(pl.col("LGD_moyenne_DT").is_finite())   # point 6 : exclut les NaN
+            )
+
+            # Affichage détaillé (facultatif)
+            for row in sub.iter_rows(named=True):
+                sig_label = "Significatif" if row.get("significatif") else "Non significatif"
+                print(
+                    f"  Periode {row['annee']} : LGD = {row['LGD_moyenne_DT']:.4f}%  "
+                    f"t_stat : {row['t_stat']:.2f}  p-value : {row['p_value']:.2e} -- {sig_label}"
+                )
+
+            if not sub.is_empty():
+                worst_year = select_pire_periode(
+                    sub,
+                    df_seg=df_seg,
+                    lgd_col=lgd_col,
+                    date_col=date_col,
+                    lra=lra,
+                    alpha=alpha,
+                    ponderation=ponderation,
+                    freq=freq,
+                )
+                if worst_year is not None:
+                    worst_by_dt.append(worst_year)
+
+        # 6. Pire période globale parmi les années DT du segment
+        if not worst_by_dt:
+            print(f"  Aucun DT valide pour le segment {seg_label} -> on passe au segment suivant")
+            continue
+
+        worst_overall = max(worst_by_dt, key=lambda x: x["LGD_moyenne_DT"])
+        moc_dt = calcule_moc(worst_overall["LGD_moyenne_DT"], lra)
+
+        # Normalisation du champ `annee_sig`
+        annee_sig = worst_overall["annee_sig"]
+        if not isinstance(annee_sig, list):
+            annee_sig = [annee_sig]
+
+        # Libellé lisible
+        if len(annee_sig) > 1:
+            periode_label = f"{annee_sig[0]} - {annee_sig[-1]} (moyenne)"
+        else:
+            periode_label = f"{annee_sig[0]} (année seule)"
+
+        # 7. Affichage des résultats finaux
+        print("\n" + "=" * 50)
+        print(f"RÉSULTATS FINAUX — Segment : {seg_label}")
+        print(f"  LRA Globale         : {lra:.4f}")
+        print(f"  Période DT retenue  : {periode_label}")
+        print(f"  LGD downturn        : {worst_overall['LGD_moyenne_DT']:.4f}%")
+        print(f"  MoC DT              : {moc_dt:.4f}")
+        print("=" * 50)
+
+        # 8. Construction du dictionnaire résultat (une ligne par segment)
+        res_final = {k: v for k, v in worst_overall.items() if not isinstance(v, list)}
+        res_final["segment"]     = seg_label
+        res_final["downturn"]    = worst_overall["downturn"]
+        res_final["annee_sig"]   = (
+            f"{annee_sig[0]} à {annee_sig[-1]}" if len(annee_sig) > 1 else str(annee_sig[0])
+        )   # point 2 : [-1] au lieu de [1]
+        res_final["annee"]       = str(worst_overall["annee"])
+        res_final["lgd_dt"]      = worst_overall["LGD_moyenne_DT"]
+        res_final["lra_globale"] = lra
+        res_final["moc_dt"]      = moc_dt
+
+        final_results.append(res_final)
+
+    # 9. Assemblage des DataFrames de sortie
+    df_final = pl.DataFrame(final_results).select([
+        "segment",
+        "downturn",
+        "annee_sig",
+        "nb_obs",
+        "LGD_moyenne_DT",
+        "lra_globale",
+        "t_stat",
+        "p_value",
+        "significatif",
+        "moc_dt",
+        "lgd_dt",
+    ])
+    df_all_test = pl.concat(all_tests)
+
+    return df_final, df_all_test
