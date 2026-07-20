@@ -1,1 +1,77 @@
+def select_pire_periode(sub: pl.DataFrame, ponderation: str = "simple", freq: str = FREQ) -> dict | None:
+    """
+    Sélectionne la pire période (significative si possible) parmi les candidats d'un downturn.
 
+    1. Élimine les LGD non finies (NaN/inf).
+    2. Si aucune observation valable -> None.
+    3. Parmi les périodes significatives, regroupe les années consécutives en blocs,
+       calcule la LGD moyenne de chaque bloc, et retient le bloc à plus forte LGD.
+    4. Si aucune période significative -> retient la période à plus forte LGD.
+    """
+    # 1. On ne garde que les LGD numériques réelles
+    sub = sub.filter(pl.col("LGD_moyenne_DT").is_finite())
+
+    # 2. Aucun résultat valable -> on sort
+    if sub.is_empty():
+        return None
+
+    # 3. Périodes significatives
+    sig = sub.filter(pl.col("significatif") == True)
+
+    if not sig.is_empty():
+        # 3.1 Tri et extraction des années
+        sig_sorted = sig.sort("annee")
+        sig_years  = sig_sorted["annee"].to_list()
+
+        # 3.2 Construction des blocs d'années consécutives
+        blocks: list[list] = []
+        current_block = [sig_years[0]]
+        for i in range(1, len(sig_years)):
+            try:
+                if int(sig_years[i]) - int(sig_years[i - 1]) == 1:
+                    current_block.append(sig_years[i])
+                else:
+                    blocks.append(current_block)
+                    current_block = [sig_years[i]]
+            except Exception:
+                # années non entières (ex. trimestres) -> pas de regroupement
+                blocks.append(current_block.copy())
+                current_block = [sig_years[i]]
+        blocks.append(current_block)
+
+        # 3.3 LGD moyenne de chaque bloc
+        block_result = []
+        for blk in blocks:
+            df_blk = sig_sorted.filter(pl.col("annee").is_in(blk))
+            if ponderation == "weighted":
+                avg = float((df_blk["LGD_moyenne_DT"] * df_blk["nb_obs"]).sum()
+                            / df_blk["nb_obs"].sum())
+            else:  # simple
+                avg = float(df_blk["LGD_moyenne_DT"].mean())
+            block_result.append({"lgd_dt": avg, "annee_sig": blk})
+
+        # 3.4 Bloc à plus forte LGD
+        best_block = max(block_result, key=lambda x: x["lgd_dt"])
+
+        # --- Construction du résultat au niveau du BLOC ---
+        df_best = sig_sorted.filter(pl.col("annee").is_in(best_block["annee_sig"]))
+        result  = df_best.head(1).to_dicts()[0]
+
+        result["LGD_moyenne_DT"] = best_block["lgd_dt"]
+        result["annee_sig"]      = best_block["annee_sig"]
+        result["nb_obs"]         = int(df_best["nb_obs"].sum())   # somme sur le bloc
+        result["t_stat"]         = None    # non défini au niveau bloc
+        result["p_value"]        = None    # (nécessiterait un t-test sur données brutes)
+        result["annee"] = (
+            f"{best_block['annee_sig'][0]}-{best_block['annee_sig'][-1]}"
+            if len(best_block["annee_sig"]) > 1 else str(best_block["annee_sig"][0])
+        )
+
+    else:
+        # Aucune période significative -> on garde la plus forte LGD disponible
+        result = sub.sort("LGD_moyenne_DT", descending=True).head(1).to_dicts()[0]
+        result["annee_sig"] = [result["annee"]]
+        result["annee"]     = str(result["annee"])
+        print("Pas de période significative")
+
+    return result
