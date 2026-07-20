@@ -1,20 +1,7 @@
-def calcule_lra(df: pl.DataFrame, lgd_col: str, freq: str, ponderation: str = "simple") -> float:
-    """Calcule la LRA globale sur toute la période disponible."""
-    df_periode = (
-        df.group_by(freq, maintain_order=True)
-          .agg([
-              pl.col(lgd_col).mean().alias("lgd_annee"),
-              pl.col(lgd_col).count().alias("nb_obs"),
-          ])
-          .sort(freq)
-    )
-
-    if ponderation == "weighted":
-        # poolé : chaque facilité pèse 1
-        lra_lgd = float((df_periode["lgd_annee"] * df_periode["nb_obs"]).sum()
-                        / df_periode["nb_obs"].sum())
-    else:  # simple : chaque année pèse pareil
-        lra_lgd = float(df_periode["lgd_annee"].mean())
-
-    print(f"LRA Globale - {ponderation}: {lra_lgd:.4f}%")
-    return lra_lgd
+(base.filter(pl.col("HLC") == 1.0)
+     .group_by("annee")
+     .agg([
+         pl.col(LGD_COL).mean().alias("lgd"),
+         pl.col(LGD_COL).count().alias("n"),
+     ])
+     .sort("annee"))
