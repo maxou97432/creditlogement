@@ -1,177 +1,114 @@
-def export_excell(df_final, df_all_test, df_annee=None, df_dt=None, base=None, lgd_col=None,
-                  freq="annee", ponderation="weighted", segment_col=None,
-                  downturn=None, lag=2, alpha=0.05,
-                  output_path="downturn_report.xlsx", ma_window=3):
-    """Rapport Excel de la MoC Downturn LGD (structure REBOOT : identification globale + impact par HLC)."""
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils import get_column_letter
-    from openpyxl.chart import BarChart, LineChart, Reference
+# ----------------------------------------------------------------------
+# Determine la methode d'agregation par episode (contigu -> moyenne ; sinon -> max)
+# ----------------------------------------------------------------------
+def determine_methodes(generations, label=""):
+    methodes = {}
+    for dt, gens in generations.items():
+        if not gens:
+            methodes[dt] = None
+            print(f"  [{label}] DT {dt} : aucune generation significative")
+        elif est_contigu(gens):
+            methodes[dt] = "moyenne"
+            print(f"  [{label}] DT {dt} : {gens} -> contigu/homogene -> moyenne number-weighted")
+        else:
+            methodes[dt] = "max"
+            print(f"  [{label}] DT {dt} : {gens} -> NON contigu -> max{{LGD(Yi)}} (jugement expert)")
+    return methodes
 
-    BLUE, DARK_BLUE, LIGHT_BG = "00305E", "005B99", "F2F7FB"
-    GREEN_LIGHT, ORANGE_FILL, WHITE = "C6EFCE", "FFEB9C", "FFFFFF"
-    freq_label = "année" if freq == "annee" else "trimestre"
-    date_col   = "annee" if freq == "annee" else "year_quarter"
 
-    # ---------- helpers (style d'origine) ----------
-    def make_title(ws, text, span, row=1, color=BLUE):
-        ws.merge_cells(f"A{row}:{get_column_letter(span)}{row}")
-        c = ws[f"A{row}"]; c.value = text
-        c.font = Font(bold=True, size=13, color=WHITE)
-        c.fill = PatternFill("solid", fgColor=color)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[row].height = 26
+# ----------------------------------------------------------------------
+# Orchestrateur : identification GLOBALE ou PAR SEGMENT
+# ----------------------------------------------------------------------
+def execution(base, segment_col, lgd_col, freq, downturn, alpha, lag,
+              niveau_identification="global"):
+    """
+    niveau_identification : "global"  -> t-test sur tout le portefeuille, memes generations pour tous les HLC (REBOOT)
+                            "segment" -> t-test refait dans chaque HLC, generations propres a chaque classe
+    """
+    if niveau_identification not in ("global", "segment"):
+        raise ValueError("niveau_identification doit valoir 'global' ou 'segment'")
+    if not isinstance(downturn, (list, tuple, set)):
+        downturn = [downturn]
+    date_col = "annee" if freq == "annee" else "year_quarter"
 
-    def make_section(ws, text, row, col=1):
-        c = ws.cell(row=row, column=col, value=text)
-        c.font = Font(bold=True, size=11, color=BLUE)
-        ws.row_dimensions[row].height = 18
+    if segment_col is None or segment_col not in base.columns:
+        segment_list = [None]
+    else:
+        segment_list = base.select(pl.col(segment_col).unique()).to_series().to_list()
 
-    def style_header(ws, row, c1, c2, color=BLUE):
-        for col in range(c1, c2 + 1):
-            cell = ws.cell(row=row, column=col)
-            cell.fill = PatternFill("solid", fgColor=color)
-            cell.font = Font(bold=True, color=WHITE, size=10)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    all_tests = []
+    generations_glob = methodes_glob = None
 
-    def write_df(ws, df, start_row, start_col=1):
-        cols = df.columns
-        for j, col in enumerate(cols):
-            ws.cell(row=start_row, column=start_col + j, value=col)
-        style_header(ws, start_row, start_col, start_col + len(cols) - 1)
-        for i, row_data in enumerate(df.iter_rows(named=True)):
-            r = start_row + 1 + i
-            fill = PatternFill("solid", fgColor=LIGHT_BG) if i % 2 == 0 else None
-            for j, col in enumerate(cols):
-                c = ws.cell(row=r, column=start_col + j, value=row_data[col])
-                if fill:
-                    c.fill = fill
-                c.alignment = Alignment(horizontal="center")
-        return start_row + 1 + len(df)
+    # --- Identification GLOBALE (une seule fois) ---
+    if niveau_identification == "global":
+        print("=== Identification GLOBALE des generations downturn ===")
+        generations_glob, tests_g, _ = identifie_generations(base, lgd_col, date_col,
+                                                             downturn, lag, alpha)
+        methodes_glob = determine_methodes(generations_glob, label="GLOBAL")
+        if tests_g.height:
+            all_tests.append(tests_g.with_columns(pl.lit("GLOBAL").alias("segment")))
+    else:
+        print("=== Identification PAR SEGMENT des generations downturn ===")
 
-    def autofit(ws):
-        for col in ws.columns:
-            ml = max((len(str(c.value)) for c in col if c.value is not None), default=8)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(ml + 4, 40)
+    results = []
+    for seg in segment_list:
+        seg_label = str(seg) if seg is not None else "Global"
+        df_seg = base.filter(pl.col(segment_col) == seg) if seg is not None else base
+        lra_hlc = float(df_seg.select(pl.col(lgd_col).mean()).item())   # LRA du HLC (number-weighted)
 
-    def moving_average(values, w):
-        out = []
-        for i in range(len(values)):
-            if i < w - 1:
-                out.append(None)
+        # --- Source des generations selon le niveau choisi ---
+        if niveau_identification == "global":
+            generations, methodes = generations_glob, methodes_glob
+        else:
+            generations, tests_s, _ = identifie_generations(df_seg, lgd_col, date_col,
+                                                            downturn, lag, alpha)
+            methodes = determine_methodes(generations, label=seg_label)
+            if tests_s.height:
+                all_tests.append(tests_s.with_columns(pl.lit(seg_label).alias("segment")))
+
+        # --- Quantification de l'impact ---
+        best = None
+        for dt, gens in generations.items():
+            if not gens:
+                continue
+            sub = df_seg.filter(pl.col(date_col).is_in(gens))
+            if sub.height == 0:
+                continue
+            if methodes[dt] == "moyenne":
+                lgd_dt = float(sub.select(pl.col(lgd_col).mean()).item())        # number-weighted
             else:
-                sub = [v for v in values[i - w + 1: i + 1] if v is not None]
-                out.append(sum(sub) / len(sub) if sub else None)
-        return out
+                yr_seg = sub.group_by(date_col).agg(pl.col(lgd_col).mean().alias("lgd_annee"))
+                lgd_dt = float(yr_seg.select(pl.col("lgd_annee").max()).item())  # max{LGD(Yi)}
+            impact = max((lgd_dt - lra_hlc) / lra_hlc, 0.0)
+            cand = {"downturn": dt, "generations": gens, "methode": methodes[dt],
+                    "LGD_DT": lgd_dt, "n_dt": int(sub.height), "impact": impact}
+            if best is None or impact > best["impact"]:
+                best = cand
 
-    def clean_chart(chart):
-        chart.y_axis.majorGridLines = None
-        chart.x_axis.delete = False
-        chart.y_axis.delete = False
-        chart.height, chart.width = 9, 20
+        if best is None:
+            best = {"downturn": None, "generations": [], "methode": None,
+                    "LGD_DT": lra_hlc, "n_dt": None, "impact": 0.0}
 
-    if df_dt is None:
-        df_dt = calcule_downturn(df_final)
+        lgd_downturn = lra_hlc * (1 + best["impact"])
+        moc = lgd_downturn - lra_hlc
 
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+        results.append({
+            "segment": seg_label,
+            "niveau_identification": niveau_identification,
+            "downturn": best["downturn"],
+            "generations": str(best["generations"]),
+            "methode": best["methode"],
+            "expert_a_valider": best["methode"] == "max",
+            "n_dt": best["n_dt"],
+            "lra": lra_hlc,
+            "LGD_DT": best["LGD_DT"],
+            "impact": best["impact"],
+            "lgd_downturn": lgd_downturn,
+            "moc": moc,
+        })
+        print(f"Seg {seg_label:>6} : LRA={lra_hlc:.4f}  LGD_DT={best['LGD_DT']:.4f}  "
+              f"({best['methode']})  impact={best['impact']*100:.2f}%  "
+              f"LGD_downturn={lgd_downturn:.4f}  MoC={moc:.4f}")
 
-    # ================= FEUILLE 1 - SYNTHESE =================
-    ws1 = wb.create_sheet("Synthèse")
-    ws1.sheet_view.showGridLines = False
-    make_title(ws1, "MoC Downturn LGD - Rapport de synthèse", span=8, row=1)
-
-    make_section(ws1, "Paramètres de la run", row=3)
-    params = [
-        ("Fréquence d'analyse", freq),
-        ("Segmentation",        str(segment_col) if segment_col else "Global"),
-        ("Périodes Downturn",   str(downturn) if downturn else "-"),
-        ("Lag",                 str(lag)),
-        ("Seuil Alpha",         str(alpha)),
-    ]
-    for i, (k, v) in enumerate(params):
-        ws1.cell(row=4 + i, column=1, value=k).font = Font(bold=True)
-        ws1.cell(row=4 + i, column=2, value=v)
-
-    make_section(ws1, "Résultats finaux par segment", row=11)
-    last = write_df(ws1, df_final, start_row=12)
-    for i, row_data in enumerate(df_final.iter_rows(named=True)):     # surlignage
-        r, fill = 13 + i, None
-        if row_data.get("expert_a_valider"):
-            fill = PatternFill("solid", fgColor=ORANGE_FILL)          # méthode max -> à valider
-        elif (row_data.get("impact") or 0) > 0:
-            fill = PatternFill("solid", fgColor=GREEN_LIGHT)          # impact downturn > 0
-        if fill:
-            for c in range(1, len(df_final.columns) + 1):
-                ws1.cell(row=r, column=c).fill = fill
-
-    make_section(ws1, "Calcul Downturn (impact & LGD ajustée)", row=last + 2)
-    write_df(ws1, df_dt, start_row=last + 3)
-    autofit(ws1)
-
-    # ================= FEUILLE 2 - STATS PAR PERIODE =================
-    if base is not None and lgd_col is not None:
-        ws2 = wb.create_sheet("Stats par période")
-        ws2.sheet_view.showGridLines = False
-        make_title(ws2, f"LGD réalisée par {freq_label}", span=5, row=1)
-
-        yr = (base.group_by(date_col)
-                  .agg([pl.col(lgd_col).mean().alias("lgd_mean"),
-                        pl.col(lgd_col).count().alias("n")])
-                  .sort(date_col))
-        lra_global = float(base.select(pl.col(lgd_col).mean()).item())
-        yr = yr.with_columns([
-            pl.Series("LGD_MA", moving_average(yr["lgd_mean"].to_list(), ma_window)),
-            pl.lit(lra_global).alias("LRA"),
-        ])
-        n = yr.height
-        last2 = write_df(ws2, yr, 3)          # cols : date_col(1) lgd_mean(2) n(3) LGD_MA(4) LRA(5)
-
-        bar = BarChart(); bar.type = "col"; bar.style = 2
-        bar.title = f"LGD par {freq_label}"; bar.y_axis.title = "LGD"; bar.x_axis.title = freq_label
-        bar.add_data(Reference(ws2, min_col=2, min_row=3, max_row=3 + n), titles_from_data=True)
-        bar.set_categories(Reference(ws2, min_col=1, min_row=4, max_row=3 + n))
-        bar.series[0].graphicalProperties.solidFill = "0070C0"
-        line = LineChart()
-        line.add_data(Reference(ws2, min_col=5, min_row=3, max_row=3 + n), titles_from_data=True)  # LRA
-        line.add_data(Reference(ws2, min_col=4, min_row=3, max_row=3 + n), titles_from_data=True)  # MA
-        line.series[0].graphicalProperties.line.solidFill = "FF0000"
-        line.series[0].graphicalProperties.line.dashDot   = "dash"
-        bar += line
-        clean_chart(bar)
-        ws2.add_chart(bar, f"A{last2 + 2}")
-        autofit(ws2)
-
-    # ================= FEUILLE 3 - T-TESTS GLOBAL =================
-    if df_all_test is not None and df_all_test.height > 0:
-        ws3 = wb.create_sheet("T-Tests global")
-        ws3.sheet_view.showGridLines = False
-        make_title(ws3, "Détail des T-Tests par génération (niveau global)", span=8, row=1)
-
-        n3 = df_all_test.height
-        last3 = write_df(ws3, df_all_test, 3)
-        for i, row_data in enumerate(df_all_test.iter_rows(named=True)):
-            r, fill = 4 + i, None
-            if row_data.get("significatif"):
-                fill = PatternFill("solid", fgColor=GREEN_LIGHT)
-            elif row_data.get("n_i") is not None and row_data.get("n_i") < 5:
-                fill = PatternFill("solid", fgColor=ORANGE_FILL)
-            if fill:
-                for c in range(1, len(df_all_test.columns) + 1):
-                    ws3.cell(row=r, column=c).fill = fill
-
-        lgd_idx = df_all_test.columns.index("LGD_annee") + 1
-        ann_idx = df_all_test.columns.index("annee") + 1
-        bar3 = BarChart(); bar3.type = "col"; bar3.style = 2
-        bar3.title = "LGD réalisée par génération testée"; bar3.y_axis.title = "LGD"; bar3.x_axis.title = "génération"
-        bar3.add_data(Reference(ws3, min_col=lgd_idx, min_row=3, max_row=3 + n3), titles_from_data=True)
-        bar3.set_categories(Reference(ws3, min_col=ann_idx, min_row=4, max_row=3 + n3))
-        bar3.series[0].graphicalProperties.solidFill = "0070C0"
-        clean_chart(bar3)
-        ws3.add_chart(bar3, f"A{last3 + 2}")
-        autofit(ws3)
-
-    wb.save(output_path)
-    sheets = "Synthèse | Stats par période | T-Tests global"
-    print(f"Excel sauvegardé : {output_path}")
-    print(f"   Feuilles : {sheets}")
+    df_all_test = pl.concat(all_tests) if all_tests else pl.DataFrame()
+    return pl.DataFrame(results), df_all_test
