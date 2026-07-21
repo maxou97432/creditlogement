@@ -1,219 +1,142 @@
+import math
+import polars as pl
+from scipy.stats import t as t_dist
+
+
 # ----------------------------------------------------------------------
-# 1. LRA / moyenne globale : number-weighted (definition EBA / standard BNPP p23)
+# Stats annuelles : LGD realisee par generation, moyenne number-weighted, sigma inter-annees
 # ----------------------------------------------------------------------
-def calcule_lra(df: pl.DataFrame, lgd_col: str, freq: str, ponderation: str = "weighted") -> float:
-    """LRA = moyenne number-weighted des LGD annuelles = Σ n_i·LGD_i / Σ n_i."""
-    yr = (df.group_by(freq, maintain_order=True)
-            .agg([pl.col(lgd_col).mean().alias("lgd_i"),
+def stats_annuelles(df, lgd_col, date_col):
+    yr = (df.group_by(date_col)
+            .agg([pl.col(lgd_col).mean().alias("lgd_annee"),
                   pl.col(lgd_col).count().alias("n_i")])
-            .sort(freq))
-    lra = float((yr["lgd_i"] * yr["n_i"]).sum() / yr["n_i"].sum())
-    print(f"LRA (number-weighted): {lra:.4f}%")
-    return lra
+            .sort(date_col))
+    if yr.height == 0:
+        return yr, None, None, 0
+    lgd_bar = float((yr["lgd_annee"] * yr["n_i"]).sum() / yr["n_i"].sum())   # number-weighted (= poolee)
+    sigma   = float(yr["lgd_annee"].std(ddof=1)) if yr.height > 1 else None
+    return yr, lgd_bar, sigma, yr.height
+
+
+def est_contigu(years):
+    ys = sorted(int(y) for y in years)
+    return all(ys[i] - ys[i - 1] == 1 for i in range(1, len(ys)))
 
 
 # ----------------------------------------------------------------------
-# 2. Periodes candidates
+# 1. Identification GLOBALE des generations downturn (t-test poole sur tout le portefeuille)
 # ----------------------------------------------------------------------
-def periode_candidates(downturn: list, lag: int, freq: str) -> list:
-    periods = []
-    for year in downturn:
-        for annee in range(year - lag, year + lag + 1):
-            if freq == "annee":
-                periods.append((year, annee))
-            else:
-                for q in range(1, 5):
-                    periods.append((year, f"{annee}-Q{q}"))
-    print(f"{len(periods)} periodes candidates generees (freq: {freq})")
-    return periods
-
-
-# ----------------------------------------------------------------------
-# 3. T-test standard BNPP (p27) : X(i) = sqrt(N)*(LGD_i - LGD_bar)/sigma, Student(N-1)
-#    N = nombre d'annees, sigma = ecart-type INTER-annees, test unilateral droit
-# ----------------------------------------------------------------------
-def t_test_dt(yearly: pl.DataFrame, annee, date_col: str,
-              lgd_bar: float, sigma: float, n_years: int, alpha: float) -> dict:
-    base_nan = {"annee": annee, "n_obs": 0, "LGD_annee": float("nan"),
-                "X_stat": None, "seuil": None, "p_value": None,
-                "significatif": False, "moc_annee": float("nan")}
-    row = yearly.filter(pl.col(date_col) == annee)
-    if row.height == 0 or sigma is None or sigma == 0 or not math.isfinite(sigma) or n_years < 2:
-        return base_nan
-    lgd_i = float(row["lgd_annee"][0])
-    n_i   = int(row["n_i"][0])
-    X     = math.sqrt(n_years) * (lgd_i - lgd_bar) / sigma
-    crit  = float(t_dist.ppf(1 - alpha, n_years - 1))
-    return {"annee": annee, "n_obs": n_i, "LGD_annee": lgd_i,
-            "X_stat": X, "seuil": crit, "p_value": float(t_dist.sf(X, n_years - 1)),
-            "significatif": bool(X > crit), "moc_annee": lgd_i - lgd_bar}
+def identifie_generations(base, lgd_col, date_col, downturn, lag, alpha):
+    yr, lgd_bar, sigma, N = stats_annuelles(base, lgd_col, date_col)
+    tests, generations = [], {}
+    crit = float(t_dist.ppf(1 - alpha, N - 1)) if N > 1 else None
+    for dt in downturn:
+        sig_years = []
+        for annee in range(dt - lag, dt + lag + 1):
+            row = yr.filter(pl.col(date_col) == annee)
+            if row.height == 0 or sigma is None or sigma == 0:
+                continue
+            lgd_i = float(row["lgd_annee"][0]); n_i = int(row["n_i"][0])
+            X = math.sqrt(N) * (lgd_i - lgd_bar) / sigma
+            sig = bool(X > crit)
+            tests.append({"downturn": dt, "annee": annee, "n_i": n_i, "LGD_annee": lgd_i,
+                          "X_stat": X, "seuil": crit, "p_value": float(t_dist.sf(X, N - 1)),
+                          "significatif": sig})
+            if sig:
+                sig_years.append(annee)
+        generations[dt] = sig_years
+    return generations, pl.DataFrame(tests), lgd_bar
 
 
 # ----------------------------------------------------------------------
-# 4. Selection de la periode retenue pour UNE annee DT (Cases 1 / 2a / 2b, p28-30)
+# 2. Orchestrateur REBOOT
 # ----------------------------------------------------------------------
-def select_pire_periode(tests_df: pl.DataFrame, lgd_bar: float, ponderation: str = "weighted") -> dict:
-    valid = tests_df.filter(pl.col("LGD_annee").is_finite())
-    sig   = valid.filter(pl.col("significatif") == True)
-
-    # Case 1 : aucune annee significative -> LGD_DT = LRA
-    if sig.is_empty():
-        return {"annee": "LRA (pas d'impact DT)", "annee_sig": [], "annees_sig_all": [],
-                "X_stats": {}, "n_obs": None, "LGD_DT": lgd_bar, "X_stat": None,
-                "significatif": False, "case": "1"}
-
-    sig_sorted = sig.sort("annee")
-    sig_years  = sig_sorted["annee"].to_list()
-    # dictionnaire {annee: X_stat} pour toutes les annees significatives
-    x_stats = {r["annee"]: round(float(r["X_stat"]), 4)
-               for r in sig_sorted.iter_rows(named=True) if r["X_stat"] is not None}
-
-    # Case 2a : une seule annee significative
-    if len(sig_years) == 1:
-        r = sig_sorted.row(0, named=True)
-        return {"annee": str(sig_years[0]), "annee_sig": [sig_years[0]], "annees_sig_all": sig_years,
-                "X_stats": x_stats, "n_obs": int(r["n_obs"]), "LGD_DT": float(r["LGD_annee"]),
-                "X_stat": float(r["X_stat"]), "significatif": True, "case": "2a"}
-
-    # Case 2b : plusieurs annees -> blocs consecutifs, moyenne number-weighted, bloc le plus severe
-    blocks, current = [], [sig_years[0]]
-    for i in range(1, len(sig_years)):
-        try:
-            consec = int(sig_years[i]) - int(sig_years[i - 1]) == 1
-        except Exception:
-            consec = False
-        if consec:
-            current.append(sig_years[i])
-        else:
-            blocks.append(current); current = [sig_years[i]]
-    blocks.append(current)
-
-    block_result = []
-    for blk in blocks:
-        df_blk = sig_sorted.filter(pl.col("annee").is_in(blk))
-        if ponderation == "weighted":
-            avg = float((df_blk["LGD_annee"] * df_blk["n_obs"]).sum() / df_blk["n_obs"].sum())
-        else:
-            avg = float(df_blk["LGD_annee"].mean())
-        block_result.append({"lgd_dt": avg, "annee_sig": blk, "n_obs": int(df_blk["n_obs"].sum())})
-
-    best = max(block_result, key=lambda x: x["lgd_dt"])
-    label = (f"{best['annee_sig'][0]}-{best['annee_sig'][-1]}"
-             if len(best["annee_sig"]) > 1 else str(best["annee_sig"][0]))
-    return {"annee": label, "annee_sig": best["annee_sig"], "annees_sig_all": sig_years,
-            "X_stats": x_stats, "n_obs": best["n_obs"], "LGD_DT": best["lgd_dt"],
-            "X_stat": None, "significatif": True, "case": "2b"}
-
-
-# ----------------------------------------------------------------------
-# 5. MoC et amplification (conformes p29)
-# ----------------------------------------------------------------------
-def calcule_moc(lgd_dt: float, lra: float) -> float:
-    return lgd_dt - lra
-
-
-def calcule_downturn(df: pl.DataFrame) -> pl.DataFrame:
-    coef_dt    = (df["lgd_dt"] - df["lra_globale"]) / df["lra_globale"]   # Delta^LGD
-    downturn_v = coef_dt * df["lra_globale"]
-    lgd_down   = df["lra_globale"] + downturn_v                           # = lgd_dt
-    return pl.DataFrame({
-        "Segment": df["segment"], "LGD DT": df["lgd_dt"], "LRA": df["lra_globale"],
-        "Coefficient Downturn": coef_dt, "Downturn": downturn_v,
-        "LGD downturn": lgd_down, "Significatif": df["significatif"],
-    })
-
-
-# ----------------------------------------------------------------------
-# 6. Orchestrateur
-# ----------------------------------------------------------------------
-def execution(base: pl.DataFrame, segment_col, lgd_col: str, ponderation: str,
-              freq: str, downturn, alpha: float, lag: int):
+def execution(base, segment_col, lgd_col, freq, downturn, alpha, lag):
     if not isinstance(downturn, (list, tuple, set)):
         downturn = [downturn]
     date_col = "annee" if freq == "annee" else "year_quarter"
+
+    # 1. Identification GLOBALE des generations downturn
+    generations, tests_glob, lgd_bar_glob = identifie_generations(base, lgd_col, date_col,
+                                                                  downturn, lag, alpha)
+
+    # 2. Methode d'agregation par episode : contigu -> moyenne ; non contigu -> max (jugement expert)
+    methodes = {}
+    print("=== Generations downturn identifiees (niveau global) ===")
+    for dt, gens in generations.items():
+        if not gens:
+            methodes[dt] = None
+            print(f"  DT {dt} : aucune generation significative")
+        elif est_contigu(gens):
+            methodes[dt] = "moyenne"
+            print(f"  DT {dt} : {gens} -> contigu/homogene -> moyenne number-weighted")
+        else:
+            methodes[dt] = "max"
+            print(f"  DT {dt} : {gens} -> NON contigu -> max{{LGD(Yi)}} (a valider en jugement expert)")
 
     if segment_col is None or segment_col not in base.columns:
         segment_list = [None]
     else:
         segment_list = base.select(pl.col(segment_col).unique()).to_series().to_list()
 
-    final_results, all_tests = [], []
-
+    # 3. Quantification de l'impact par HLC
+    results = []
     for seg in segment_list:
         seg_label = str(seg) if seg is not None else "Global"
         df_seg = base.filter(pl.col(segment_col) == seg) if seg is not None else base
+        lra_hlc = float(df_seg.select(pl.col(lgd_col).mean()).item())   # LRA du HLC (number-weighted)
 
-        # Serie annuelle realisee + stats globales (number-weighted)
-        yearly = (df_seg.group_by(date_col)
-                    .agg([pl.col(lgd_col).mean().alias("lgd_annee"),
-                          pl.col(lgd_col).count().alias("n_i")])
-                    .sort(date_col))
-        n_years = yearly.height
-        if n_years < 2:
-            print(f"Segment {seg_label} : < 2 annees -> ignore")
-            continue
-        lgd_bar = float((yearly["lgd_annee"] * yearly["n_i"]).sum() / yearly["n_i"].sum())  # = LRA
-        sigma   = float(yearly["lgd_annee"].std(ddof=1))
-        print(f"\n=== Segment {seg_label} : LRA={lgd_bar:.4f}  sigma_annuel={sigma:.4f}  N_annees={n_years}")
+        best = None
+        for dt, gens in generations.items():
+            if not gens:
+                continue
+            sub = df_seg.filter(pl.col(date_col).is_in(gens))
+            if sub.height == 0:
+                continue
+            if methodes[dt] == "moyenne":
+                lgd_dt = float(sub.select(pl.col(lgd_col).mean()).item())            # number-weighted
+            else:  # max
+                yr_seg = sub.group_by(date_col).agg(pl.col(lgd_col).mean().alias("lgd_annee"))
+                lgd_dt = float(yr_seg.select(pl.col("lgd_annee").max()).item())      # max{LGD(Yi)}
+            impact = max((lgd_dt - lra_hlc) / lra_hlc, 0.0)
+            cand = {"downturn": dt, "generations": gens, "methode": methodes[dt],
+                    "LGD_DT": lgd_dt, "n_dt": int(sub.height), "impact": impact}
+            if best is None or impact > best["impact"]:
+                best = cand
 
-        candidate_dt = periode_candidates(downturn, lag, freq)
+        if best is None:                       # aucune generation downturn -> pas d'impact
+            best = {"downturn": None, "generations": [], "methode": None,
+                    "LGD_DT": lra_hlc, "n_dt": None, "impact": 0.0}
 
-        tests_results = []
-        for (dt_year, periode) in candidate_dt:
-            res = t_test_dt(yearly, periode, date_col, lgd_bar, sigma, n_years, alpha)
-            res["segment"], res["downturn"] = seg_label, dt_year
-            tests_results.append(res)
-        tests_df = pl.DataFrame(tests_results)
-        all_tests.append(tests_df)
+        lgd_downturn = lra_hlc * (1 + best["impact"])
+        moc = lgd_downturn - lra_hlc           # = max(LGD_DT - LRA, 0)
 
-        worst_by_dt = []
-        for dt_year in downturn:
-            sub = tests_df.filter(pl.col("downturn").cast(pl.String) == str(dt_year))
-            for row in sub.iter_rows(named=True):
-                lab = "Significatif" if row.get("significatif") else "Non significatif"
-                xs = row["X_stat"]; xs_str = f"{xs:.2f}" if xs is not None else " nan"
-                print(f"  DT {dt_year} | {row['annee']} : LGD={row['LGD_annee']:.4f}% X={xs_str} -- {lab}")
-            picked = select_pire_periode(sub, lgd_bar, ponderation)
-            picked["downturn"] = dt_year
-            worst_by_dt.append(picked)
-
-        worst_overall = max(worst_by_dt, key=lambda x: x["LGD_DT"])
-        moc_dt = calcule_moc(worst_overall["LGD_DT"], lgd_bar)
-
-        annee_sig = worst_overall.get("annee_sig", [])
-        if len(annee_sig) > 1:
-            periode_label = f"{annee_sig[0]} - {annee_sig[-1]} (moyenne number-weighted)"
-        elif len(annee_sig) == 1:
-            periode_label = f"{annee_sig[0]} (annee seule)"
-        else:
-            periode_label = "LRA (pas d'impact DT)"
-
-        print("=" * 50)
-        print(f"RESULTATS -- Segment {seg_label}")
-        print(f"  LRA                : {lgd_bar:.4f}")
-        print(f"  Periode DT retenue : {periode_label}")
-        print(f"  Annees signif.     : {worst_overall.get('annees_sig_all', [])}")
-        print(f"  X_stats            : {worst_overall.get('X_stats', {})}")
-        print(f"  LGD downturn       : {worst_overall['LGD_DT']:.4f}%")
-        print(f"  MoC DT             : {moc_dt:.4f}")
-        print("=" * 50)
-
-        final_results.append({
+        results.append({
             "segment": seg_label,
-            "downturn": worst_overall["downturn"],
-            "annee_sig": (f"{annee_sig[0]} a {annee_sig[-1]}" if len(annee_sig) > 1
-                          else (str(annee_sig[0]) if annee_sig else "-")),
-            "annees_significatives": ", ".join(str(y) for y in worst_overall.get("annees_sig_all", [])) or "-",
-            "X_stats": str(worst_overall.get("X_stats", {})),
-            "n_obs": worst_overall.get("n_obs"),
-            "lgd_dt": worst_overall["LGD_DT"],
-            "lra_globale": lgd_bar,
-            "sigma_annuel": sigma,
-            "X_stat": worst_overall.get("X_stat"),
-            "significatif": worst_overall.get("significatif"),
-            "moc_dt": moc_dt,
+            "downturn": best["downturn"],
+            "generations": str(best["generations"]),
+            "methode": best["methode"],
+            "expert_a_valider": best["methode"] == "max",
+            "n_dt": best["n_dt"],
+            "lra": lra_hlc,
+            "LGD_DT": best["LGD_DT"],
+            "impact": best["impact"],
+            "lgd_downturn": lgd_downturn,
+            "moc": moc,
         })
+        print(f"Seg {seg_label:>6} : LRA={lra_hlc:.4f}  LGD_DT={best['LGD_DT']:.4f}  "
+              f"({best['methode']})  impact={best['impact']*100:.2f}%  "
+              f"LGD_downturn={lgd_downturn:.4f}  MoC={moc:.4f}")
 
-    df_final    = pl.DataFrame(final_results)
-    df_all_test = pl.concat(all_tests) if all_tests else pl.DataFrame()
-    return df_final, df_all_test
+    return pl.DataFrame(results), tests_glob
+
+
+# ----------------------------------------------------------------------
+# (optionnel) reformatage pour ta cellule df_dt
+# ----------------------------------------------------------------------
+def calcule_downturn(df):
+    return pl.DataFrame({
+        "Segment": df["segment"], "LRA": df["lra"], "LGD DT": df["LGD_DT"],
+        "Methode": df["methode"], "Impact": df["impact"],
+        "Downturn (LGD-LRA)": df["moc"], "LGD downturn": df["lgd_downturn"],
+    })
