@@ -1,120 +1,14 @@
-def execution(base, segment_col, lgd_col, freq, downturn, alpha, lag,
-              niveau_identification="global",
-              methode_agregation="moyenne",
-              seuil_heterogeneite=1.0):
-    """
-    niveau_identification : "global" (t-test sur tout le portefeuille, REBOOT) | "segment"
-    methode_agregation    : "moyenne" (regle par defaut du standard) | "max" (backstop expert, a justifier)
-    seuil_heterogeneite   : seuil INFORMATIF du ratio (ecart max-min des LGD annuelles) / (LGD_DT - LRA)
-                            au-dela duquel on signale qu'un jugement expert peut etre requis.
-    """
-    if niveau_identification not in ("global", "segment"):
-        raise ValueError("niveau_identification doit valoir 'global' ou 'segment'")
-    if methode_agregation not in ("moyenne", "max"):
-        raise ValueError("methode_agregation doit valoir 'moyenne' ou 'max'")
-    if not isinstance(downturn, (list, tuple, set)):
-        downturn = [downturn]
-    date_col = "annee" if freq == "annee" else "year_quarter"
-
-    if segment_col is None or segment_col not in base.columns:
-        segment_list = [None]
-    else:
-        segment_list = base.select(pl.col(segment_col).unique()).to_series().to_list()
-
-    all_tests, generations_glob = [], None
-
-    if niveau_identification == "global":
-        print("=== Identification GLOBALE des generations downturn ===")
-        generations_glob, tests_g, _ = identifie_generations(base, lgd_col, date_col,
-                                                             downturn, lag, alpha)
-        for dt, gens in generations_glob.items():
-            tag = "contigues" if (gens and est_contigu(gens)) else "NON contigues"
-            print(f"  DT {dt} : {gens} ({tag})" if gens else f"  DT {dt} : aucune generation significative")
-        if tests_g.height:
-            all_tests.append(tests_g.with_columns(pl.lit("GLOBAL").alias("segment")))
-    else:
-        print("=== Identification PAR SEGMENT des generations downturn ===")
-
-    print(f"--- Methode d'agregation appliquee : {methode_agregation} ---")
-
-    results = []
-    for seg in segment_list:
-        seg_label = str(seg) if seg is not None else "Global"
-        df_seg = base.filter(pl.col(segment_col) == seg) if seg is not None else base
-        lra_hlc = float(df_seg.select(pl.col(lgd_col).mean()).item())   # LRA du HLC (number-weighted)
-
-        if niveau_identification == "global":
-            generations = generations_glob
-        else:
-            generations, tests_s, _ = identifie_generations(df_seg, lgd_col, date_col,
-                                                            downturn, lag, alpha)
-            if tests_s.height:
-                all_tests.append(tests_s.with_columns(pl.lit(seg_label).alias("segment")))
-
-        best = None
-        for dt, gens in generations.items():
-            if not gens:
-                continue
-            sub = df_seg.filter(pl.col(date_col).is_in(gens))
-            if sub.height == 0:
-                continue
-
-            yr_seg = (sub.group_by(date_col)
-                         .agg(pl.col(lgd_col).mean().alias("lgd_annee"))
-                         .sort(date_col))
-            lgd_moy = float(sub.select(pl.col(lgd_col).mean()).item())          # number-weighted
-            lgd_max = float(yr_seg.select(pl.col("lgd_annee").max()).item())    # max{LGD(Yi)}
-            lgd_min = float(yr_seg.select(pl.col("lgd_annee").min()).item())
-
-            # --- indicateur d'heterogeneite (INFORMATIF, ne pilote aucun calcul) ---
-            ecart_max_min = lgd_max - lgd_min
-            ecart_a_lra   = lgd_moy - lra_hlc
-            ratio_het = (ecart_max_min / abs(ecart_a_lra)) if abs(ecart_a_lra) > 1e-12 else None
-            heterogene = bool(ratio_het is not None and ratio_het > seuil_heterogeneite)
-
-            lgd_dt = lgd_moy if methode_agregation == "moyenne" else lgd_max
-            impact = max((lgd_dt - lra_hlc) / lra_hlc, 0.0)
-
-            cand = {"downturn": dt, "generations": gens, "n_dt": int(sub.height),
-                    "LGD_DT_moyenne": lgd_moy, "LGD_DT_max": lgd_max,
-                    "ecart_max_min": ecart_max_min, "ratio_heterogeneite": ratio_het,
-                    "heterogene_a_verifier": heterogene,
-                    "LGD_DT": lgd_dt, "impact": impact}
-            if best is None or impact > best["impact"]:
-                best = cand
-
-        if best is None:      # aucune generation downturn -> pas d'impact
-            best = {"downturn": None, "generations": [], "n_dt": None,
-                    "LGD_DT_moyenne": lra_hlc, "LGD_DT_max": lra_hlc,
-                    "ecart_max_min": None, "ratio_heterogeneite": None,
-                    "heterogene_a_verifier": False, "LGD_DT": lra_hlc, "impact": 0.0}
-
-        lgd_downturn = lra_hlc * (1 + best["impact"])
-        moc = lgd_downturn - lra_hlc
-
-        results.append({
-            "segment": seg_label,
-            "niveau_identification": niveau_identification,
-            "methode_agregation": methode_agregation,
-            "downturn": best["downturn"],
-            "generations": str(best["generations"]),
-            "generations_contigues": est_contigu(best["generations"]) if best["generations"] else None,
-            "n_dt": best["n_dt"],
-            "lra": lra_hlc,
-            "LGD_DT_moyenne": best["LGD_DT_moyenne"],
-            "LGD_DT_max": best["LGD_DT_max"],
-            "ecart_max_min": best["ecart_max_min"],
-            "ratio_heterogeneite": best["ratio_heterogeneite"],
-            "heterogene_a_verifier": best["heterogene_a_verifier"],
-            "LGD_DT": best["LGD_DT"],
-            "impact": best["impact"],
-            "lgd_downturn": lgd_downturn,
-            "moc": moc,
-        })
-        flag = "  <-- heterogeneite : jugement expert a envisager" if best["heterogene_a_verifier"] else ""
-        print(f"Seg {seg_label:>6} : LRA={lra_hlc:.4f}  LGD_DT={best['LGD_DT']:.4f}  "
-              f"(moy={best['LGD_DT_moyenne']:.4f} / max={best['LGD_DT_max']:.4f})  "
-              f"impact={best['impact']*100:.2f}%  MoC={moc:.4f}{flag}")
-
-    df_all_test = pl.concat(all_tests) if all_tests else pl.DataFrame()
-    return pl.DataFrame(results), df_all_test
+def calcule_downturn(df: pl.DataFrame) -> pl.DataFrame:
+    """Restitue le calcul downturn au format du standard (p29) :
+       Delta^LGD = (LGD_DT - LRA)/LRA (plancher 0), Downturn = LRA x Delta^LGD,
+       LGD downturn = LRA x (1 + Delta^LGD)."""
+    return pl.DataFrame({
+        "Segment":                  df["segment"],
+        "LRA":                      df["lra"],
+        "LGD DT":                   df["LGD_DT"],
+        "Coefficient Downturn":     df["impact"],                  # Delta^LGD
+        "Downturn (marge)":         df["moc"],                     # = LRA x Delta^LGD
+        "LGD downturn":             df["lgd_downturn"],            # = LRA x (1 + Delta^LGD)
+        "Methode":                  df["methode_agregation"],
+        "Heterogeneite a verifier": df["heterogene_a_verifier"],
+    })
