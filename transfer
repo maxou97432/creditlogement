@@ -1,10 +1,8 @@
-mu, sigma = stats["mean"][0], stats["std"][0]
+dtm.select([
+    pl.col("Seg").null_count().alias("null_seg"),
+    pl.col("HLC").null_count().alias("null_hlc"),
+    pl.col("Seg_X_HLC").null_count().alias("null_cat"),
+]).collect()
 
-    # garde-fou : donnees insuffisantes -> pas de detection d'outliers
-    if mu is None or sigma is None or trimmed_mean is None:
-        return False
-
-    # outlier detection
-    return (trimmed_mean < mu - 2 * sigma * tailsize) or (
-        trimmed_mean > mu + 2 * sigma * tailsize
-    )
+# volume concerne
+dtm.filter(pl.col("Seg_X_HLC").is_null()).select(pl.len()).collect()
