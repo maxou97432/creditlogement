@@ -1,13 +1,2 @@
-keys = [OBLIGOR_COL, DATE_COL]
-
-base_obl = (
-    base.group_by(keys)
-        .agg([
-            pl.col("lgd_obligor").first(),          # constante dans le couple
-            pl.col(CLASS).first().alias(CLASS),     # HLC de l'obligor
-            pl.col(EAD_COL).sum().alias("ead_obligor"),   # volume : on somme
-            pl.len().alias("nb_facilites"),               # tracabilite
-            # + toutes les autres colonnes constantes dans le couple : .first()
-        ])
-        .with_columns(pl.col(DATE_COL).dt.year().alias("annee"))
-)
+print(df_brut.group_by([OBLIGOR_COL, DATDEF]).agg(pl.col(JENKS_CLASS).n_unique().alias("n"))
+             .filter(pl.col("n") > 1).height)      # doit valoir 0
