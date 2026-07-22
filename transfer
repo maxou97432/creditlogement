@@ -1,7 +1,10 @@
-regles = (base.group_by(keys).agg([
-    pl.col("HLC").sort_by(EAD_COL, descending=True).first().alias("hlc_ead"),   # EAD dominant
-    pl.col("HLC").mode().first().alias("hlc_majorite"),                          # majorite facilites
-]))
-desaccord = regles.filter(pl.col("hlc_ead") != pl.col("hlc_majorite"))
-print(f"Couples ou EAD-dominant != majorite : {desaccord.height:,} "
-      f"= {desaccord.height/tot*100:.1f}%")
+mu, sigma = stats["mean"][0], stats["std"][0]
+
+    # garde-fou : donnees insuffisantes -> pas de detection d'outliers
+    if mu is None or sigma is None or trimmed_mean is None:
+        return False
+
+    # outlier detection
+    return (trimmed_mean < mu - 2 * sigma * tailsize) or (
+        trimmed_mean > mu + 2 * sigma * tailsize
+    )
