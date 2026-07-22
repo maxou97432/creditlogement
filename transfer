@@ -1,35 +1,7 @@
-keys = [OBLIGOR_COL, DATE_COL]
-
-# 1. Par couple : nb de HLC distinctes, ecart entre HLC, nb facilites, EAD
-couple = (base.group_by(keys)
-              .agg([
-                  pl.col("HLC").n_unique().alias("nb_hlc"),
-                  (pl.col("HLC").max() - pl.col("HLC").min()).alias("spread_hlc"),
-                  pl.len().alias("nb_fac"),
-                  pl.col(EAD_COL).sum().alias("ead"),
-              ]))
-tot = couple.height
-print(f"Total couples obligor x datdef : {tot:,}")
-
-# 2. Repartition du nombre de HLC distinctes par couple
-print(couple.group_by("nb_hlc").agg(pl.len().alias("n"))
-            .with_columns((pl.col("n")/tot*100).round(2).alias("pct"))
-            .sort("nb_hlc"))
-
-# 3. Taux d'eclatement (en nb de couples ET en EAD)
-split = couple.filter(pl.col("nb_hlc") > 1)
-print(f"Couples eclates (>1 HLC) : {split.height:,} = {split.height/tot*100:.1f}%")
-print(f"Part de l'EAD dans les couples eclates : {split['ead'].sum()/couple['ead'].sum()*100:.1f}%")
-
-# 4. Pour les eclates : de combien de classes s'ecartent-ils (spread) ?
-print(split.group_by("spread_hlc").agg(pl.len().alias("n"))
-           .with_columns((pl.col("n")/split.height*100).round(2).alias("pct"))
-           .sort("spread_hlc"))
-
-# 5. Nb de facilites par couple
-print(couple.select([
-    pl.col("nb_fac").mean().round(2).alias("moy_fac"),
-    pl.col("nb_fac").median().alias("med_fac"),
-    pl.col("nb_fac").quantile(0.95).alias("p95_fac"),
-    pl.col("nb_fac").max().alias("max_fac"),
+regles = (base.group_by(keys).agg([
+    pl.col("HLC").sort_by(EAD_COL, descending=True).first().alias("hlc_ead"),   # EAD dominant
+    pl.col("HLC").mode().first().alias("hlc_majorite"),                          # majorite facilites
 ]))
+desaccord = regles.filter(pl.col("hlc_ead") != pl.col("hlc_majorite"))
+print(f"Couples ou EAD-dominant != majorite : {desaccord.height:,} "
+      f"= {desaccord.height/tot*100:.1f}%")
