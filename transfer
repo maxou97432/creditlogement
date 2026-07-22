@@ -1,2 +1,12 @@
-print(df_brut.group_by([OBLIGOR_COL, DATDEF]).agg(pl.col(JENKS_CLASS).n_unique().alias("n"))
-             .filter(pl.col("n") > 1).height)      # doit valoir 0
+lf = (
+    lf.filter(pl.col(EAD_COL).is_not_null() & (pl.col(EAD_COL) > 0))   # evite la div/0
+      .group_by([OBLIGOR_COL, DATDEF])
+      .agg([
+          # LGD obligor : ponderee par l'EAD dans le couple  <-- LE point cle
+          ((pl.col(LGD_COL) * pl.col(EAD_COL)).sum() / pl.col(EAD_COL).sum()).alias(LGD_COL),
+          pl.col(EAD_COL).sum().alias(EAD_COL),
+          pl.col(SEG).first().alias(SEG),               # indispensable pour la detection segment
+          pl.len().alias("nb_facilites"),
+          # + tout autre attribut obligor constant dans le couple : pl.col(x).first().alias(x)
+      ])
+)
