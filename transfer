@@ -1,8 +1,12 @@
-dtm.select([
-    pl.col("Seg").null_count().alias("null_seg"),
-    pl.col("HLC").null_count().alias("null_hlc"),
-    pl.col("Seg_X_HLC").null_count().alias("null_cat"),
-]).collect()
-
-# volume concerne
-dtm.filter(pl.col("Seg_X_HLC").is_null()).select(pl.len()).collect()
+def compute_LRA_LGD_open(dtm_filled: pd.DataFrame, crr_final_col: str, cad_final_col: str,
+                          out_col: str = "LRA_LGD_open") -> pd.DataFrame:
+    """
+    CRR_tilde = CRR_final / (1 + CAD_final)
+    LRA_LGD_open = 1 - CRR_tilde
+    (RISK FRB LGD Retail Model Documentation, p.74-75)
+    """
+    dtm_filled = dtm_filled.copy()
+    crr_tilde_col = f"{crr_final_col}_tilde"
+    dtm_filled[crr_tilde_col] = dtm_filled[crr_final_col] / (1 + dtm_filled[cad_final_col])
+    dtm_filled[out_col] = 1 - dtm_filled[crr_tilde_col]
+    return dtm_filled
