@@ -1,12 +1,156 @@
-def compute_LRA_LGD_open(dtm_filled: pd.DataFrame, crr_final_col: str, cad_final_col: str,
-                          out_col: str = "LRA_LGD_open") -> pd.DataFrame:
+def merge_extrapolation_to_base(
+    base: pd.DataFrame,
+    dtm_filled: pd.DataFrame,
+    facility_col: str = "idctr",
+    generation_col: str = "generation",
+    cols_to_merge: list = None,
+    how: str = "left",
+) -> pd.DataFrame:
     """
-    CRR_tilde = CRR_final / (1 + CAD_final)
-    LRA_LGD_open = 1 - CRR_tilde
-    (RISK FRB LGD Retail Model Documentation, p.74-75)
+    Fusionne les résultats de l'extrapolation (CRR_final, CAD_final, ...) au
+    grain facilité, sur la base principale contenant la LGD observée, le score,
+    etc.
+
+    Parameters
+    ----------
+    base : pd.DataFrame
+        Table principale au grain facilité (contient idctr, LGD observée,
+        score, statut ouvert/fermé, etc.).
+    dtm_filled : pd.DataFrame
+        Sortie de `extrapolate_all_categories`, au grain facilité, contenant
+        les colonnes extrapolées finales (ex. "CRR__final", "CAD_act__final").
+    facility_col : str, default "idctr"
+        Nom de la colonne identifiant la facilité, présente dans les deux tables.
+    generation_col : str, default "generation"
+        Nom de la colonne génération. Si présente dans les deux tables, elle est
+        ajoutée à la clé de jointure pour éviter les collisions si un même
+        `idctr` apparaît sur plusieurs générations dans `dtm_filled`.
+    cols_to_merge : list, optional
+        Liste explicite des colonnes de `dtm_filled` à ramener dans `base`
+        (en plus des clés de jointure). Si None, toutes les colonnes de
+        `dtm_filled` non présentes dans `base` sont ramenées.
+    how : str, default "left"
+        Type de jointure pandas (`left` pour garder toute la base principale
+        même si certaines facilités n'ont pas été extrapolées).
+
+    Returns
+    -------
+    pd.DataFrame
+        `base` enrichie des colonnes extrapolées.
+
+    Raises
+    ------
+    ValueError
+        Si `facility_col` n'est pas présent dans les deux tables.
     """
-    dtm_filled = dtm_filled.copy()
+    if facility_col not in base.columns or facility_col not in dtm_filled.columns:
+        raise ValueError(f"'{facility_col}' must be present in both `base` and `dtm_filled`")
+
+    join_keys = [facility_col]
+    if generation_col in base.columns and generation_col in dtm_filled.columns:
+        join_keys.append(generation_col)
+
+    if cols_to_merge is None:
+        cols_to_merge = [c for c in dtm_filled.columns if c not in base.columns or c in join_keys]
+
+    # s'assure que les clés de jointure sont bien incluses
+    cols_to_merge = list(dict.fromkeys(join_keys + cols_to_merge))
+
+    # vérifie l'unicité de la clé côté dtm_filled pour éviter une explosion de lignes
+    dup_check = dtm_filled[join_keys].duplicated().sum()
+    if dup_check > 0:
+        log.warning(
+            "dtm_filled contains %d duplicated rows on %s — the merge may "
+            "produce duplicated/unexpected rows in `base`.", dup_check, join_keys
+        )
+
+    merged = base.merge(dtm_filled[cols_to_merge], on=join_keys, how=how)
+    return merged
+
+def compute_final_LRA_LGD_pipeline(
+    base_enriched: pd.DataFrame,
+    category_column: str,
+    crr_final_col: str = "CRR__final",
+    cad_final_col: str = "CAD_act__final",
+    is_open_col: str = "is_open",
+    lgd_observed_col: str = "LGD_observed",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Calcule la LRA LGD finale par HLC, conformément à la doc RISK FRB
+    (LGD Retail Model Documentation, p.74-75) :
+
+        1) CRR_tilde = CRR_final / (1 + CAD_final)                (cas ouverts)
+        2) LRA_LGD_open  = 1 - CRR_tilde, agrégée par HLC (moyenne pondérée
+           par le nombre de contrats ouverts)
+        3) LRA_LGD_closed = moyenne arithmétique de la LGD observée au niveau
+           facilité, pour les contrats fermés, par HLC
+        4) LRA_LGD_final = moyenne pondérée (par le nombre de contrats) entre
+           LRA_LGD_open et LRA_LGD_closed, par HLC
+
+    Parameters
+    ----------
+    base_enriched : pd.DataFrame
+        Table au grain facilité, contenant : la catégorie (HLC), le CRR et
+        le CAD extrapolés finaux (fusionnés depuis `dtm_filled`), le statut
+        ouvert/fermé, et la LGD observée.
+    category_column : str
+        Nom de la colonne HLC (catégorie de risque).
+    crr_final_col : str, default "CRR__final"
+        Nom de la colonne contenant le CRR extrapolé final.
+    cad_final_col : str, default "CAD_act__final"
+        Nom de la colonne contenant le CAD extrapolé final (proportion).
+    is_open_col : str, default "is_open"
+        Nom de la colonne booléenne indiquant si le contrat est encore ouvert.
+    lgd_observed_col : str, default "LGD_observed"
+        Nom de la colonne contenant la LGD observée au niveau facilité.
+
+    Returns
+    -------
+    base_enriched : pd.DataFrame
+        La table d'entrée enrichie des colonnes intermédiaires au grain
+        facilité : f"{crr_final_col}_tilde" et "LRA_LGD_open".
+    lra_final : pd.DataFrame
+        Table indexée par HLC, avec les colonnes "LRA_LGD_open", "N_open",
+        "LRA_LGD_closed", "N_closed", "LRA_LGD_final".
+    """
+    # ------------------------------------------------------------------
+    # 1) Ajustement CRR / (1 + CAD) + LRA LGD ouverts, au grain facilité
+    # ------------------------------------------------------------------
+    base_enriched = base_enriched.copy()
     crr_tilde_col = f"{crr_final_col}_tilde"
-    dtm_filled[crr_tilde_col] = dtm_filled[crr_final_col] / (1 + dtm_filled[cad_final_col])
-    dtm_filled[out_col] = 1 - dtm_filled[crr_tilde_col]
-    return dtm_filled
+    base_enriched[crr_tilde_col] = (
+        base_enriched[crr_final_col] / (1 + base_enriched[cad_final_col])
+    )
+    base_enriched["LRA_LGD_open"] = 1 - base_enriched[crr_tilde_col]
+
+    # ------------------------------------------------------------------
+    # 2) Agrégation LRA LGD ouverts par HLC
+    # ------------------------------------------------------------------
+    open_mask = base_enriched[is_open_col].astype(bool)
+    lra_open_by_hlc = (
+        base_enriched.loc[open_mask]
+        .groupby(category_column)
+        .agg(LRA_LGD_open=("LRA_LGD_open", "mean"), N_open=("LRA_LGD_open", "size"))
+    )
+
+    # ------------------------------------------------------------------
+    # 3) Agrégation LRA LGD fermés par HLC
+    # ------------------------------------------------------------------
+    closed = base_enriched.loc[~open_mask]
+    g = closed.groupby(category_column)[lgd_observed_col]
+    lra_closed_by_hlc = g.mean().to_frame("LRA_LGD_closed")
+    lra_closed_by_hlc["N_closed"] = g.size()
+
+    # ------------------------------------------------------------------
+    # 4) Combinaison finale : moyenne pondérée par le nombre de contrats
+    # ------------------------------------------------------------------
+    lra_final = lra_open_by_hlc.join(lra_closed_by_hlc, how="outer")
+    n_open = lra_final["N_open"].fillna(0)
+    n_closed = lra_final["N_closed"].fillna(0)
+    weighted_sum = (
+        n_open * lra_final["LRA_LGD_open"].fillna(0)
+        + n_closed * lra_final["LRA_LGD_closed"].fillna(0)
+    )
+    lra_final["LRA_LGD_final"] = weighted_sum / (n_open + n_closed)
+
+    return base_enriched, lra_final
