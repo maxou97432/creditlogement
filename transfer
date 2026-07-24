@@ -1,22 +1,71 @@
-# Fix 1 : mise à l'échelle du CRR
-final_survival_rate = final_survival_rate.with_columns(
-    (pl.col("CRR__final") / 100).alias("CRR__final_prop")
-)
+def cap_floor_observed(
+    dtm_in: pd.DataFrame,
+    cum_field: str,
+    TTW: int,
+    lower_pct: float = 0.001,
+    upper_pct: float = 0.999,
+    mode: str = "per_class",
+    category_column: str | None = None,
+) -> pd.DataFrame:
+    """
+    Cap/floor les colonnes cumulatives observées (horizons 1..TTW) au 0.1e et
+    99.9e percentile, pour éviter que des outliers d'observation ne biaisent
+    les facteurs de développement calculés dessus.
+    (Doc RISK FRB LGD Retail Model — traitement des outliers CRR/CA)
 
-# Recalcul du CRRadj avec la bonne échelle
-final_survival_rate = final_survival_rate.with_columns(
-    (pl.col("CRR__final_prop") / (1 + pl.col("CAD_act__final"))).alias("CRRadj_v2")
-)
-final_survival_rate = final_survival_rate.with_columns(
-    (1 - pl.col("CRRadj_v2")).alias("LRAfin_v2")
-)
+    Parameters
+    ----------
+    dtm_in : pd.DataFrame
+        Table au grain facilité, contenant les colonnes cumulatives
+        {cum_field}1an, {cum_field}2ans, ..., {cum_field}{TTW}ans.
+    cum_field : str
+        Nom de base du champ cumulatif (ex. "CRR_" ou "CAD_act_").
+    TTW : int
+        Nombre d'horizons.
+    lower_pct, upper_pct : float
+        Percentiles de floor/cap (par défaut 0.1% et 99.9%).
+    mode : {"per_class", "global"}, default "per_class"
+        - "per_class" : les percentiles sont calculés séparément pour chaque
+          modalité de `category_column` (recommandé — cohérent avec le fait
+          que les dev_factor/unobs_SR sont eux-mêmes calculés par classe).
+        - "global" : les percentiles sont calculés une seule fois sur
+          l'ensemble du portefeuille, tous HLC confondus.
+    category_column : str, optional
+        Nom de la colonne de catégorie (HLC). Obligatoire si mode="per_class".
 
-# Nouveau diagnostic
-mask_bad_v2 = final_survival_rate["LRAfin_v2"] > 1
-print(f"Nb de lignes LGD > 100% après fix échelle : {mask_bad_v2.sum()}")
+    Returns
+    -------
+    pd.DataFrame
+        Copie de dtm_in avec les colonnes cumulatives cappées/flooréees.
 
-print(
-    final_survival_rate.filter(pl.col("LRAfin_v2") > 1)
-    .select(["CRR__final_prop", "CAD_act__final", "CRRadj_v2", "LRAfin_v2"])
-    .describe()
-)
+    Raises
+    ------
+    ValueError
+        Si mode="per_class" et category_column est None.
+    """
+    if mode == "per_class" and category_column is None:
+        raise ValueError("category_column must be provided when mode='per_class'")
+
+    dtm_in = dtm_in.copy()
+    cols = [f"{cum_field}1an"] + [f"{cum_field}{h}ans" for h in range(2, TTW + 1)]
+    cols = [c for c in cols if c in dtm_in.columns]
+
+    if mode == "global":
+        for col in cols:
+            lo = dtm_in[col].quantile(lower_pct)
+            hi = dtm_in[col].quantile(upper_pct)
+            dtm_in[col] = dtm_in[col].clip(lower=lo, upper=hi)
+
+    elif mode == "per_class":
+        for col in cols:
+            bounds = dtm_in.groupby(category_column)[col].quantile([lower_pct, upper_pct]).unstack()
+            lo_map = bounds[lower_pct]
+            hi_map = bounds[upper_pct]
+            lo = dtm_in[category_column].map(lo_map)
+            hi = dtm_in[category_column].map(hi_map)
+            dtm_in[col] = dtm_in[col].clip(lower=lo, upper=hi)
+
+    else:
+        raise ValueError(f"mode must be 'per_class' or 'global', got {mode!r}")
+
+    return dtm_in
