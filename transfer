@@ -1,9 +1,35 @@
-outliers = dtm.filter(pl.col("CAD_act_14ans") < -10)  # adapte l'horizon si besoin
-print(
-    outliers.group_by("Seg_X_HLC")
-    .agg(pl.len().alias("n_outliers"))
-)
+def apply_winsorisation_lazy(
+    lf: pl.LazyFrame,
+    col: str,
+    tailsize: float = 0.001,
+    mode: str = "global",
+    category_column: str | None = None,
+    min_class_size: int = 1000,
+) -> pl.LazyFrame:
+    if mode == "global":
+        lo = pl.col(col).quantile(tailsize, interpolation="linear")
+        hi = pl.col(col).quantile(1 - tailsize, interpolation="linear")
 
-# Et la taille totale de chaque classe concernée
-class_sizes = dtm.group_by("Seg_X_HLC").agg(pl.len().alias("n_total")).collect()
-print(class_sizes.sort("n_total"))
+    elif mode == "per_class":
+        if category_column is None:
+            raise ValueError("category_column must be provided when mode='per_class'")
+
+        class_size = pl.count().over(category_column)
+
+        lo_global = pl.col(col).quantile(tailsize, interpolation="linear")
+        hi_global = pl.col(col).quantile(1 - tailsize, interpolation="linear")
+        lo_class = pl.col(col).quantile(tailsize, interpolation="linear").over(category_column)
+        hi_class = pl.col(col).quantile(1 - tailsize, interpolation="linear").over(category_column)
+
+        lo = pl.when(class_size >= min_class_size).then(lo_class).otherwise(lo_global)
+        hi = pl.when(class_size >= min_class_size).then(hi_class).otherwise(hi_global)
+
+    else:
+        raise ValueError(f"mode must be 'global' or 'per_class', got {mode!r}")
+
+    return lf.with_columns(
+        pl.when(pl.col(col) < lo).then(lo)
+          .when(pl.col(col) > hi).then(hi)
+          .otherwise(pl.col(col))
+          .alias(col)
+    )
