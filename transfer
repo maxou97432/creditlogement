@@ -1,6 +1,17 @@
-mask_bad = base_enriched["LGD_facility_final"] > 1
+import polars as pl
+
+mask_bad = final_survival_rate["LRAfin_REBOOTp"] > 1
 
 print(f"Nb de lignes LGD > 100% : {mask_bad.sum()}")
-print(base_enriched.loc[mask_bad, ["CRR__final", "CAD_act__final", "CRR__final_tilde",
-                                    "LRA_LGD_open", "is_open"]].describe())
-print(base_enriched.loc[mask_bad, ["CRR__final", "CAD_act__final"]].head(10))
+
+print(
+    final_survival_rate.filter(pl.col("LRAfin_REBOOTp") > 1)
+    .select(["CRR__final", "CAD_act__final", "CRRadj", "LRAfin_REBOOTp", "CLOS"])
+    .describe()
+)
+
+print(
+    final_survival_rate.filter(pl.col("LRAfin_REBOOTp") > 1)
+    .select(["CRR__final", "CAD_act__final"])
+    .head(10)
+)
