@@ -1,11 +1,9 @@
-# 1. Combien de classes/générations sont concernées
-bad = final_survival_rate.filter(pl.col("CAD_act__final") > 0)
-print(
-    bad.group_by([category_column, "generation"])
-    .agg(pl.len().alias("n_cases"))
-    .sort("n_cases", descending=True)
+d11 = final_survival_rate.filter(
+    (pl.col(CFG["jenks_submodel"]) == "D_11") & (pl.col("generation").is_in([2013, 2014, 2015]))
 )
+print(d11.select(["CRR__final", "CAD_act__final"]).describe())
 
-# 2. Est-ce concentré sur peu de couples classe/génération (hypothèse 2)
-#    ou étalé partout (hypothèse 1, dérive générale du mécanisme) ?
-print(bad.select([category_column, "generation"]).n_unique())
+# Et surtout, regarder le dev_factor du CAD pour cette classe précise
+# (il faut aller chercher results["D_11"]["dev_factor_mCAD_act_"] dans ton dict de résultats)
+print(results["D_11"]["dev_factor_mCAD_act_"])
+print(results["D_11"]["n_open_cases"])  # pour voir si l'effectif est faible à certains horizons
