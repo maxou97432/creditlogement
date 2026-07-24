@@ -1,9 +1,8 @@
 d11 = final_survival_rate.filter(
-    (pl.col(CFG["jenks_submodel"]) == "D_11") & (pl.col("generation").is_in([2013, 2014, 2015]))
+    (pl.col(CFG["jenks_submodel"]) == "D_11")
+    & (pl.col("generation").is_in([2013.0, 2014.0, 2015.0]))
 )
+print(d11.height)   # vérifie qu'il y a bien des lignes cette fois
 print(d11.select(["CRR__final", "CAD_act__final"]).describe())
 
-# Et surtout, regarder le dev_factor du CAD pour cette classe précise
-# (il faut aller chercher results["D_11"]["dev_factor_mCAD_act_"] dans ton dict de résultats)
-print(results["D_11"]["dev_factor_mCAD_act_"])
-print(results["D_11"]["n_open_cases"])  # pour voir si l'effectif est faible à certains horizons
+print(results["D_11"]["unobs_SR"])
