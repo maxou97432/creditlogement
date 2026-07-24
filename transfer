@@ -1,6 +1,11 @@
-positive_cases = final_survival_rate.filter(pl.col("CAD_act__final") > 0)
+# 1. Combien de classes/générations sont concernées
+bad = final_survival_rate.filter(pl.col("CAD_act__final") > 0)
 print(
-    positive_cases.group_by(category_column)
-    .agg(pl.len().alias("n_positive"))
-    .sort("n_positive", descending=True)
+    bad.group_by([category_column, "generation"])
+    .agg(pl.len().alias("n_cases"))
+    .sort("n_cases", descending=True)
 )
+
+# 2. Est-ce concentré sur peu de couples classe/génération (hypothèse 2)
+#    ou étalé partout (hypothèse 1, dérive générale du mécanisme) ?
+print(bad.select([category_column, "generation"]).n_unique())
