@@ -1,17 +1,22 @@
-import polars as pl
-
-mask_bad = final_survival_rate["LRAfin_REBOOTp"] > 1
-
-print(f"Nb de lignes LGD > 100% : {mask_bad.sum()}")
-
-print(
-    final_survival_rate.filter(pl.col("LRAfin_REBOOTp") > 1)
-    .select(["CRR__final", "CAD_act__final", "CRRadj", "LRAfin_REBOOTp", "CLOS"])
-    .describe()
+# Fix 1 : mise à l'échelle du CRR
+final_survival_rate = final_survival_rate.with_columns(
+    (pl.col("CRR__final") / 100).alias("CRR__final_prop")
 )
 
+# Recalcul du CRRadj avec la bonne échelle
+final_survival_rate = final_survival_rate.with_columns(
+    (pl.col("CRR__final_prop") / (1 + pl.col("CAD_act__final"))).alias("CRRadj_v2")
+)
+final_survival_rate = final_survival_rate.with_columns(
+    (1 - pl.col("CRRadj_v2")).alias("LRAfin_v2")
+)
+
+# Nouveau diagnostic
+mask_bad_v2 = final_survival_rate["LRAfin_v2"] > 1
+print(f"Nb de lignes LGD > 100% après fix échelle : {mask_bad_v2.sum()}")
+
 print(
-    final_survival_rate.filter(pl.col("LRAfin_REBOOTp") > 1)
-    .select(["CRR__final", "CAD_act__final"])
-    .head(10)
+    final_survival_rate.filter(pl.col("LRAfin_v2") > 1)
+    .select(["CRR__final_prop", "CAD_act__final", "CRRadj_v2", "LRAfin_v2"])
+    .describe()
 )
