@@ -1,15 +1,5 @@
-# Décomposer la variance selon la source de la valeur
-df.group_by("CLOS").agg([
-    pl.len().alias("n"),
-    pl.col("lra_obligor").mean().alias("mean"),
-    pl.col("lra_obligor").std().alias("std"),
-    pl.col("lgd_obligor_base").std().alias("std_base"),   # la version sans survival rate
-])
-
-# Et vérifier l'impact du clip sur le std
-df.select([
-    pl.col("lra_obligor").std().alias("std_sans_clip"),
-    pl.col("lra_obligor").clip(0, 100).std().alias("std_avec_clip"),
-    (pl.col("lra_obligor") > 100).sum().alias("n_sup_100"),
-    (pl.col("lra_obligor") < 0).sum().alias("n_neg"),
+lf_LGD4.filter(pl.col(CFG["clos"]) == "CLOS").select([
+    pl.corr("lra_obligor", "lgd_obligor").alias("corr"),
+    (pl.col("lra_obligor") - pl.col("lgd_obligor")).abs().mean().alias("MAE"),
+    (pl.col("lra_obligor") - pl.col("lgd_obligor")).abs().quantile(0.95).alias("q95_ecart"),
 ])
