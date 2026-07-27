@@ -1,4 +1,334 @@
-# Ces contrats sans CAD sont-ils d'un type de produit particulier ?
-final_survival_rate.filter(
-    pl.col("CAD_act__final").is_null() & pl.col("CRR__final").is_not_null()
-).group_by("TYP_CPTE").agg(pl.len().alias("n")).sort("n", descending=True)
+"""
+================================================================================
+ Automatisation du Reporting de Validation LGD
+================================================================================
+ Génère automatiquement :
+   - Rapport 1 : Tableau de synthèse (style "Tableau 42") — Somer's D par segment
+                 pour les modèles LGD 3Y et LGD FINALE, coloré Vert/Ambre/Rouge.
+   - Rapport 2 : Analyse par segment (style "Tableau 36/45") — matrice de
+                 contingence Estimé (lignes) vs Observé (colonnes).
+
+ Le code est modulaire : fonctions distinctes pour le calcul, la matrice et
+ le formatage.
+================================================================================
+"""
+
+from __future__ import annotations
+
+from typing import Iterable, Sequence
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+
+# ==============================================================================
+# 1. BLOC DE CONFIGURATION — seule partie à modifier par l'utilisateur
+# ==============================================================================
+
+CONFIG = {
+    # DataFrame source (pandas). Remplacer par votre chargement réel.
+    "df": None,
+
+    # Colonnes
+    "col_segment":   "segment",          # ex: "Home Loans", "Private Current account"
+    "col_estimated": "LGD_estimated",    # LGD estimées, valeurs entre 0 et 100
+    "col_observed":  "LGD_observed",     # LGD observées, valeurs entre 0 et 100
+    "col_target":    "statut",           # ex: "Cured" vs "Non cured"
+
+    # Segments à traiter : liste de noms, ou "all"
+    "segments_to_analyze": "all",
+
+    # Colonnes de scores Somer's D par modèle
+    "lgd_3y_col":     "LGD_3Y",
+    "lgd_finale_col": "LGD_FINALE",
+
+    # Modalité de la colonne cible considérée comme l'événement "positif"
+    "target_positive_label": "Non cured",
+}
+
+
+# Paliers de tranches (bins) pour les matrices de contingence
+BINS = [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, np.inf]
+BIN_LABELS = [
+    "[0-5%]", "[5-10%]", "[10-20%]", "[20-30%]", "[30-40%]", "[40-50%]",
+    "[50-60%]", "[60-70%]", "[70-80%]", "[80-90%]", "[90-100%]", "[100%+]",
+]
+
+# Seuils de coloration du Somer's D
+THRESHOLD_GREEN = 0.30   # D >= 30%  -> VERT
+THRESHOLD_AMBER = 0.15   # 15% <= D < 30% -> AMBRE ; D < 15% -> ROUGE
+
+
+# ==============================================================================
+# 2. CALCUL — Somer's D
+# ==============================================================================
+
+def compute_somers_d(scores: Sequence[float], target: Sequence[int]) -> float:
+    """
+    Capacité de discrimination (Somer's D) d'un score continu vis-à-vis d'une
+    cible binaire.
+
+    Somer's D = 2 * AUC - 1, calculé ici via la statistique de Mann-Whitney U
+    (équivalent au comptage paires concordantes / discordantes, mais robuste
+    et vectorisé).
+
+    Parameters
+    ----------
+    scores : Sequence[float]
+        Valeurs estimées (ex. LGD estimée).
+    target : Sequence[int]
+        Cible binaire (1 = événement positif, 0 = sinon).
+
+    Returns
+    -------
+    float
+        Somer's D dans [-1, 1]. Retourne np.nan si la cible est constante
+        ou si l'échantillon est vide.
+    """
+    s = pd.Series(scores).astype(float)
+    y = pd.Series(target).astype(float)
+
+    mask = s.notna() & y.notna()
+    s, y = s[mask], y[mask]
+
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+
+    # AUC via Mann-Whitney U
+    u_stat = stats.mannwhitneyu(s[y == 1], s[y == 0], alternative="two-sided").statistic
+    auc = u_stat / (n_pos * n_neg)
+    return 2.0 * auc - 1.0
+
+
+def _binarize_target(series: pd.Series, positive_label: str) -> pd.Series:
+    """Convertit la colonne de statut en 0/1 selon la modalité positive."""
+    return (series.astype(str).str.strip().str.lower()
+            == str(positive_label).strip().lower()).astype(int)
+
+
+# ==============================================================================
+# 3. CALCUL — Matrice de contingence Estimé vs Observé
+# ==============================================================================
+
+def build_contingency_matrix(
+    df: pd.DataFrame,
+    col_estimated: str,
+    col_observed: str,
+) -> pd.DataFrame:
+    """
+    Matrice de contingence : tranches de l'Estimé en lignes, tranches de
+    l'Observé en colonnes, valeur = comptage des observations.
+
+    Toutes les tranches de BIN_LABELS sont présentes, même vides (comptage 0),
+    afin que toutes les matrices aient la même forme d'un segment à l'autre.
+    """
+    est_bin = pd.cut(df[col_estimated], bins=BINS, labels=BIN_LABELS,
+                     right=False, include_lowest=True)
+    obs_bin = pd.cut(df[col_observed], bins=BINS, labels=BIN_LABELS,
+                     right=False, include_lowest=True)
+
+    matrix = pd.crosstab(est_bin, obs_bin, dropna=False)
+    matrix = matrix.reindex(index=BIN_LABELS, columns=BIN_LABELS, fill_value=0)
+
+    matrix.index.name = "Estimé"
+    matrix.columns.name = "Observé"
+    return matrix
+
+
+# ==============================================================================
+# 4. CALCUL — Tableau de synthèse
+# ==============================================================================
+
+def build_summary_table(
+    df: pd.DataFrame,
+    col_segment: str,
+    col_target: str,
+    lgd_3y_col: str,
+    lgd_finale_col: str,
+    positive_label: str,
+    segments: Iterable[str] | str = "all",
+) -> pd.DataFrame:
+    """
+    Tableau récapitulatif : un Somer's D par segment et par modèle
+    (LGD 3Y et LGD FINALE), plus l'effectif du segment.
+    """
+    work = df.copy()
+    work["_target_bin"] = _binarize_target(work[col_target], positive_label)
+
+    if segments != "all":
+        work = work[work[col_segment].isin(list(segments))]
+
+    rows = []
+    for seg, sub in work.groupby(col_segment, dropna=False):
+        rows.append({
+            "Segment": seg,
+            "N": len(sub),
+            "Somer's D — LGD 3Y": compute_somers_d(sub[lgd_3y_col], sub["_target_bin"]),
+            "Somer's D — LGD FINALE": compute_somers_d(sub[lgd_finale_col], sub["_target_bin"]),
+        })
+
+    summary = pd.DataFrame(rows).sort_values("Segment").reset_index(drop=True)
+    return summary
+
+
+# ==============================================================================
+# 5. FORMATAGE — coloration conditionnelle
+# ==============================================================================
+
+def _color_somers_d(value: float) -> str:
+    """Retourne le style CSS de fond selon les seuils Vert / Ambre / Rouge."""
+    if pd.isna(value):
+        return "background-color: #E0E0E0; color: #666666;"
+    if value >= THRESHOLD_GREEN:
+        return "background-color: #C6EFCE; color: #006100;"   # VERT
+    if value >= THRESHOLD_AMBER:
+        return "background-color: #FFEB9C; color: #9C5700;"   # AMBRE
+    return "background-color: #FFC7CE; color: #9C0006;"       # ROUGE
+
+
+def format_summary_table(summary: pd.DataFrame):
+    """Applique la coloration Vert/Ambre/Rouge aux colonnes de Somer's D."""
+    score_cols = [c for c in summary.columns if c.startswith("Somer's D")]
+    return (
+        summary.style
+        .map(_color_somers_d, subset=score_cols)
+        .format({c: "{:.2%}" for c in score_cols}, na_rep="n/a")
+        .set_caption("Tableau 42 — Synthèse de la capacité de discrimination (Somer's D)")
+        .set_table_styles([
+            {"selector": "caption",
+             "props": [("font-size", "13px"), ("font-weight", "bold"),
+                       ("text-align", "left"), ("padding-bottom", "8px")]},
+            {"selector": "th",
+             "props": [("background-color", "#F2F2F2"), ("text-align", "center")]},
+        ])
+    )
+
+
+def format_contingency_matrix(matrix: pd.DataFrame, segment_name: str):
+    """
+    Met en forme la matrice de contingence : dégradé de couleur sur les
+    comptages, diagonale (concordance parfaite) mise en évidence.
+    """
+    def _highlight_diagonal(data: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=data.index, columns=data.columns)
+        for label in data.index:
+            if label in data.columns:
+                styles.loc[label, label] = "border: 2px solid #2E5FA3;"
+        return styles
+
+    return (
+        matrix.style
+        .background_gradient(cmap="Blues", axis=None)
+        .apply(_highlight_diagonal, axis=None)
+        .format("{:,.0f}")
+        .set_caption(
+            f'Segment "{segment_name}": Performance by segment (estimated vs observed)'
+        )
+        .set_table_styles([
+            {"selector": "caption",
+             "props": [("font-size", "13px"), ("font-weight", "bold"),
+                       ("text-align", "left"), ("padding-bottom", "8px")]},
+            {"selector": "th",
+             "props": [("background-color", "#F2F2F2"), ("text-align", "center"),
+                       ("font-size", "11px")]},
+            {"selector": "td",
+             "props": [("text-align", "center"), ("font-size", "11px")]},
+        ])
+    )
+
+
+# ==============================================================================
+# 6. ORCHESTRATION — génération des deux rapports
+# ==============================================================================
+
+def generate_report(config: dict = CONFIG):
+    """
+    Produit les deux rendus attendus :
+      - Rapport 1 : tableau de synthèse formaté (retourné + affiché)
+      - Rapport 2 : une matrice de contingence formatée par segment
+
+    Returns
+    -------
+    tuple[Styler, dict[str, Styler]]
+        Le tableau de synthèse stylé, et un dictionnaire
+        {segment: matrice stylée}.
+    """
+    df = config["df"]
+    if df is None:
+        raise ValueError("CONFIG['df'] doit contenir le DataFrame source.")
+
+    # ---------------- Rapport 1 : synthèse ----------------
+    summary = build_summary_table(
+        df,
+        col_segment=config["col_segment"],
+        col_target=config["col_target"],
+        lgd_3y_col=config["lgd_3y_col"],
+        lgd_finale_col=config["lgd_finale_col"],
+        positive_label=config["target_positive_label"],
+        segments=config["segments_to_analyze"],
+    )
+    styled_summary = format_summary_table(summary)
+
+    # ---------------- Rapport 2 : par segment ----------------
+    segments = config["segments_to_analyze"]
+    if segments == "all":
+        segments = sorted(df[config["col_segment"]].dropna().unique())
+
+    matrices = {}
+    for seg in segments:
+        sub = df[df[config["col_segment"]] == seg]
+        matrix = build_contingency_matrix(
+            sub,
+            col_estimated=config["col_estimated"],
+            col_observed=config["col_observed"],
+        )
+        matrices[seg] = format_contingency_matrix(matrix, seg)
+
+    return styled_summary, matrices
+
+
+# ==============================================================================
+# 7. EXEMPLE D'UTILISATION (à copier dans les cellules du notebook)
+# ==============================================================================
+
+if __name__ == "__main__":
+    # --- Cellule 1 : configuration ---
+    # CONFIG["df"] = pd.read_parquet("chemin/vers/donnees.parquet")
+    # CONFIG["col_segment"] = "Seg_X_HLC"
+    # ...
+
+    # --- Cellule 2 : génération ---
+    # styled_summary, matrices = generate_report(CONFIG)
+
+    # --- Cellule 3 : affichage du rapport 1 ---
+    # display(styled_summary)
+
+    # --- Cellule 4 : affichage du rapport 2, segment par segment ---
+    # for seg, styled_matrix in matrices.items():
+    #     display(styled_matrix)
+
+    # Jeu de données de démonstration pour tester le module isolément
+    rng = np.random.default_rng(42)
+    n = 5_000
+    demo = pd.DataFrame({
+        "segment": rng.choice(["Home Loans", "Private Current account",
+                               "Consumer Loans"], size=n),
+        "LGD_estimated": rng.uniform(0, 100, size=n),
+        "LGD_observed": rng.uniform(0, 100, size=n),
+        "statut": rng.choice(["Cured", "Non cured"], size=n, p=[0.4, 0.6]),
+    })
+    demo["LGD_3Y"] = demo["LGD_estimated"] + rng.normal(0, 10, size=n)
+    demo["LGD_FINALE"] = demo["LGD_estimated"] + rng.normal(0, 5, size=n)
+
+    CONFIG["df"] = demo
+    summary_tbl, matrices_tbl = generate_report(CONFIG)
+
+    print("=== RAPPORT 1 — Tableau de synthèse ===")
+    print(summary_tbl.data.to_string(index=False))
+    print(f"\n=== RAPPORT 2 — {len(matrices_tbl)} matrices générées ===")
+    for seg, m in matrices_tbl.items():
+        print(f"\nSegment: {seg}  (shape {m.data.shape})")
+        print(m.data.iloc[:5, :5].to_string())
