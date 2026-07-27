@@ -3,8 +3,8 @@
  Automatisation du Reporting de Validation LGD
 ================================================================================
  Génère automatiquement :
-   - Rapport 1 : Tableau de synthèse (style "Tableau 42") — Somer's D par segment
-                 pour les modèles LGD 3Y et LGD FINALE, coloré Vert/Ambre/Rouge.
+   - Rapport 1 : Tableau de synthèse (style "Tableau 42") — Somer's D du modèle
+                 LGD, par segment ET au global, coloré Vert/Ambre/Rouge.
    - Rapport 2 : Analyse par segment (style "Tableau 36/45") — matrice de
                  contingence Estimé (lignes) vs Observé (colonnes).
 
@@ -31,20 +31,19 @@ CONFIG = {
     "df": None,
 
     # Colonnes
-    "col_segment":   "segment",          # ex: "Home Loans", "Private Current account"
-    "col_estimated": "LGD_estimated",    # LGD estimées, valeurs entre 0 et 100
-    "col_observed":  "LGD_observed",     # LGD observées, valeurs entre 0 et 100
-    "col_target":    "statut",           # ex: "Cured" vs "Non cured"
+    "col_segment":   "segment",             # ex: "Home Loans", "Private Current account"
+    "col_estimated": "LGD_3ans_finale",     # LGD prédite par le modèle, entre 0 et 100
+    "col_observed":  "LGD_observed",        # LGD observée, entre 0 et 100
+    "col_target":    "statut",              # ex: "Cured" vs "Non cured"
 
     # Segments à traiter : liste de noms, ou "all"
     "segments_to_analyze": "all",
 
-    # Colonnes de scores Somer's D par modèle
-    "lgd_3y_col":     "LGD_3Y",
-    "lgd_finale_col": "LGD_FINALE",
-
     # Modalité de la colonne cible considérée comme l'événement "positif"
     "target_positive_label": "Non cured",
+
+    # Libellé du modèle affiché dans le tableau de synthèse
+    "model_label": "LGD 3 ans finale",
 }
 
 
@@ -56,8 +55,11 @@ BIN_LABELS = [
 ]
 
 # Seuils de coloration du Somer's D
-THRESHOLD_GREEN = 0.30   # D >= 30%  -> VERT
-THRESHOLD_AMBER = 0.15   # 15% <= D < 30% -> AMBRE ; D < 15% -> ROUGE
+THRESHOLD_GREEN = 0.30   # D >= 30%        -> VERT
+THRESHOLD_AMBER = 0.15   # 15% <= D < 30%  -> AMBRE ; D < 15% -> ROUGE
+
+# Libellé de la ligne d'agrégation globale
+GLOBAL_LABEL = "GLOBAL"
 
 
 # ==============================================================================
@@ -69,22 +71,22 @@ def compute_somers_d(scores: Sequence[float], target: Sequence[int]) -> float:
     Capacité de discrimination (Somer's D) d'un score continu vis-à-vis d'une
     cible binaire.
 
-    Somer's D = 2 * AUC - 1, calculé ici via la statistique de Mann-Whitney U
-    (équivalent au comptage paires concordantes / discordantes, mais robuste
-    et vectorisé).
+    Somer's D = 2 * AUC - 1, calculé via la statistique de Mann-Whitney U
+    (équivalent au comptage paires concordantes / discordantes, mais vectorisé
+    et robuste sur de gros volumes).
 
     Parameters
     ----------
     scores : Sequence[float]
-        Valeurs estimées (ex. LGD estimée).
+        Valeurs estimées (LGD prédite par le modèle).
     target : Sequence[int]
         Cible binaire (1 = événement positif, 0 = sinon).
 
     Returns
     -------
     float
-        Somer's D dans [-1, 1]. Retourne np.nan si la cible est constante
-        ou si l'échantillon est vide.
+        Somer's D dans [-1, 1]. np.nan si la cible est constante ou si
+        l'échantillon est vide.
     """
     s = pd.Series(scores).astype(float)
     y = pd.Series(target).astype(float)
@@ -97,7 +99,6 @@ def compute_somers_d(scores: Sequence[float], target: Sequence[int]) -> float:
     if n_pos == 0 or n_neg == 0:
         return np.nan
 
-    # AUC via Mann-Whitney U
     u_stat = stats.mannwhitneyu(s[y == 1], s[y == 0], alternative="two-sided").statistic
     auc = u_stat / (n_pos * n_neg)
     return 2.0 * auc - 1.0
@@ -139,21 +140,27 @@ def build_contingency_matrix(
 
 
 # ==============================================================================
-# 4. CALCUL — Tableau de synthèse
+# 4. CALCUL — Tableau de synthèse (par segment + global)
 # ==============================================================================
 
 def build_summary_table(
     df: pd.DataFrame,
     col_segment: str,
+    col_estimated: str,
+    col_observed: str,
     col_target: str,
-    lgd_3y_col: str,
-    lgd_finale_col: str,
     positive_label: str,
+    model_label: str,
     segments: Iterable[str] | str = "all",
 ) -> pd.DataFrame:
     """
-    Tableau récapitulatif : un Somer's D par segment et par modèle
-    (LGD 3Y et LGD FINALE), plus l'effectif du segment.
+    Tableau récapitulatif du modèle : une ligne par segment, plus une ligne
+    GLOBAL agrégeant l'ensemble du périmètre analysé.
+
+    Colonnes produites
+    ------------------
+    Segment, N, LGD estimée moyenne, LGD observée moyenne, Écart (est. - obs.),
+    Somer's D.
     """
     work = df.copy()
     work["_target_bin"] = _binarize_target(work[col_target], positive_label)
@@ -161,16 +168,29 @@ def build_summary_table(
     if segments != "all":
         work = work[work[col_segment].isin(list(segments))]
 
-    rows = []
-    for seg, sub in work.groupby(col_segment, dropna=False):
-        rows.append({
-            "Segment": seg,
-            "N": len(sub),
-            "Somer's D — LGD 3Y": compute_somers_d(sub[lgd_3y_col], sub["_target_bin"]),
-            "Somer's D — LGD FINALE": compute_somers_d(sub[lgd_finale_col], sub["_target_bin"]),
-        })
+    somers_col = f"Somer's D — {model_label}"
 
+    def _stats_for(sub: pd.DataFrame, label: str) -> dict:
+        return {
+            "Segment": label,
+            "N": len(sub),
+            "LGD estimée moy.": sub[col_estimated].mean(),
+            "LGD observée moy.": sub[col_observed].mean(),
+            "Écart (est. - obs.)": sub[col_estimated].mean() - sub[col_observed].mean(),
+            somers_col: compute_somers_d(sub[col_estimated], sub["_target_bin"]),
+        }
+
+    rows = [
+        _stats_for(sub, seg)
+        for seg, sub in work.groupby(col_segment, dropna=False)
+    ]
     summary = pd.DataFrame(rows).sort_values("Segment").reset_index(drop=True)
+
+    # Ligne globale : calculée sur l'ensemble du périmètre, pas comme une
+    # moyenne des Somer's D par segment (qui n'aurait pas de sens statistique).
+    global_row = pd.DataFrame([_stats_for(work, GLOBAL_LABEL)])
+    summary = pd.concat([summary, global_row], ignore_index=True)
+
     return summary
 
 
@@ -179,7 +199,7 @@ def build_summary_table(
 # ==============================================================================
 
 def _color_somers_d(value: float) -> str:
-    """Retourne le style CSS de fond selon les seuils Vert / Ambre / Rouge."""
+    """Style CSS de fond selon les seuils Vert / Ambre / Rouge."""
     if pd.isna(value):
         return "background-color: #E0E0E0; color: #666666;"
     if value >= THRESHOLD_GREEN:
@@ -189,14 +209,26 @@ def _color_somers_d(value: float) -> str:
     return "background-color: #FFC7CE; color: #9C0006;"       # ROUGE
 
 
+def _bold_global_row(row: pd.Series) -> list[str]:
+    """Met la ligne GLOBAL en gras avec un fond distinct."""
+    if row["Segment"] == GLOBAL_LABEL:
+        return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
+    return [""] * len(row)
+
+
 def format_summary_table(summary: pd.DataFrame):
-    """Applique la coloration Vert/Ambre/Rouge aux colonnes de Somer's D."""
+    """Applique la coloration Vert/Ambre/Rouge et met en avant la ligne GLOBAL."""
     score_cols = [c for c in summary.columns if c.startswith("Somer's D")]
+    pct_cols = ["LGD estimée moy.", "LGD observée moy.", "Écart (est. - obs.)"]
+
     return (
         summary.style
+        .apply(_bold_global_row, axis=1)
         .map(_color_somers_d, subset=score_cols)
         .format({c: "{:.2%}" for c in score_cols}, na_rep="n/a")
-        .set_caption("Tableau 42 — Synthèse de la capacité de discrimination (Somer's D)")
+        .format({c: "{:.2f}" for c in pct_cols}, na_rep="n/a")
+        .format({"N": "{:,.0f}"})
+        .set_caption("Tableau 42 — Capacité de discrimination du modèle (Somer's D)")
         .set_table_styles([
             {"selector": "caption",
              "props": [("font-size", "13px"), ("font-weight", "bold"),
@@ -209,8 +241,8 @@ def format_summary_table(summary: pd.DataFrame):
 
 def format_contingency_matrix(matrix: pd.DataFrame, segment_name: str):
     """
-    Met en forme la matrice de contingence : dégradé de couleur sur les
-    comptages, diagonale (concordance parfaite) mise en évidence.
+    Met en forme la matrice de contingence : dégradé sur les comptages,
+    diagonale (concordance parfaite) encadrée.
     """
     def _highlight_diagonal(data: pd.DataFrame) -> pd.DataFrame:
         styles = pd.DataFrame("", index=data.index, columns=data.columns)
@@ -241,20 +273,21 @@ def format_contingency_matrix(matrix: pd.DataFrame, segment_name: str):
 
 
 # ==============================================================================
-# 6. ORCHESTRATION — génération des deux rapports
+# 6. ORCHESTRATION
 # ==============================================================================
 
 def generate_report(config: dict = CONFIG):
     """
     Produit les deux rendus attendus :
-      - Rapport 1 : tableau de synthèse formaté (retourné + affiché)
-      - Rapport 2 : une matrice de contingence formatée par segment
+      - Rapport 1 : tableau de synthèse formaté (segments + ligne GLOBAL)
+      - Rapport 2 : une matrice de contingence formatée par segment,
+                    plus une matrice globale
 
     Returns
     -------
     tuple[Styler, dict[str, Styler]]
-        Le tableau de synthèse stylé, et un dictionnaire
-        {segment: matrice stylée}.
+        Le tableau de synthèse stylé, et un dictionnaire {segment: matrice stylée}
+        contenant également la clé GLOBAL_LABEL.
     """
     df = config["df"]
     if df is None:
@@ -264,16 +297,18 @@ def generate_report(config: dict = CONFIG):
     summary = build_summary_table(
         df,
         col_segment=config["col_segment"],
+        col_estimated=config["col_estimated"],
+        col_observed=config["col_observed"],
         col_target=config["col_target"],
-        lgd_3y_col=config["lgd_3y_col"],
-        lgd_finale_col=config["lgd_finale_col"],
         positive_label=config["target_positive_label"],
+        model_label=config["model_label"],
         segments=config["segments_to_analyze"],
     )
     styled_summary = format_summary_table(summary)
 
-    # ---------------- Rapport 2 : par segment ----------------
+    # ---------------- Rapport 2 : matrices ----------------
     segments = config["segments_to_analyze"]
+    work = df if segments == "all" else df[df[config["col_segment"]].isin(list(segments))]
     if segments == "all":
         segments = sorted(df[config["col_segment"]].dropna().unique())
 
@@ -287,6 +322,14 @@ def generate_report(config: dict = CONFIG):
         )
         matrices[seg] = format_contingency_matrix(matrix, seg)
 
+    # Matrice globale, tous segments confondus
+    global_matrix = build_contingency_matrix(
+        work,
+        col_estimated=config["col_estimated"],
+        col_observed=config["col_observed"],
+    )
+    matrices[GLOBAL_LABEL] = format_contingency_matrix(global_matrix, GLOBAL_LABEL)
+
     return styled_summary, matrices
 
 
@@ -297,31 +340,37 @@ def generate_report(config: dict = CONFIG):
 if __name__ == "__main__":
     # --- Cellule 1 : configuration ---
     # CONFIG["df"] = pd.read_parquet("chemin/vers/donnees.parquet")
-    # CONFIG["col_segment"] = "Seg_X_HLC"
-    # ...
+    # CONFIG["col_segment"]   = "Seg_X_HLC"
+    # CONFIG["col_estimated"] = "LGD_3ans_finale"
+    # CONFIG["col_observed"]  = "LGD_observed"
+    # CONFIG["col_target"]    = "statut"
 
     # --- Cellule 2 : génération ---
     # styled_summary, matrices = generate_report(CONFIG)
 
-    # --- Cellule 3 : affichage du rapport 1 ---
+    # --- Cellule 3 : rapport 1 ---
     # display(styled_summary)
 
-    # --- Cellule 4 : affichage du rapport 2, segment par segment ---
+    # --- Cellule 4 : rapport 2 ---
     # for seg, styled_matrix in matrices.items():
     #     display(styled_matrix)
 
-    # Jeu de données de démonstration pour tester le module isolément
+    # Jeu de démonstration pour tester le module isolément
     rng = np.random.default_rng(42)
     n = 5_000
     demo = pd.DataFrame({
         "segment": rng.choice(["Home Loans", "Private Current account",
                                "Consumer Loans"], size=n),
-        "LGD_estimated": rng.uniform(0, 100, size=n),
         "LGD_observed": rng.uniform(0, 100, size=n),
         "statut": rng.choice(["Cured", "Non cured"], size=n, p=[0.4, 0.6]),
     })
-    demo["LGD_3Y"] = demo["LGD_estimated"] + rng.normal(0, 10, size=n)
-    demo["LGD_FINALE"] = demo["LGD_estimated"] + rng.normal(0, 5, size=n)
+    # LGD prédite corrélée au statut, pour obtenir un Somer's D non nul
+    demo["LGD_3ans_finale"] = np.clip(
+        demo["LGD_observed"] * 0.6
+        + np.where(demo["statut"] == "Non cured", 25, 0)
+        + rng.normal(0, 12, size=n),
+        0, 100,
+    )
 
     CONFIG["df"] = demo
     summary_tbl, matrices_tbl = generate_report(CONFIG)
@@ -330,5 +379,4 @@ if __name__ == "__main__":
     print(summary_tbl.data.to_string(index=False))
     print(f"\n=== RAPPORT 2 — {len(matrices_tbl)} matrices générées ===")
     for seg, m in matrices_tbl.items():
-        print(f"\nSegment: {seg}  (shape {m.data.shape})")
-        print(m.data.iloc[:5, :5].to_string())
+        print(f"  - {seg}: shape {m.data.shape}, total = {m.data.values.sum():,}")
