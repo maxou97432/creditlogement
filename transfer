@@ -1,8 +1,143 @@
-d11 = final_survival_rate.filter(
-    (pl.col(CFG["jenks_submodel"]) == "D_11")
-    & (pl.col("generation").is_in([2013.0, 2014.0, 2015.0]))
-)
-print(d11.height)   # vérifie qu'il y a bien des lignes cette fois
-print(d11.select(["CRR__final", "CAD_act__final"]).describe())
+import polars as pl
 
-print(results["D_11"]["unobs_SR"])
+
+def compare_lgd_variables(
+    df: pl.DataFrame | pl.LazyFrame,
+    lgd_col_a: str,
+    lgd_col_b: str,
+    group_col: str,
+    label_a: str = "A",
+    label_b: str = "B",
+    material_threshold: float = 0.05,
+) -> dict[str, pl.DataFrame]:
+    """
+    Compare deux variables de LGD, globalement et par groupe (HLC/segment).
+
+    Parameters
+    ----------
+    df : pl.DataFrame | pl.LazyFrame
+        Table contenant les deux colonnes LGD et la colonne de regroupement.
+    lgd_col_a, lgd_col_b : str
+        Noms des deux colonnes LGD à comparer (ex. l'ancienne et la nouvelle).
+    group_col : str
+        Colonne de regroupement (ex. "Seg_X_HLC", "CHR_model", ...).
+    label_a, label_b : str
+        Libellés courts utilisés dans les noms de colonnes de sortie.
+    material_threshold : float, default 0.05
+        Écart absolu au-delà duquel une observation est comptée comme
+        "matériellement différente" (en points de LGD, donc 0.05 = 5pts
+        si la LGD est en proportion 0-1 ; mettre 5.0 si elle est en 0-100).
+
+    Returns
+    -------
+    dict[str, pl.DataFrame]
+        - "global"      : stats descriptives des deux variables + de l'écart
+        - "by_group"    : mêmes stats déclinées par groupe
+        - "ranking"     : classement des groupes selon chaque variable, et
+                          si l'ordre relatif change (point clé si le
+                          regroupement adjacent ne donne plus le même résultat)
+        - "coverage"    : nombre de nulls de chaque côté, par groupe
+    """
+    if isinstance(df, pl.LazyFrame):
+        df = df.collect()
+
+    diff = pl.col(lgd_col_b) - pl.col(lgd_col_a)
+    df = df.with_columns(diff.alias("_diff"))
+
+    # ------------------------------------------------------------------
+    # 1) Stats globales
+    # ------------------------------------------------------------------
+    global_stats = df.select([
+        pl.col(lgd_col_a).mean().alias(f"mean_{label_a}"),
+        pl.col(lgd_col_b).mean().alias(f"mean_{label_b}"),
+        pl.col("_diff").mean().alias("mean_diff"),
+        pl.col(lgd_col_a).median().alias(f"median_{label_a}"),
+        pl.col(lgd_col_b).median().alias(f"median_{label_b}"),
+        pl.col("_diff").median().alias("median_diff"),
+        pl.col(lgd_col_a).std().alias(f"std_{label_a}"),
+        pl.col(lgd_col_b).std().alias(f"std_{label_b}"),
+        pl.col("_diff").std().alias("std_diff"),
+        pl.col("_diff").abs().mean().alias("MAE"),
+        pl.corr(pl.col(lgd_col_a), pl.col(lgd_col_b)).alias("correlation"),
+        pl.col(lgd_col_a).null_count().alias(f"nulls_{label_a}"),
+        pl.col(lgd_col_b).null_count().alias(f"nulls_{label_b}"),
+        pl.len().alias("n_total"),
+        (pl.col("_diff").abs() > material_threshold).sum().alias("n_material_diff"),
+    ])
+
+    # ------------------------------------------------------------------
+    # 2) Stats par groupe
+    # ------------------------------------------------------------------
+    by_group = (
+        df.group_by(group_col)
+          .agg([
+              pl.len().alias("n"),
+              pl.col(lgd_col_a).mean().alias(f"mean_{label_a}"),
+              pl.col(lgd_col_b).mean().alias(f"mean_{label_b}"),
+              pl.col("_diff").mean().alias("mean_diff"),
+              pl.col(lgd_col_a).std().alias(f"std_{label_a}"),
+              pl.col(lgd_col_b).std().alias(f"std_{label_b}"),
+              pl.col("_diff").abs().mean().alias("MAE"),
+              (pl.col("_diff").abs() > material_threshold).sum().alias("n_material_diff"),
+              pl.col(lgd_col_a).null_count().alias(f"nulls_{label_a}"),
+              pl.col(lgd_col_b).null_count().alias(f"nulls_{label_b}"),
+          ])
+          .with_columns(
+              (pl.col("n_material_diff") / pl.col("n")).alias("pct_material_diff")
+          )
+          .sort(group_col)
+    )
+
+    # ------------------------------------------------------------------
+    # 3) Classement des groupes : est-ce que l'ordre relatif change ?
+    #    (déterminant si le regroupement de classes adjacentes diffère)
+    # ------------------------------------------------------------------
+    ranking = (
+        by_group.select([group_col, f"mean_{label_a}", f"mean_{label_b}", "n"])
+        .with_columns([
+            pl.col(f"mean_{label_a}").rank(method="ordinal").alias(f"rank_{label_a}"),
+            pl.col(f"mean_{label_b}").rank(method="ordinal").alias(f"rank_{label_b}"),
+        ])
+        .with_columns(
+            (pl.col(f"rank_{label_b}") - pl.col(f"rank_{label_a}")).alias("rank_shift")
+        )
+        .sort(f"rank_{label_a}")
+    )
+
+    # ------------------------------------------------------------------
+    # 4) Couverture : où l'une des deux variables est manquante
+    # ------------------------------------------------------------------
+    coverage = (
+        df.group_by(group_col)
+          .agg([
+              pl.len().alias("n"),
+              (pl.col(lgd_col_a).is_null() & pl.col(lgd_col_b).is_not_null()).sum()
+                .alias(f"only_{label_b}_present"),
+              (pl.col(lgd_col_b).is_null() & pl.col(lgd_col_a).is_not_null()).sum()
+                .alias(f"only_{label_a}_present"),
+              (pl.col(lgd_col_a).is_null() & pl.col(lgd_col_b).is_null()).sum()
+                .alias("both_null"),
+          ])
+          .sort(group_col)
+    )
+
+    return {
+        "global": global_stats,
+        "by_group": by_group,
+        "ranking": ranking,
+        "coverage": coverage,
+    }
+res = compare_lgd_variables(
+    df=ta_table,
+    lgd_col_a="LGD_ancienne",       # à toi de mettre les vrais noms
+    lgd_col_b="LGD_nouvelle",
+    group_col="Seg_X_HLC",
+    label_a="old",
+    label_b="new",
+    material_threshold=0.05,        # 0.05 si LGD en 0-1, 5.0 si en 0-100
+)
+
+print("=== GLOBAL ===");   print(res["global"])
+print("=== PAR HLC ===");  print(res["by_group"])
+print("=== RANKING ===");  print(res["ranking"])
+print("=== COUVERTURE ==="); print(res["coverage"])
