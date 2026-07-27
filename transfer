@@ -1,7 +1,15 @@
-.with_columns([
-    pl.col(f"mean_{label_a}").rank(method="ordinal").cast(pl.Int32).alias(f"rank_{label_a}"),
-    pl.col(f"mean_{label_b}").rank(method="ordinal").cast(pl.Int32).alias(f"rank_{label_b}"),
+# Décomposer la variance selon la source de la valeur
+df.group_by("CLOS").agg([
+    pl.len().alias("n"),
+    pl.col("lra_obligor").mean().alias("mean"),
+    pl.col("lra_obligor").std().alias("std"),
+    pl.col("lgd_obligor_base").std().alias("std_base"),   # la version sans survival rate
 ])
-.with_columns(
-    (pl.col(f"rank_{label_b}") - pl.col(f"rank_{label_a}")).alias("rank_shift")
-)
+
+# Et vérifier l'impact du clip sur le std
+df.select([
+    pl.col("lra_obligor").std().alias("std_sans_clip"),
+    pl.col("lra_obligor").clip(0, 100).std().alias("std_avec_clip"),
+    (pl.col("lra_obligor") > 100).sum().alias("n_sup_100"),
+    (pl.col("lra_obligor") < 0).sum().alias("n_neg"),
+])
