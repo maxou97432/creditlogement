@@ -1,5 +1,15 @@
-lf_LGD4.filter(pl.col(CFG["clos"]) == "CLOS").select([
-    pl.corr("lra_obligor", "lgd_obligor").alias("corr"),
-    (pl.col("lra_obligor") - pl.col("lgd_obligor")).abs().mean().alias("MAE"),
-    (pl.col("lra_obligor") - pl.col("lgd_obligor")).abs().quantile(0.95).alias("q95_ecart"),
+# Croiser les NaN avec la génération et le statut
+final_survival_rate.with_columns([
+    pl.col("CRR__final").is_null().alias("crr_null"),
+    pl.col("CAD_act__final").is_null().alias("cad_null"),
+]).group_by(["generation", CFG["clos"]]).agg([
+    pl.len().alias("n"),
+    pl.col("crr_null").sum().alias("n_crr_null"),
+    pl.col("cad_null").sum().alias("n_cad_null"),
+]).sort("generation")
+
+final_survival_rate.select([
+    (pl.col("CRR__final").is_null() & pl.col("CAD_act__final").is_not_null()).sum().alias("crr_seul_null"),
+    (pl.col("CAD_act__final").is_null() & pl.col("CRR__final").is_not_null()).sum().alias("cad_seul_null"),
+    (pl.col("CRR__final").is_null() & pl.col("CAD_act__final").is_null()).sum().alias("les_deux_null"),
 ])
