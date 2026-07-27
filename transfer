@@ -1,3 +1,316 @@
+"""
+================================================================================
+ Automatisation du Reporting de Validation LGD  —  version Polars
+================================================================================
+ Architecture :
+   - Tous les calculs sur les données volumineuses sont faits en POLARS natif
+     (lazy quand c'est possible) : binning, matrice de contingence, Somer's D,
+     agrégations par segment.
+   - pandas n'intervient QU'AU DERNIER MOMENT, sur les petites tables de sortie
+     (~66 lignes pour la synthèse, 12x12 pour les matrices), uniquement pour
+     bénéficier du `Styler` qui gère la coloration conditionnelle en notebook.
+
+ Rendus produits :
+   - Rapport 1 : Tableau de synthèse (style "Tableau 42") — Somer's D par
+                 segment ET au global, coloré Vert/Ambre/Rouge.
+   - Rapport 2 : Analyse par segment (style "Tableau 36/45") — matrice de
+                 contingence Estimé (lignes) vs Observé (colonnes).
+================================================================================
+"""
+
+from __future__ import annotations
+
+from typing import Iterable
+
+import numpy as np
+import polars as pl
+
+
+# ==============================================================================
+# 1. BLOC DE CONFIGURATION — seule partie à modifier par l'utilisateur
+# ==============================================================================
+
+CONFIG = {
+    # LazyFrame ou DataFrame Polars
+    "df": None,
+
+    # Colonnes
+    "col_segment":   "Seg_X_HLC",
+    "col_estimated": "LGD_3ans_finale",   # LGD prédite par le modèle, 0-100
+    "col_observed":  "LGD_observed",      # LGD observée, 0-100
+    "col_target":    "statut",            # ex: "Cured" / "Non cured"
+
+    # Segments à traiter : liste de noms, ou "all"
+    "segments_to_analyze": "all",
+
+    # Modalité de la cible considérée comme l'événement "positif"
+    "target_positive_label": "Non cured",
+
+    # Libellé du modèle affiché dans le tableau de synthèse
+    "model_label": "LGD 3 ans finale",
+}
+
+
+# Paliers de tranches (bins)
+BIN_EDGES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+BIN_LABELS = [
+    "[0-5%]", "[5-10%]", "[10-20%]", "[20-30%]", "[30-40%]", "[40-50%]",
+    "[50-60%]", "[60-70%]", "[70-80%]", "[80-90%]", "[90-100%]", "[100%+]",
+]
+
+# Seuils de coloration du Somer's D
+THRESHOLD_GREEN = 0.30   # D >= 30%        -> VERT
+THRESHOLD_AMBER = 0.15   # 15% <= D < 30%  -> AMBRE ; D < 15% -> ROUGE
+
+GLOBAL_LABEL = "GLOBAL"
+
+
+# ==============================================================================
+# 2. HELPERS POLARS
+# ==============================================================================
+
+def _to_lazy(df: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
+    """Normalise l'entrée en LazyFrame."""
+    return df.lazy() if isinstance(df, pl.DataFrame) else df
+
+
+def _binarize_target_expr(col_target: str, positive_label: str) -> pl.Expr:
+    """Expression Polars convertissant la colonne de statut en 0/1."""
+    return (
+        pl.col(col_target).cast(pl.Utf8).str.strip_chars().str.to_lowercase()
+        == str(positive_label).strip().lower()
+    ).cast(pl.Int8).alias("_target_bin")
+
+
+def _bin_expr(col: str, alias: str) -> pl.Expr:
+    """
+    Expression Polars découpant une colonne 0-100 en tranches BIN_LABELS.
+    Utilise `cut` qui renvoie une colonne catégorielle ordonnée.
+    """
+    return (
+        pl.col(col)
+        .cut(BIN_EDGES, labels=BIN_LABELS, left_closed=True)
+        .cast(pl.Utf8)
+        .alias(alias)
+    )
+
+
+# ==============================================================================
+# 3. CALCUL — Somer's D (Polars natif)
+# ==============================================================================
+
+def compute_somers_d_polars(
+    lf: pl.LazyFrame,
+    score_col: str,
+    target_col: str = "_target_bin",
+) -> float:
+    """
+    Somer's D = 2 * AUC - 1, calculé en Polars sans passer par scipy.
+
+    L'AUC est obtenue par la formule des rangs (équivalente à Mann-Whitney U) :
+
+        AUC = (S_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+    où S_pos est la somme des rangs des observations positives. La méthode de
+    rang "average" gère correctement les ex aequo (fréquents sur des LGD
+    tronquées à 0 ou 100).
+
+    Parameters
+    ----------
+    lf : pl.LazyFrame
+        Doit contenir `score_col` et `target_col` (0/1).
+    score_col : str
+        Colonne du score continu (LGD estimée).
+    target_col : str
+        Colonne binaire 0/1.
+
+    Returns
+    -------
+    float
+        Somer's D dans [-1, 1], ou np.nan si la cible est constante /
+        l'échantillon vide.
+    """
+    ranked = (
+        lf.select([pl.col(score_col), pl.col(target_col)])
+          .drop_nulls()
+          .with_columns(pl.col(score_col).rank(method="average").alias("_rank"))
+          .select([
+              pl.col(target_col).sum().alias("n_pos"),
+              (1 - pl.col(target_col)).sum().alias("n_neg"),
+              (pl.col("_rank") * pl.col(target_col)).sum().alias("sum_rank_pos"),
+          ])
+          .collect()
+    )
+
+    n_pos = float(ranked["n_pos"][0] or 0)
+    n_neg = float(ranked["n_neg"][0] or 0)
+    sum_rank_pos = float(ranked["sum_rank_pos"][0] or 0)
+
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    auc = (sum_rank_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+    return 2.0 * auc - 1.0
+
+
+# ==============================================================================
+# 4. CALCUL — Matrice de contingence (Polars natif)
+# ==============================================================================
+
+def build_contingency_matrix_polars(
+    lf: pl.LazyFrame,
+    col_estimated: str,
+    col_observed: str,
+) -> pl.DataFrame:
+    """
+    Matrice de contingence : tranches de l'Estimé en lignes, tranches de
+    l'Observé en colonnes, valeur = comptage.
+
+    Toutes les tranches sont présentes même vides (comptage 0), afin que
+    toutes les matrices aient la même forme d'un segment à l'autre.
+
+    Returns
+    -------
+    pl.DataFrame
+        Première colonne "Estimé" (labels), puis une colonne par tranche
+        d'Observé.
+    """
+    counts = (
+        lf.select([
+            _bin_expr(col_estimated, "_est"),
+            _bin_expr(col_observed, "_obs"),
+        ])
+        .drop_nulls()
+        .group_by(["_est", "_obs"])
+        .agg(pl.len().alias("n"))
+        .collect()
+    )
+
+    # Grille complète de toutes les combinaisons (label_est x label_obs)
+    grid = pl.DataFrame({
+        "_est": [e for e in BIN_LABELS for _ in BIN_LABELS],
+        "_obs": BIN_LABELS * len(BIN_LABELS),
+    })
+
+    matrix = (
+        grid.join(counts, on=["_est", "_obs"], how="left")
+            .with_columns(pl.col("n").fill_null(0))
+            .pivot(index="_est", on="_obs", values="n")
+            .rename({"_est": "Estimé"})
+    )
+
+    # Réordonner lignes et colonnes selon l'ordre canonique des tranches
+    matrix = (
+        matrix.with_columns(
+            pl.col("Estimé").cast(pl.Enum(BIN_LABELS))
+        )
+        .sort("Estimé")
+        .select(["Estimé"] + BIN_LABELS)
+        .with_columns(pl.col("Estimé").cast(pl.Utf8))
+    )
+    return matrix
+
+
+# ==============================================================================
+# 5. CALCUL — Tableau de synthèse (Polars natif)
+# ==============================================================================
+
+def build_summary_table_polars(
+    lf: pl.LazyFrame,
+    col_segment: str,
+    col_estimated: str,
+    col_observed: str,
+    col_target: str,
+    positive_label: str,
+    model_label: str,
+    segments: Iterable[str] | str = "all",
+) -> pl.DataFrame:
+    """
+    Tableau récapitulatif : une ligne par segment + une ligne GLOBAL.
+
+    Le Somer's D global est recalculé sur l'ensemble du périmètre (et non
+    comme une moyenne des D par segment, qui n'aurait pas de sens statistique).
+    """
+    work = lf.with_columns(_binarize_target_expr(col_target, positive_label))
+
+    if segments != "all":
+        work = work.filter(pl.col(col_segment).is_in(list(segments)))
+
+    somers_col = f"Somer's D — {model_label}"
+
+    # Stats agrégées vectorisées (une seule passe)
+    stats = (
+        work.group_by(col_segment)
+            .agg([
+                pl.len().alias("N"),
+                pl.col(col_estimated).mean().alias("LGD estimée moy."),
+                pl.col(col_observed).mean().alias("LGD observée moy."),
+            ])
+            .with_columns(
+                (pl.col("LGD estimée moy.") - pl.col("LGD observée moy."))
+                .alias("Écart (est. - obs.)")
+            )
+            .sort(col_segment)
+            .collect()
+    )
+
+    # Somer's D : une passe par segment (le rank doit être local au segment)
+    seg_values = stats[col_segment].to_list()
+    somers_values = [
+        compute_somers_d_polars(
+            work.filter(pl.col(col_segment) == seg), col_estimated
+        )
+        for seg in seg_values
+    ]
+    stats = stats.with_columns(pl.Series(somers_col, somers_values))
+    stats = stats.rename({col_segment: "Segment"})
+
+    # Ligne globale
+    global_stats = (
+        work.select([
+            pl.len().alias("N"),
+            pl.col(col_estimated).mean().alias("LGD estimée moy."),
+            pl.col(col_observed).mean().alias("LGD observée moy."),
+        ])
+        .collect()
+        .with_columns([
+            pl.lit(GLOBAL_LABEL).alias("Segment"),
+            (pl.col("LGD estimée moy.") - pl.col("LGD observée moy."))
+            .alias("Écart (est. - obs.)"),
+            pl.lit(compute_somers_d_polars(work, col_estimated)).alias(somers_col),
+        ])
+    )
+
+    cols = ["Segment", "N", "LGD estimée moy.", "LGD observée moy.",
+            "Écart (est. - obs.)", somers_col]
+    return pl.concat([stats.select(cols), global_stats.select(cols)],
+                     how="vertical_relaxed")
+
+
+# ==============================================================================
+# 6. FORMATAGE — pandas Styler, uniquement sur les petites tables de sortie
+# ==============================================================================
+
+def _color_somers_d(value: float) -> str:
+    """Style CSS de fond selon les seuils Vert / Ambre / Rouge (couleur de
+    texte fixée explicitement pour rester lisible quel que soit le thème
+    du notebook, clair ou sombre)."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "background-color: #E0E0E0; color: #444444; font-weight: 600;"
+    if value >= THRESHOLD_GREEN:
+        return "background-color: #C6EFCE; color: #006100; font-weight: 600;"   # VERT
+    if value >= THRESHOLD_AMBER:
+        return "background-color: #FFEB9C; color: #9C5700; font-weight: 600;"   # AMBRE
+    return "background-color: #FFC7CE; color: #9C0006; font-weight: 600;"       # ROUGE
+
+
+def _bold_global_row(row):
+    """Met la ligne GLOBAL en gras avec une bordure distinctive."""
+    if row["Segment"] == GLOBAL_LABEL:
+        return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
+    return [""] * len(row)
+
+
 def format_summary_table(summary: pl.DataFrame):
     """
     Convertit la table de synthèse (petite : ~n_segments+1 lignes) en pandas
@@ -6,11 +319,6 @@ def format_summary_table(summary: pl.DataFrame):
     pdf = summary.to_pandas()
     score_cols = [c for c in pdf.columns if c.startswith("Somer's D")]
     pct_cols = ["LGD estimée moy.", "LGD observée moy.", "Écart (est. - obs.)"]
-
-    def _bold_global_row(row):
-        if row["Segment"] == GLOBAL_LABEL:
-            return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
-        return [""] * len(row)
 
     return (
         pdf.style
@@ -34,3 +342,157 @@ def format_summary_table(summary: pl.DataFrame):
              "props": [("border", "1px solid #CCCCCC")]},
         ])
     )
+
+
+def format_contingency_matrix(matrix: pl.DataFrame, segment_name: str):
+    """
+    Convertit la matrice (12x12) en pandas et applique le dégradé + la mise en
+    évidence de la diagonale (concordance parfaite).
+    """
+    pdf = matrix.to_pandas().set_index("Estimé")
+    pdf.columns.name = "Observé"
+
+    def _highlight_diagonal(data):
+        import pandas as pd
+        styles = pd.DataFrame("", index=data.index, columns=data.columns)
+        for label in data.index:
+            if label in data.columns:
+                styles.loc[label, label] = "border: 2px solid #2E5FA3;"
+        return styles
+
+    return (
+        pdf.style
+        .background_gradient(cmap="Blues", axis=None, text_color_threshold=0.4)
+        .apply(_highlight_diagonal, axis=None)
+        .format("{:,.0f}")
+        .set_caption(
+            f'Segment "{segment_name}": Performance by segment (estimated vs observed)'
+        )
+        .set_table_styles([
+            {"selector": "caption",
+             "props": [("font-size", "13px"), ("font-weight", "bold"),
+                       ("text-align", "left"), ("padding-bottom", "8px"),
+                       ("color", "#111111")]},
+            {"selector": "th",
+             "props": [("background-color", "#F2F2F2"), ("color", "#111111"),
+                       ("text-align", "center"), ("font-size", "11px"),
+                       ("border", "1px solid #CCCCCC")]},
+            {"selector": "td",
+             "props": [("text-align", "center"), ("font-size", "11px"),
+                       ("color", "#111111"), ("border", "1px solid #CCCCCC")]},
+        ])
+    )
+
+
+# ==============================================================================
+# 7. ORCHESTRATION
+# ==============================================================================
+
+def generate_report(config: dict = CONFIG):
+    """
+    Produit les deux rendus attendus.
+
+    Returns
+    -------
+    tuple[Styler, dict[str, Styler]]
+        Le tableau de synthèse stylé, et {segment: matrice stylée} incluant
+        la clé GLOBAL_LABEL.
+    """
+    if config["df"] is None:
+        raise ValueError("CONFIG['df'] doit contenir le LazyFrame/DataFrame Polars.")
+
+    lf = _to_lazy(config["df"])
+
+    # ---------------- Rapport 1 : synthèse ----------------
+    summary = build_summary_table_polars(
+        lf,
+        col_segment=config["col_segment"],
+        col_estimated=config["col_estimated"],
+        col_observed=config["col_observed"],
+        col_target=config["col_target"],
+        positive_label=config["target_positive_label"],
+        model_label=config["model_label"],
+        segments=config["segments_to_analyze"],
+    )
+    styled_summary = format_summary_table(summary)
+
+    # ---------------- Rapport 2 : matrices ----------------
+    segments = config["segments_to_analyze"]
+    if segments == "all":
+        work = lf
+        segments = (
+            lf.select(pl.col(config["col_segment"]))
+              .drop_nulls().unique().collect()
+              .to_series().sort().to_list()
+        )
+    else:
+        segments = list(segments)
+        work = lf.filter(pl.col(config["col_segment"]).is_in(segments))
+
+    matrices = {}
+    for seg in segments:
+        sub = lf.filter(pl.col(config["col_segment"]) == seg)
+        matrices[seg] = format_contingency_matrix(
+            build_contingency_matrix_polars(
+                sub, config["col_estimated"], config["col_observed"]
+            ),
+            seg,
+        )
+
+    matrices[GLOBAL_LABEL] = format_contingency_matrix(
+        build_contingency_matrix_polars(
+            work, config["col_estimated"], config["col_observed"]
+        ),
+        GLOBAL_LABEL,
+    )
+
+    return styled_summary, matrices
+
+
+# ==============================================================================
+# 8. EXEMPLE D'UTILISATION
+# ==============================================================================
+
+if __name__ == "__main__":
+    # --- Cellule 1 : configuration ---
+    # CONFIG["df"] = pl.scan_parquet("chemin/vers/donnees.parquet")
+    # CONFIG["col_segment"]   = "Seg_X_HLC"
+    # CONFIG["col_estimated"] = "LGD_3ans_finale"
+    # CONFIG["col_observed"]  = "LGD_observed"
+    # CONFIG["col_target"]    = "statut"
+
+    # --- Cellule 2 : génération ---
+    # styled_summary, matrices = generate_report(CONFIG)
+
+    # --- Cellule 3 : rapport 1 ---
+    # display(styled_summary)
+
+    # --- Cellule 4 : rapport 2 ---
+    # for seg, styled_matrix in matrices.items():
+    #     display(styled_matrix)
+
+    # Jeu de démonstration
+    rng = np.random.default_rng(42)
+    n = 50_000
+    statut = rng.choice(["Cured", "Non cured"], size=n, p=[0.4, 0.6])
+    observed = rng.uniform(0, 100, size=n)
+    estimated = np.clip(
+        observed * 0.6 + np.where(statut == "Non cured", 25, 0)
+        + rng.normal(0, 12, size=n),
+        0, 100,
+    )
+    demo = pl.DataFrame({
+        "Seg_X_HLC": rng.choice(["A_1", "B_2", "C_3"], size=n),
+        "LGD_observed": observed,
+        "LGD_3ans_finale": estimated,
+        "statut": statut,
+    })
+
+    CONFIG["df"] = demo
+    summary_tbl, matrices_tbl = generate_report(CONFIG)
+
+    print("=== RAPPORT 1 — Tableau de synthèse ===")
+    print(summary_tbl.data.to_string(index=False))
+    print(f"\n=== RAPPORT 2 — {len(matrices_tbl)} matrices générées ===")
+    for seg, m in matrices_tbl.items():
+        print(f"  - {seg}: shape {m.data.shape}, total = {m.data.values.sum():,}")
