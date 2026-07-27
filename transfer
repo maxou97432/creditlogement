@@ -1,13 +1,11 @@
 return (
         pdf.style
-        .apply(_bold_global_row, axis=1)
-        .map(_color_somers_d, subset=score_cols)
-        .format({c: "{:.2%}" for c in score_cols}, na_rep="n/a")
-        .format({c: "{:.2f}" for c in pct_cols}, na_rep="n/a")
-        .format({"N": "{:,.0f}"})
-        .hide(axis="index")
-        .set_caption("Tableau 42 — Capacité de discrimination du modèle (Somer's D)")
-        .set_properties(**{"color": "#111111", "background-color": "#FFFFFF"})
+        .background_gradient(cmap="Blues", axis=None, text_color_threshold=0.4)
+        .apply(_highlight_diagonal, axis=None)
+        .format("{:,.0f}")
+        .set_caption(
+            f'Segment "{segment_name}": Performance by segment (estimated vs observed)'
+        )
         .set_table_styles([
             {"selector": "caption",
              "props": [("font-size", "13px"), ("font-weight", "bold"),
@@ -15,8 +13,10 @@ return (
                        ("color", "#111111")]},
             {"selector": "th",
              "props": [("background-color", "#F2F2F2"), ("color", "#111111"),
-                       ("text-align", "center"), ("border", "1px solid #CCCCCC")]},
+                       ("text-align", "center"), ("font-size", "11px"),
+                       ("border", "1px solid #CCCCCC")]},
             {"selector": "td",
-             "props": [("border", "1px solid #CCCCCC")]},
+             "props": [("text-align", "center"), ("font-size", "11px"),
+                       ("color", "#111111"), ("border", "1px solid #CCCCCC")]},
         ])
     )
