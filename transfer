@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Iterable
 
 import numpy as np
+import pandas as pd
 import polars as pl
 
 
@@ -302,13 +303,38 @@ def build_summary_table_polars(
 
     cols = ["Segment", "N", "LGD estimée moy.", "LGD observée moy.",
             "Écart (est. - obs.)", somers_col]
-    return pl.concat([stats.select(cols), global_stats.select(cols)],
-                     how="vertical_relaxed")
+    out = pl.concat([stats.select(cols), global_stats.select(cols)],
+                    how="vertical_relaxed")
+
+    # Colonne emoji de notation -- filet de sécurité, garantie de s'afficher
+    # même si le CSS de coloration (background-color) est filtré/ignoré par
+    # le rendu du notebook (comportement observé avec certains renderers
+    # Jupyter/VSCode qui suppriment les <style> injectés par pandas Styler).
+    out = out.with_columns(
+        pl.col(somers_col).map_elements(_rate_emoji, return_dtype=pl.Utf8)
+          .alias("Rating")
+    )
+    return out.select(["Segment", "Rating"] + cols[1:])
 
 
 # ==============================================================================
 # 6. FORMATAGE — pandas Styler, uniquement sur les petites tables de sortie
 # ==============================================================================
+
+def _rate_emoji(value: float) -> str:
+    """
+    Pastille emoji Vert/Ambre/Rouge -- filet de sécurité garanti de
+    s'afficher quel que soit le rendu (contrairement au CSS de coloration,
+    qui peut être filtré par certains notebooks/thèmes).
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "⚪ n/a"
+    if value >= THRESHOLD_GREEN:
+        return "🟢 VERT"
+    if value >= THRESHOLD_AMBER:
+        return "🟡 AMBRE"
+    return "🔴 ROUGE"
+
 
 def _color_somers_d(value: float) -> str:
     """Style CSS de fond selon les seuils Vert / Ambre / Rouge (couleur de
@@ -326,7 +352,9 @@ def _color_somers_d(value: float) -> str:
 def format_summary_table(summary: pl.DataFrame):
     """
     Convertit la table de synthèse (petite : ~n_segments+1 lignes) en pandas
-    et applique la coloration conditionnelle.
+    et applique la coloration conditionnelle. La colonne "Rating" (emoji
+    🟢/🟡/🔴) est un filet de sécurité visuel qui reste lisible même si le
+    CSS de coloration n'est pas rendu par le notebook.
     """
     pdf = summary.to_pandas()
     score_cols = [c for c in pdf.columns if c.startswith("Somer's D")]
@@ -339,6 +367,7 @@ def format_summary_table(summary: pl.DataFrame):
 
     return (
         pdf.style
+        .set_properties(**{"color": "#111111", "background-color": "#FFFFFF"})
         .apply(_bold_global_row, axis=1)
         .map(_color_somers_d, subset=score_cols)
         .format({c: "{:.2%}" for c in score_cols}, na_rep="n/a")
@@ -346,7 +375,6 @@ def format_summary_table(summary: pl.DataFrame):
         .format({"N": "{:,.0f}"})
         .hide(axis="index")
         .set_caption("Tableau 42 — Capacité de discrimination du modèle (Somer's D)")
-        .set_properties(**{"color": "#111111", "background-color": "#FFFFFF"})
         .set_table_styles([
             {"selector": "caption",
              "props": [("font-size", "13px"), ("font-weight", "bold"),
@@ -402,7 +430,64 @@ def format_contingency_matrix(matrix: pl.DataFrame, segment_name: str):
 
 
 # ==============================================================================
-# 7. ORCHESTRATION
+# 7. EXPORT EXCEL — préserve la coloration conditionnelle
+# ==============================================================================
+
+def export_report_to_excel(
+    styled_summary,
+    matrices: dict,
+    output_path: str,
+) -> str:
+    """
+    Exporte le rapport complet dans un classeur Excel multi-feuilles :
+      - Feuille "Synthese"      : le tableau de synthèse (Rapport 1), couleurs
+                                  Vert/Ambre/Rouge préservées via openpyxl.
+      - Une feuille par segment : la matrice de contingence correspondante,
+                                  dégradé de couleur préservé.
+    Les noms de feuille sont tronqués/nettoyés pour respecter la limite
+    Excel de 31 caractères et les caractères interdits (: \\ / ? * [ ]).
+
+    Parameters
+    ----------
+    styled_summary : pandas.io.formats.style.Styler
+        Sortie de `format_summary_table`.
+    matrices : dict[str, Styler]
+        Sortie `matrices` de `generate_report` (inclut GLOBAL_LABEL).
+    output_path : str
+        Chemin du fichier .xlsx à écrire.
+
+    Returns
+    -------
+    str
+        Le chemin du fichier écrit (identique à `output_path`).
+    """
+    import re
+
+    def _safe_sheet_name(name: str, used: set) -> str:
+        clean = re.sub(r"[:\\/?*\[\]]", "_", str(name))[:31]
+        base, i = clean, 1
+        while clean in used:
+            suffix = f"_{i}"
+            clean = base[: 31 - len(suffix)] + suffix
+            i += 1
+        used.add(clean)
+        return clean
+
+    used_names: set = set()
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        styled_summary.to_excel(
+            writer, sheet_name=_safe_sheet_name("Synthese", used_names), index=False
+        )
+        for seg, styled_matrix in matrices.items():
+            sheet_name = _safe_sheet_name(f"Matrice_{seg}", used_names)
+            styled_matrix.to_excel(writer, sheet_name=sheet_name)
+
+    return output_path
+
+
+# ==============================================================================
+# 8. ORCHESTRATION
 # ==============================================================================
 
 def generate_report(config: dict = CONFIG):
