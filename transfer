@@ -38,13 +38,9 @@ CONFIG = {
     "col_segment":   "Seg_X_HLC",
     "col_estimated": "LGD_3ans_finale",   # LGD prédite par le modèle, 0-100
     "col_observed":  "LGD_observed",      # LGD observée, 0-100
-    "col_target":    "statut",            # ex: "Cured" / "Non cured"
 
     # Segments à traiter : liste de noms, ou "all"
     "segments_to_analyze": "all",
-
-    # Modalité de la cible considérée comme l'événement "positif"
-    "target_positive_label": "Non cured",
 
     # Libellé du modèle affiché dans le tableau de synthèse
     "model_label": "LGD 3 ans finale",
@@ -74,14 +70,6 @@ def _to_lazy(df: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     return df.lazy() if isinstance(df, pl.DataFrame) else df
 
 
-def _binarize_target_expr(col_target: str, positive_label: str) -> pl.Expr:
-    """Expression Polars convertissant la colonne de statut en 0/1."""
-    return (
-        pl.col(col_target).cast(pl.Utf8).str.strip_chars().str.to_lowercase()
-        == str(positive_label).strip().lower()
-    ).cast(pl.Int8).alias("_target_bin")
-
-
 def _bin_expr(col: str, alias: str) -> pl.Expr:
     """
     Expression Polars découpant une colonne 0-100 en tranches BIN_LABELS.
@@ -96,61 +84,91 @@ def _bin_expr(col: str, alias: str) -> pl.Expr:
 
 
 # ==============================================================================
-# 3. CALCUL — Somer's D (Polars natif)
+# 3. CALCUL — Somer's D (variable continue vs variable continue)
 # ==============================================================================
+#
+# scipy.stats.somersd construit en interne une table de contingence de taille
+# (n_valeurs_uniques_x x n_valeurs_uniques_y) : pour des variables CONTINUES
+# avec des dizaines de milliers de valeurs distinctes, ça explose en mémoire
+# (testé : ~57 Go pour 1.8M lignes). On utilise donc scipy.stats.kendalltau,
+# qui compte les paires concordantes/discordantes via un algorithme C compilé
+# en O(n log n) SANS jamais construire de table de contingence (testé : <1s
+# sur 1.8M lignes), puis on dérive le Somer's D asymétrique à partir de tau-b
+# via la relation mathématique entre les deux statistiques :
+#
+#     tau_b = (N_c - N_d) / sqrt((N0 - N1) * (N0 - N2))
+#     D_yx  = (N_c - N_d) / (N0 - N1)
+#
+# où N0 = n(n-1)/2, N1 = paires ex aequo sur x, N2 = paires ex aequo sur y.
+# On calcule donc (N_c - N_d) = tau_b * sqrt((N0-N1)(N0-N2)), puis on divise
+# par (N0 - N1) pour obtenir le D asymétrique (x = LGD estimée = variable
+# explicative). Polars reste utilisé pour tout le reste du pipeline.
+# ==============================================================================
+
+from scipy import stats as _scipy_stats
+
 
 def compute_somers_d_polars(
     lf: pl.LazyFrame,
-    score_col: str,
-    target_col: str = "_target_bin",
+    col_estimated: str,
+    col_observed: str,
 ) -> float:
     """
-    Somer's D = 2 * AUC - 1, calculé en Polars sans passer par scipy.
+    Somer's D asymétrique entre deux variables continues : LGD estimée comme
+    variable explicative (x), LGD observée comme variable expliquée (y).
 
-    L'AUC est obtenue par la formule des rangs (équivalente à Mann-Whitney U) :
+        D = (N_c - N_d) / (N_c + N_d + N_tied_x)
 
-        AUC = (S_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
-
-    où S_pos est la somme des rangs des observations positives. La méthode de
-    rang "average" gère correctement les ex aequo (fréquents sur des LGD
-    tronquées à 0 ou 100).
+    Calculé via scipy.stats.kendalltau (rapide, O(n log n), praticable sur
+    plusieurs millions de lignes) puis converti en Somer's D asymétrique.
 
     Parameters
     ----------
     lf : pl.LazyFrame
-        Doit contenir `score_col` et `target_col` (0/1).
-    score_col : str
-        Colonne du score continu (LGD estimée).
-    target_col : str
-        Colonne binaire 0/1.
+        Doit contenir `col_estimated` et `col_observed`.
+    col_estimated : str
+        Variable explicative (LGD estimée).
+    col_observed : str
+        Variable expliquée (LGD observée).
 
     Returns
     -------
     float
-        Somer's D dans [-1, 1], ou np.nan si la cible est constante /
-        l'échantillon vide.
+        Somer's D dans [-1, 1], ou np.nan si l'échantillon est trop petit
+        ou si x est constant.
     """
-    ranked = (
-        lf.select([pl.col(score_col), pl.col(target_col)])
+    data = (
+        lf.select([pl.col(col_estimated).alias("_x"), pl.col(col_observed).alias("_y")])
           .drop_nulls()
-          .with_columns(pl.col(score_col).rank(method="average").alias("_rank"))
-          .select([
-              pl.col(target_col).sum().alias("n_pos"),
-              (1 - pl.col(target_col)).sum().alias("n_neg"),
-              (pl.col("_rank") * pl.col(target_col)).sum().alias("sum_rank_pos"),
-          ])
           .collect()
     )
-
-    n_pos = float(ranked["n_pos"][0] or 0)
-    n_neg = float(ranked["n_neg"][0] or 0)
-    sum_rank_pos = float(ranked["sum_rank_pos"][0] or 0)
-
-    if n_pos == 0 or n_neg == 0:
+    n = data.height
+    if n < 2:
         return float("nan")
 
-    auc = (sum_rank_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
-    return 2.0 * auc - 1.0
+    x = data["_x"].to_numpy()
+    y = data["_y"].to_numpy()
+
+    n0 = n * (n - 1) // 2
+
+    _, counts_x = np.unique(x, return_counts=True)
+    n1 = int(np.sum(counts_x.astype(np.int64) * (counts_x - 1) // 2))
+
+    _, counts_y = np.unique(y, return_counts=True)
+    n2 = int(np.sum(counts_y.astype(np.int64) * (counts_y - 1) // 2))
+
+    denom_d = n0 - n1
+    if denom_d <= 0:
+        return float("nan")
+
+    denom_tau = np.sqrt(float(n0 - n1) * float(n0 - n2))
+    if denom_tau == 0:
+        return float("nan")
+
+    tau_b = _scipy_stats.kendalltau(x, y).statistic
+    nc_minus_nd = tau_b * denom_tau
+
+    return float(nc_minus_nd / denom_d)
 
 
 # ==============================================================================
@@ -220,18 +238,18 @@ def build_summary_table_polars(
     col_segment: str,
     col_estimated: str,
     col_observed: str,
-    col_target: str,
-    positive_label: str,
     model_label: str,
     segments: Iterable[str] | str = "all",
 ) -> pl.DataFrame:
     """
     Tableau récapitulatif : une ligne par segment + une ligne GLOBAL.
 
-    Le Somer's D global est recalculé sur l'ensemble du périmètre (et non
-    comme une moyenne des D par segment, qui n'aurait pas de sens statistique).
+    Le Somer's D est calculé directement entre LGD estimée et LGD observée
+    (variables continues), pas contre une cible binaire. Il est recalculé
+    sur l'ensemble du périmètre pour la ligne GLOBAL (et non comme une
+    moyenne des D par segment, qui n'aurait pas de sens statistique).
     """
-    work = lf.with_columns(_binarize_target_expr(col_target, positive_label))
+    work = lf
 
     if segments != "all":
         work = work.filter(pl.col(col_segment).is_in(list(segments)))
@@ -254,11 +272,11 @@ def build_summary_table_polars(
             .collect()
     )
 
-    # Somer's D : une passe par segment (le rank doit être local au segment)
+    # Somer's D : une passe par segment
     seg_values = stats[col_segment].to_list()
     somers_values = [
         compute_somers_d_polars(
-            work.filter(pl.col(col_segment) == seg), col_estimated
+            work.filter(pl.col(col_segment) == seg), col_estimated, col_observed
         )
         for seg in seg_values
     ]
@@ -277,7 +295,8 @@ def build_summary_table_polars(
             pl.lit(GLOBAL_LABEL).alias("Segment"),
             (pl.col("LGD estimée moy.") - pl.col("LGD observée moy."))
             .alias("Écart (est. - obs.)"),
-            pl.lit(compute_somers_d_polars(work, col_estimated)).alias(somers_col),
+            pl.lit(compute_somers_d_polars(work, col_estimated, col_observed))
+              .alias(somers_col),
         ])
     )
 
@@ -304,13 +323,6 @@ def _color_somers_d(value: float) -> str:
     return "background-color: #FFC7CE; color: #9C0006; font-weight: 600;"       # ROUGE
 
 
-def _bold_global_row(row):
-    """Met la ligne GLOBAL en gras avec une bordure distinctive."""
-    if row["Segment"] == GLOBAL_LABEL:
-        return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
-    return [""] * len(row)
-
-
 def format_summary_table(summary: pl.DataFrame):
     """
     Convertit la table de synthèse (petite : ~n_segments+1 lignes) en pandas
@@ -319,6 +331,11 @@ def format_summary_table(summary: pl.DataFrame):
     pdf = summary.to_pandas()
     score_cols = [c for c in pdf.columns if c.startswith("Somer's D")]
     pct_cols = ["LGD estimée moy.", "LGD observée moy.", "Écart (est. - obs.)"]
+
+    def _bold_global_row(row):
+        if row["Segment"] == GLOBAL_LABEL:
+            return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
+        return [""] * len(row)
 
     return (
         pdf.style
@@ -409,8 +426,6 @@ def generate_report(config: dict = CONFIG):
         col_segment=config["col_segment"],
         col_estimated=config["col_estimated"],
         col_observed=config["col_observed"],
-        col_target=config["col_target"],
-        positive_label=config["target_positive_label"],
         model_label=config["model_label"],
         segments=config["segments_to_analyze"],
     )
@@ -474,18 +489,12 @@ if __name__ == "__main__":
     # Jeu de démonstration
     rng = np.random.default_rng(42)
     n = 50_000
-    statut = rng.choice(["Cured", "Non cured"], size=n, p=[0.4, 0.6])
     observed = rng.uniform(0, 100, size=n)
-    estimated = np.clip(
-        observed * 0.6 + np.where(statut == "Non cured", 25, 0)
-        + rng.normal(0, 12, size=n),
-        0, 100,
-    )
+    estimated = np.clip(observed * 0.7 + rng.normal(0, 12, size=n), 0, 100)
     demo = pl.DataFrame({
         "Seg_X_HLC": rng.choice(["A_1", "B_2", "C_3"], size=n),
         "LGD_observed": observed,
         "LGD_3ans_finale": estimated,
-        "statut": statut,
     })
 
     CONFIG["df"] = demo
