@@ -1,592 +1,1004 @@
 """
-================================================================================
- Automatisation du Reporting de Validation LGD  —  version Polars
-================================================================================
- Architecture :
-   - Tous les calculs sur les données volumineuses sont faits en POLARS natif
-     (lazy quand c'est possible) : binning, matrice de contingence, Somer's D,
-     agrégations par segment.
-   - pandas n'intervient QU'AU DERNIER MOMENT, sur les petites tables de sortie
-     (~66 lignes pour la synthèse, 12x12 pour les matrices), uniquement pour
-     bénéficier du `Styler` qui gère la coloration conditionnelle en notebook.
+survival_rate_v2.py
+===================
 
- Rendus produits :
-   - Rapport 1 : Tableau de synthèse (style "Tableau 42") — Somer's D par
-                 segment ET au global, coloré Vert/Ambre/Rouge.
-   - Rapport 2 : Analyse par segment (style "Tableau 36/45") — matrice de
-                 contingence Estimé (lignes) vs Observé (colonnes).
-================================================================================
+Extrapolation des taux de recuperation (CRR) et des tirages additionnels (CAD)
+par la methode du survival rate / chain ladder, au grain generation x categorie.
+
+Deux moteurs de calcul sont disponibles, selectionnables par le parametre
+``engine`` de :func:`extrapolate_all_categories` :
+
+* ``engine="pandas"`` : portage corrige de la version historique.
+* ``engine="polars"`` : version optimisee pour les gros volumes (>= 1 M lignes).
+
+IMPORTANT — architecture
+------------------------
+Seules DEUX etapes touchent la table au grain facilite :
+
+1. l'agregation initiale (``get_mean`` / ``get_n_open``) ;
+2. la reinjection des marges extrapolees (``extrapolate_on_dtm``).
+
+Ce sont les seules fonctions dupliquees entre les deux moteurs. Tout le coeur
+methodologique (RR marginaux, dev factors, survival rates, RR extrapoles)
+travaille sur des agregats de quelques dizaines de lignes et reste en pandas,
+partage par les deux moteurs. Les deux engines produisent donc des resultats
+identiques par construction sur la partie methodologique.
+
+
+=======================================================================
+JOURNAL DES CORRECTIONS  (rechercher "FIX-" dans le fichier)
+=======================================================================
+
+FIX-01  get_dev_factor : moyenne EXPANSIVE decalee d'une generation.
+        AVANT : moyenne ponderee globale sur toutes les generations ayant
+        observe l'horizon, y compris POSTERIEURES a celle qu'on extrapole
+        => fuite d'information future.
+        APRES : pour la generation g, le facteur n'utilise que les
+        generations STRICTEMENT ANTERIEURES, par accumulation puis decalage
+        d'un cran. Reproduit le `retain` + `lag()` du programme SAS.
+        Consequence : `dev_factor` n'est plus une ligne unique mais un
+        tableau indexe par generation.
+
+FIX-02  extrapolate_on_dtm : toutes les generations sont extrapolees.
+        AVANT : `for y in sub.index[:-2]` sautait les DEUX generations les
+        plus recentes, qui gardaient donc des cumulatives nulles.
+        APRES : boucle sur l'integralite de `sub.index`.
+
+FIX-03  extrapolate_all_categories : plus de duplication de lignes.
+        AVANT : le resultat intermediaire (1er champ seul) ET le resultat
+        final (tous champs) etaient tous deux ajoutes a `dtms_filled`, puis
+        empiles par `concat` => nombre de lignes multiplie par len(fields).
+        APRES : un seul DataFrame par categorie, enrichi champ par champ.
+
+FIX-04  extrapolate_on_dtm : test de valeur manquante correct.
+        AVANT : `if value is not None` ne capture pas `np.nan`, donc un NaN
+        etait additionne et contaminait toute la chaine de cumul.
+        APRES : `pd.notna(value)`.
+
+FIX-05  extrapolate_on_dtm : reutilisation des colonnes `open_H{h}`.
+        AVANT : `is_open` etait recalcule a chaque couple (generation,
+        horizon), soit ~30 scans complets de la table par champ, avec en
+        prime un `>` la ou `add_is_open` utilise `>=`.
+        APRES : on lit la colonne `open_H{h}` deja calculee. Gain de temps,
+        et coherence retablie avec les `n_open` qui alimentent les survival
+        rates.
+
+FIX-06  extrapolate_all_categories : `category_column` au lieu de la chaine
+        "categories" ecrite en dur dans le controle de coherence du TTW.
+
+FIX-07  get_dev_factor : le masque d'observation inclut desormais le poids.
+        AVANT : le masque portait sur `rr_open[h]` seul ; avec
+        `weighted_facility=True` le poids `n_open[h]` pouvait etre NaN sur
+        une ligne retenue, ce qui rendait NaN la somme et donc le facteur de
+        developpement de tout l'horizon.
+        APRES : masque = RR observe ET poids observe.
+
+FIX-08  extrapolate_all_categories : une seule copie de la table par
+        categorie au lieu d'une par champ (division par len(fields) du pic
+        memoire).
+
+FIX-09  extrapolate_on_dtm (Polars) : une affectation par horizon.
+        Les expressions dependantes NE PEUVENT PAS etre empilees dans un
+        `with_columns` unique : Polars les evalue toutes contre le
+        LazyFrame d'ENTREE, ce qui casse la chaine de cumul et fait de
+        `final_value_col` une copie de l'observe. On chaine donc un
+        `with_columns` par horizon, et `final_value_col` est affecte APRES
+        la boucle.
+
+FIX-11  get_extrapolated_RR : regle de masquage alignee sur la regle
+        d'observation (`y + h <= gen_max`) au lieu d'une regle basee sur le
+        rang de colonne et sur `annee_courante`. L'ancienne regle etait
+        decalee d'une generation et laissait, pour chaque horizon, un trou
+        sur la generation la plus ancienne a extrapoler.
+
+FIX-10  get_mean / get_n_open : plus de creation silencieuse de generations
+        fantomes. AVANT, `aggr.loc[y, col] = np.nan` sur une annee sans
+        defaut CREAIT la ligne au lieu de lever. APRES, on n'ecrit que sur
+        les generations reellement presentes.
+
+
+=======================================================================
+POINTS OUVERTS  (rechercher "OPEN-" dans le fichier) — NON corriges
+=======================================================================
+
+OPEN-01 get_unobserved_survival_rate : la cellule manquante recoit le ratio
+        moyen `SR_col / SR_k` sans multiplication par le SR observe de la
+        generation. REQUALIFIE : ce n'est PAS un bug, c'est le comportement
+        du SAS. `triangle_2` fait `SR_i = factor_i = temp_i / temp2_i`, soit
+        le meme ratio de moyennes affecte directement. Seule difference : le
+        SAS utilise des moyennes EXPANSIVES decalees, la version historique
+        des moyennes globales. Voir le parametre `expanding`.
+        Controle disponible : `check_sr_monotonic`.
+
+OPEN-02 Le module ne fait ni winsorisation, ni cap a 100, ni exclusion des
+        dossiers a outstanding >= 0. Le programme SAS de reference fait les
+        trois avant calibrage. Ces etapes doivent etre realisees en amont
+        (chargement du datamart) et leur presence n'est pas verifiee ici.
+
+OPEN-03 Aucune borne structurelle n'est appliquee aux cumulatives
+        reconstruites. Les parametres `lower_bound` / `upper_bound` de
+        `extrapolate_on_dtm` permettent de le faire horizon par horizon
+        (ex. CAD : borne superieure a 0), mais ils valent None par defaut.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+import logging
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-import polars as pl
+
+try:
+    import polars as pl
+except ImportError:  # le moteur polars devient simplement indisponible
+    pl = None
+
+log = logging.getLogger(__name__)
 
 
-# ==============================================================================
-# 1. BLOC DE CONFIGURATION — seule partie à modifier par l'utilisateur
-# ==============================================================================
+# ======================================================================
+# SECTION 1 — Preparation au grain facilite
+# ======================================================================
 
-CONFIG = {
-    # LazyFrame ou DataFrame Polars
-    "df": None,
+def add_is_open(table: pd.DataFrame, TTW: int, date_fin: str = "date_fin",
+                datdef: str = "datdef_ap_mdef") -> None:
+    """Ajoute open_H1 … open_H{TTW} : contrat ouvert depuis >= 365*(i-1) jours.
 
-    # Colonnes
-    "col_segment":   "Seg_X_HLC",
-    "col_estimated": "LGD_3ans_finale",   # LGD prédite par le modèle, 0-100
-    "col_observed":  "LGD_observed",      # LGD observée, 0-100
+    Modifie ``table`` sur place. open_H1 vaut toujours True (seuil 0 jour).
+    """
+    delta = (table[date_fin] - table[datdef]).dt.days
+    for i in range(1, TTW + 1):
+        table[f"open_H{i}"] = delta >= 365 * (i - 1)
 
-    # Segments à traiter : liste de noms, ou "all"
-    "segments_to_analyze": "all",
 
-    # Libellé du modèle affiché dans le tableau de synthèse
-    "model_label": "LGD 3 ans finale",
+def add_marginal_value(table: pd.DataFrame, cum_name: str, marg_name: str, TTW: int) -> None:
+    """Ajoute les colonnes marginales a partir des cumulatives."""
+    cum_cols = [f"{cum_name}1an"] + [f"{cum_name}{i}ans" for i in range(2, TTW + 1)]
+    for i, cur in enumerate(cum_cols):
+        if i == 0:
+            table[f"{marg_name}1an"] = table[cur]
+        else:
+            table[f"{marg_name}{i+1}ans"] = table[cur] - table[cum_cols[i - 1]]
+
+
+def add_required_fields(table: pd.DataFrame, cum_names: Sequence[str],
+                        marg_names: Sequence[str], TTW: int,
+                        inplace: bool = False) -> pd.DataFrame:
+    """Ajoute les flags d'ouverture et les valeurs marginales."""
+    dtm2 = table if inplace else table.copy()
+    add_is_open(dtm2, TTW)
+    for c, m in zip(cum_names, marg_names):
+        add_marginal_value(dtm2, c, m, TTW)
+    return dtm2
+
+
+# ======================================================================
+# SECTION 2 — Agregation en triangle  (SPECIFIQUE AU MOTEUR)
+# ======================================================================
+
+def _mask_incomplete(aggr: pd.DataFrame, TTW: int, offset: int) -> pd.DataFrame:
+    """Met a NaN les cellules du triangle qui ne sont pas encore observees.
+
+    ``offset`` vaut 0 pour les cumulatives (observees en FIN de periode) et 1
+    pour les comptages de contrats ouverts (regardes en DEBUT de periode).
+
+    FIX-10 : on n'ecrit que sur les generations reellement presentes dans
+    l'index, pour ne pas creer de ligne fantome via `.loc`.
+    """
+    gen_max = aggr.index.max()
+    present = set(aggr.index)
+    for y in range(gen_max, gen_max - TTW, -1):
+        if y not in present:
+            continue
+        for h in range(1, TTW + 1):
+            if y + h > gen_max + offset:
+                aggr.loc[y, f"Horizon {h}"] = np.nan
+    return aggr
+
+
+def get_mean_pd(dtm: pd.DataFrame, cum_field_name: str, TTW: int) -> pd.DataFrame:
+    """Moyenne des cumulatives par generation (moteur pandas)."""
+    columns = ["generation", f"{cum_field_name}1an"] + \
+        [f"{cum_field_name}{x}ans" for x in range(2, TTW + 1)]
+    g = dtm[columns].groupby("generation")
+    aggr = g.mean()
+    aggr.columns = [f"Horizon {i}" for i in range(1, TTW + 1)]
+    aggr = _mask_incomplete(aggr, TTW, offset=0)
+    aggr.insert(loc=0, column="population", value=g.size())
+    return aggr
+
+
+def get_n_open_pd(dtm: pd.DataFrame, TTW: int) -> pd.DataFrame:
+    """Nombre de contrats ouverts par generation et horizon (moteur pandas)."""
+    columns = ["generation"] + [f"open_H{x}" for x in range(1, TTW + 1)]
+    g = dtm[columns].groupby("generation")
+    aggr = g.sum()
+    aggr.columns = [f"Horizon {i}" for i in range(1, TTW + 1)]
+    aggr = aggr.astype(float)
+    aggr = _mask_incomplete(aggr, TTW, offset=1)
+    aggr.insert(loc=0, column="population", value=g.size())
+    return aggr
+
+
+def get_mean_pl(dtm: "pl.DataFrame", cum_field_name: str, TTW: int) -> pd.DataFrame:
+    """Moyenne des cumulatives par generation (moteur polars).
+
+    Retourne un DataFrame pandas indexe par generation, pour que tout le
+    coeur methodologique reste partage entre les deux moteurs.
+    """
+    cols = [f"{cum_field_name}1an"] + \
+        [f"{cum_field_name}{x}ans" for x in range(2, TTW + 1)]
+    aggr = (
+        dtm.lazy()
+        .group_by("generation")
+        .agg(
+            [pl.col(c).mean().alias(f"Horizon {i+1}") for i, c in enumerate(cols)]
+            + [pl.len().alias("population")]
+        )
+        .sort("generation")
+        .collect()
+        .to_pandas()
+        .set_index("generation")
+    )
+    order = [f"Horizon {i}" for i in range(1, TTW + 1)]
+    aggr = aggr[order + ["population"]]
+    aggr = _mask_incomplete(aggr, TTW, offset=0)
+    pop = aggr.pop("population")
+    aggr.insert(loc=0, column="population", value=pop)
+    return aggr
+
+
+def get_n_open_pl(dtm: "pl.DataFrame", TTW: int) -> pd.DataFrame:
+    """Nombre de contrats ouverts par generation et horizon (moteur polars)."""
+    aggr = (
+        dtm.lazy()
+        .group_by("generation")
+        .agg(
+            [pl.col(f"open_H{i}").sum().cast(pl.Float64).alias(f"Horizon {i}")
+             for i in range(1, TTW + 1)]
+            + [pl.len().alias("population")]
+        )
+        .sort("generation")
+        .collect()
+        .to_pandas()
+        .set_index("generation")
+    )
+    order = [f"Horizon {i}" for i in range(1, TTW + 1)]
+    aggr = aggr[order + ["population"]]
+    aggr = _mask_incomplete(aggr, TTW, offset=1)
+    pop = aggr.pop("population")
+    aggr.insert(loc=0, column="population", value=pop)
+    return aggr
+
+
+# ======================================================================
+# SECTION 3 — Coeur methodologique (partage, petits tableaux)
+# ======================================================================
+
+def get_SR_ratio_H1(n_open: pd.DataFrame, TTW: int) -> pd.DataFrame:
+    """Taux de survie a la SAS : ``SR_h = H_h / H_1``.
+
+    Reproduit `triangle_2` : `H1_copie = H_1` puis `SR_i = H_i / H1_copie`.
+    Reference = horizon 1, et non la population de la generation.
+    """
+    out = pd.DataFrame(index=n_open.index, dtype=float)
+    h1 = n_open["Horizon 1"]
+    for h in range(1, TTW + 1):
+        out[f"Horizon {h}"] = n_open[f"Horizon {h}"] / h1
+    return out
+
+
+def get_RR_open(cum: pd.DataFrame, n_open: pd.DataFrame, TTW: int,
+                deflator: str = "n_open_start") -> pd.DataFrame:
+    """Taux de recuperation marginal, ramene aux contrats encore vivants.
+
+    Parameters
+    ----------
+    deflator : {"n_open_start", "sas_sr_end"}
+        ``"n_open_start"`` (defaut, comportement du module) : la recuperation
+        marginale de la periode ``h`` est rapportee aux contrats ouverts au
+        DEBUT de la periode -> ``x population / n_open[h-1]``.
+
+        ``"sas_sr_end"`` : reproduit `%recal` du SAS, qui divise par le taux
+        de survie de FIN de periode -> ``/ (H_h / H_1)``. Decale d'un horizon
+        par rapport a la logique economique, mais c'est ce que fait le SAS.
+    """
+    out = n_open.copy()
+    out["Horizon 1"] = cum["Horizon 1"]
+
+    if deflator == "sas_sr_end":
+        sr = get_SR_ratio_H1(n_open, TTW)
+        for h in range(2, TTW + 1):
+            marg = cum[f"Horizon {h}"] - cum[f"Horizon {h-1}"]
+            out[f"Horizon {h}"] = marg / sr[f"Horizon {h}"]
+        return out
+
+    if deflator != "n_open_start":
+        raise ValueError(f"deflator inconnu : {deflator!r}")
+
+    for h in range(2, TTW + 1):
+        marg = cum[f"Horizon {h}"] - cum[f"Horizon {h-1}"]
+        out[f"Horizon {h}"] = marg * n_open["population"] / n_open[f"Horizon {h-1}"]
+    return out
+
+
+def get_dev_factor(rr_open: pd.DataFrame, n_open: pd.DataFrame, TTW: int,
+                   weighted_facility: bool = False,
+                   expanding: bool = True,
+                   forward_fill: bool = True) -> pd.DataFrame:
+    """Facteurs de developpement par horizon.
+
+    FIX-01 — mode ``expanding=True`` (defaut) : pour la generation ``g``, le
+    facteur est la moyenne ponderee des ``RR_open`` des generations
+    STRICTEMENT ANTERIEURES a ``g``. Obtenu par accumulation dans l'ordre
+    croissant des generations, puis decalage d'un cran. C'est la transposition
+    du ``retain`` + ``lag()`` du programme SAS : aucune information
+    posterieure a la generation extrapolee n'est utilisee.
+
+    FIX-07 — le masque d'observation inclut le poids, pour eviter qu'un poids
+    manquant sur une ligne retenue ne rende NaN tout l'horizon.
+
+    Parameters
+    ----------
+    expanding : bool
+        Si False, retombe sur la moyenne globale historique (une seule ligne,
+        repliquee sur toutes les generations). Conserve pour pouvoir mesurer
+        l'impact de FIX-01 ; ne pas utiliser en production.
+    forward_fill : bool
+        Propage le dernier facteur disponible aux generations pour lesquelles
+        aucune generation anterieure n'a observe l'horizon. Equivalent des
+        `lag2()`/`lag3()` du SAS qui vont rechercher la derniere valeur utile.
+
+    Returns
+    -------
+    pd.DataFrame
+        Indexe par generation (meme index que ``rr_open``), colonnes
+        ``Horizon 2`` … ``Horizon {TTW}``.
+    """
+    idx = rr_open.index
+    out = pd.DataFrame(index=idx, dtype=float)
+
+    for h in range(2, TTW + 1):
+        col = f"Horizon {h}"
+        w = n_open[col] if weighted_facility else n_open["population"]
+        rr = rr_open[col]
+
+        # FIX-07 : observe = RR renseigne ET poids renseigne
+        mask = rr.notna() & w.notna()
+
+        if not expanding:
+            num = (rr * w).loc[mask].sum()
+            den = w.loc[mask].sum()
+            out[col] = num / den if den else np.nan
+            continue
+
+        # --- FIX-01 : accumulation par generation croissante, puis decalage
+        contrib_num = (rr * w).where(mask, 0.0)
+        contrib_den = w.where(mask, 0.0)
+
+        cum_num = contrib_num.sort_index().cumsum()
+        cum_den = contrib_den.sort_index().cumsum()
+
+        moy = cum_num / cum_den.replace(0.0, np.nan)   # moyenne sur g' <= g
+        dev = moy.shift(1)                              # -> uniquement g' < g
+
+        if forward_fill:
+            dev = dev.ffill()
+
+        out[col] = dev.reindex(idx)
+
+    return out
+
+
+def get_unobserved_survival_rate(n_open: pd.DataFrame, crr: pd.DataFrame,
+                                 TTW: int, expanding: bool = False) -> pd.DataFrame:
+    """Taux de survie cumules, cellules non observees imputees.
+
+    OPEN-01 — comportement volontairement INCHANGE par rapport a la version
+    historique. La cellule manquante recoit le ratio moyen de portefeuille
+    ``SR_col / SR_k`` sans multiplication par le SR observe de la generation.
+    Voir le journal en tete de fichier avant toute modification.
+    """
+    sr = n_open.copy()
+    for h in range(1, TTW + 1):
+        sr[f"Horizon {h}"] = sr[f"Horizon {h}"] / sr["population"]
+
+    for col in sr.columns:
+        if col in ("population", "Horizon 1"):
+            continue
+        mask = sr[col].notna()
+        if not mask.any():
+            continue
+
+        if expanding:
+            # --- variante SAS : moyennes EXPANSIVES decalees d'une generation
+            # `triangle_2` accumule var_SR_col_i et var_SR1_col_i par `retain`
+            # puis prend `lag()`. Le ratio temp_i / temp2_i n'utilise donc que
+            # les generations strictement anterieures.
+            w = sr["population"]
+            body = sr.drop(columns="population")
+            num = body[col].where(mask, 0.0) * w.where(mask, 0.0)
+            den = w.where(mask, 0.0)
+            moy_col = (num.sort_index().cumsum() / den.sort_index().cumsum()
+                       .replace(0.0, np.nan)).shift(1).ffill()
+            for other in body.columns:
+                if other == col:
+                    continue
+            for g in sr.index[sr[col].isna()]:
+                # SR_k de reference = dernier horizon observe de la generation g
+                obs = [c for c in body.columns if pd.notna(sr.loc[g, c])]
+                if not obs or pd.isna(moy_col.get(g, np.nan)):
+                    continue
+                ref = obs[-1]
+                num_r = body[ref].where(mask, 0.0) * w.where(mask, 0.0)
+                moy_ref = (num_r.sort_index().cumsum() / den.sort_index().cumsum()
+                           .replace(0.0, np.nan)).shift(1).ffill()
+                if pd.notna(moy_ref.get(g, np.nan)) and moy_ref[g] != 0:
+                    sr.loc[g, col] = moy_col[g] / moy_ref[g]
+            continue
+
+        moy_ponderee = (
+            sr[mask].drop(columns="population")
+            .mul(sr[mask]["population"], axis=0) / sr[mask]["population"].sum()
+        )
+        totaux = moy_ponderee.sum(axis=0)
+        calc_col = totaux[col] / totaux
+        to_fill_size = int((~mask).sum())
+        if to_fill_size:
+            sr.loc[sr[col].isna(), col] = calc_col[:to_fill_size][::-1].values
+
+    mask_diag_observed = crr.isna() & n_open.notna()
+    sr[mask_diag_observed] = 1
+    return sr
+
+
+def get_unobserved_SR_stepwise(n_open: pd.DataFrame, crr: pd.DataFrame, TTW: int,
+                               weighted_facility: bool = False) -> pd.DataFrame:
+    """Taux de survie marginaux puis cumules par produit.
+
+    OPEN-01 — les deux forcages a 1 (``sr[mask_diag_observed] = 1`` ici, et
+    ``usr_copy[n_open.notna()] = 1`` dans :func:`get_extrapolated_RR`) sont
+    conserves a l'identique.
+    """
+    sr = n_open.copy()
+    sr["Horizon 1"] = 1.0
+    for h in range(2, TTW + 1):
+        sr[f"Horizon {h}"] = n_open[f"Horizon {h}"] / n_open[f"Horizon {h-1}"]
+
+    for h in range(2, TTW + 1):
+        col_prev, col = f"Horizon {h-1}", f"Horizon {h}"
+        mask = sr[col].notna()
+        if not mask.any():
+            continue
+        w = n_open[col_prev] if weighted_facility else n_open["population"]
+        weighted_mean = (sr[col][mask] * w[mask]).sum() / w[mask].sum()
+        sr.loc[sr[col].isna(), col] = weighted_mean
+
+    propagated = sr[n_open.isna()].astype(float).cumprod(axis=1)
+    sr[n_open.isna()] = propagated[n_open.isna()]
+
+    mask_diag_observed = crr.isna() & n_open.notna()
+    sr[mask_diag_observed] = 1
+    return sr
+
+
+def get_extrapolated_RR(usr: pd.DataFrame, dev_factor: pd.DataFrame,
+                        n_open: pd.DataFrame, annee_courante: int,
+                        TTW: int, mask_rule: str = "observation") -> pd.DataFrame:
+    """Marges extrapolees = taux de survie x facteur de developpement.
+
+    FIX-01 — ``dev_factor`` est desormais indexe par generation. Le produit
+    est aligne ligne a ligne au lieu d'etre diffuse depuis une ligne unique.
+
+    FIX-11 — regle de masquage alignee sur la regle d'observation.
+    AVANT : ``out.loc[out.index <= annee_courante - i, col] = np.nan``, ou
+    ``i`` est le RANG de la colonne. Cette regle depend de la convention
+    exacte passee dans ``annee_courante`` et se decalait d'une generation par
+    rapport a la regle qui definit le triangle observe dans ``get_mean``
+    (``y + h > gen_max``). Resultat : pour chaque horizon, la generation la
+    plus ancienne devant etre extrapolee etait masquee, donc jamais remplie.
+    C'est tres probablement ce trou que le ``[:-2]`` historique cherchait a
+    contourner.
+    APRES : on masque exactement les cellules OBSERVEES, ``y + h <= gen_max``,
+    c'est-a-dire le complementaire exact de ce que reinjecte
+    ``extrapolate_on_dtm``. Les deux fonctions partagent desormais la meme
+    definition et ne peuvent plus diverger.
+
+    Parameters
+    ----------
+    mask_rule : {"observation", "annee_courante"}
+        ``"annee_courante"`` restaure le comportement historique, pour
+        pouvoir mesurer l'impact de FIX-11. Ne pas utiliser en production.
+    """
+    out = usr.drop(columns=["population"]).copy()
+    out["Horizon 1"] = np.nan
+    cols = [f"Horizon {h}" for h in range(2, TTW + 1)]
+
+    usr_copy = usr.copy()
+    usr_copy[n_open.notna()] = 1          # OPEN-01 : forcage conserve
+
+    if isinstance(dev_factor, pd.DataFrame) and len(dev_factor) == 1 \
+            and not dev_factor.index.equals(usr.index):
+        # compatibilite avec l'ancien format (une seule ligne)
+        out[cols] = usr_copy[cols] * dev_factor.iloc[0, :]
+    else:
+        dev = dev_factor.reindex(usr.index)
+        out[cols] = usr_copy[cols].values * dev[cols].values
+
+    # On masque les horizons deja observes : seule la partie non observee
+    # du triangle porte une valeur extrapolee.
+    if mask_rule == "observation":                       # FIX-11
+        gen_max = int(usr.index.max())
+        for h in range(1, TTW + 1):
+            col = f"Horizon {h}"
+            out.loc[out.index + h <= gen_max, col] = np.nan
+    elif mask_rule == "annee_courante":                  # comportement historique
+        for i, col in enumerate(out.columns):
+            out.loc[out.index <= annee_courante - i, col] = np.nan
+    else:
+        raise ValueError(f"mask_rule inconnu : {mask_rule!r}")
+    return out
+
+
+# ======================================================================
+# SECTION 4 — Reinjection au grain facilite  (SPECIFIQUE AU MOTEUR)
+# ======================================================================
+
+def _eligible_generations(sub: pd.DataFrame, h: int, gen_max: int) -> pd.Series:
+    """Generations a extrapoler a l'horizon h, avec la marge associee.
+
+    FIX-02 — plus d'exclusion des deux dernieres generations.
+    FIX-04 — filtre sur `notna`, qui capture aussi bien None que NaN.
+    """
+    col = f"Horizon {h}"
+    if col not in sub.columns:
+        return pd.Series(dtype=float)
+    s = sub[col]
+    s = s[s.notna()]
+    # l'horizon h de la generation y depasse-t-il la fenetre observee ?
+    return s[[y + h > gen_max for y in s.index]]
+
+
+def extrapolate_on_dtm_pd(dtm: pd.DataFrame, extr_marg: pd.DataFrame, cum_field: str,
+                          TTW: int, final_value_col: str,
+                          lower_bound: float | None = None,
+                          upper_bound: float | None = None,
+                          inplace: bool = False) -> pd.DataFrame:
+    """Reinjecte les marges extrapolees sur la table au grain facilite (pandas).
+
+    Pour chaque horizon h, dans l'ordre croissant :
+      * contrat ouvert  -> cumulative(h) = cumulative(h-1) + marge(h)
+      * contrat ferme   -> cumulative(h) = cumulative(h-1)
+      * generation non concernee -> cumulative(h) inchangee (valeur observee)
+
+    L'ordre de la boucle garantit que ``cumulative(h-1)`` a deja ete mise a
+    jour lorsqu'on calcule ``cumulative(h)``.
+
+    OPEN-03 — ``lower_bound`` / ``upper_bound`` appliquent une borne
+    structurelle a CHAQUE horizon reconstruit (et non seulement a la colonne
+    finale). None par defaut.
+    """
+    dtm_filled = dtm if inplace else dtm.copy()
+    sub = extr_marg[extr_marg[f"Horizon {TTW}"].notna()]
+    if sub.empty:
+        dtm_filled[final_value_col] = dtm_filled[f"{cum_field}{TTW}ans"]
+        return dtm_filled
+
+    gen_max = int(sub.index.max())
+    gen = dtm_filled["generation"]
+
+    for h in range(2, TTW + 1):
+        marg = _eligible_generations(sub, h, gen_max)
+        if marg.empty:
+            continue
+
+        col_prev = f"{cum_field}1an" if h == 2 else f"{cum_field}{h-1}ans"
+        col_cur = f"{cum_field}{h}ans"
+
+        values = gen.map(marg)              # NaN hors generations concernees
+        touched = values.notna()
+        if not touched.any():
+            continue
+
+        # FIX-05 : on relit le flag deja calcule au lieu de le recalculer
+        is_open = dtm_filled[f"open_H{h}"]
+
+        new_col = dtm_filled[col_prev].where(~is_open, dtm_filled[col_prev] + values)
+        if lower_bound is not None or upper_bound is not None:
+            new_col = new_col.clip(lower=lower_bound, upper=upper_bound)
+
+        dtm_filled.loc[touched, col_cur] = new_col[touched]
+
+    dtm_filled[final_value_col] = dtm_filled[f"{cum_field}{TTW}ans"]
+    return dtm_filled
+
+
+def extrapolate_on_dtm_pl(dtm: "pl.LazyFrame", extr_marg: pd.DataFrame, cum_field: str,
+                          TTW: int, final_value_col: str,
+                          lower_bound: float | None = None,
+                          upper_bound: float | None = None) -> "pl.LazyFrame":
+    """Reinjecte les marges extrapolees (polars, lazy).
+
+    FIX-09 — un ``with_columns`` PAR HORIZON, et ``final_value_col`` affecte
+    APRES la boucle. Empiler les expressions dans un ``with_columns`` unique
+    les ferait toutes evaluer contre le LazyFrame d'entree : la chaine de
+    cumul serait rompue et la colonne finale ne serait qu'une copie de
+    l'observe.
+    """
+    out = dtm
+    sub = extr_marg[extr_marg[f"Horizon {TTW}"].notna()]
+    if sub.empty:
+        return out.with_columns(pl.col(f"{cum_field}{TTW}ans").alias(final_value_col))
+
+    gen_max = int(sub.index.max())
+
+    for h in range(2, TTW + 1):
+        marg = _eligible_generations(sub, h, gen_max)
+        if marg.empty:
+            continue
+
+        col_prev = f"{cum_field}1an" if h == 2 else f"{cum_field}{h-1}ans"
+        col_cur = f"{cum_field}{h}ans"
+
+        mapping = pl.DataFrame({
+            "generation": pl.Series(list(marg.index), dtype=pl.Int64),
+            "__marg": pl.Series(list(marg.values), dtype=pl.Float64),
+        }).lazy()
+
+        expr = (
+            pl.when(pl.col("__marg").is_null())
+              .then(pl.col(col_cur))                                  # non concernee
+              .when(pl.col(f"open_H{h}"))
+              .then(pl.col(col_prev) + pl.col("__marg"))              # ouvert
+              .otherwise(pl.col(col_prev))                            # ferme
+        )
+        if lower_bound is not None or upper_bound is not None:
+            expr = expr.clip(lower_bound, upper_bound)
+
+        out = (
+            out.with_columns(pl.col("generation").cast(pl.Int64))
+               .join(mapping, on="generation", how="left")
+               .with_columns(expr.alias(col_cur))
+               .drop("__marg")
+        )
+
+    return out.with_columns(pl.col(f"{cum_field}{TTW}ans").alias(final_value_col))
+
+
+# ======================================================================
+# SECTION 4bis — Completion "a la SAS" des cumulatives brutes
+# ======================================================================
+
+def apply_sas_completion_pd(dtm: pd.DataFrame, fields: Sequence[str], TTW: int,
+                            snapshot_year: int,
+                            inplace: bool = False) -> pd.DataFrame:
+    """Report de la derniere valeur observee, puis mise a zero des residuels.
+
+    Reproduit le bloc de `calcul_TRG` du programme SAS :
+
+    .. code-block:: sas
+
+        CRR_3ans = coalesce(CRR_3ans, CRR_2ans, CRR_1an) ;
+        ...
+        if CRR_3ans = . then CRR_3ans = 0 ;
+
+    Deux mecanismes SUCCESSIFS et distincts :
+
+    1. **LOCF descendant** — a l'horizon h non observe, on reporte la derniere
+       valeur observee aux horizons anterieurs.
+    2. **Mise a zero** — ce qui reste vide apres report est mis a 0, ce qui
+       revient a poser une recuperation nulle.
+
+    Le traitement ne s'applique qu'aux horizons theoriquement observables de
+    chaque generation, soit ``h <= snapshot_year - generation`` (le SAS ecrit
+    ``2021 - generation`` en dur). Au-dela, la cellule reste vide : c'est le
+    triangle non observe, qui sera comble par l'extrapolation.
+
+    ATTENTION — cette etape fabrique des valeurs qui ne sont pas des
+    observations. Elle modifie les moyennes calculees ensuite par `get_mean`,
+    donc TOUT l'aval. A n'activer que pour repliquer le SAS.
+    """
+    out = dtm if inplace else dtm.copy()
+    n_obs = (snapshot_year - out["generation"]).clip(lower=0, upper=TTW)
+
+    for f in fields:
+        cols = [f"{f}1an"] + [f"{f}{i}ans" for i in range(2, TTW + 1)]
+        prev = None
+        for h, c in enumerate(cols, start=1):
+            elig = n_obs >= h
+            if not elig.any():
+                continue
+            s = out[c]
+            if prev is not None:                       # 1. LOCF descendant
+                s = s.where(~elig | s.notna(), out[prev])
+            s = s.where(~elig | s.notna(), 0.0)        # 2. residuels a zero
+            out[c] = s
+            prev = c
+    return out
+
+
+def apply_sas_completion_pl(lf: "pl.LazyFrame", fields: Sequence[str], TTW: int,
+                            snapshot_year: int) -> "pl.LazyFrame":
+    """Equivalent polars de :func:`apply_sas_completion_pd`.
+
+    Un ``with_columns`` PAR HORIZON : la cascade de report exige que
+    l'horizon h-1 soit deja complete quand on traite h (cf. FIX-09).
+    """
+    out = lf.with_columns(
+        (pl.lit(snapshot_year) - pl.col("generation"))
+        .clip(0, TTW).alias("__n_obs")
+    )
+    for f in fields:
+        cols = [f"{f}1an"] + [f"{f}{i}ans" for i in range(2, TTW + 1)]
+        prev = None
+        for h, c in enumerate(cols, start=1):
+            elig = pl.col("__n_obs") >= h
+            base = pl.col(c) if prev is None else pl.coalesce([pl.col(c), pl.col(prev)])
+            out = out.with_columns(
+                pl.when(elig)
+                  .then(pl.coalesce([base, pl.lit(0.0)]))
+                  .otherwise(pl.col(c))
+                  .alias(c)
+            )
+            prev = c
+    return out.drop("__n_obs")
+
+
+# ======================================================================
+# SECTION 4ter — Presets
+# ======================================================================
+
+PRESETS: dict[str, dict] = {
+    # Version corrigee : choix methodologiques defendables, sans fuite
+    # d'information future et sans fabrication de donnees.
+    "corrected": dict(
+        sas_completion=False,
+        deflator="n_open_start",
+        expanding_dev_factor=True,
+        expanding_sr=False,
+        weighted_facility=False,
+        mask_rule="observation",
+    ),
+    # Replication du programme SAS "3-2 Completion".
+    # NOTE — la replication porte sur la METHODE, pas sur les anomalies
+    # identifiees dans le SAS : C1 (`SR_1 = count_sum / H1_copie` inverse),
+    # C4 (blocs TTWK 6/5/4 melangeant un marginal d'horizon k avec un cumul
+    # d'horizon k+1) et C17 (percentiles P01 calcules mais jamais appliques)
+    # ne sont PAS reproduits. Un ecart residuel avec le SAS est donc attendu
+    # et doit etre attribue a ces trois postes.
+    "sas": dict(
+        sas_completion=True,
+        deflator="sas_sr_end",
+        expanding_dev_factor=True,
+        expanding_sr=True,
+        weighted_facility=False,
+        mask_rule="observation",
+    ),
 }
 
-
-# Paliers de tranches (bins)
-BIN_EDGES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-BIN_LABELS = [
-    "[0-5%]", "[5-10%]", "[10-20%]", "[20-30%]", "[30-40%]", "[40-50%]",
-    "[50-60%]", "[60-70%]", "[70-80%]", "[80-90%]", "[90-100%]", "[100%+]",
-]
-
-# Seuils de coloration du Somer's D
-THRESHOLD_GREEN = 0.30   # D >= 30%        -> VERT
-THRESHOLD_AMBER = 0.15   # 15% <= D < 30%  -> AMBRE ; D < 15% -> ROUGE
-
-GLOBAL_LABEL = "GLOBAL"
-
-
-# ==============================================================================
-# 2. HELPERS POLARS
-# ==============================================================================
-
-def _to_lazy(df: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
-    """Normalise l'entrée en LazyFrame."""
-    return df.lazy() if isinstance(df, pl.DataFrame) else df
-
-
-def _bin_expr(col: str, alias: str) -> pl.Expr:
-    """
-    Expression Polars découpant une colonne 0-100 en tranches BIN_LABELS.
-    Utilise `cut` qui renvoie une colonne catégorielle ordonnée.
-    """
-    return (
-        pl.col(col)
-        .cut(BIN_EDGES, labels=BIN_LABELS, left_closed=True)
-        .cast(pl.Utf8)
-        .alias(alias)
-    )
-
-
-# ==============================================================================
-# 3. CALCUL — Somer's D (variable continue vs variable continue)
-# ==============================================================================
-#
-# scipy.stats.somersd construit en interne une table de contingence de taille
-# (n_valeurs_uniques_x x n_valeurs_uniques_y) : pour des variables CONTINUES
-# avec des dizaines de milliers de valeurs distinctes, ça explose en mémoire
-# (testé : ~57 Go pour 1.8M lignes). On utilise donc scipy.stats.kendalltau,
-# qui compte les paires concordantes/discordantes via un algorithme C compilé
-# en O(n log n) SANS jamais construire de table de contingence (testé : <1s
-# sur 1.8M lignes), puis on dérive le Somer's D asymétrique à partir de tau-b
-# via la relation mathématique entre les deux statistiques :
-#
-#     tau_b = (N_c - N_d) / sqrt((N0 - N1) * (N0 - N2))
-#     D_yx  = (N_c - N_d) / (N0 - N1)
-#
-# où N0 = n(n-1)/2, N1 = paires ex aequo sur x, N2 = paires ex aequo sur y.
-# On calcule donc (N_c - N_d) = tau_b * sqrt((N0-N1)(N0-N2)), puis on divise
-# par (N0 - N1) pour obtenir le D asymétrique (x = LGD estimée = variable
-# explicative). Polars reste utilisé pour tout le reste du pipeline.
-# ==============================================================================
-
-from scipy import stats as _scipy_stats
-
-
-def compute_somers_d_polars(
-    lf: pl.LazyFrame,
-    col_estimated: str,
-    col_observed: str,
-) -> float:
-    """
-    Somer's D asymétrique entre deux variables continues : LGD estimée comme
-    variable explicative (x), LGD observée comme variable expliquée (y).
-
-        D = (N_c - N_d) / (N_c + N_d + N_tied_x)
-
-    Calculé via scipy.stats.kendalltau (rapide, O(n log n), praticable sur
-    plusieurs millions de lignes) puis converti en Somer's D asymétrique.
-
-    Parameters
-    ----------
-    lf : pl.LazyFrame
-        Doit contenir `col_estimated` et `col_observed`.
-    col_estimated : str
-        Variable explicative (LGD estimée).
-    col_observed : str
-        Variable expliquée (LGD observée).
-
-    Returns
-    -------
-    float
-        Somer's D dans [-1, 1], ou np.nan si l'échantillon est trop petit
-        ou si x est constant.
-    """
-    data = (
-        lf.select([pl.col(col_estimated).alias("_x"), pl.col(col_observed).alias("_y")])
-          .drop_nulls()
-          .collect()
-    )
-    n = data.height
-    if n < 2:
-        return float("nan")
-
-    x = data["_x"].to_numpy()
-    y = data["_y"].to_numpy()
-
-    n0 = n * (n - 1) // 2
-
-    _, counts_x = np.unique(x, return_counts=True)
-    n1 = int(np.sum(counts_x.astype(np.int64) * (counts_x - 1) // 2))
-
-    _, counts_y = np.unique(y, return_counts=True)
-    n2 = int(np.sum(counts_y.astype(np.int64) * (counts_y - 1) // 2))
-
-    denom_d = n0 - n1
-    if denom_d <= 0:
-        return float("nan")
-
-    denom_tau = np.sqrt(float(n0 - n1) * float(n0 - n2))
-    if denom_tau == 0:
-        return float("nan")
-
-    tau_b = _scipy_stats.kendalltau(x, y).statistic
-    nc_minus_nd = tau_b * denom_tau
-
-    return float(nc_minus_nd / denom_d)
-
-
-# ==============================================================================
-# 4. CALCUL — Matrice de contingence (Polars natif)
-# ==============================================================================
-
-def build_contingency_matrix_polars(
-    lf: pl.LazyFrame,
-    col_estimated: str,
-    col_observed: str,
-) -> pl.DataFrame:
-    """
-    Matrice de contingence : tranches de l'Estimé en lignes, tranches de
-    l'Observé en colonnes, valeur = comptage.
-
-    Toutes les tranches sont présentes même vides (comptage 0), afin que
-    toutes les matrices aient la même forme d'un segment à l'autre.
-
-    Returns
-    -------
-    pl.DataFrame
-        Première colonne "Estimé" (labels), puis une colonne par tranche
-        d'Observé.
-    """
-    counts = (
-        lf.select([
-            _bin_expr(col_estimated, "_est"),
-            _bin_expr(col_observed, "_obs"),
-        ])
-        .drop_nulls()
-        .group_by(["_est", "_obs"])
-        .agg(pl.len().alias("n"))
-        .collect()
-    )
-
-    # Grille complète de toutes les combinaisons (label_est x label_obs)
-    grid = pl.DataFrame({
-        "_est": [e for e in BIN_LABELS for _ in BIN_LABELS],
-        "_obs": BIN_LABELS * len(BIN_LABELS),
-    })
-
-    matrix = (
-        grid.join(counts, on=["_est", "_obs"], how="left")
-            .with_columns(pl.col("n").fill_null(0))
-            .pivot(index="_est", on="_obs", values="n")
-            .rename({"_est": "Estimé"})
-    )
-
-    # Réordonner lignes et colonnes selon l'ordre canonique des tranches
-    matrix = (
-        matrix.with_columns(
-            pl.col("Estimé").cast(pl.Enum(BIN_LABELS))
-        )
-        .sort("Estimé")
-        .select(["Estimé"] + BIN_LABELS)
-        .with_columns(pl.col("Estimé").cast(pl.Utf8))
-    )
-    return matrix
-
-
-# ==============================================================================
-# 5. CALCUL — Tableau de synthèse (Polars natif)
-# ==============================================================================
-
-def build_summary_table_polars(
-    lf: pl.LazyFrame,
-    col_segment: str,
-    col_estimated: str,
-    col_observed: str,
-    model_label: str,
-    segments: Iterable[str] | str = "all",
-) -> pl.DataFrame:
-    """
-    Tableau récapitulatif : une ligne par segment + une ligne GLOBAL.
-
-    Le Somer's D est calculé directement entre LGD estimée et LGD observée
-    (variables continues), pas contre une cible binaire. Il est recalculé
-    sur l'ensemble du périmètre pour la ligne GLOBAL (et non comme une
-    moyenne des D par segment, qui n'aurait pas de sens statistique).
-    """
-    work = lf
-
-    if segments != "all":
-        work = work.filter(pl.col(col_segment).is_in(list(segments)))
-
-    somers_col = f"Somer's D — {model_label}"
-
-    # Stats agrégées vectorisées (une seule passe)
-    stats = (
-        work.group_by(col_segment)
-            .agg([
-                pl.len().alias("N"),
-                pl.col(col_estimated).mean().alias("LGD estimée moy."),
-                pl.col(col_observed).mean().alias("LGD observée moy."),
-            ])
-            .with_columns(
-                (pl.col("LGD estimée moy.") - pl.col("LGD observée moy."))
-                .alias("Écart (est. - obs.)")
-            )
-            .sort(col_segment)
-            .collect()
-    )
-
-    # Somer's D : une passe par segment
-    seg_values = stats[col_segment].to_list()
-    somers_values = [
-        compute_somers_d_polars(
-            work.filter(pl.col(col_segment) == seg), col_estimated, col_observed
-        )
-        for seg in seg_values
-    ]
-    stats = stats.with_columns(pl.Series(somers_col, somers_values))
-    stats = stats.rename({col_segment: "Segment"})
-
-    # Ligne globale
-    global_stats = (
-        work.select([
-            pl.len().alias("N"),
-            pl.col(col_estimated).mean().alias("LGD estimée moy."),
-            pl.col(col_observed).mean().alias("LGD observée moy."),
-        ])
-        .collect()
-        .with_columns([
-            pl.lit(GLOBAL_LABEL).alias("Segment"),
-            (pl.col("LGD estimée moy.") - pl.col("LGD observée moy."))
-            .alias("Écart (est. - obs.)"),
-            pl.lit(compute_somers_d_polars(work, col_estimated, col_observed))
-              .alias(somers_col),
-        ])
-    )
-
-    cols = ["Segment", "N", "LGD estimée moy.", "LGD observée moy.",
-            "Écart (est. - obs.)", somers_col]
-    out = pl.concat([stats.select(cols), global_stats.select(cols)],
-                    how="vertical_relaxed")
-
-    # Colonne emoji de notation -- filet de sécurité, garantie de s'afficher
-    # même si le CSS de coloration (background-color) est filtré/ignoré par
-    # le rendu du notebook (comportement observé avec certains renderers
-    # Jupyter/VSCode qui suppriment les <style> injectés par pandas Styler).
-    out = out.with_columns(
-        pl.col(somers_col).map_elements(_rate_emoji, return_dtype=pl.Utf8)
-          .alias("Rating")
-    )
-    return out.select(["Segment", "Rating"] + cols[1:])
-
-
-# ==============================================================================
-# 6. FORMATAGE — pandas Styler, uniquement sur les petites tables de sortie
-# ==============================================================================
-
-def _rate_emoji(value: float) -> str:
-    """
-    Pastille emoji Vert/Ambre/Rouge -- filet de sécurité garanti de
-    s'afficher quel que soit le rendu (contrairement au CSS de coloration,
-    qui peut être filtré par certains notebooks/thèmes).
-    """
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "⚪ n/a"
-    if value >= THRESHOLD_GREEN:
-        return "🟢 VERT"
-    if value >= THRESHOLD_AMBER:
-        return "🟡 AMBRE"
-    return "🔴 ROUGE"
-
-
-def _color_somers_d(value: float) -> str:
-    """Style CSS de fond selon les seuils Vert / Ambre / Rouge (couleur de
-    texte fixée explicitement pour rester lisible quel que soit le thème
-    du notebook, clair ou sombre)."""
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "background-color: #E0E0E0; color: #444444; font-weight: 600;"
-    if value >= THRESHOLD_GREEN:
-        return "background-color: #C6EFCE; color: #006100; font-weight: 600;"   # VERT
-    if value >= THRESHOLD_AMBER:
-        return "background-color: #FFEB9C; color: #9C5700; font-weight: 600;"   # AMBRE
-    return "background-color: #FFC7CE; color: #9C0006; font-weight: 600;"       # ROUGE
-
-
-def format_summary_table(summary: pl.DataFrame):
-    """
-    Convertit la table de synthèse (petite : ~n_segments+1 lignes) en pandas
-    et applique la coloration conditionnelle. La colonne "Rating" (emoji
-    🟢/🟡/🔴) est un filet de sécurité visuel qui reste lisible même si le
-    CSS de coloration n'est pas rendu par le notebook.
-    """
-    pdf = summary.to_pandas()
-    score_cols = [c for c in pdf.columns if c.startswith("Somer's D")]
-    pct_cols = ["LGD estimée moy.", "LGD observée moy.", "Écart (est. - obs.)"]
-
-    def _bold_global_row(row):
-        if row["Segment"] == GLOBAL_LABEL:
-            return ["font-weight: bold; border-top: 2px solid #333333;"] * len(row)
-        return [""] * len(row)
-
-    return (
-        pdf.style
-        .set_properties(**{"color": "#111111", "background-color": "#FFFFFF"})
-        .apply(_bold_global_row, axis=1)
-        .map(_color_somers_d, subset=score_cols)
-        .format({c: "{:.2%}" for c in score_cols}, na_rep="n/a")
-        .format({c: "{:.2f}" for c in pct_cols}, na_rep="n/a")
-        .format({"N": "{:,.0f}"})
-        .hide(axis="index")
-        .set_caption("Tableau 42 — Capacité de discrimination du modèle (Somer's D)")
-        .set_table_styles([
-            {"selector": "caption",
-             "props": [("font-size", "13px"), ("font-weight", "bold"),
-                       ("text-align", "left"), ("padding-bottom", "8px"),
-                       ("color", "#111111")]},
-            {"selector": "th",
-             "props": [("background-color", "#F2F2F2"), ("color", "#111111"),
-                       ("text-align", "center"), ("border", "1px solid #CCCCCC")]},
-            {"selector": "td",
-             "props": [("border", "1px solid #CCCCCC")]},
-        ])
-    )
-
-
-def format_contingency_matrix(matrix: pl.DataFrame, segment_name: str):
-    """
-    Convertit la matrice (12x12) en pandas et applique le dégradé + la mise en
-    évidence de la diagonale (concordance parfaite).
-    """
-    pdf = matrix.to_pandas().set_index("Estimé")
-    pdf.columns.name = "Observé"
-
-    def _highlight_diagonal(data):
-        import pandas as pd
-        styles = pd.DataFrame("", index=data.index, columns=data.columns)
-        for label in data.index:
-            if label in data.columns:
-                styles.loc[label, label] = "border: 2px solid #2E5FA3;"
-        return styles
-
-    return (
-        pdf.style
-        .background_gradient(cmap="Blues", axis=None, text_color_threshold=0.4)
-        .apply(_highlight_diagonal, axis=None)
-        .format("{:,.0f}")
-        .set_caption(
-            f'Segment "{segment_name}": Performance by segment (estimated vs observed)'
-        )
-        .set_table_styles([
-            {"selector": "caption",
-             "props": [("font-size", "13px"), ("font-weight", "bold"),
-                       ("text-align", "left"), ("padding-bottom", "8px"),
-                       ("color", "#111111")]},
-            {"selector": "th",
-             "props": [("background-color", "#F2F2F2"), ("color", "#111111"),
-                       ("text-align", "center"), ("font-size", "11px"),
-                       ("border", "1px solid #CCCCCC")]},
-            {"selector": "td",
-             "props": [("text-align", "center"), ("font-size", "11px"),
-                       ("color", "#111111"), ("border", "1px solid #CCCCCC")]},
-        ])
-    )
-
-
-# ==============================================================================
-# 7. EXPORT EXCEL — préserve la coloration conditionnelle
-# ==============================================================================
-
-def export_report_to_excel(
-    styled_summary,
-    matrices: dict,
-    output_path: str,
-) -> str:
-    """
-    Exporte le rapport complet dans un classeur Excel multi-feuilles :
-      - Feuille "Synthese"      : le tableau de synthèse (Rapport 1), couleurs
-                                  Vert/Ambre/Rouge préservées via openpyxl.
-      - Une feuille par segment : la matrice de contingence correspondante,
-                                  dégradé de couleur préservé.
-    Les noms de feuille sont tronqués/nettoyés pour respecter la limite
-    Excel de 31 caractères et les caractères interdits (: \\ / ? * [ ]).
-
-    Parameters
-    ----------
-    styled_summary : pandas.io.formats.style.Styler
-        Sortie de `format_summary_table`.
-    matrices : dict[str, Styler]
-        Sortie `matrices` de `generate_report` (inclut GLOBAL_LABEL).
-    output_path : str
-        Chemin du fichier .xlsx à écrire.
-
-    Returns
-    -------
-    str
-        Le chemin du fichier écrit (identique à `output_path`).
-    """
-    import re
-
-    def _safe_sheet_name(name: str, used: set) -> str:
-        clean = re.sub(r"[:\\/?*\[\]]", "_", str(name))[:31]
-        base, i = clean, 1
-        while clean in used:
-            suffix = f"_{i}"
-            clean = base[: 31 - len(suffix)] + suffix
-            i += 1
-        used.add(clean)
-        return clean
-
-    used_names: set = set()
-
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        styled_summary.to_excel(
-            writer, sheet_name=_safe_sheet_name("Synthese", used_names), index=False
-        )
-        for seg, styled_matrix in matrices.items():
-            sheet_name = _safe_sheet_name(f"Matrice_{seg}", used_names)
-            styled_matrix.to_excel(writer, sheet_name=sheet_name)
-
-    return output_path
-
-
-# ==============================================================================
-# 8. ORCHESTRATION
-# ==============================================================================
-
-def generate_report(config: dict = CONFIG):
-    """
-    Produit les deux rendus attendus.
-
-    Returns
-    -------
-    tuple[Styler, dict[str, Styler]]
-        Le tableau de synthèse stylé, et {segment: matrice stylée} incluant
-        la clé GLOBAL_LABEL.
-    """
-    if config["df"] is None:
-        raise ValueError("CONFIG['df'] doit contenir le LazyFrame/DataFrame Polars.")
-
-    lf = _to_lazy(config["df"])
-
-    # ---------------- Rapport 1 : synthèse ----------------
-    summary = build_summary_table_polars(
-        lf,
-        col_segment=config["col_segment"],
-        col_estimated=config["col_estimated"],
-        col_observed=config["col_observed"],
-        model_label=config["model_label"],
-        segments=config["segments_to_analyze"],
-    )
-    styled_summary = format_summary_table(summary)
-
-    # ---------------- Rapport 2 : matrices ----------------
-    segments = config["segments_to_analyze"]
-    if segments == "all":
-        work = lf
-        segments = (
-            lf.select(pl.col(config["col_segment"]))
-              .drop_nulls().unique().collect()
-              .to_series().sort().to_list()
-        )
+# ======================================================================
+# SECTION 5 — Orchestration
+# ======================================================================
+
+def get_TTW(dtm, ttwcol: str = "TTW"):
+    """Recupere l'unique valeur de TTW d'une table (pandas ou polars)."""
+    if pl is not None and isinstance(dtm, (pl.DataFrame, pl.LazyFrame)):
+        vals = (dtm.lazy().select(pl.col(ttwcol).unique()).collect()
+                .to_series().to_list())
     else:
-        segments = list(segments)
-        work = lf.filter(pl.col(config["col_segment"]).is_in(segments))
+        vals = list(pd.unique(dtm[ttwcol]))
+    assert len(vals) == 1, f"Too many TTW: {vals}"
+    return int(vals[0])
 
-    matrices = {}
-    for seg in segments:
-        sub = lf.filter(pl.col(config["col_segment"]) == seg)
-        matrices[seg] = format_contingency_matrix(
-            build_contingency_matrix_polars(
-                sub, config["col_estimated"], config["col_observed"]
-            ),
-            seg,
+
+def extrapolate_survival_rate(annee_courante: int, TTW: int,
+                              fields: Sequence[str] = ("CRR_",),
+                              *,
+                              n_open_cases: pd.DataFrame | None = None,
+                              means: Mapping[str, pd.DataFrame] | None = None,
+                              stepwise_SR: bool = False,
+                              weighted_facility: bool = False,
+                              expanding_dev_factor: bool = True,
+                              expanding_sr: bool = False,
+                              deflator: str = "n_open_start",
+                              mask_rule: str = "observation",
+                              **kwargs: Any) -> dict[str, Any]:
+    """Calcule dev factors, survival rates et marges extrapolees.
+
+    Travaille exclusivement sur les triangles agreges, donc identique quel que
+    soit le moteur qui les a produits.
+    """
+    results: dict[str, Any] = {"n_open_cases": n_open_cases}
+    for f in fields:
+        results[f] = means[f]
+
+    for f in fields:
+        results[f"m{f}_open"] = get_RR_open(results[f], n_open_cases, TTW=TTW,
+                                            deflator=deflator)
+        results[f"dev_factor_m{f}"] = get_dev_factor(
+            results[f"m{f}_open"], n_open_cases,
+            TTW=TTW, weighted_facility=weighted_facility,
+            expanding=expanding_dev_factor,       # FIX-01
         )
 
-    matrices[GLOBAL_LABEL] = format_contingency_matrix(
-        build_contingency_matrix_polars(
-            work, config["col_estimated"], config["col_observed"]
-        ),
-        GLOBAL_LABEL,
-    )
+    first = fields[0]
+    if stepwise_SR:
+        results["unobs_SR"] = get_unobserved_SR_stepwise(
+            n_open_cases, results[first], TTW=TTW,
+            weighted_facility=weighted_facility)
+    else:
+        results["unobs_SR"] = get_unobserved_survival_rate(
+            n_open_cases, results[first], TTW=TTW, expanding=expanding_sr)
 
-    return styled_summary, matrices
+    for f in fields:
+        suffix = f[1:] if f.startswith("C") else f
+        results[f"extrapolated_{suffix}"] = get_extrapolated_RR(
+            results["unobs_SR"], results[f"dev_factor_m{f}"], n_open_cases,
+            annee_courante - 1, TTW=TTW, mask_rule=mask_rule)
+
+    return results
 
 
-# ==============================================================================
-# 8. EXEMPLE D'UTILISATION
-# ==============================================================================
+def extrapolate_all_categories(annee_courante: int,
+                               dtm_in,
+                               category_column: str,
+                               fields: Sequence[str],
+                               marginal_fields: Sequence[str],
+                               final_suffix: str = "_final",
+                               engine: str = "pandas",
+                               preset: str = "corrected",
+                               snapshot_year: int | None = None,
+                               bounds: Mapping[str, tuple] | None = None,
+                               **kwargs: Any):
+    """Extrapole tous les champs, pour toutes les categories.
 
-if __name__ == "__main__":
-    # --- Cellule 1 : configuration ---
-    # CONFIG["df"] = pl.scan_parquet("chemin/vers/donnees.parquet")
-    # CONFIG["col_segment"]   = "Seg_X_HLC"
-    # CONFIG["col_estimated"] = "LGD_3ans_finale"
-    # CONFIG["col_observed"]  = "LGD_observed"
-    # CONFIG["col_target"]    = "statut"
+    Parameters
+    ----------
+    engine : {"pandas", "polars"}
+        Moteur de calcul. ``"polars"`` est recommande au-dela de ~500 k lignes.
+        Les deux moteurs partagent le coeur methodologique et doivent produire
+        des chiffres identiques.
+    bounds : mapping, optional
+        Bornes structurelles par champ, ex. ``{"CAD_act_": (None, 0.0)}``
+        pour interdire un CAD positif. Appliquees a chaque horizon reconstruit
+        (OPEN-03).
+    kwargs
+        Transmis a :func:`extrapolate_survival_rate` (``stepwise_SR``,
+        ``weighted_facility``, ``expanding_dev_factor``).
 
-    # --- Cellule 2 : génération ---
-    # styled_summary, matrices = generate_report(CONFIG)
+    Returns
+    -------
+    (results, dtm_filled)
+    """
+    if engine not in ("pandas", "polars"):
+        raise ValueError(f"engine doit valoir 'pandas' ou 'polars', recu {engine!r}")
+    if engine == "polars" and pl is None:
+        raise ImportError("polars n'est pas installe")
+    if preset not in PRESETS:
+        raise ValueError(f"preset doit valoir {list(PRESETS)}, recu {preset!r}")
 
-    # --- Cellule 3 : rapport 1 ---
-    # display(styled_summary)
+    # Le preset fournit les defauts ; tout kwarg explicite le surcharge.
+    cfg = dict(PRESETS[preset])
+    cfg.update({k: v for k, v in kwargs.items() if k in cfg})
+    kwargs = {k: v for k, v in kwargs.items() if k not in cfg}
+    sas_completion = cfg.pop("sas_completion")
+    if sas_completion and snapshot_year is None:
+        snapshot_year = annee_courante
+        log.warning("preset='sas' : snapshot_year non fourni, %s utilise", snapshot_year)
 
-    # --- Cellule 4 : rapport 2 ---
-    # for seg, styled_matrix in matrices.items():
-    #     display(styled_matrix)
+    bounds = bounds or {}
 
-    # Jeu de démonstration
-    rng = np.random.default_rng(42)
-    n = 50_000
-    observed = rng.uniform(0, 100, size=n)
-    estimated = np.clip(observed * 0.7 + rng.normal(0, 12, size=n), 0, 100)
-    demo = pl.DataFrame({
-        "Seg_X_HLC": rng.choice(["A_1", "B_2", "C_3"], size=n),
-        "LGD_observed": observed,
-        "LGD_3ans_finale": estimated,
-    })
+    # --- FIX-06 : on utilise category_column, plus la chaine "categories"
+    if engine == "polars":
+        base = dtm_in.lazy() if isinstance(dtm_in, pl.DataFrame) else dtm_in
+        pairs = (base.select([category_column, "TTW"]).unique().collect())
+        n_pairs, n_cats = pairs.height, pairs[category_column].n_unique()
+        cats = pairs[category_column].to_list()
+    else:
+        _d = dtm_in[[category_column, "TTW"]]
+        n_pairs = _d.drop_duplicates().shape[0]
+        n_cats = _d[category_column].nunique()
+        cats = list(pd.unique(dtm_in[category_column]))
+    assert n_pairs == n_cats, "There is a mismatch in terms of TTW per category"
 
-    CONFIG["df"] = demo
-    summary_tbl, matrices_tbl = generate_report(CONFIG)
+    results: dict[Any, Any] = {}
+    parts = []
 
-    print("=== RAPPORT 1 — Tableau de synthèse ===")
-    print(summary_tbl.data.to_string(index=False))
-    print(f"\n=== RAPPORT 2 — {len(matrices_tbl)} matrices générées ===")
-    for seg, m in matrices_tbl.items():
-        print(f"  - {seg}: shape {m.data.shape}, total = {m.data.values.sum():,}")
+    for cat in cats:
+        # ---------------------------------------------------------- sous-table
+        if engine == "polars":
+            sub_dtm = base.filter(pl.col(category_column) == cat)
+            TTW = get_TTW(sub_dtm)
+            if sas_completion:
+                sub_dtm = apply_sas_completion_pl(sub_dtm, fields, TTW, snapshot_year)
+            sub_pl = _add_required_fields_pl(sub_dtm, fields, marginal_fields, TTW).collect()
+            n_open_cases = get_n_open_pl(sub_pl, TTW)
+            means = {f: get_mean_pl(sub_pl, f, TTW=TTW) for f in fields}
+        else:
+            sub_dtm = dtm_in.loc[dtm_in[category_column] == cat, :].copy()  # FIX-08
+            TTW = get_TTW(sub_dtm)
+            if sas_completion:
+                sub_dtm = apply_sas_completion_pd(sub_dtm, fields, TTW,
+                                                  snapshot_year, inplace=True)
+            sub_dtm = add_required_fields(sub_dtm, fields, marginal_fields,
+                                          TTW=TTW, inplace=True)
+            n_open_cases = get_n_open_pd(sub_dtm, TTW)
+            means = {f: get_mean_pd(sub_dtm, f, TTW=TTW) for f in fields}
+
+        # ------------------------------------------- coeur methodologique
+        results[cat] = extrapolate_survival_rate(
+            annee_courante, TTW, fields=fields,
+            n_open_cases=n_open_cases, means=means, **cfg, **kwargs)
+
+        # ---------------------------------------- reinjection, champ par champ
+        # FIX-03 / FIX-08 : UNE seule table par categorie, enrichie
+        # successivement. L'ancienne version empilait le resultat
+        # intermediaire ET le resultat final dans la liste de sortie.
+        if engine == "polars":
+            filled = sub_pl.lazy()
+            for f in fields:
+                suffix = f[1:] if f.startswith("C") else f
+                lo, hi = bounds.get(f, (None, None))
+                filled = extrapolate_on_dtm_pl(
+                    filled, results[cat][f"extrapolated_{suffix}"],
+                    f, TTW, f"{f}{final_suffix}", lower_bound=lo, upper_bound=hi)
+            parts.append(filled.collect())
+        else:
+            filled = sub_dtm
+            for f in fields:
+                suffix = f[1:] if f.startswith("C") else f
+                lo, hi = bounds.get(f, (None, None))
+                filled = extrapolate_on_dtm_pd(
+                    filled, results[cat][f"extrapolated_{suffix}"],
+                    f, TTW, f"{f}{final_suffix}",
+                    lower_bound=lo, upper_bound=hi, inplace=True)
+            parts.append(filled)
+
+    dtm_filled = pl.concat(parts, how="vertical") if engine == "polars" \
+        else pd.concat(parts, axis=0)
+    return results, dtm_filled
+
+
+def _add_required_fields_pl(lf: "pl.LazyFrame", cum_names: Sequence[str],
+                            marg_names: Sequence[str], TTW: int,
+                            date_fin: str = "date_fin",
+                            datdef: str = "datdef_ap_mdef") -> "pl.LazyFrame":
+    """Equivalent polars de :func:`add_required_fields`."""
+    delta = (pl.col(date_fin) - pl.col(datdef)).dt.total_days()
+    exprs = [(delta >= 365 * (i - 1)).alias(f"open_H{i}") for i in range(1, TTW + 1)]
+    for c, m in zip(cum_names, marg_names):
+        exprs.append(pl.col(f"{c}1an").alias(f"{m}1an"))
+        for i in range(2, TTW + 1):
+            prev = f"{c}1an" if i == 2 else f"{c}{i-1}ans"
+            exprs.append((pl.col(f"{c}{i}ans") - pl.col(prev)).alias(f"{m}{i}ans"))
+    return lf.with_columns(exprs)
+
+
+# ======================================================================
+# SECTION 6 — Controles
+# ======================================================================
+
+def check_sr_monotonic(sr: pd.DataFrame, TTW: int) -> pd.DataFrame:
+    """Controle OPEN-01 : un SR cumule doit etre non croissant en horizon."""
+    cols = [f"Horizon {h}" for h in range(1, TTW + 1)]
+    m = sr[cols]
+    viol = (m.diff(axis=1) > 1e-12).sum(axis=1)
+    return pd.DataFrame({"nb_remontees": viol})
+
+
+def check_no_duplication(dtm_in, dtm_filled) -> dict:
+    """Controle FIX-03 : la table de sortie doit avoir le meme nombre de lignes."""
+    n_in = dtm_in.height if pl is not None and isinstance(dtm_in, (pl.DataFrame,)) else len(dtm_in)
+    n_out = dtm_filled.height if pl is not None and isinstance(dtm_filled, (pl.DataFrame,)) else len(dtm_filled)
+    return {"n_entree": n_in, "n_sortie": n_out, "ok": n_in == n_out}
+
+
+def check_coverage(dtm_filled, final_col: str, gen_col: str = "generation"):
+    """Controle FIX-02 : part de valeurs manquantes par generation."""
+    if pl is not None and isinstance(dtm_filled, pl.DataFrame):
+        return (dtm_filled.lazy()
+                .group_by(gen_col)
+                .agg(pl.col(final_col).is_null().mean().alias("part_null"))
+                .sort(gen_col).collect())
+    return dtm_filled.groupby(gen_col)[final_col].apply(lambda s: s.isna().mean())
