@@ -1,5 +1,7 @@
-rd_path = segments["RD_path"]  # celui de INDIVIDUEL_NC
-df_rd = pd.read_excel(rd_path)
-df_rd["Variable"] = df_rd["Variable"].astype(str).str.upper()
-row = df_rd[df_rd["Variable"] == "PRD_VARN4"]
-print(row[["Variable", "Risk_drivers", "Type"]] if not row.empty else "ABSENTE DU FICHIER RD")
+lf_binned = apply_bins(lf_cure_seg, features, nominals, input_path, gam_suffixe)
+df_binned = lf_binned.select(features).collect().to_pandas()
+
+s = df_binned["PRD_VARN4"]
+print("dtype:", s.dtype)
+print("types réels:", s.dropna().map(type).value_counts())
+print("valeurs non numériques:", s[pd.to_numeric(s, errors="coerce").isna() & s.notna()].unique())
