@@ -1,56 +1,38 @@
+import pandas as pd
+
 def process_dummies_imbriquee(df_binned_dummies, feature_):
-    df_binned_dummies = df_binned_dummies.copy()
-
-    # CORR-1 : ramener la colonne a une vue numerique ordonnee avant de trier.
-    # L'original faisait `sorted(df[feature_].unique())` sur une colonne
-    # `object` pouvant melanger nombres et texte, d'ou le TypeError.
-    s = df_binned_dummies[feature_]
-    converti = False
-    if not pd.api.types.is_numeric_dtype(s):
-        s_num = pd.to_numeric(s, errors="coerce")
-        if (s_num.isna() & s.notna()).any():
-            exemples = pd.unique(s[s_num.isna() & s.notna()])[:5].tolist()
-            raise TypeError(
-                f"[{feature_}] contient des valeurs non numeriques "
-                f"(ex: {exemples}) : les dummies emboitees (>= seuil) "
-                f"supposent une variable ordonnee."
-            )
-        s = s_num
-        converti = True
-
-    # CORR-2 : ne pas garder NaN comme "modalite" (creait une colonne
-    # constante a zero, `>= nan` etant toujours False).
-    groups = sorted(s.dropna().unique())
-
+    # 1. Récupérer les modalités uniques en ignorant les valeurs manquantes (NaN)
+    raw_groups = df_binned_dummies[feature_].dropna().unique()
+    
+    # 2. Trier de manière sécurisée (gère les mélanges de types str / float / int)
+    try:
+        groups = sorted(raw_groups)
+    except TypeError:
+        # Si la colonne contient un mélange de types (ex: str et float), on trie par leur représentation texte
+        groups = sorted(raw_groups, key=lambda x: str(x))
+    
+    # 3. Création des variables dummies imbriquées pour chaque modalité (à partir de la 2ème)
     for g in groups[1:]:
-        # si la colonne a ete convertie en float, on retire le suffixe
-        # ".0" pour les entiers, afin de ne pas modifier les noms de
-        # colonnes dans le cas nominal (colonne deja numerique).
-        libelle = str(int(g)) if converti and float(g).is_integer() else str(g)
-        col_name = f'{feature_}_{libelle}'
-        df_binned_dummies[col_name] = (s >= g).astype(int)
-
-    df_binned_dummies = df_binned_dummies.drop(feature_, axis=1)
-
+        col_name = f'{feature_}_{g}'
+        df_binned_dummies[col_name] = (df_binned_dummies[feature_] >= g).astype(int)
+    
+    # 4. Suppression de la colonne initiale
+    df_binned_dummies = df_binned_dummies.drop(columns=[feature_])
+    
     return df_binned_dummies
 
 
 def dummies_imbriquee(data, columns=None):
     df_binned_dummies = data.copy()
-
+    
+    # Si aucune colonne n'est spécifiée, on traite toutes les colonnes
     if columns is None:
-        columns = data.columns
-        for feature_ in columns:
-            print(feature_)
-            df_binned_dummies = process_dummies_imbriquee(df_binned_dummies, feature_)
+        columns = list(data.columns)
     elif isinstance(columns, str):
-        df_binned_dummies = process_dummies_imbriquee(df_binned_dummies, columns)
-    else:
-        # CORR-4 : l'original appelait process_dummies_imbriquee(df, columns)
-        # avec `columns` = liste entiere, ce qui plantait des que plusieurs
-        # colonnes etaient passees explicitement.
-        for feature_ in columns:
-            print(feature_)
-            df_binned_dummies = process_dummies_imbriquee(df_binned_dummies, feature_)
-
+        columns = [columns]
+        
+    for feature_ in columns:
+        print(feature_)
+        df_binned_dummies = process_dummies_imbriquee(df_binned_dummies, feature_)
+        
     return df_binned_dummies
