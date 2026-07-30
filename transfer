@@ -1,7 +1,1 @@
-lf_binned = apply_bins(lf_cure_seg, features, nominals, input_path, gam_suffixe)
-df_binned = lf_binned.select(features).collect().to_pandas()
-
-s = df_binned["PRD_VARN4"]
-print("dtype:", s.dtype)
-print("types réels:", s.dropna().map(type).value_counts())
-print("valeurs non numériques:", s[pd.to_numeric(s, errors="coerce").isna() & s.notna()].unique())
+print([c for c in model.feature_names_in_ if c.startswith("PRD_VARN4")])
