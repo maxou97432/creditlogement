@@ -1,8 +1,462 @@
-# TODO : reintroduire un vrai filtre par segment quand le pipeline sera
-# generalise a plusieurs segments Cure/NonCure en parallele.
-# Pour l'instant lf_cure_w_nc est deja restreint au segment courant en amont,
-# donc pas besoin de refiltrer ici -- seg['Filtre'] est casse (is_in sur
-# Int32) et n'est de toute facon plus necessaire dans ce contexte.
-lf_cure_w_nc = lf_cure_w_nc.with_columns(
-    pl.lit(mean_lgd_cure).alias('avg_LGD_Cure')
-)
+"""
+time_to_workout.py
+==================
+
+Time-to-Workout (TtW) calibration, Polars lazy implementation.
+
+Methodology reference
+---------------------
+LGD Retail Model Documentation - RISK BCeF, section "Time-to-workout"
+(Granularity / Scope / Methodology), consistent with BNPP Group Modeling
+Standards and EBA GL art. 156.
+
+    a. Granularity : one TtW per product-type segment.
+    b. Scope       : operationally closed recovery processes only; per segment,
+                     the 1st and 99th percentiles of the *recovery length* are
+                     treated as outliers and removed from the calibration sample.
+    c. Methodology : recovery speed = annual growth rate of the number-weighted
+                     average non-discounted cumulated recovery rate.
+
+                         CRR_t          = sum_{k=t0}^{t} R_k / EAD
+                         mean_CRR_t     = (1/n) * sum_{facilities} CRR_t
+                         speed_t        = (mean_CRR_t - mean_CRR_{t-1}) / mean_CRR_{t-1}
+
+                     TtW = last year before which the recovery speed falls and
+                     *remains* under 1%.
+
+Implementation notes
+--------------------
+* Everything is expressed as native Polars expressions and stays lazy until the
+  single terminal ``.collect()`` in ``compute_all_TtW_lazy``.
+* CRR_t is read from pre-computed columns ``{prefix}1an``, ``{prefix}2ans``, ...
+  The EAD denominator (including cumulated additional drawings) is assumed to be
+  already embedded upstream, as in the survival-rate module.
+* The growth rate is scale-invariant, so a CRR on a 0-100 scale and a CRR on a
+  0-1 scale give identical TtW. ``ttw_threshold`` is always expressed in
+  **percentage points** (1 = 1%).
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Dict, List, Optional, Sequence, Union
+
+import polars as pl
+
+FrameLike = Union[pl.DataFrame, pl.LazyFrame]
+
+# ----------------------------------------------------------------------
+# 0) helpers
+# ----------------------------------------------------------------------
+_HORIZON_RE = re.compile(r"^(?P<h>\d+)ans?$")
+
+
+def _as_lazy(df: FrameLike) -> pl.LazyFrame:
+    """Accept either a DataFrame or a LazyFrame, always return a LazyFrame."""
+    return df.lazy() if isinstance(df, pl.DataFrame) else df
+
+
+def _schema_names(lf: pl.LazyFrame) -> List[str]:
+    """Schema resolution without triggering computation."""
+    try:
+        return lf.collect_schema().names()
+    except AttributeError:  # polars < 1.0
+        return lf.columns
+
+
+def detect_horizon_columns(
+    lf: pl.LazyFrame,
+    prefix: str = "CRR_",
+    max_horizon: Optional[int] = None,
+) -> Dict[int, str]:
+    """
+    Discover the available cumulative columns and map horizon -> column name.
+
+    Recognises the BNP naming convention ``{prefix}1an`` then ``{prefix}2ans`` ...
+    ``{prefix}{H}ans``. Horizons are returned sorted and *contiguous from 1*:
+    if a horizon is missing in the schema the scan stops there, because the
+    recovery-speed recursion requires an unbroken chain.
+
+    Parameters
+    ----------
+    lf : pl.LazyFrame
+    prefix : str
+        Base name of the cumulative recovery-rate columns, e.g. ``"CRR_"``.
+    max_horizon : int, optional
+        Hard cap on the highest horizon retained.
+
+    Returns
+    -------
+    dict[int, str]
+        e.g. ``{1: "CRR_1an", 2: "CRR_2ans", ..., 15: "CRR_15ans"}``
+    """
+    found: Dict[int, str] = {}
+    for name in _schema_names(lf):
+        if not name.startswith(prefix):
+            continue
+        m = _HORIZON_RE.match(name[len(prefix):])
+        if m:
+            found[int(m.group("h"))] = name
+
+    horizons: Dict[int, str] = {}
+    h = 1
+    while h in found:
+        if max_horizon is not None and h > max_horizon:
+            break
+        horizons[h] = found[h]
+        h += 1
+
+    if not horizons:
+        raise ValueError(
+            f"No cumulative column matching '{prefix}<h>an(s)' found in schema."
+        )
+    return horizons
+
+
+# ----------------------------------------------------------------------
+# 1) recovery length
+# ----------------------------------------------------------------------
+def add_recovery_length_lazy(
+    lf: pl.LazyFrame,
+    datdef: str = "datdef_corr",
+    date_fin: str = "date_fin",
+    out_col: str = "recovery_length_y",
+) -> pl.LazyFrame:
+    """
+    Add the recovery length, in years, of each facility's recovery process.
+
+    Defined as ``(date_fin - datdef) / 365.25``. This is the variable on which
+    the 1st / 99th percentile outlier trimming of the documentation is applied.
+
+    Notes
+    -----
+    Null for facilities whose recovery process is still open (``date_fin`` null),
+    which is what ``filter_closed_processes_lazy`` relies on.
+    """
+    return lf.with_columns(
+        ((pl.col(date_fin) - pl.col(datdef)).dt.total_days() / 365.25).alias(out_col)
+    )
+
+
+# ----------------------------------------------------------------------
+# 2) scope: operationally closed recovery processes
+# ----------------------------------------------------------------------
+def filter_closed_processes_lazy(
+    lf: pl.LazyFrame,
+    datdef: str = "datdef_corr",
+    date_fin: str = "date_fin",
+    col_year: str = "year",
+    year: Optional[int] = None,
+    length_col: str = "recovery_length_y",
+) -> pl.LazyFrame:
+    """
+    Restrict the calibration sample to operationally closed recovery processes
+    (EBA GL art. 156).
+
+    A facility is retained when:
+
+    * ``date_fin`` is not null  -> the recovery process is operationally closed;
+    * ``date_fin >= datdef``    -> non-degenerate chronology;
+    * ``date_fin`` occurs on or before the end of the observation year ``year``
+      -> the closure is actually observed within the reference sample, so no
+      future information is used.
+
+    The ``col_year`` (generation / default year) column is *not* used as a filter
+    here: censoring is handled by the closure condition itself. It is kept in the
+    signature and carried through for diagnostics and for the observation-window
+    consistency check.
+    """
+    cond = pl.col(date_fin).is_not_null() & (pl.col(length_col) >= 0)
+    if year is not None:
+        cond = cond & (pl.col(date_fin).dt.year() <= year)
+    return lf.filter(cond)
+
+
+# ----------------------------------------------------------------------
+# 3) outlier trimming on recovery length, per segment
+# ----------------------------------------------------------------------
+def remove_recovery_length_outliers_lazy(
+    lf: pl.LazyFrame,
+    segments_col: str = "Seg",
+    length_col: str = "recovery_length_y",
+    tailsize: float = 0.01,
+) -> pl.LazyFrame:
+    """
+    Drop, within each segment, the facilities whose recovery length falls below
+    the ``tailsize`` quantile or above the ``1 - tailsize`` quantile.
+
+    With ``tailsize=0.01`` this reproduces the documented removal of the 1st and
+    99th percentiles (extremely short and extremely long recovery processes).
+
+    Bounds are computed **per segment** via a window expression, so the trimming
+    axis matches the granularity axis of the TtW estimation.
+    """
+    if tailsize is None or tailsize <= 0:
+        return lf
+
+    lo = pl.col(length_col).quantile(tailsize, "linear").over(segments_col)
+    hi = pl.col(length_col).quantile(1.0 - tailsize, "linear").over(segments_col)
+
+    return (
+        lf.with_columns(
+            lo.alias("_len_lo"),
+            hi.alias("_len_hi"),
+        )
+        .filter(
+            (pl.col(length_col) > pl.col("_len_lo"))
+            & (pl.col(length_col) < pl.col("_len_hi"))
+        )
+        .drop("_len_lo", "_len_hi")
+    )
+
+
+# ----------------------------------------------------------------------
+# 4) number-weighted average CRR per segment
+# ----------------------------------------------------------------------
+def compute_mean_crr_lazy(
+    lf: pl.LazyFrame,
+    horizons: Dict[int, str],
+    segments_col: str = "Seg",
+) -> pl.LazyFrame:
+    """
+    Number-weighted (i.e. equally weighted across facilities) average cumulated
+    recovery rate per segment and per horizon.
+
+    Returns one row per segment, with columns ``n_facilities`` and
+    ``mean_CRR_{h}`` / ``n_obs_{h}`` for each horizon ``h``.
+
+    Notes
+    -----
+    The documentation prescribes ``mean_CRR_t = (1/n) * sum CRR_t`` over the
+    facilities of the segment: this is an unweighted mean in *number*, **not** an
+    EAD-weighted mean. Nulls are excluded horizon by horizon and their count is
+    reported through ``n_obs_{h}`` so that a thinning denominator can be spotted
+    at long horizons.
+    """
+    aggs: List[pl.Expr] = [pl.len().alias("n_facilities")]
+    for h, col in horizons.items():
+        aggs.append(pl.col(col).mean().alias(f"mean_CRR_{h}"))
+        aggs.append(pl.col(col).is_not_null().sum().alias(f"n_obs_{h}"))
+
+    return lf.group_by(segments_col).agg(aggs).sort(segments_col)
+
+
+# ----------------------------------------------------------------------
+# 5) recovery speed
+# ----------------------------------------------------------------------
+def compute_recovery_speed_lazy(
+    mean_lf: pl.LazyFrame,
+    horizons: Dict[int, str],
+    segments_col: str = "Seg",
+    min_obs: int = 0,
+) -> pl.LazyFrame:
+    """
+    Annual growth rate of the average cumulated recovery rate, in percentage
+    points:
+
+        speed_t = 100 * (mean_CRR_t - mean_CRR_{t-1}) / mean_CRR_{t-1},  t >= 2
+
+    Horizon 1 has no predecessor and is therefore left undefined.
+
+    Parameters
+    ----------
+    min_obs : int
+        Horizons backed by fewer than ``min_obs`` non-null observations produce a
+        null speed. Used to neutralise horizons where the mean is too thin to
+        support a stable growth rate.
+    """
+    hs = sorted(horizons)
+    exprs: List[pl.Expr] = []
+    for prev, cur in zip(hs[:-1], hs[1:]):
+        num = pl.col(f"mean_CRR_{cur}") - pl.col(f"mean_CRR_{prev}")
+        den = pl.col(f"mean_CRR_{prev}")
+        speed = pl.when(den.is_null() | (den == 0)).then(None).otherwise(100.0 * num / den)
+        if min_obs > 0:
+            speed = (
+                pl.when((pl.col(f"n_obs_{cur}") < min_obs) | (pl.col(f"n_obs_{prev}") < min_obs))
+                .then(None)
+                .otherwise(speed)
+            )
+        exprs.append(speed.alias(f"speed_{cur}"))
+    return mean_lf.with_columns(exprs)
+
+
+# ----------------------------------------------------------------------
+# 6) TtW decision rule
+# ----------------------------------------------------------------------
+def determine_ttw_lazy(
+    speed_lf: pl.LazyFrame,
+    horizons: Dict[int, str],
+    ttw_threshold: float = 1.0,
+) -> pl.LazyFrame:
+    """
+    Apply the decision rule of the documentation:
+
+        "The Time-to-workout will be the last year before which the recovery
+         speed falls and remains under 1%."
+
+    Formally, let ``t*`` be the smallest horizon such that ``speed_t < threshold``
+    for **every** observed horizon ``t >= t*``. Then ``TtW = t* - 1``.
+
+    The *persistence* requirement is what distinguishes this rule from a simple
+    first-crossing rule: a horizon where the speed dips under the threshold and
+    then rises back above it does not qualify. The implementation therefore scans
+    horizons **backwards** from the last one, which resolves the persistence
+    condition in a single pass.
+
+    Null speeds (thin or missing horizons) are treated as *non-informative*: they
+    neither validate nor break the persistence chain. This is deliberate — a
+    horizon with no observable generation must not silently certify that the
+    recovery process has slowed down.
+
+    Returns
+    -------
+    pl.LazyFrame
+        ``speed_lf`` with the added columns ``TtW``, ``first_slow_horizon``
+        (``t*``) and ``ttw_rule`` (how the value was obtained).
+    """
+    hs = sorted(horizons)
+    speed_hs = hs[1:]  # horizon 1 carries no speed
+    h_max = hs[-1]
+
+    # Backward scan: t_star is the smallest horizon opening a fully-slow suffix.
+    # Built as a nested when/then, from the last horizon down to the second one.
+    t_star_expr: pl.Expr = pl.lit(None, dtype=pl.Int64)
+    suffix_ok: pl.Expr = pl.lit(True)
+
+    for h in reversed(speed_hs):
+        s = pl.col(f"speed_{h}")
+        # a null speed is non-informative, an observed speed must be under threshold
+        h_ok = s.is_null() | (s < ttw_threshold)
+        suffix_ok = suffix_ok & h_ok
+        # only an *observed* slow horizon may open the suffix
+        opens = suffix_ok & s.is_not_null() & (s < ttw_threshold)
+        t_star_expr = pl.when(opens).then(pl.lit(h, dtype=pl.Int64)).otherwise(t_star_expr)
+
+    return speed_lf.with_columns(
+        t_star_expr.alias("first_slow_horizon"),
+    ).with_columns(
+        pl.when(pl.col("first_slow_horizon").is_not_null())
+        .then(pl.col("first_slow_horizon") - 1)
+        .otherwise(pl.lit(h_max, dtype=pl.Int64))
+        .alias("TtW"),
+        pl.when(pl.col("first_slow_horizon").is_not_null())
+        .then(pl.lit("recovery speed below threshold and persistent"))
+        .otherwise(pl.lit("threshold never durably reached - capped at max observed horizon"))
+        .alias("ttw_rule"),
+    )
+
+
+# ----------------------------------------------------------------------
+# 7) orchestration
+# ----------------------------------------------------------------------
+def compute_all_TtW_lazy(
+    dtm: FrameLike,
+    segments_col: str = "Seg",
+    prefix: str = "CRR_",
+    tailsize: float = 0.01,
+    ttw_threshold: float = 1.0,
+    datdef: str = "datdef_corr",
+    date_fin: str = "date_fin",
+    col_year: str = "year",
+    year: int = 2020,
+    max_horizon: Optional[int] = None,
+    min_obs: int = 0,
+    min_ttw: int = 1,
+    collect: bool = True,
+) -> Dict[str, Union[pl.DataFrame, pl.LazyFrame, Dict[int, str]]]:
+    """
+    Full Time-to-Workout calibration pipeline, one TtW per segment.
+
+    Chains: recovery length -> closed-process scope -> per-segment percentile
+    trimming -> number-weighted mean CRR -> recovery speed -> decision rule.
+
+    Parameters
+    ----------
+    dtm : pl.DataFrame | pl.LazyFrame
+        Facility-grain frame holding the observed ``{prefix}{h}an(s)`` columns.
+    segments_col : str
+        Granularity axis of the TtW (product-type segment).
+    prefix : str
+        Base name of the cumulated recovery-rate columns.
+    tailsize : float
+        Two-sided trimming level on recovery length. ``0.01`` = P1 / P99.
+    ttw_threshold : float
+        Recovery-speed threshold in **percentage points**. ``1`` = 1%.
+    datdef, date_fin : str
+        Default date and recovery-process closure date.
+    col_year, year : str, int
+        Observation-year column and end of the observation window; closures after
+        ``year`` are excluded so that no future information enters the sample.
+    max_horizon : int, optional
+        Cap on the highest horizon considered.
+    min_obs : int
+        Minimum non-null facilities required for a horizon to yield a speed.
+    min_ttw : int
+        Floor applied to the resulting TtW, guarding against a degenerate TtW of
+        0 on segments recovering almost entirely within the first year.
+    collect : bool
+        If False, returns LazyFrames so the plan can be inspected or chained.
+
+    Returns
+    -------
+    dict with keys
+        ``"ttw"``          : one row per segment - TtW, rule, sample size
+        ``"detail"``       : mean CRR, observation counts and speeds per horizon
+        ``"sample"``       : the trimmed calibration sample (lazy unless collected)
+        ``"horizons"``     : the horizon -> column mapping actually used
+    """
+    lf = _as_lazy(dtm)
+    horizons = detect_horizon_columns(lf, prefix=prefix, max_horizon=max_horizon)
+
+    sample = add_recovery_length_lazy(lf, datdef=datdef, date_fin=date_fin)
+    sample = filter_closed_processes_lazy(
+        sample, datdef=datdef, date_fin=date_fin, col_year=col_year, year=year
+    )
+    sample = remove_recovery_length_outliers_lazy(
+        sample, segments_col=segments_col, tailsize=tailsize
+    )
+
+    mean_lf = compute_mean_crr_lazy(sample, horizons, segments_col=segments_col)
+    speed_lf = compute_recovery_speed_lazy(
+        mean_lf, horizons, segments_col=segments_col, min_obs=min_obs
+    )
+    detail = determine_ttw_lazy(speed_lf, horizons, ttw_threshold=ttw_threshold)
+
+    detail = detail.with_columns(
+        pl.max_horizontal(pl.col("TtW"), pl.lit(min_ttw, dtype=pl.Int64)).alias("TtW")
+    )
+
+    ttw = detail.select(
+        segments_col,
+        "TtW",
+        "first_slow_horizon",
+        "ttw_rule",
+        "n_facilities",
+    ).sort(segments_col)
+
+    out = {"ttw": ttw, "detail": detail, "sample": sample, "horizons": horizons}
+    if collect:
+        out["ttw"] = out["ttw"].collect()
+        out["detail"] = out["detail"].collect()
+    return out
+
+
+# ----------------------------------------------------------------------
+# 8) join back onto the facility-grain frame
+# ----------------------------------------------------------------------
+def attach_ttw_lazy(
+    dtm: FrameLike,
+    ttw_table: FrameLike,
+    segments_col: str = "Seg",
+    ttw_col: str = "TTW",
+) -> pl.LazyFrame:
+    """
+    Broadcast the per-segment TtW back onto the facility-grain frame, under the
+    column name expected downstream by the survival-rate extrapolation module
+    (``get_TTW`` asserts a single distinct value per processed category).
+    """
+    right = _as_lazy(ttw_table).select(
+        pl.col(segments_col), pl.col("TtW").cast(pl.Int64).alias(ttw_col)
+    )
+    return _as_lazy(dtm).join(right, on=segments_col, how="left")
