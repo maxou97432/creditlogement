@@ -1,22 +1,8 @@
-def _resoudre_chaine_notebooks(config):
-    dossier = config["intermediate_dir"]
+MAPPING_TYPE_VERS_CLE_SORTIE = {"CURERATE": "curerate", "NONCURE": "noncure"}
 
-    for nb in config["pipeline"]["notebooks"]:
-        for role in ("input_file", "output_file"):
-            valeur = nb.get(role)
-            champ = role.replace("_file", "_path")
-
-            if valeur is None:
-                nb[champ] = None
-            elif isinstance(valeur, str):
-                if valeur not in config:
-                    raise KeyError(f"{nb['name']} : '{role}: {valeur}' introuvable dans config.yaml")
-                nb[champ] = dossier / config[valeur]
-            elif isinstance(valeur, dict):
-                nb[champ] = {}
-                for sous_nom, cle in valeur.items():
-                    if cle not in config:
-                        raise KeyError(f"{nb['name']} : '{role}.{sous_nom}: {cle}' introuvable dans config.yaml")
-                    nb[champ][sous_nom] = dossier / config[cle]
-            else:
-                raise TypeError(f"{nb['name']} : type inattendu pour {role} : {type(valeur)}")
+for t, lf in lf_by_type.items():
+    if t not in MAPPING_TYPE_VERS_CLE_SORTIE:
+        raise ValueError(f"Type '{t}' inattendu, non prévu dans CHEMIN_SORTIE : {list(CHEMIN_SORTIE)}")
+    sous_cle = MAPPING_TYPE_VERS_CLE_SORTIE[t]
+    lf.collect().write_parquet(str(CHEMIN_SORTIE[sous_cle]))
+    print(f"{t} sauvegardé → {CHEMIN_SORTIE[sous_cle].name}")
