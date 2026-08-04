@@ -1,8 +1,11 @@
-MAPPING_TYPE_VERS_CLE_SORTIE = {"CURERATE": "curerate", "NONCURE": "noncure"}
+if isinstance(CHEMIN_ENTREE, dict):
+    chemin_curerate = Path(CHEMIN_ENTREE["curerate"])
+    chemin_noncure  = Path(CHEMIN_ENTREE["noncure"])
+else:
+    raise TypeError(
+        f"CHEMIN_ENTREE attendu sous forme de dict (curerate/noncure) pour ce notebook, "
+        f"reçu : {type(CHEMIN_ENTREE)}"
+    )
 
-for t, lf in lf_by_type.items():
-    if t not in MAPPING_TYPE_VERS_CLE_SORTIE:
-        raise ValueError(f"Type '{t}' inattendu, non prévu dans CHEMIN_SORTIE : {list(CHEMIN_SORTIE)}")
-    sous_cle = MAPPING_TYPE_VERS_CLE_SORTIE[t]
-    lf.collect().write_parquet(str(CHEMIN_SORTIE[sous_cle]))
-    print(f"{t} sauvegardé → {CHEMIN_SORTIE[sous_cle].name}")
+lf_CureRate = pl.scan_parquet(chemin_curerate)
+lf_NonCure  = pl.scan_parquet(chemin_noncure)
