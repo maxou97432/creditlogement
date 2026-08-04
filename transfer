@@ -1,8 +1,26 @@
-import yaml
+# --- Cellule taguée "parameters" pour papermill ---
+config = None
+NOM_NOTEBOOK = "2 - Rassemblement niveau Modèle.ipynb"   # <-- à adapter
 
-chemin_archive = config["report_dir"] / f"config_executee_{RUN_ID}.yaml"
-with open(chemin_archive, "w", encoding="utf-8") as f:
-    yaml.dump(config_run, f, sort_keys=False, allow_unicode=True)
+# --- Cellule suivante : résolution de la configuration ---
+from pathlib import Path
+from utils.config import load_config, get_notebook_io
 
-plan.to_csv(config["report_dir"] / f"plan_run_{RUN_ID}.csv", index=False)
-print(f"Config archivée : {chemin_archive}")
+if config is None:
+    CFG = load_config("config.yaml")          # standalone
+    print(f"[standalone] configuration rechargée")
+else:
+    CFG = config                              # injecté par papermill
+    CFG["pipeline"]["notebooks"] = CFG["pipeline"]["notebooks"]
+    print(f"[orchestré] run_id = {CFG.get('run_id')}")
+
+CHEMIN_ENTREE, CHEMIN_SORTIE = get_notebook_io(CFG, NOM_NOTEBOOK)
+print(f"entrée : {CHEMIN_ENTREE}\nsortie : {CHEMIN_SORTIE}")
+
+# Variables métier
+LGD_COL  = CFG["lgd_calc"]
+EAD_COL  = CFG["ead"]
+FACILITE = CFG["facility"]
+OBLIGOR  = CFG["obligor"]
+DATDEF   = CFG["date_defaut"]
+SEG      = CFG["segment_col"]
