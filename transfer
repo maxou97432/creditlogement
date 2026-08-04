@@ -1,11 +1,13 @@
-if isinstance(CHEMIN_ENTREE, dict):
-    chemin_curerate = Path(CHEMIN_ENTREE["curerate"])
-    chemin_noncure  = Path(CHEMIN_ENTREE["noncure"])
-else:
-    raise TypeError(
-        f"CHEMIN_ENTREE attendu sous forme de dict (curerate/noncure) pour ce notebook, "
-        f"reçu : {type(CHEMIN_ENTREE)}"
-    )
+def get_notebook_io(config, nom_notebook):
+    """
+    Retourne (chemin_entree, chemin_sortie) pour un notebook donné.
+    Ces valeurs sont déjà résolues en Path (ou dict de Path pour les
+    notebooks à entrées/sorties multiples) par load_config().
+    À appeler en tête de chaque notebook métier.
+    """
+    for nb in config["pipeline"]["notebooks"]:
+        if nb["name"] == nom_notebook:
+            return nb.get("input_path"), nb.get("output_path")
 
-lf_CureRate = pl.scan_parquet(chemin_curerate)
-lf_NonCure  = pl.scan_parquet(chemin_noncure)
+    connus = [nb["name"] for nb in config["pipeline"]["notebooks"]]
+    raise KeyError(f"Notebook '{nom_notebook}' absent de config.yaml. Connus : {connus}")
