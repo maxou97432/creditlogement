@@ -1,22 +1,22 @@
-# --- Cellule taguée "parameters" ---
-chemin_entree = None
-chemin_sortie = None
-nom_notebook  = "2 - Rassemblement niveau Modèle.ipynb"   # repli standalone uniquement
+notebooks_orchestrateur = [{
+    "name": nb["name"],
+    "timeout": nb.get("timeout", 9000),
+    "parameters": {
+        "nom_notebook":  nb["name"],
+        "chemin_entree": str(nb["input_path"])  if nb.get("input_path")  else None,
+        "chemin_sortie": str(nb["output_path"]) if nb.get("output_path") else None,
+        "run_id":        RUN_ID,
+    },
+} for nb in notebooks_actifs]
 
-# --- Cellule suivante ---
-from pathlib import Path
-from utils.config import load_config, get_notebook_io
-
-CFG = load_config("config.yaml")          # variables métier : toujours depuis le YAML
-
-if chemin_entree is None and chemin_sortie is None:
-    CHEMIN_ENTREE, CHEMIN_SORTIE = get_notebook_io(CFG, nom_notebook)
-    print(f"[standalone] {nom_notebook}")
-else:
-    CHEMIN_ENTREE = Path(chemin_entree) if chemin_entree else None
-    CHEMIN_SORTIE = Path(chemin_sortie) if chemin_sortie else None
-    print(f"[orchestré] {nom_notebook}")
-
-LGD_COL, EAD_COL = CFG["lgd_calc"], CFG["ead"]
-FACILITE, OBLIGOR = CFG["facility"], CFG["obligor"]
-DATDEF, SEG = CFG["date_defaut"], CFG["segment_col"]
+# Chemins RELATIFS : l'orchestrateur préfixe lui-même par OneDrive
+config_run = {
+    "pipeline_name": f"{config_brut['pipeline']['name']}_{RUN_ID}",
+    "Working_path":  config_brut["working_path"],     # W majuscule, cf. ligne 88
+    "notebooks_dir": config_brut["notebooks_dir"],
+    "output_dir":    f"notebooks_executes/{RUN_ID}",
+    "report_dir":    config_brut["report_dir"],
+    "notebooks":     notebooks_orchestrateur,          # racine, cf. ligne 107
+    "pipeline":      {"name": config_brut["pipeline"]["name"]},
+    "execution":     config_brut["execution"],
+}
