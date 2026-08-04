@@ -1,11 +1,8 @@
-config_run = dict(config)
-config_run["pipeline"] = {**config["pipeline"], "notebooks": notebooks_actifs}
-config_run["run_id"] = RUN_ID
-config_run["pipeline_name"] = f"{config['pipeline']['name']}_{RUN_ID}"
+import yaml
 
-config_run = serialiser_pour_papermill(config_run)   # Path -> str
+chemin_archive = config["report_dir"] / f"config_executee_{RUN_ID}.yaml"
+with open(chemin_archive, "w", encoding="utf-8") as f:
+    yaml.dump(config_run, f, sort_keys=False, allow_unicode=True)
 
-orchestrator = PipelineOrchestrator(config=config_run)
-success = orchestrator.execute_pipeline()
-
-print("\nRUN OK" if success else "\nRUN EN ÉCHEC")
+plan.to_csv(config["report_dir"] / f"plan_run_{RUN_ID}.csv", index=False)
+print(f"Config archivée : {chemin_archive}")
