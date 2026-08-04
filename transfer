@@ -1,23 +1,22 @@
-notebooks_orchestrateur = [{
-    "name": nb["name"],
-    "timeout": nb.get("timeout", 9000),
-    "parameters": {
-        "nom_notebook":  nb["name"],
-        "chemin_entree": str(nb["input_path"])  if nb.get("input_path")  else None,
-        "chemin_sortie": str(nb["output_path"]) if nb.get("output_path") else None,
-        "run_id":        RUN_ID,
-    },
-} for nb in notebooks_actifs]
+def _resoudre_chaine_notebooks(config):
+    dossier = config["intermediate_dir"]
 
-config_run = {
-    "pipeline_name":  f"{config['pipeline']['name']}_{RUN_ID}",
-    "working_path":   str(config["working_path"]),
-    "notebooks_dir":  str(config["notebooks_dir"]),
-    "output_dir":     str(config["output_dir"] / "notebooks_executes" / RUN_ID),
-    "report_dir":     str(config["report_dir"]),
-    "pipeline":       {"name": config["pipeline"]["name"], "notebooks": notebooks_orchestrateur},
-    "execution":      config["execution"],
-}
+    for nb in config["pipeline"]["notebooks"]:
+        for role in ("input_file", "output_file"):
+            valeur = nb.get(role)
+            champ = role.replace("_file", "_path")
 
-orchestrator = PipelineOrchestrator(config=config_run)
-success = orchestrator.execute_pipeline()
+            if valeur is None:
+                nb[champ] = None
+            elif isinstance(valeur, str):
+                if valeur not in config:
+                    raise KeyError(f"{nb['name']} : '{role}: {valeur}' introuvable dans config.yaml")
+                nb[champ] = dossier / config[valeur]
+            elif isinstance(valeur, dict):
+                nb[champ] = {}
+                for sous_nom, cle in valeur.items():
+                    if cle not in config:
+                        raise KeyError(f"{nb['name']} : '{role}.{sous_nom}: {cle}' introuvable dans config.yaml")
+                    nb[champ][sous_nom] = dossier / config[cle]
+            else:
+                raise TypeError(f"{nb['name']} : type inattendu pour {role} : {type(valeur)}")
