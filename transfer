@@ -1,2 +1,19 @@
-print(f"notebooks_orchestrateur : {len(notebooks_orchestrateur)} éléments")
-print(f"config_run['pipeline']['notebooks'] : {len(config_run['pipeline']['notebooks'])} éléments")
+if not notebooks_list:
+            print("⚠️  Aucun notebook dans la config, utilisation de la séquence par défaut")
+            notebooks_list = [
+                {'name': '01_preprocessing.ipynb'},
+                {'name': '02_feature_engineering.ipynb'},
+                {'name': '03_modeling_evaluation.ipynb'}
+            ]
+
+        # <-- AJOUT : construire pipeline_sequence à partir de notebooks_list
+        for nb in notebooks_list:
+            if nb.get('enabled', True):
+                notebook_params = global_parameters.copy()
+                if nb.get('parameters'):
+                    notebook_params.update(nb['parameters'])
+                self.pipeline_sequence.append({
+                    'name': nb['name'],
+                    'timeout': nb.get('timeout', 9000),
+                    'parameters': notebook_params
+                })
