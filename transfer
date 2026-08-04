@@ -9,14 +9,15 @@ notebooks_orchestrateur = [{
     },
 } for nb in notebooks_actifs]
 
-# Chemins RELATIFS : l'orchestrateur préfixe lui-même par OneDrive
 config_run = {
-    "pipeline_name": f"{config_brut['pipeline']['name']}_{RUN_ID}",
-    "Working_path":  config_brut["working_path"],     # W majuscule, cf. ligne 88
-    "notebooks_dir": config_brut["notebooks_dir"],
-    "output_dir":    f"notebooks_executes/{RUN_ID}",
-    "report_dir":    config_brut["report_dir"],
-    "notebooks":     notebooks_orchestrateur,          # racine, cf. ligne 107
-    "pipeline":      {"name": config_brut["pipeline"]["name"]},
-    "execution":     config_brut["execution"],
+    "pipeline_name":  f"{config['pipeline']['name']}_{RUN_ID}",
+    "working_path":   str(config["working_path"]),
+    "notebooks_dir":  str(config["notebooks_dir"]),
+    "output_dir":     str(config["output_dir"] / "notebooks_executes" / RUN_ID),
+    "report_dir":     str(config["report_dir"]),
+    "pipeline":       {"name": config["pipeline"]["name"], "notebooks": notebooks_orchestrateur},
+    "execution":      config["execution"],
 }
+
+orchestrator = PipelineOrchestrator(config=config_run)
+success = orchestrator.execute_pipeline()
