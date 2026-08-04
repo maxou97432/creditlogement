@@ -1,60 +1,11 @@
-config = load_config("config.yaml")
-catalogue = config["pipeline"]["notebooks"]
-noms_catalogue = [nb["name"] for nb in catalogue]
+config_run = dict(config)
+config_run["pipeline"] = {**config["pipeline"], "notebooks": notebooks_actifs}
+config_run["run_id"] = RUN_ID
+config_run["pipeline_name"] = f"{config['pipeline']['name']}_{RUN_ID}"
 
-# --- Sélection ---
-if NOTEBOOKS_A_LANCER == "all":
-    selection = noms_catalogue
-else:
-    inconnus = [n for n in NOTEBOOKS_A_LANCER if n not in noms_catalogue]
-    if inconnus:
-        raise ValueError(
-            f"Notebooks demandés absents de config.yaml : {inconnus}\n"
-            f"Catalogue : {noms_catalogue}"
-        )
-    # on respecte l'ordre du catalogue, pas celui de la saisie
-    selection = [n for n in noms_catalogue if n in NOTEBOOKS_A_LANCER]
+config_run = serialiser_pour_papermill(config_run)   # Path -> str
 
-notebooks_actifs = [nb for nb in catalogue if nb["name"] in selection]
+orchestrator = PipelineOrchestrator(config=config_run)
+success = orchestrator.execute_pipeline()
 
-# --- Contrôle de la chaîne : chaque entrée doit exister ---
-produits = set()          # fichiers qui seront produits pendant CE run
-alertes = []
-
-for nb in notebooks_actifs:
-    entree = nb.get("input_path")
-    if entree is None:
-        pass
-    elif entree in produits:
-        pass                                   # produit en amont dans ce run
-    elif entree.exists():
-        alertes.append(
-            f"{nb['name']} : lit un fichier préexistant "
-            f"({entree.name}, modifié le "
-            f"{datetime.fromtimestamp(entree.stat().st_mtime):%d/%m/%Y %H:%M})"
-        )
-    else:
-        raise FileNotFoundError(
-            f"{nb['name']} : entrée introuvable ({entree}). "
-            f"Le notebook qui la produit n'est ni dans la sélection, "
-            f"ni déjà exécuté."
-        )
-    if nb.get("output_path") is not None:
-        produits.add(nb["output_path"])
-
-# --- Récapitulatif ---
-plan = pd.DataFrame([{
-    "notebook":  nb["name"],
-    "entrée":    nb["input_path"].name if nb.get("input_path") else "— (sources)",
-    "sortie":    nb["output_path"].name if nb.get("output_path") else "—",
-    "origine":   "ce run" if nb.get("input_path") in produits - {nb.get("output_path")}
-                 else ("préexistant" if nb.get("input_path") else "—"),
-} for nb in notebooks_actifs])
-
-print(f"RUN {RUN_ID} — {len(notebooks_actifs)}/{len(catalogue)} notebooks")
-print(f"Fichiers intermédiaires : {config['intermediate_dir']}\n")
-
-for a in alertes:
-    print(f"  [!] {a}")
-
-plan
+print("\nRUN OK" if success else "\nRUN EN ÉCHEC")
