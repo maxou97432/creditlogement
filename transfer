@@ -1,25 +1,22 @@
-notebooks_orchestrateur = [{
-    "name": nb["name"],
-    "timeout": nb.get("timeout", 9000),
-    "parameters": {
-        "nom_notebook":  nb["name"],
-        "chemin_entree": str(nb["input_path"])  if nb.get("input_path")  else None,
-        "chemin_sortie": str(nb["output_path"]) if nb.get("output_path") else None,
-        "run_id":        RUN_ID,
-    },
-} for nb in notebooks_actifs]
+# --- Cellule taguée "parameters" ---
+chemin_entree = None
+chemin_sortie = None
+nom_notebook  = "2 - Rassemblement niveau Modèle.ipynb"   # repli standalone uniquement
 
-config_run = {
-    "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
-    "pipeline": {
-        "name": config["pipeline"]["name"],
-        "notebooks": notebooks_orchestrateur,
-    },
-    "execution":     config["execution"],
-    "notebooks_dir": str(config["notebooks_dir"]),
-    "output_dir":    str(config["output_dir"] / "notebooks_executes" / RUN_ID),
-    "report_dir":    str(config["report_dir"]),
-}
+# --- Cellule suivante ---
+from pathlib import Path
+from utils.config import load_config, get_notebook_io
 
-orchestrator = PipelineOrchestrator(config=config_run)
-success = orchestrator.execute_pipeline()
+CFG = load_config("config.yaml")          # variables métier : toujours depuis le YAML
+
+if chemin_entree is None and chemin_sortie is None:
+    CHEMIN_ENTREE, CHEMIN_SORTIE = get_notebook_io(CFG, nom_notebook)
+    print(f"[standalone] {nom_notebook}")
+else:
+    CHEMIN_ENTREE = Path(chemin_entree) if chemin_entree else None
+    CHEMIN_SORTIE = Path(chemin_sortie) if chemin_sortie else None
+    print(f"[orchestré] {nom_notebook}")
+
+LGD_COL, EAD_COL = CFG["lgd_calc"], CFG["ead"]
+FACILITE, OBLIGOR = CFG["facility"], CFG["obligor"]
+DATDEF, SEG = CFG["date_defaut"], CFG["segment_col"]
