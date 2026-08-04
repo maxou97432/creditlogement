@@ -1,23 +1,60 @@
-# =========================================================================
-#  PILOTAGE DU RUN
-# =========================================================================
-# "all"  -> tous les notebooks du catalogue config.yaml
-# liste  -> uniquement ceux listés, dans l'ordre du catalogue
-#
-# NB3 exclu tant que le survival rate n'est pas finalisé.
-# Le NB4 lit alors la sortie du NB2 (cf. input_file dans config.yaml).
+config = load_config("config.yaml")
+catalogue = config["pipeline"]["notebooks"]
+noms_catalogue = [nb["name"] for nb in catalogue]
 
-NOTEBOOKS_A_LANCER = [
-    "0 - Chargement.ipynb",
-    "1A - Calcul_LGD.ipynb",
-    "1B - Creation CHR.ipynb",
-    "2 - Rassemblement niveau Modèle.ipynb",
-    # "3 - TTW and LGD Extrapolation.ipynb",
-    "4 - Calcul_obligor.ipynb",
-    "5A - Tests d'hétérogénéité.ipynb",
-    "5B - HLC Verification.ipynb",
-    "6 - MoC C.ipynb",
-    "7 - MoC Downturn.ipynb",
-]
+# --- Sélection ---
+if NOTEBOOKS_A_LANCER == "all":
+    selection = noms_catalogue
+else:
+    inconnus = [n for n in NOTEBOOKS_A_LANCER if n not in noms_catalogue]
+    if inconnus:
+        raise ValueError(
+            f"Notebooks demandés absents de config.yaml : {inconnus}\n"
+            f"Catalogue : {noms_catalogue}"
+        )
+    # on respecte l'ordre du catalogue, pas celui de la saisie
+    selection = [n for n in noms_catalogue if n in NOTEBOOKS_A_LANCER]
 
-RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+notebooks_actifs = [nb for nb in catalogue if nb["name"] in selection]
+
+# --- Contrôle de la chaîne : chaque entrée doit exister ---
+produits = set()          # fichiers qui seront produits pendant CE run
+alertes = []
+
+for nb in notebooks_actifs:
+    entree = nb.get("input_path")
+    if entree is None:
+        pass
+    elif entree in produits:
+        pass                                   # produit en amont dans ce run
+    elif entree.exists():
+        alertes.append(
+            f"{nb['name']} : lit un fichier préexistant "
+            f"({entree.name}, modifié le "
+            f"{datetime.fromtimestamp(entree.stat().st_mtime):%d/%m/%Y %H:%M})"
+        )
+    else:
+        raise FileNotFoundError(
+            f"{nb['name']} : entrée introuvable ({entree}). "
+            f"Le notebook qui la produit n'est ni dans la sélection, "
+            f"ni déjà exécuté."
+        )
+    if nb.get("output_path") is not None:
+        produits.add(nb["output_path"])
+
+# --- Récapitulatif ---
+plan = pd.DataFrame([{
+    "notebook":  nb["name"],
+    "entrée":    nb["input_path"].name if nb.get("input_path") else "— (sources)",
+    "sortie":    nb["output_path"].name if nb.get("output_path") else "—",
+    "origine":   "ce run" if nb.get("input_path") in produits - {nb.get("output_path")}
+                 else ("préexistant" if nb.get("input_path") else "—"),
+} for nb in notebooks_actifs])
+
+print(f"RUN {RUN_ID} — {len(notebooks_actifs)}/{len(catalogue)} notebooks")
+print(f"Fichiers intermédiaires : {config['intermediate_dir']}\n")
+
+for a in alertes:
+    print(f"  [!] {a}")
+
+plan
