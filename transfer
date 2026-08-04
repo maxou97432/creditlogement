@@ -1,26 +1,25 @@
-# --- Cellule taguée "parameters" pour papermill ---
-config = None
-NOM_NOTEBOOK = "2 - Rassemblement niveau Modèle.ipynb"   # <-- à adapter
+notebooks_orchestrateur = [{
+    "name": nb["name"],
+    "timeout": nb.get("timeout", 9000),
+    "parameters": {
+        "nom_notebook":  nb["name"],
+        "chemin_entree": str(nb["input_path"])  if nb.get("input_path")  else None,
+        "chemin_sortie": str(nb["output_path"]) if nb.get("output_path") else None,
+        "run_id":        RUN_ID,
+    },
+} for nb in notebooks_actifs]
 
-# --- Cellule suivante : résolution de la configuration ---
-from pathlib import Path
-from utils.config import load_config, get_notebook_io
+config_run = {
+    "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
+    "pipeline": {
+        "name": config["pipeline"]["name"],
+        "notebooks": notebooks_orchestrateur,
+    },
+    "execution":     config["execution"],
+    "notebooks_dir": str(config["notebooks_dir"]),
+    "output_dir":    str(config["output_dir"] / "notebooks_executes" / RUN_ID),
+    "report_dir":    str(config["report_dir"]),
+}
 
-if config is None:
-    CFG = load_config("config.yaml")          # standalone
-    print(f"[standalone] configuration rechargée")
-else:
-    CFG = config                              # injecté par papermill
-    CFG["pipeline"]["notebooks"] = CFG["pipeline"]["notebooks"]
-    print(f"[orchestré] run_id = {CFG.get('run_id')}")
-
-CHEMIN_ENTREE, CHEMIN_SORTIE = get_notebook_io(CFG, NOM_NOTEBOOK)
-print(f"entrée : {CHEMIN_ENTREE}\nsortie : {CHEMIN_SORTIE}")
-
-# Variables métier
-LGD_COL  = CFG["lgd_calc"]
-EAD_COL  = CFG["ead"]
-FACILITE = CFG["facility"]
-OBLIGOR  = CFG["obligor"]
-DATDEF   = CFG["date_defaut"]
-SEG      = CFG["segment_col"]
+orchestrator = PipelineOrchestrator(config=config_run)
+success = orchestrator.execute_pipeline()
