@@ -1,8 +1,23 @@
-import sys
-from datetime import datetime
+# =========================================================================
+#  PILOTAGE DU RUN
+# =========================================================================
+# "all"  -> tous les notebooks du catalogue config.yaml
+# liste  -> uniquement ceux listés, dans l'ordre du catalogue
+#
+# NB3 exclu tant que le survival rate n'est pas finalisé.
+# Le NB4 lit alors la sortie du NB2 (cf. input_file dans config.yaml).
 
-import pandas as pd
+NOTEBOOKS_A_LANCER = [
+    "0 - Chargement.ipynb",
+    "1A - Calcul_LGD.ipynb",
+    "1B - Creation CHR.ipynb",
+    "2 - Rassemblement niveau Modèle.ipynb",
+    # "3 - TTW and LGD Extrapolation.ipynb",
+    "4 - Calcul_obligor.ipynb",
+    "5A - Tests d'hétérogénéité.ipynb",
+    "5B - HLC Verification.ipynb",
+    "6 - MoC C.ipynb",
+    "7 - MoC Downturn.ipynb",
+]
 
-sys.path.insert(0, ".")
-from utils.config import load_config, serialiser_pour_papermill
-from run_pipeline import PipelineOrchestrator
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
