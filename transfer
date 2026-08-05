@@ -1,16 +1,33 @@
-import yaml
-from pathlib import Path
+CATALOGUE_NOTEBOOKS = [
+    {"nom_metier": "Chargement",
+     "input_file": None,
+     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
 
-config_source = {
-    **CHEMINS,
-    **FICHIERS_SOURCES,
-    **FICHIERS_INTERMEDIAIRES,
-    **VARIABLES_METIER,
-    "pipeline": {"name": "Pipeline_LGD_RiskQuant", "notebooks": CATALOGUE_NOTEBOOKS},
-    "execution": EXECUTION,
-}
+    {"nom_metier": "Calcul_LGD",
+     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
+     "output_file": "score_file"},
 
-with open("config.yaml", "w", encoding="utf-8") as f:
-    yaml.dump(config_source, f, sort_keys=False, allow_unicode=True)
+    {"nom_metier": "Creation CHR",
+     "input_file": "score_file", "output_file": "chr_file"},
 
-print("config.yaml régénéré à partir des constantes de Run Pipeline.ipynb")
+    {"nom_metier": "Rassemblement niveau Modèle",
+     "input_file": "chr_file", "output_file": "rassemblement_file"},
+
+    {"nom_metier": "TTW and LGD Extrapolation",
+     "input_file": "rassemblement_file", "output_file": "survival_rate_file"},
+
+    {"nom_metier": "Calcul_obligor",
+     "input_file": "survival_rate_file", "output_file": "lra_file"},
+
+    {"nom_metier": "Tests d'hétérogénéité",
+     "input_file": "lra_file", "output_file": "heterogeneite_file"},
+
+    {"nom_metier": "HLC Verification",
+     "input_file": "heterogeneite_file", "output_file": "heterogeneite_file"},
+
+    {"nom_metier": "MoC C",
+     "input_file": "heterogeneite_file", "output_file": "moc_c_file"},
+
+    {"nom_metier": "MoC Downturn",
+     "input_file": "moc_c_file", "output_file": "downturn_file"},
+]
