@@ -1,19 +1,34 @@
-if not notebooks_list:
-            print("⚠️  Aucun notebook dans la config, utilisation de la séquence par défaut")
-            notebooks_list = [
-                {'name': '01_preprocessing.ipynb'},
-                {'name': '02_feature_engineering.ipynb'},
-                {'name': '03_modeling_evaluation.ipynb'}
-            ]
+import json
 
-        # <-- AJOUT : construire pipeline_sequence à partir de notebooks_list
-        for nb in notebooks_list:
-            if nb.get('enabled', True):
-                notebook_params = global_parameters.copy()
-                if nb.get('parameters'):
-                    notebook_params.update(nb['parameters'])
-                self.pipeline_sequence.append({
-                    'name': nb['name'],
-                    'timeout': nb.get('timeout', 9000),
-                    'parameters': notebook_params
-                })
+def load_lazy_frames(segments):
+    lazy_by_name: Dict[str, pl.LazyFrame] = {}
+    type_by_name: Dict[str, str] = {}
+
+    for seg in segments:
+        lf = pl.scan_parquet(str(seg["Score_path"]))
+
+        # --- Décodage de PRD_TYPECONTRAT via le JSON du segment ---
+        encoding_path = seg.get("Encoding")
+        if encoding_path is not None and Path(encoding_path).exists():
+            with open(encoding_path, encoding="utf-8") as f:
+                mapping_texte_vers_code = json.load(f)
+
+            # Inversion : on a besoin de code -> texte, pas texte -> code
+            mapping_code_vers_texte = {v: k for k, v in mapping_texte_vers_code.items()}
+
+            lf = lf.with_columns(
+                pl.col("PRD_TYPECONTRAT")
+                  .cast(pl.Int64)
+                  .replace(mapping_code_vers_texte, default=None)
+                  .alias("PRD_TYPECONTRAT")
+            )
+            print(f"[{seg['Nom']}] PRD_TYPECONTRAT décodé via {Path(encoding_path).name} "
+                  f"({len(mapping_code_vers_texte)} valeurs)")
+        else:
+            print(f"⚠️  [{seg['Nom']}] Pas de fichier d'encodage trouvé — PRD_TYPECONTRAT reste tel quel")
+
+        lazy_by_name[seg["Nom"]] = lf
+        type_by_name[seg["Nom"]] = seg["Type"]
+        print(f"📥 [{seg['Nom']}] ({seg['Type']}) chargé (lazy) : {seg['Score_path']}")
+
+    return lazy_by_name, type_by_name
