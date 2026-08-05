@@ -1,49 +1,93 @@
-def load_lazy_frames(segments: List[Dict[str, Any]]) -> Tuple[Dict[str, pl.LazyFrame], Dict[str, str]]:
-    import json
-    from pathlib import Path
+# ============================================================
+#  SETUP — seul endroit à modifier pour changer la configuration
+# ============================================================
 
-    lazy_by_name: Dict[str, pl.LazyFrame] = {}
-    type_by_name: Dict[str, str] = {}
+CHEMINS = {
+    "input_dir": "Input",
+    "output_dir": "OutputNI",
+    "notebooks_dir": ".",
+    "report_dir": "reports",
+    "sortie_nb": "Fichiers intermédiaires",
+    "output_excel_dir": "reports_excel",
+}
 
-    for seg in segments:
-        # 1. Chargement du LazyFrame
-        lf = pl.scan_parquet(seg["Score_path"])
+FICHIERS_SOURCES = {
+    "dtm1": "bcr_2007_2023_trg_with_apur_ecof.parquet",
+    "dtm2": "dtm_reboot_out2.parquet",
+    "segmentation_file": "Segmentation_LGD.xlsx",
+}
 
-        # 2. Décodage de la colonne PRD_TYPECONTRAT
-        encoding_path = seg.get("Encoding")
+FICHIERS_INTERMEDIAIRES = {
+    "loaded_file_curerate": "chargement_curerate.parquet",
+    "loaded_file_noncure":  "chargement_noncure.parquet",
+    "score_file":           "score_lgd.parquet",
+    "chr_file":             "chr_jenks.parquet",
+    "rassemblement_file":   "rassemblement_modele.parquet",
+    "survival_rate_file":   "survival_rate.parquet",
+    "lra_file":             "lgd_obligor_calcule.parquet",
+    "heterogeneite_file":   "tests_heterogeneite.parquet",
+    "moc_c_file":           "moc_c.parquet",
+    "downturn_file":        "downturn.parquet",
+}
 
-        if encoding_path and Path(encoding_path).exists():
-            with open(encoding_path, mode="r", encoding="utf-8") as f:
-                mapping_json = json.load(f)
+VARIABLES_METIER = {
+    "target":        "LGD_MAX_EBA_DIRECT_2ANS",
+    "lgd_observed":  "REALISED_LGD",
+    "lgd_calc":      "Score_LGD_calc",
+    "lgd":           "LGD_3ANS_finale",
+    "ead":           "EXPOSURE_AT_DEFAULT",
+    "obligor":       "OBLIGOR_ID",
+    "facility":      "IDCTR",
+    "date_defaut":   "DEFAULT_DATE",
+    "date_photo":    "REFERENCE_DATE",
+    "statut":        "cure",
+    "clos":          "clos",
+    "segment_col":       "Seg",
+    "jenks_submodel":    "Jenks_Submodel",
+    "chr_inversion":     "CHR_model",
+    "chr_heterogeneite": "CHR_homogene",
+    "downturn_years": [2009],
+    "lag": 1,
+    "alpha": 0.05,
+    "ponderation": True,
+}
 
-            # Le JSON est multi-variables : {nom_colonne: {texte: code}, ...}
-            if "PRD_TYPECONTRAT" not in mapping_json:
-                print(f"⚠️  [{seg['Nom']}] Clé 'PRD_TYPECONTRAT' absente du JSON d'encodage — colonne non décodée")
-            else:
-                mapping_texte_vers_code = mapping_json["PRD_TYPECONTRAT"]
+CATALOGUE_NOTEBOOKS = [
+    {"name": "0 - Chargement.ipynb",
+     "input_file": None,
+     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
 
-                if not isinstance(mapping_texte_vers_code, dict):
-                    print(f"⚠️  [{seg['Nom']}] mapping_json['PRD_TYPECONTRAT'] n'est pas un dict "
-                          f"(type reçu : {type(mapping_texte_vers_code).__name__}) — colonne non décodée")
-                else:
-                    # Inversion : texte -> code devient code -> texte
-                    mapping_code_vers_texte = {
-                        str(code): str(texte)
-                        for texte, code in mapping_texte_vers_code.items()
-                    }
+    {"name": "1A - Calcul_LGD.ipynb",
+     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
+     "output_file": "score_file"},
 
-                    lf = lf.with_columns(
-                        pl.col("PRD_TYPECONTRAT")
-                          .cast(pl.Utf8)
-                          .replace_strict(mapping_code_vers_texte, default=None)
-                          .alias("PRD_TYPECONTRAT")
-                    )
-                    print(f"✅ [{seg['Nom']}] PRD_TYPECONTRAT décodé ({len(mapping_code_vers_texte)} valeurs)")
-        else:
-            print(f"⚠️  [{seg['Nom']}] Pas de fichier d'encodage trouvé")
+    {"name": "1B - Creation CHR.ipynb",
+     "input_file": "score_file", "output_file": "chr_file"},
 
-        lazy_by_name[seg["Nom"]] = lf
-        type_by_name[seg["Nom"]] = seg["Type"]
-        print(f"📥 [{seg['Nom']}] ({seg['Type']}) chargé (lazy) : {seg['Score_path']}")
+    {"name": "2 - Rassemblement niveau Modèle.ipynb",
+     "input_file": "chr_file", "output_file": "rassemblement_file"},
 
-    return lazy_by_name, type_by_name
+    {"name": "3 - TTW and LGD Extrapolation.ipynb",
+     "input_file": "rassemblement_file", "output_file": "survival_rate_file"},
+
+    {"name": "4 - Calcul_obligor.ipynb",
+     # TEMPORAIRE : pointe sur la sortie du NB2 tant que le NB3 n'est pas finalisé.
+     "input_file": "rassemblement_file", "output_file": "lra_file"},
+
+    {"name": "5A - Tests d'hétérogénéité.ipynb",
+     "input_file": "lra_file", "output_file": "heterogeneite_file"},
+
+    {"name": "5B - HLC Verification.ipynb",
+     "input_file": "heterogeneite_file", "output_file": "heterogeneite_file"},
+
+    {"name": "6 - MoC C.ipynb",
+     "input_file": "heterogeneite_file", "output_file": "moc_c_file"},
+
+    {"name": "7 - MoC Downturn.ipynb",
+     "input_file": "moc_c_file", "output_file": "downturn_file"},
+]
+
+EXECUTION = {
+    "method": "papermill",
+    "stop_on_error": True,
+}
