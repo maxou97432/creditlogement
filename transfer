@@ -1,31 +1,46 @@
-import json
+def load_lazy_frames(segments: List[Dict[str, Any]]) -> Tuple[Dict[str, pl.LazyFrame], Dict[str, str]]:
+    import json
+    from pathlib import Path
 
-def load_lazy_frames(segments):
     lazy_by_name: Dict[str, pl.LazyFrame] = {}
     type_by_name: Dict[str, str] = {}
 
     for seg in segments:
-        lf = pl.scan_parquet(str(seg["Score_path"]))
+        # 1. Chargement du LazyFrame
+        lf = pl.scan_parquet(seg["Score_path"])
 
-        # --- Décodage de PRD_TYPECONTRAT via le JSON du segment ---
+        # 2. Décodage de la colonne PRD_TYPECONTRAT
         encoding_path = seg.get("Encoding")
-        if encoding_path is not None and Path(encoding_path).exists():
-            with open(encoding_path, encoding="utf-8") as f:
-                mapping_texte_vers_code = json.load(f)
 
-            # Inversion : on a besoin de code -> texte, pas texte -> code
-            mapping_code_vers_texte = {v: k for k, v in mapping_texte_vers_code.items()}
+        if encoding_path and Path(encoding_path).exists():
+            with open(encoding_path, mode="r", encoding="utf-8") as f:
+                mapping_json = json.load(f)
 
-            lf = lf.with_columns(
-                pl.col("PRD_TYPECONTRAT")
-                  .cast(pl.Int64)
-                  .replace(mapping_code_vers_texte, default=None)
-                  .alias("PRD_TYPECONTRAT")
-            )
-            print(f"[{seg['Nom']}] PRD_TYPECONTRAT décodé via {Path(encoding_path).name} "
-                  f"({len(mapping_code_vers_texte)} valeurs)")
+            # Le JSON est multi-variables : {nom_colonne: {texte: code}, ...}
+            if "PRD_TYPECONTRAT" not in mapping_json:
+                print(f"⚠️  [{seg['Nom']}] Clé 'PRD_TYPECONTRAT' absente du JSON d'encodage — colonne non décodée")
+            else:
+                mapping_texte_vers_code = mapping_json["PRD_TYPECONTRAT"]
+
+                if not isinstance(mapping_texte_vers_code, dict):
+                    print(f"⚠️  [{seg['Nom']}] mapping_json['PRD_TYPECONTRAT'] n'est pas un dict "
+                          f"(type reçu : {type(mapping_texte_vers_code).__name__}) — colonne non décodée")
+                else:
+                    # Inversion : texte -> code devient code -> texte
+                    mapping_code_vers_texte = {
+                        str(code): str(texte)
+                        for texte, code in mapping_texte_vers_code.items()
+                    }
+
+                    lf = lf.with_columns(
+                        pl.col("PRD_TYPECONTRAT")
+                          .cast(pl.Utf8)
+                          .replace_strict(mapping_code_vers_texte, default=None)
+                          .alias("PRD_TYPECONTRAT")
+                    )
+                    print(f"✅ [{seg['Nom']}] PRD_TYPECONTRAT décodé ({len(mapping_code_vers_texte)} valeurs)")
         else:
-            print(f"⚠️  [{seg['Nom']}] Pas de fichier d'encodage trouvé — PRD_TYPECONTRAT reste tel quel")
+            print(f"⚠️  [{seg['Nom']}] Pas de fichier d'encodage trouvé")
 
         lazy_by_name[seg["Nom"]] = lf
         type_by_name[seg["Nom"]] = seg["Type"]
