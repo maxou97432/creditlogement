@@ -1,26 +1,239 @@
-import re
-from pathlib import Path
+Voici le notebook complet, cellule par cellule (markdown + code), prêt à recréer `Run Pipeline.ipynb`.
 
-def synchroniser_noms_fichiers(catalogue, dossier_notebooks):
+---
+
+### 📝 Markdown
+
+```markdown
+# Pipeline RiskQuant — Lancement
+
+Ce notebook est le **seul endroit** où l'on pilote la pipeline LGD RiskQuant :
+- la liste et l'ordre des notebooks,
+- leurs dépendances d'entrée/sortie,
+- les variables métier,
+- les chemins,
+- la sélection du run.
+
+`config.yaml` est régénéré automatiquement à chaque exécution à partir des
+constantes définies ici — **il ne doit jamais être édité à la main**.
+
+## Sommaire
+1. Constantes (chemins, variables métier, catalogue des notebooks)
+2. Synchronisation des noms de fichiers
+3. Génération de `config.yaml`
+4. Sélection et résolution de la chaîne
+5. Exécution
+6. Archivage
+```
+
+---
+
+### 💻 Cellule — Imports
+
+```python
+import re
+import yaml
+from pathlib import Path
+from datetime import datetime
+
+import pandas as pd
+
+from utils.config import load_config
+from run_pipeline import PipelineOrchestrator
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 1. Constantes — le seul endroit à modifier
+
+**Pour changer une variable métier** (nom de colonne, seuil...) → modifie `VARIABLES_METIER`.
+
+**Pour ajouter, retirer, réordonner ou désactiver un notebook** → modifie uniquement
+`CATALOGUE_NOTEBOOKS` :
+- L'**ordre** = la position dans la liste.
+- `"actif": False` retire un notebook du run sans le supprimer du catalogue —
+  les notebooks suivants s'adaptent automatiquement (repli sur la dernière
+  sortie disponible parmi les notebooks actifs).
+- Le préfixe numérique du fichier (`"0 - "`, `"1A - "`...) est calculé et
+  synchronisé automatiquement sur disque — ne jamais le taper à la main.
+- `input_file` / `output_file` sont des clés qui pointent vers
+  `FICHIERS_INTERMEDIAIRES` — c'est la **dépendance normale**, celle qui a un
+  sens quand tout le catalogue est actif. Ne change ces clés que si tu veux
+  vraiment qu'un notebook lise une autre donnée (décision métier volontaire,
+  jamais automatique).
+
+**Exemple pour ajouter un notebook** (ex. futur "MoC Homogénéité") :
+1. Ajoute sa sortie dans `FICHIERS_INTERMEDIAIRES`.
+2. Insère un bloc dans `CATALOGUE_NOTEBOOKS`, à la position voulue.
+3. Relance ce notebook — le fichier `.ipynb` correspondant sera renommé
+   automatiquement avec le bon préfixe.
+```
+
+---
+
+### 💻 Cellule — Chemins et fichiers sources
+
+```python
+CHEMINS = {
+    "input_dir": "Input",
+    "output_dir": "OutputNI",
+    "notebooks_dir": ".",
+    "report_dir": "reports",
+    "sortie_nb": "Fichiers intermédiaires",
+    "output_excel_dir": "reports_excel",
+}
+
+FICHIERS_SOURCES = {
+    "dtm1": "bcr_2007_2023_trg_with_apur_ecof.parquet",
+    "dtm2": "dtm_reboot_out2.parquet",
+    "segmentation_file": "Segmentation_LGD.xlsx",
+}
+```
+
+---
+
+### 💻 Cellule — Fichiers intermédiaires
+
+```python
+# Chaque clé correspond au nom de fichier écrit dans "Fichiers intermédiaires".
+# Ajouter une clé ici avant de la référencer dans CATALOGUE_NOTEBOOKS.
+FICHIERS_INTERMEDIAIRES = {
+    "loaded_file_curerate": "chargement_curerate.parquet",
+    "loaded_file_noncure":  "chargement_noncure.parquet",
+    "score_file":           "score_lgd.parquet",
+    "chr_file":             "chr_jenks.parquet",
+    "rassemblement_file":   "rassemblement_modele.parquet",
+    "survival_rate_file":   "survival_rate.parquet",
+    "lra_file":             "lgd_obligor_calcule.parquet",
+    "heterogeneite_file":   "tests_heterogeneite.parquet",
+    "moc_c_file":           "moc_c.parquet",
+    "downturn_file":        "downturn.parquet",
+    # "homogeneite_file":   "homogeneite.parquet",   # exemple futur ajout
+}
+```
+
+---
+
+### 💻 Cellule — Variables métier
+
+```python
+VARIABLES_METIER = {
+    "target":        "LGD_MAX_EBA_DIRECT_2ANS",
+    "lgd_observed":  "REALISED_LGD",
+    "lgd_calc":      "Score_LGD_calc",
+    "lgd":           "LGD_3ANS_finale",
+    "ead":           "EXPOSURE_AT_DEFAULT",
+    "obligor":       "OBLIGOR_ID",
+    "facility":      "IDCTR",
+    "date_defaut":   "DEFAULT_DATE",
+    "date_photo":    "REFERENCE_DATE",
+    "statut":        "cure",
+    "clos":          "clos",
+
+    "segment_col":       "Seg",
+    "jenks_submodel":    "Jenks_Submodel",
+    "chr_inversion":     "CHR_model",
+    "chr_heterogeneite": "CHR_homogene",
+
+    "downturn_years": [2009],
+    "lag": 1,
+    "alpha": 0.05,
+    "ponderation": True,
+}
+```
+
+---
+
+### 💻 Cellule — Catalogue des notebooks (⭐ endroit central)
+
+```python
+# ============================================================
+#  CATALOGUE — ordre, activation et dépendances des notebooks.
+#  C'est le SEUL endroit à modifier pour piloter la pipeline.
+# ============================================================
+CATALOGUE_NOTEBOOKS = [
+    {"nom_metier": "Chargement", "actif": True,
+     "input_file": None,
+     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
+
+    {"nom_metier": "Calcul_LGD", "actif": True,
+     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
+     "output_file": "score_file"},
+
+    {"nom_metier": "Creation CHR", "actif": True,
+     "input_file": "score_file", "output_file": "chr_file"},
+
+    {"nom_metier": "Rassemblement niveau Modèle", "actif": True,
+     "input_file": "chr_file", "output_file": "rassemblement_file"},
+
+    {"nom_metier": "TTW and LGD Extrapolation", "actif": True,
+     "input_file": "rassemblement_file", "output_file": "survival_rate_file"},
+
+    {"nom_metier": "Calcul_obligor", "actif": True,
+     "input_file": "survival_rate_file", "output_file": "lra_file"},
+
+    {"nom_metier": "Tests d'hétérogénéité", "actif": True,
+     "input_file": "lra_file", "output_file": "heterogeneite_file"},
+
+    {"nom_metier": "HLC Verification", "actif": True,
+     "input_file": "heterogeneite_file", "output_file": "heterogeneite_file"},
+
+    {"nom_metier": "MoC C", "actif": True,
+     "input_file": "heterogeneite_file", "output_file": "moc_c_file"},
+
+    {"nom_metier": "MoC Downturn", "actif": True,
+     "input_file": "moc_c_file", "output_file": "downturn_file"},
+
+    # --- Exemple d'ajout futur ---
+    # {"nom_metier": "MoC Homogénéité", "actif": True,
+    #  "input_file": "downturn_file", "output_file": "homogeneite_file"},
+]
+
+EXECUTION = {
+    "method": "papermill",
+    "stop_on_error": True,   # False pour continuer malgré les échecs (debug)
+}
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 2. Synchronisation des noms de fichiers
+
+Renomme les `.ipynb` sur disque pour que leur préfixe reflète l'ordre du
+catalogue. Idempotent : si l'ordre n'a pas changé, aucun fichier n'est touché.
+
+⚠️ Ferme les notebooks concernés dans VSCode avant de lancer un run qui va
+les renommer.
+```
+
+---
+
+### 💻 Cellule — Fonction de synchronisation
+
+```python
+def synchroniser_noms_fichiers(catalogue, dossier_notebooks="."):
     """
     Renomme les .ipynb sur disque pour que leur préfixe reflète l'ordre
-    du catalogue. Ne touche que les fichiers dont le préfixe a changé.
-    Retourne le catalogue mis à jour avec les noms de fichiers réels.
+    du catalogue. Ajoute la clé 'name' (nom de fichier réel) à chaque
+    entrée du catalogue.
     """
     dossier = Path(dossier_notebooks)
     pattern_prefixe = re.compile(r"^\d+[A-Z]?\s*-\s*")
 
     for position, nb in enumerate(catalogue):
-        prefixe_attendu = f"{position} - "
-        nom_attendu = f"{prefixe_attendu}{nb['nom_metier']}.ipynb"
+        nom_attendu = f"{position} - {nb['nom_metier']}.ipynb"
         chemin_attendu = dossier / nom_attendu
 
         if chemin_attendu.exists():
             nb["name"] = nom_attendu
             continue
 
-        # Chercher un fichier existant portant le même nom métier,
-        # peu importe son préfixe actuel
         candidats = [
             f for f in dossier.glob("*.ipynb")
             if pattern_prefixe.sub("", f.stem).strip() == nb["nom_metier"]
@@ -28,21 +241,290 @@ def synchroniser_noms_fichiers(catalogue, dossier_notebooks):
 
         if len(candidats) == 0:
             raise FileNotFoundError(
-                f"Aucun fichier trouvé pour le notebook '{nb['nom_metier']}' "
-                f"dans {dossier}. Vérifie le nom métier dans CATALOGUE_NOTEBOOKS."
+                f"Aucun fichier trouvé pour '{nb['nom_metier']}' dans {dossier}. "
+                f"Vérifie que le fichier existe et que 'nom_metier' correspond exactement."
             )
         if len(candidats) > 1:
             raise ValueError(
-                f"Plusieurs fichiers correspondent à '{nb['nom_metier']}' : "
-                f"{[c.name for c in candidats]}. Renomme-les pour lever l'ambiguïté."
+                f"Ambiguïté pour '{nb['nom_metier']}' : {[c.name for c in candidats]}"
             )
 
-        ancien_chemin = candidats[0]
-        ancien_chemin.rename(chemin_attendu)
-        print(f"[renommé] {ancien_chemin.name}  →  {nom_attendu}")
+        ancien = candidats[0]
+        ancien.rename(chemin_attendu)
+        print(f"[renommé] {ancien.name}  →  {nom_attendu}")
         nb["name"] = nom_attendu
 
     return catalogue
 
 
 CATALOGUE_NOTEBOOKS = synchroniser_noms_fichiers(CATALOGUE_NOTEBOOKS, dossier_notebooks=".")
+print(f"{len(CATALOGUE_NOTEBOOKS)} notebooks synchronisés.")
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 3. Génération de `config.yaml`
+
+Régénère entièrement le fichier à partir des constantes ci-dessus.
+Les notebooks lancés en standalone continuent de lire ce fichier via
+`load_config()` — il reste valide tant qu'aucun run n'a modifié les
+constantes de ce notebook depuis.
+```
+
+---
+
+### 💻 Cellule — Écriture du YAML
+
+```python
+config_source = {
+    **CHEMINS,
+    **FICHIERS_SOURCES,
+    **FICHIERS_INTERMEDIAIRES,
+    **VARIABLES_METIER,
+    "pipeline": {
+        "name": "Pipeline_LGD_RiskQuant",
+        "notebooks": [
+            {
+                "name": nb["name"],
+                "actif": nb.get("actif", True),
+                "input_file": nb["input_file"],
+                "output_file": nb["output_file"],
+            }
+            for nb in CATALOGUE_NOTEBOOKS
+        ],
+    },
+    "execution": EXECUTION,
+}
+
+with open("config.yaml", "w", encoding="utf-8") as f:
+    yaml.dump(config_source, f, sort_keys=False, allow_unicode=True)
+
+print("config.yaml régénéré depuis les constantes de ce notebook.")
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 4. Sélection et résolution de la chaîne
+
+La sélection est calculée depuis `actif` dans le catalogue — rien à changer
+ici pour un run normal. La résolution gère automatiquement le cas où un
+notebook désactivé aurait dû produire une entrée attendue par un autre
+(repli sur la dernière sortie disponible, avec message `[repli]` dans les logs).
+```
+
+---
+
+### 💻 Cellule — Chargement et sélection
+
+```python
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+config = load_config("config.yaml")
+catalogue = config["pipeline"]["notebooks"]
+selection = [nb["name"] for nb in catalogue if nb.get("actif", True)]
+
+print(f"RUN {RUN_ID}")
+print(f"Sélection : {len(selection)}/{len(catalogue)} notebooks actifs")
+```
+
+---
+
+### 💻 Cellule — Résolution automatique des entrées/sorties
+
+```python
+def resoudre_entree_effective(index, catalogue, selection, config):
+    """
+    Détermine le chemin d'entrée réel du notebook à cet index :
+      - si le producteur normal de l'entrée déclarée est actif, on
+        l'utilise tel quel ;
+      - sinon, on remonte au dernier notebook actif précédent et on
+        prend SA sortie (repli automatique, loggé) ;
+      - le cas dict (Cure/NonCure) est résolu tel quel, sans repli.
+    """
+    nb = catalogue[index]
+    entree_declaree = nb.get("input_file")
+
+    if entree_declaree is None:
+        return None
+
+    if isinstance(entree_declaree, dict):
+        return {k: config["intermediate_dir"] / config[v] for k, v in entree_declaree.items()}
+
+    producteur_normal = next(
+        (n for n in catalogue[:index] if n.get("output_file") == entree_declaree),
+        None
+    )
+    if producteur_normal and producteur_normal["name"] in selection:
+        return config["intermediate_dir"] / config[entree_declaree]
+
+    for n in reversed(catalogue[:index]):
+        if n["name"] in selection and isinstance(n.get("output_file"), str):
+            print(f"  [repli] {nb['name']} lira la sortie de {n['name']} "
+                  f"({n['output_file']}) au lieu de {entree_declaree}")
+            return config["intermediate_dir"] / config[n["output_file"]]
+
+    raise ValueError(
+        f"{nb['name']} : aucune entrée disponible dans la sélection actuelle "
+        f"(attendait '{entree_declaree}')"
+    )
+
+
+def resoudre_sortie(nb, config):
+    sortie_declaree = nb.get("output_file")
+    if sortie_declaree is None:
+        return None
+    if isinstance(sortie_declaree, dict):
+        return {k: config["intermediate_dir"] / config[v] for k, v in sortie_declaree.items()}
+    return config["intermediate_dir"] / config[sortie_declaree]
+
+
+notebooks_actifs = []
+for index, nb in enumerate(catalogue):
+    if nb["name"] not in selection:
+        continue
+    entree_path = resoudre_entree_effective(index, catalogue, selection, config)
+    sortie_path = resoudre_sortie(nb, config)
+    notebooks_actifs.append({**nb, "input_path": entree_path, "output_path": sortie_path})
+
+print(f"{len(notebooks_actifs)} notebooks actifs résolus.")
+```
+
+---
+
+### 💻 Cellule — Contrôle de la chaîne et plan récapitulatif
+
+```python
+def chemins_a_plat(valeur):
+    if valeur is None:
+        return []
+    if isinstance(valeur, dict):
+        return list(valeur.values())
+    return [valeur]
+
+def noms_a_plat(valeur):
+    if valeur is None:
+        return "— (sources)"
+    if isinstance(valeur, dict):
+        return ", ".join(p.name for p in valeur.values())
+    return valeur.name
+
+produits = set()
+alertes = []
+
+for nb in notebooks_actifs:
+    for entree in chemins_a_plat(nb.get("input_path")):
+        if entree in produits:
+            pass
+        elif entree.exists():
+            alertes.append(
+                f"{nb['name']} : lit un fichier préexistant "
+                f"({entree.name}, modifié le "
+                f"{datetime.fromtimestamp(entree.stat().st_mtime):%d/%m/%Y %H:%M})"
+            )
+        else:
+            raise FileNotFoundError(f"{nb['name']} : entrée introuvable ({entree}).")
+    for sortie in chemins_a_plat(nb.get("output_path")):
+        produits.add(sortie)
+
+plan = pd.DataFrame([{
+    "notebook": nb["name"],
+    "entrée":   noms_a_plat(nb.get("input_path")),
+    "sortie":   noms_a_plat(nb.get("output_path")),
+} for nb in notebooks_actifs])
+
+print(f"Fichiers intermédiaires : {config['intermediate_dir']}\n")
+for a in alertes:
+    print(f"  [!] {a}")
+
+plan
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 5. Exécution
+
+Lance l'orchestrateur sur `notebooks_actifs`. Chaque notebook reçoit ses
+chemins d'entrée/sortie déjà résolus via papermill — il n'a besoin de rien
+recalculer lui-même.
+```
+
+---
+
+### 💻 Cellule — Lancement de l'orchestrateur
+
+```python
+def serialiser(valeur):
+    if valeur is None:
+        return None
+    if isinstance(valeur, dict):
+        return {k: str(v) for k, v in valeur.items()}
+    return str(valeur)
+
+notebooks_orchestrateur = [{
+    "name": nb["name"],
+    "timeout": nb.get("timeout", 9000),
+    "parameters": {
+        "nom_notebook":  nb["name"],
+        "chemin_entree": serialiser(nb.get("input_path")),
+        "chemin_sortie": serialiser(nb.get("output_path")),
+        "run_id": RUN_ID,
+    },
+} for nb in notebooks_actifs]
+
+config_run = {
+    "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
+    "working_path":  str(config["working_path"]),
+    "notebooks_dir": str(config["notebooks_dir"]),
+    "output_dir":    str(config["output_dir"] / "notebooks_executes" / RUN_ID),
+    "report_dir":    str(config["report_dir"]),
+    "pipeline":      {"name": config["pipeline"]["name"], "notebooks": notebooks_orchestrateur},
+    "execution":     config["execution"],
+}
+
+orchestrator = PipelineOrchestrator(config=config_run)
+success = orchestrator.execute_pipeline()
+
+print("\n✅ RUN OK" if success else "\n❌ RUN EN ÉCHEC")
+```
+
+---
+
+### 📝 Markdown
+
+```markdown
+## 6. Archivage de la configuration effectivement exécutée
+
+Trace datée de ce qui a réellement tourné, indépendante de `config.yaml`
+qui continue d'évoluer entre deux runs.
+```
+
+---
+
+### 💻 Cellule — Archivage
+
+```python
+chemin_archive = config["report_dir"] / f"config_executee_{RUN_ID}.yaml"
+with open(chemin_archive, "w", encoding="utf-8") as f:
+    yaml.dump(config_run, f, sort_keys=False, allow_unicode=True)
+
+plan.to_csv(config["report_dir"] / f"plan_run_{RUN_ID}.csv", index=False)
+
+print(f"Config archivée : {chemin_archive}")
+```
+
+---
+
+## Points à vérifier avant de lancer
+
+1. **`utils/config.py`** doit toujours contenir `_resoudre_chemins` et `get_notebook_io` tels qu'on les a corrigés — rien à changer là-dedans, ce notebook s'appuie dessus tel quel.
+2. **`run_pipeline.py`** doit avoir la boucle de construction de `self.pipeline_sequence` qu'on a ajoutée (celle qui manquait), et `notebooks_dir` sans le doublement de chemin.
+3. Premier test conseillé : mets `"actif": False` sur "TTW and LGD Extrapolation" dans le catalogue, relance, et vérifie que le message `[repli] Calcul_obligor lira la sortie de Rassemblement niveau Modèle...` apparaît bien dans les logs de la cellule de résolution.
