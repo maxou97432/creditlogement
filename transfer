@@ -1,33 +1,48 @@
-CATALOGUE_NOTEBOOKS = [
-    {"nom_metier": "Chargement",
-     "input_file": None,
-     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
+import re
+from pathlib import Path
 
-    {"nom_metier": "Calcul_LGD",
-     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
-     "output_file": "score_file"},
+def synchroniser_noms_fichiers(catalogue, dossier_notebooks):
+    """
+    Renomme les .ipynb sur disque pour que leur préfixe reflète l'ordre
+    du catalogue. Ne touche que les fichiers dont le préfixe a changé.
+    Retourne le catalogue mis à jour avec les noms de fichiers réels.
+    """
+    dossier = Path(dossier_notebooks)
+    pattern_prefixe = re.compile(r"^\d+[A-Z]?\s*-\s*")
 
-    {"nom_metier": "Creation CHR",
-     "input_file": "score_file", "output_file": "chr_file"},
+    for position, nb in enumerate(catalogue):
+        prefixe_attendu = f"{position} - "
+        nom_attendu = f"{prefixe_attendu}{nb['nom_metier']}.ipynb"
+        chemin_attendu = dossier / nom_attendu
 
-    {"nom_metier": "Rassemblement niveau Modèle",
-     "input_file": "chr_file", "output_file": "rassemblement_file"},
+        if chemin_attendu.exists():
+            nb["name"] = nom_attendu
+            continue
 
-    {"nom_metier": "TTW and LGD Extrapolation",
-     "input_file": "rassemblement_file", "output_file": "survival_rate_file"},
+        # Chercher un fichier existant portant le même nom métier,
+        # peu importe son préfixe actuel
+        candidats = [
+            f for f in dossier.glob("*.ipynb")
+            if pattern_prefixe.sub("", f.stem).strip() == nb["nom_metier"]
+        ]
 
-    {"nom_metier": "Calcul_obligor",
-     "input_file": "survival_rate_file", "output_file": "lra_file"},
+        if len(candidats) == 0:
+            raise FileNotFoundError(
+                f"Aucun fichier trouvé pour le notebook '{nb['nom_metier']}' "
+                f"dans {dossier}. Vérifie le nom métier dans CATALOGUE_NOTEBOOKS."
+            )
+        if len(candidats) > 1:
+            raise ValueError(
+                f"Plusieurs fichiers correspondent à '{nb['nom_metier']}' : "
+                f"{[c.name for c in candidats]}. Renomme-les pour lever l'ambiguïté."
+            )
 
-    {"nom_metier": "Tests d'hétérogénéité",
-     "input_file": "lra_file", "output_file": "heterogeneite_file"},
+        ancien_chemin = candidats[0]
+        ancien_chemin.rename(chemin_attendu)
+        print(f"[renommé] {ancien_chemin.name}  →  {nom_attendu}")
+        nb["name"] = nom_attendu
 
-    {"nom_metier": "HLC Verification",
-     "input_file": "heterogeneite_file", "output_file": "heterogeneite_file"},
+    return catalogue
 
-    {"nom_metier": "MoC C",
-     "input_file": "heterogeneite_file", "output_file": "moc_c_file"},
 
-    {"nom_metier": "MoC Downturn",
-     "input_file": "moc_c_file", "output_file": "downturn_file"},
-]
+CATALOGUE_NOTEBOOKS = synchroniser_noms_fichiers(CATALOGUE_NOTEBOOKS, dossier_notebooks=".")
