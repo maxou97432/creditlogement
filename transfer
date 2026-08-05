@@ -1,93 +1,16 @@
-# ============================================================
-#  SETUP — seul endroit à modifier pour changer la configuration
-# ============================================================
+import yaml
+from pathlib import Path
 
-CHEMINS = {
-    "input_dir": "Input",
-    "output_dir": "OutputNI",
-    "notebooks_dir": ".",
-    "report_dir": "reports",
-    "sortie_nb": "Fichiers intermédiaires",
-    "output_excel_dir": "reports_excel",
+config_source = {
+    **CHEMINS,
+    **FICHIERS_SOURCES,
+    **FICHIERS_INTERMEDIAIRES,
+    **VARIABLES_METIER,
+    "pipeline": {"name": "Pipeline_LGD_RiskQuant", "notebooks": CATALOGUE_NOTEBOOKS},
+    "execution": EXECUTION,
 }
 
-FICHIERS_SOURCES = {
-    "dtm1": "bcr_2007_2023_trg_with_apur_ecof.parquet",
-    "dtm2": "dtm_reboot_out2.parquet",
-    "segmentation_file": "Segmentation_LGD.xlsx",
-}
+with open("config.yaml", "w", encoding="utf-8") as f:
+    yaml.dump(config_source, f, sort_keys=False, allow_unicode=True)
 
-FICHIERS_INTERMEDIAIRES = {
-    "loaded_file_curerate": "chargement_curerate.parquet",
-    "loaded_file_noncure":  "chargement_noncure.parquet",
-    "score_file":           "score_lgd.parquet",
-    "chr_file":             "chr_jenks.parquet",
-    "rassemblement_file":   "rassemblement_modele.parquet",
-    "survival_rate_file":   "survival_rate.parquet",
-    "lra_file":             "lgd_obligor_calcule.parquet",
-    "heterogeneite_file":   "tests_heterogeneite.parquet",
-    "moc_c_file":           "moc_c.parquet",
-    "downturn_file":        "downturn.parquet",
-}
-
-VARIABLES_METIER = {
-    "target":        "LGD_MAX_EBA_DIRECT_2ANS",
-    "lgd_observed":  "REALISED_LGD",
-    "lgd_calc":      "Score_LGD_calc",
-    "lgd":           "LGD_3ANS_finale",
-    "ead":           "EXPOSURE_AT_DEFAULT",
-    "obligor":       "OBLIGOR_ID",
-    "facility":      "IDCTR",
-    "date_defaut":   "DEFAULT_DATE",
-    "date_photo":    "REFERENCE_DATE",
-    "statut":        "cure",
-    "clos":          "clos",
-    "segment_col":       "Seg",
-    "jenks_submodel":    "Jenks_Submodel",
-    "chr_inversion":     "CHR_model",
-    "chr_heterogeneite": "CHR_homogene",
-    "downturn_years": [2009],
-    "lag": 1,
-    "alpha": 0.05,
-    "ponderation": True,
-}
-
-CATALOGUE_NOTEBOOKS = [
-    {"name": "0 - Chargement.ipynb",
-     "input_file": None,
-     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
-
-    {"name": "1A - Calcul_LGD.ipynb",
-     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
-     "output_file": "score_file"},
-
-    {"name": "1B - Creation CHR.ipynb",
-     "input_file": "score_file", "output_file": "chr_file"},
-
-    {"name": "2 - Rassemblement niveau Modèle.ipynb",
-     "input_file": "chr_file", "output_file": "rassemblement_file"},
-
-    {"name": "3 - TTW and LGD Extrapolation.ipynb",
-     "input_file": "rassemblement_file", "output_file": "survival_rate_file"},
-
-    {"name": "4 - Calcul_obligor.ipynb",
-     # TEMPORAIRE : pointe sur la sortie du NB2 tant que le NB3 n'est pas finalisé.
-     "input_file": "rassemblement_file", "output_file": "lra_file"},
-
-    {"name": "5A - Tests d'hétérogénéité.ipynb",
-     "input_file": "lra_file", "output_file": "heterogeneite_file"},
-
-    {"name": "5B - HLC Verification.ipynb",
-     "input_file": "heterogeneite_file", "output_file": "heterogeneite_file"},
-
-    {"name": "6 - MoC C.ipynb",
-     "input_file": "heterogeneite_file", "output_file": "moc_c_file"},
-
-    {"name": "7 - MoC Downturn.ipynb",
-     "input_file": "moc_c_file", "output_file": "downturn_file"},
-]
-
-EXECUTION = {
-    "method": "papermill",
-    "stop_on_error": True,
-}
+print("config.yaml régénéré à partir des constantes de Run Pipeline.ipynb")
