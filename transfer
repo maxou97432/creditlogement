@@ -1,3 +1,3 @@
-print(type_mismatch_by_type.get("PRD_VS35"))
-print(type_mismatch_by_type.get("PRD_VHR32"))
-print(type_mismatch_by_type.get("PRD_VS37"))
+print(type(type_mismatch_by_type))
+for k, v in type_mismatch_by_type.items():
+    print(k, "->", v)
