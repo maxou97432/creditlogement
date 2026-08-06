@@ -1,12 +1,8 @@
-for nom_modele in modeles_actifs:
-    print(f"\n{'='*70}\nMODÈLE {nom_modele}\n{'='*70}")
+segment_root = onedrive / row[path_col] / row[output_col]
+print(f"[DEBUG] segment_root pour {row[name_col]!r} : {segment_root!r}")
+print(f"[DEBUG] existe ? {segment_root.exists()}")
 
-    segments_modele = [
-        s for s in segments_tous
-        if str(s.get(COLONNE_MODELE, "")).strip() == nom_modele
-    ]
 
-    print(f"{len(segments_modele)} segments : {[s['Nom'] for s in segments_modele]}")
-
-    try:
-        # ... reste de la boucle inchangé (config.yaml, JSON segments, résolution, exécution, archivage)
+for suffix in ["_h", ""]:
+    test_path = segment_root / "jenks" / f"{DEFAULT_SCORE_BASE}{suffix}.parquet"
+    print(f"[DEBUG]   test : {test_path!r} -> {test_path.exists()}")
