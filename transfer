@@ -1,8 +1,3 @@
-segment_root = onedrive / row[path_col] / row[output_col]
-print(f"[DEBUG] segment_root pour {row[name_col]!r} : {segment_root!r}")
-print(f"[DEBUG] existe ? {segment_root.exists()}")
-
-
-for suffix in ["_h", ""]:
-    test_path = segment_root / "jenks" / f"{DEFAULT_SCORE_BASE}{suffix}.parquet"
-    print(f"[DEBUG]   test : {test_path!r} -> {test_path.exists()}")
+print(type_mismatch_by_type.get("PRD_VS35"))
+print(type_mismatch_by_type.get("PRD_VHR32"))
+print(type_mismatch_by_type.get("PRD_VS37"))
