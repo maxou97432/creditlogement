@@ -1,3 +1,11 @@
 print(type(type_mismatch_by_type))
 for k, v in type_mismatch_by_type.items():
     print(k, "->", v)
+
+for nom, lf in lazy_by_name.items():
+    schema = lf.collect_schema()
+    for col in ["PRD_VS35", "PRD_VHR32", "PRD_VS37"]:
+        if col in schema:
+            print(f"{nom} — {col} : {schema[col]}")
+        else:
+            print(f"{nom} — {col} : absente")
