@@ -1,6 +1,20 @@
-def get_notebook_io(config, nom_notebook_ou_metier):
-    for nb in config["pipeline"]["notebooks"]:
-        if nb["name"] == nom_notebook_ou_metier or nb.get("nom_metier") == nom_notebook_ou_metier:
-            return nb.get("input_path"), nb.get("output_path")
-    connus = [nb["name"] for nb in config["pipeline"]["notebooks"]]
-    raise KeyError(f"Notebook '{nom_notebook_ou_metier}' absent de config.yaml. Connus : {connus}")
+pyreadstat
+pandas
+polars
+numpy
+openpyxl
+pyarrow
+duckdb
+papermill
+nbformat
+nbconvert
+ipykernel
+xlsxwriter
+plotly
+seaborn
+scipy
+statsmodels
+scikit-learn
+xgboost
+matplotlib
+tqdm
