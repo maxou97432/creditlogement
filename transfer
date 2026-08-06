@@ -1,2 +1,24 @@
-print(lazy_by_name["IMMO_CR"].select("PRD_VS35", "PRD_VHR32", "PRD_VS37").head(5).collect())
-print(lazy_by_name["IMMO_NC"].select("PRD_VS35", "PRD_VHR32", "PRD_VS37").head(5).collect())
+COLONNES_A_DECODER = ["PRD_TYPECONTRAT", "PRD_VS35", "PRD_VHR32", "PRD_VS37"]
+
+for seg in segments:
+    lf = pl.scan_parquet(seg["Score_path"])
+    encoding_path = seg.get("Encoding")
+
+    if encoding_path and Path(encoding_path).exists():
+        with open(encoding_path, encoding="utf-8") as f:
+            mapping_json = json.load(f)
+
+        for colonne in COLONNES_A_DECODER:
+            if colonne not in mapping_json:
+                continue  # cette colonne n'a pas de mapping pour ce segment — normal si déjà en texte
+            mapping_texte_vers_code = mapping_json[colonne]
+            if not isinstance(mapping_texte_vers_code, dict):
+                continue
+            mapping_code_vers_texte = {
+                str(code): str(texte) for texte, code in mapping_texte_vers_code.items()
+            }
+            if colonne in lf.collect_schema():
+                lf = lf.with_columns(
+                    pl.col(colonne).cast(pl.Utf8).replace_strict(mapping_code_vers_texte, default=None).alias(colonne)
+                )
+        print(f"✅ [{seg['Nom']}] colonnes décodées si mapping présent")
