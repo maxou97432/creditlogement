@@ -1,17 +1,12 @@
-import time
-from pynput.keyboard import Controller  # nécessite : pip install pynput
+Le code teste plusieurs découpages pour chaque variable : 6 modalités, puis 5, puis 4, etc.
 
-keyboard = Controller()
+Le problème : avant de remplir `data_stability` — la table qui alimente les graphiques de l’onglet Inversion — il peut écarter certains essais :
 
-print("Appuyez sur Ctrl+C pour arrêter le script.")
-print("Démarrage dans 3 secondes...")
-time.sleep(3)
+- soit parce qu’un groupe contient trop peu d’observations ;
+- soit parce qu’après simplification, un essai à 6 modalités ne produit plus réellement 6 groupes.
 
-try:
-    while True:
-        keyboard.press(' ')  # Barre d'espace
-        keyboard.release(' ')
-        print(f"Touche appuyée à {time.strftime('%H:%M:%S')}")
-        time.sleep(30)
-except KeyboardInterrupt:
-    print("\nScript arrêté par l'utilisateur.")
+Dans ces cas, les essais 6 et 5 ne sont pas ajoutés à `data_stability`. Le graphique ne peut donc afficher que les essais qui restent, par exemple à partir de 4.
+
+Ton besoin est différent : tu veux voir tous les essais, y compris ceux rejetés, pour comprendre pourquoi ils ne sont pas retenus.
+
+La correction est donc : ajouter tous les essais dans `data_stability` pour l’affichage, puis seulement après les exclure du choix du nombre de modalités optimal.
