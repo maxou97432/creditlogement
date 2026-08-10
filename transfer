@@ -1,12 +1,226 @@
-Le code teste plusieurs découpages pour chaque variable : 6 modalités, puis 5, puis 4, etc.
+def bins_cardinality_analysis(
+    lf,
+    features_list,
+    output_path,
+    mapping,
+    nominal_features,
+    target,
+    n_target,
+    cardinality,
+    nb_inversions_max,
+    percent_min_modalities,
+    additional_features=(),
+    add_missing=False,
+):
+    """
+    Teste plusieurs nombres de modalités par variable.
 
-Le problème : avant de remplir `data_stability` — la table qui alimente les graphiques de l’onglet Inversion — il peut écarter certains essais :
+    Tous les essais sont ajoutés à data_stability, y compris les essais
+    rejetés. Seuls les essais valides peuvent alimenter levels_opt.
+    """
 
-- soit parce qu’un groupe contient trop peu d’observations ;
-- soit parce qu’après simplification, un essai à 6 modalités ne produit plus réellement 6 groupes.
+    distribution = "bernoulli" if n_target == 2 else "gaussian"
 
-Dans ces cas, les essais 6 et 5 ne sont pas ajoutés à `data_stability`. Le graphique ne peut donc afficher que les essais qui restent, par exemple à partir de 4.
+    data_stability = pd.DataFrame({
+        "variable": pd.Series(dtype="string"),
+        "n_levels": pd.Series(dtype="int64"),  # nombre demandé
+        "n_levels_requested": pd.Series(dtype="int64"),
+        "n_levels_actual": pd.Series(dtype="int64"),
+        "rejection_reason": pd.Series(dtype="string"),
+        "sample": pd.Series(dtype="string"),
+        "year": pd.Series(dtype="int64"),
+        "group": pd.Series(dtype="string"),
+        "effectif": pd.Series(dtype="int64"),
+        target: pd.Series(dtype="float64"),
+    })
 
-Ton besoin est différent : tu veux voir tous les essais, y compris ceux rejetés, pour comprendre pourquoi ils ne sont pas retenus.
+    levels_opt = {}
+    xg_levels = {}
+    justification = {}
 
-La correction est donc : ajouter tous les essais dans `data_stability` pour l’affichage, puis seulement après les exclure du choix du nombre de modalités optimal.
+    drop_features_path = output_path + "/drop_features.txt"
+
+    with open(drop_features_path, "a+", encoding="utf-8") as f:
+        f.seek(0)
+        var_already_present = f.read()
+
+        for feature in tqdm(features_list, desc="Nb de variables traitées"):
+            nominal_feature = feature in nominal_features
+            additional_feature = feature in additional_features
+
+            df_gam = pd.read_parquet(
+                output_path + f"/decoup/{feature}_gam.parquet"
+            )
+            df_gam = sort_by_coef(df_gam)
+
+            # Nombre de modalités produit par XGBoost/GAM avant simplification
+            if nominal_feature:
+                max_levels = df_gam["coef"].nunique()
+                xg_levels[feature] = df_gam.loc[
+                    df_gam["nb"] > 0, "coef"
+                ].nunique()
+            else:
+                max_levels = df_gam["level"].nunique()
+                xg_levels[feature] = df_gam.loc[
+                    df_gam["nb"] > 0, "level"
+                ].nunique()
+
+            # Limite existante du notebook : 10 modalités maximum
+            for n_levels in range(min(max_levels, 10), 1, -1):
+
+                # 1. Création du découpage demandé
+                df_simplified_gam = to_simplify_gam_target(
+                    feature,
+                    df_gam,
+                    n_levels,
+                    mapping,
+                    nominal_features,
+                    target,
+                    n_target,
+                    percent_min_modalities,
+                )
+
+                n_levels_actual = df_simplified_gam["level"].nunique()
+
+                # 2. Calcul systématique de la stabilité :
+                #    indispensable pour afficher TOUS les essais.
+                lf_decoup = bin_features(
+                    lf,
+                    df_simplified_gam,
+                    feature,
+                    nominal_features,
+                )
+
+                sort_column = target if distribution == "bernoulli" else f"Mean {target}"
+
+                yv = valeurs_annuelles(
+                    lf_decoup,
+                    feature,
+                    nominal_features,
+                    df_simplified_gam.sort_values(by=sort_column),
+                    target,
+                    add_missing,
+                )
+
+                # On distingue ce qui a été demandé de ce qui a réellement été obtenu.
+                min_bin_size = int(
+                    df_simplified_gam["nb"].sum() * percent_min_modalities
+                )
+
+                has_small_bin = (
+                    df_simplified_gam["nb"] < min_bin_size
+                ).any()
+
+                rejection_reason = ""
+
+                if has_small_bin:
+                    rejection_reason = (
+                        f"Effectif insuffisant : au moins un bin est sous "
+                        f"le seuil de {min_bin_size}"
+                    )
+                elif n_levels_actual != n_levels:
+                    rejection_reason = (
+                        f"{n_levels} modalités demandées, "
+                        f"{n_levels_actual} obtenues après simplification"
+                    )
+
+                # Important : la colonne n_levels est celle utilisée par
+                # le widget. Elle doit donc contenir le nombre demandé.
+                yv["n_levels"] = n_levels
+                yv["n_levels_requested"] = n_levels
+                yv["n_levels_actual"] = n_levels_actual
+                yv["rejection_reason"] = rejection_reason
+
+                # L’essai est enregistré AVANT les filtres métier.
+                data_stability = pd.concat(
+                    [data_stability, yv],
+                    axis=0,
+                    ignore_index=True,
+                )
+
+                # 3. Filtres pour le choix du découpage optimal seulement.
+                # Les essais restent néanmoins disponibles dans les graphiques.
+                if has_small_bin:
+                    continue
+
+                if n_levels_actual != n_levels:
+                    continue
+
+                # Si un niveau valide a déjà été trouvé, inutile de tester
+                # des niveaux plus faibles pour la sélection optimale.
+                # Pour une variable forcée dans cardinality, seul le niveau
+                # explicitement demandé est exporté.
+                if feature in cardinality:
+                    if cardinality[feature] == n_levels:
+                        export_simplified_binning(
+                            feature,
+                            df_simplified_gam,
+                            output_path,
+                        )
+                    continue
+
+                if feature in levels_opt:
+                    continue
+
+                # 4. Critère d’inversion
+                res_inversion = annees_avec_inversion(yv, target)
+
+                inversion_ok = (
+                    len(res_inversion["train"]) <= nb_inversions_max["train"]
+                    and len(res_inversion["test"]) <= nb_inversions_max["test"]
+                    and len(res_inversion["oot"]) <= nb_inversions_max["oot"]
+                )
+
+                if not inversion_ok:
+                    justification[feature] = "Inversion"
+                    continue
+
+                # 5. Critère de monotonie
+                monotonicity_ok = check_monotonicity(
+                    df_simplified_gam,
+                    target,
+                    feature,
+                    n_target,
+                    nominal_features,
+                )
+
+                if not monotonicity_ok:
+                    justification[feature] = "Monotonicity"
+                    continue
+
+                # 6. Critère de significativité, sauf pour 2 modalités
+                if n_levels == 2:
+                    levels_opt[feature] = 2
+                    export_simplified_binning(
+                        feature,
+                        df_simplified_gam,
+                        output_path,
+                    )
+                    continue
+
+                significance_ok = coeff_reg_significatifs(
+                    lf_decoup.filter(pl.col("sample") == "train"),
+                    feature,
+                    target,
+                    distribution,
+                )
+
+                if significance_ok:
+                    levels_opt[feature] = n_levels
+                    export_simplified_binning(
+                        feature,
+                        df_simplified_gam,
+                        output_path,
+                    )
+                else:
+                    justification[feature] = "Coef significativity"
+
+            # Variable sans découpage retenu : ajout dans drop_features.txt
+            if (
+                feature not in levels_opt
+                and feature not in cardinality
+                and feature not in var_already_present
+            ):
+                f.write(f"{feature}\n")
+
+    return data_stability, levels_opt, xg_levels, justification
