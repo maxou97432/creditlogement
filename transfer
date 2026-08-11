@@ -1,86 +1,71 @@
 # --------------------------------------------------------------------------- #
-# 2. Statistiques descriptives
+# 3. Écriture Excel (factorisation du pattern de create_excel_scorecard)
 # --------------------------------------------------------------------------- #
-def stats_par_modalite(
-    lf: pl.LazyFrame,
-    variables: list,
-    target: str,
-    id_col: str,
-    colonne_annee: str = None,
-    type_variable: str = "quali",
-):
+def write_formatted_sheet(writer, df, sheet_name, tab_color="#006C44",
+                          startcol=1, index=False, largeur=20):
     """
-    Pour chaque variable et chaque modalité : effectif, % effectif, target moyenne.
-    Si colonne_annee est fourni, ventile également par année.
-    Retourne un DataFrame Polars empilé (une ligne = variable x modalité [x année]).
+    Écrit un DataFrame dans un onglet en reprenant le formatage standard du pack.
+    Accepte un DataFrame pandas ou Polars.
     """
-    cles_groupe_base = [] if colonne_annee is None else [colonne_annee]
-    resultats = []
+    if isinstance(df, pl.DataFrame):
+        df = df.to_pandas()
 
-    for var in variables:
-        cles = cles_groupe_base + [var]
+    df.to_excel(writer, sheet_name=sheet_name, startcol=startcol, index=index)
 
-        agg = (
-            lf.group_by(cles)
-              .agg([
-                  pl.col(id_col).n_unique().alias("effectif"),
-                  pl.col(target).mean().alias("target_moyenne"),
-                  pl.col(target).std().alias("target_ecart_type"),
-                  pl.col(target).min().alias("target_min"),
-                  pl.col(target).max().alias("target_max"),
-              ])
-        )
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+    worksheet.hide_gridlines(2)
+    worksheet.set_tab_color(tab_color)
 
-        # % d'effectif calculé DANS l'année quand la ventilation est active
-        fenetre = cles_groupe_base if cles_groupe_base else None
-        if fenetre:
-            agg = agg.with_columns(
-                (pl.col("effectif") / pl.col("effectif").sum().over(fenetre) * 100)
-                .alias("pct_effectif")
-            )
-        else:
-            agg = agg.with_columns(
-                (pl.col("effectif") / pl.col("effectif").sum() * 100).alias("pct_effectif")
-            )
+    header_format = workbook.add_format({
+        "bold": True, "text_wrap": True, "align": "center", "valign": "vcenter",
+        "bg_color": "#00915A", "font_color": "#FFFFFF",
+        "border": 1, "border_color": "#999999",
+    })
+    row_format = workbook.add_format({
+        "bold": False, "border": 1, "border_color": "#999999",
+        "bg_color": "#FFFFFF", "text_wrap": True,
+    })
 
-        agg = (
-            agg.with_columns([
-                pl.lit(var).alias("variable"),
-                pl.lit(type_variable).alias("type_variable"),
-                pl.col(var).cast(pl.Utf8).alias("modalite"),
-            ])
-            .drop(var)
-        )
-        resultats.append(agg)
+    max_row, max_col = df.shape
+    derniere_col = startcol + max_col
 
-    if not resultats:
-        return pl.DataFrame()
-
-    colonnes_finales = (
-        ["variable", "type_variable", "modalite"]
-        + ([colonne_annee] if colonne_annee else [])
-        + ["effectif", "pct_effectif", "target_moyenne",
-           "target_ecart_type", "target_min", "target_max"]
+    worksheet.conditional_format(
+        0, startcol, 0, derniere_col,
+        {"type": "formula", "criteria": "=ROW()=1", "format": header_format},
     )
-
-    return (
-        pl.concat(resultats, how="vertical")
-          .collect()
-          .select(colonnes_finales)
-          .sort(["variable"] + ([colonne_annee] if colonne_annee else []) + ["modalite"])
+    worksheet.conditional_format(
+        1, startcol, max_row, derniere_col,
+        {"type": "formula",
+         "criteria": f'=${chr(65 + derniere_col)}2<>""',
+         "format": row_format},
     )
+    worksheet.set_column(0, derniere_col, largeur)
+    return worksheet
 
 
-def export_brut_comptages(lf, variables, id_col, colonne_annee=None):
+def exporter_stat_desc_excel(chemin, correlation=None, stats_quali=None,
+                             stats_quanti=None, seuils_cart=None, export_brut=None):
     """
-    Export à plat, une ligne par variable x modalité [x année], avec count(ID).
-    Destiné à être croisé via TCD Excel côté utilisateur.
+    Fichier Excel autonome du notebook stat desc (option B).
     """
-    return stats_par_modalite(
-        lf, variables, target=id_col, id_col=id_col,
-        colonne_annee=colonne_annee, type_variable="brut",
-    ).select(
-        ["variable", "modalite"]
-        + ([colonne_annee] if colonne_annee else [])
-        + ["effectif", "pct_effectif"]
-    )
+    chemin = Path(chemin)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(chemin, engine="xlsxwriter") as writer:
+        onglets = [
+            ("Full_correlation", correlation, "#8E44AD", True),
+            ("Stats_quali",      stats_quali, "#006C44", False),
+            ("Stats_quanti",     stats_quanti, "#006C44", False),
+            ("Seuils_CART",      seuils_cart, "#B7950B", False),
+            ("Export_brut",      export_brut, "#5D6D7E", False),
+        ]
+        ecrits = []
+        for nom, df, couleur, index in onglets:
+            if df is not None and len(df) > 0:
+                write_formatted_sheet(writer, df, nom, tab_color=couleur, index=index)
+                ecrits.append(nom)
+
+    print(f"Fichier stat desc écrit : {chemin}")
+    print(f"   Onglets : {', '.join(ecrits)}")
+    return chemin
