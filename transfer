@@ -1,32 +1,19 @@
-import yaml
-from pathlib import Path
-import numpy as np
-import polars as pl
-import pandas as pd
+lf = pl.scan_parquet(OUTPUT_DIR / config["RDS"])
 
-from utils.stat_desc import (
-    appliquer_decoupage_cart, stats_par_modalite,
-    export_brut_comptages, exporter_stat_desc_excel,
-)
-from utils.output import cramers_v_matrix
+# Liste des risk drivers depuis l'Excel de référence
+rd = pd.read_excel(RD_PATH)
+colonnes_presentes = lf.collect_schema().names()
 
-with open(config_path, encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+# ⚠️ à adapter aux noms réels des colonnes de l'Excel RD
+COL_NOM  = "Variable"
+COL_TYPE = "Type"
 
-if not config.get("run_stat_desc", False):
-    print("run_stat_desc = False -> notebook ignoré.")
-    raise SystemExit
+rd = rd[rd[COL_NOM].isin(colonnes_presentes)]
+drivers_quali  = rd.loc[rd[COL_TYPE].str.upper().str.startswith("QUAL"), COL_NOM].tolist()
+drivers_quanti = rd.loc[rd[COL_TYPE].str.upper().str.startswith("QUAN"), COL_NOM].tolist()
 
-TARGET       = config["target"]
-DISTRIBUTION = config.get("distribution", "continuous")
-ID_COL       = config.get("Granularity", "FACILITY")
-DATE_PHOTO   = config["Date_photo"]
-OUTPUT_DIR   = Path(config["Output"])
-RD_PATH      = Path(config["RD"])
+print(f"{len(drivers_quali)} quali | {len(drivers_quanti)} quanti "
+      f"| total {len(drivers_quali) + len(drivers_quanti)}")
 
-# Paramètres propres au notebook
-MAX_LEAF_NODES   = config.get("cart_max_leaf_nodes", 5)
-MIN_SAMPLES_LEAF = config.get("cart_min_samples_leaf", 0.05)
-NB_DRIVERS_MAX   = config.get("nb_drivers_max_correlation", None)  # None = tous
-
-print(f"Target : {TARGET} ({DISTRIBUTION}) | ID : {ID_COL} | Sortie : {OUTPUT_DIR}")
+# Colonne année dérivée de la date photo
+lf = lf.with_columns(pl.col(DATE_PHOTO).dt.year().alias("annee"))
