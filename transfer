@@ -1,15 +1,21 @@
-lf_binned, seuils_cart, drivers_quanti_bines = appliquer_decoupage_cart(
-    lf=lf,
-    variables_quanti=drivers_quanti,
-    target=TARGET,
-    distribution=DISTRIBUTION,
-    max_leaf_nodes=MAX_LEAF_NODES,
-    min_samples_leaf=MIN_SAMPLES_LEAF,
-    dossier_sortie=OUTPUT_DIR,
-)
+import time
 
-df_seuils = pd.DataFrame([
-    {"variable": k, "nb_classes": v["nb_classes"], "colonne_binee": v["colonne_binee"]}
-    for k, v in seuils_cart.items()
-])
-df_seuils.head(20)
+drivers_correlation = drivers_quali + drivers_quanti_bines
+if NB_DRIVERS_MAX:
+    drivers_correlation = drivers_correlation[:NB_DRIVERS_MAX]
+    print(f"⚠️ Limité à {NB_DRIVERS_MAX} drivers pour ce run")
+
+n = len(drivers_correlation)
+print(f"{n} drivers -> {n * (n - 1) // 2} paires à calculer")
+
+t0 = time.time()
+correlation = cramers_v_matrix(
+    df_train_binned=lf_binned,
+    features_used=drivers_correlation,
+    threshold_corr=config.get("threshold_corr", 0.6),
+    plot=False,          # heatmap illisible à 280 variables
+    round_digits=2,
+)
+print(f"Terminé en {time.time() - t0:.0f}s")
+
+correlation.head()
