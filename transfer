@@ -1,8 +1,15 @@
-from utils.stat_desc import write_formatted_sheet
+lf_binned, seuils_cart, drivers_quanti_bines = appliquer_decoupage_cart(
+    lf=lf,
+    variables_quanti=drivers_quanti,
+    target=TARGET,
+    distribution=DISTRIBUTION,
+    max_leaf_nodes=MAX_LEAF_NODES,
+    min_samples_leaf=MIN_SAMPLES_LEAF,
+    dossier_sortie=OUTPUT_DIR,
+)
 
-if full_correlation is not None:
-    write_formatted_sheet(writer, full_correlation, 'Full_correlation', '#8E44AD', index=True)
-if stats_quali is not None:
-    write_formatted_sheet(writer, stats_quali, 'Stats_quali', '#006C44')
-if stats_quanti is not None:
-    write_formatted_sheet(writer, stats_quanti, 'Stats_quanti', '#006C44')
+df_seuils = pd.DataFrame([
+    {"variable": k, "nb_classes": v["nb_classes"], "colonne_binee": v["colonne_binee"]}
+    for k, v in seuils_cart.items()
+])
+df_seuils.head(20)
