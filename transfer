@@ -1,21 +1,11 @@
-import time
-
-drivers_correlation = drivers_quali + drivers_quanti_bines
-if NB_DRIVERS_MAX:
-    drivers_correlation = drivers_correlation[:NB_DRIVERS_MAX]
-    print(f"⚠️ Limité à {NB_DRIVERS_MAX} drivers pour ce run")
-
-n = len(drivers_correlation)
-print(f"{n} drivers -> {n * (n - 1) // 2} paires à calculer")
-
-t0 = time.time()
-correlation = cramers_v_matrix(
-    df_train_binned=lf_binned,
-    features_used=drivers_correlation,
-    threshold_corr=config.get("threshold_corr", 0.6),
-    plot=False,          # heatmap illisible à 280 variables
-    round_digits=2,
+stats_quali = stats_par_modalite(
+    lf_binned, drivers_quali, TARGET, ID_COL,
+    colonne_annee="annee", type_variable="quali",
 )
-print(f"Terminé en {time.time() - t0:.0f}s")
+stats_quanti = stats_par_modalite(
+    lf_binned, drivers_quanti_bines, TARGET, ID_COL,
+    colonne_annee="annee", type_variable="quanti",
+)
 
-correlation.head()
+print(f"quali : {stats_quali.height} lignes | quanti : {stats_quanti.height} lignes")
+stats_quali.head(10)
