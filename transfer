@@ -1,18 +1,4 @@
-chemin_excel = OUTPUT_DIR / f"stat_desc_{config['pipeline_name']}.xlsx"
-
-exporter_stat_desc_excel(
-    chemin=chemin_excel,
-    correlation=correlation,
-    stats_quali=stats_quali,
-    stats_quanti=stats_quanti,
-    seuils_cart=df_seuils,
-    export_brut=export_brut,
-)
-
-# Parquets relus par le NB07 pour l'injection dans la scorecard (option A)
-dossier = OUTPUT_DIR / "stat_desc"
-dossier.mkdir(parents=True, exist_ok=True)
-pl.from_pandas(correlation.reset_index()).write_parquet(dossier / "full_correlation.parquet")
-stats_quali.write_parquet(dossier / "stats_quali.parquet")
-stats_quanti.write_parquet(dossier / "stats_quanti.parquet")
-print(f"Parquets pour le NB07 : {dossier}")
+'run_stat_desc': True,
+'cart_max_leaf_nodes': 5,
+'cart_min_samples_leaf': 0.05,
+'nb_drivers_max_correlation': None,   # ex. 30 pour un test rapide
