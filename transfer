@@ -1,4 +1,8 @@
-'run_stat_desc': True,
-'cart_max_leaf_nodes': 5,
-'cart_min_samples_leaf': 0.05,
-'nb_drivers_max_correlation': None,   # ex. 30 pour un test rapide
+from utils.stat_desc import write_formatted_sheet
+
+if full_correlation is not None:
+    write_formatted_sheet(writer, full_correlation, 'Full_correlation', '#8E44AD', index=True)
+if stats_quali is not None:
+    write_formatted_sheet(writer, stats_quali, 'Stats_quali', '#006C44')
+if stats_quanti is not None:
+    write_formatted_sheet(writer, stats_quanti, 'Stats_quanti', '#006C44')
