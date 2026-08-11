@@ -1,11 +1,8 @@
-stats_quali = stats_par_modalite(
-    lf_binned, drivers_quali, TARGET, ID_COL,
-    colonne_annee="annee", type_variable="quali",
+export_brut = export_brut_comptages(
+    lf_binned,
+    variables=drivers_quali + drivers_quanti_bines,
+    id_col=ID_COL,
+    colonne_annee="annee",
 )
-stats_quanti = stats_par_modalite(
-    lf_binned, drivers_quanti_bines, TARGET, ID_COL,
-    colonne_annee="annee", type_variable="quanti",
-)
-
-print(f"quali : {stats_quali.height} lignes | quanti : {stats_quanti.height} lignes")
-stats_quali.head(10)
+print(f"{export_brut.height} lignes")
+export_brut.head(10)
