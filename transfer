@@ -1,118 +1,86 @@
-"""
-Statistiques descriptives et découpage CART des risk drivers.
-S'insère entre le NB01 (encoding/split) et le NB02 (XGBoost).
-"""
-import json
-from pathlib import Path
-
-import numpy as np
-import polars as pl
-import pandas as pd
-from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
-
-from utils.output import create_bin_lazy
-
-
 # --------------------------------------------------------------------------- #
-# 1. Découpage CART
+# 2. Statistiques descriptives
 # --------------------------------------------------------------------------- #
-def seuils_cart_variable(
-    df: pl.DataFrame,
-    colonne: str,
-    target: str,
-    distribution: str = "continuous",
-    max_leaf_nodes: int = 5,
-    min_samples_leaf: float = 0.05,
-    random_state: int = 42,
-):
-    """
-    Ajuste un CART univarié (colonne -> target) et retourne les bornes de coupure.
-    Retourne toujours une liste encadrée par -inf / +inf, exploitable par
-    create_bin_lazy. Retourne None si la variable n'est pas exploitable.
-    """
-    sous_df = df.select([colonne, target]).drop_nulls()
-    if sous_df.height < 100 or sous_df[colonne].n_unique() < 3:
-        return None
-
-    X = sous_df[colonne].to_numpy().reshape(-1, 1)
-    y = sous_df[target].to_numpy()
-
-    Arbre = DecisionTreeClassifier if distribution == "bernoulli" else DecisionTreeRegressor
-    arbre = Arbre(
-        max_leaf_nodes=max_leaf_nodes,
-        min_samples_leaf=min_samples_leaf,
-        random_state=random_state,
-    )
-    arbre.fit(X, y)
-
-    seuils = arbre.tree_.threshold[arbre.tree_.feature != -2]
-    if len(seuils) == 0:
-        return None
-
-    return [-np.inf] + sorted(float(s) for s in np.unique(seuils)) + [np.inf]
-
-
-def appliquer_decoupage_cart(
+def stats_par_modalite(
     lf: pl.LazyFrame,
-    variables_quanti: list,
+    variables: list,
     target: str,
-    distribution: str = "continuous",
-    max_leaf_nodes: int = 5,
-    min_samples_leaf: float = 0.05,
-    dossier_sortie: Path = None,
-    suffixe: str = "_CART",
+    id_col: str,
+    colonne_annee: str = None,
+    type_variable: str = "quali",
 ):
     """
-    Calcule un CART par variable quanti, applique les bins via create_bin_lazy,
-    et sauvegarde les seuils dans dossier_sortie/decoupCART.
-
-    Retourne (lf_binned, dict_seuils, liste_variables_binees).
+    Pour chaque variable et chaque modalité : effectif, % effectif, target moyenne.
+    Si colonne_annee est fourni, ventile également par année.
+    Retourne un DataFrame Polars empilé (une ligne = variable x modalité [x année]).
     """
-    df = lf.select(list(set(variables_quanti + [target]))).collect()
+    cles_groupe_base = [] if colonne_annee is None else [colonne_annee]
+    resultats = []
 
-    dict_seuils, expressions, variables_binees, ignorees = {}, [], [], []
+    for var in variables:
+        cles = cles_groupe_base + [var]
 
-    for col in variables_quanti:
-        if col not in df.columns:
-            ignorees.append((col, "absente"))
-            continue
-
-        bins = seuils_cart_variable(
-            df, col, target, distribution, max_leaf_nodes, min_samples_leaf
+        agg = (
+            lf.group_by(cles)
+              .agg([
+                  pl.col(id_col).n_unique().alias("effectif"),
+                  pl.col(target).mean().alias("target_moyenne"),
+                  pl.col(target).std().alias("target_ecart_type"),
+                  pl.col(target).min().alias("target_min"),
+                  pl.col(target).max().alias("target_max"),
+              ])
         )
-        if bins is None:
-            ignorees.append((col, "pas de coupure trouvée"))
-            continue
 
-        nom_bin = f"{col}{suffixe}"
-        expressions.append(create_bin_lazy(lf, col, bins).alias(nom_bin))
-        dict_seuils[col] = {
-            "bins": [None if np.isinf(b) else b for b in bins],
-            "nb_classes": len(bins) - 1,
-            "colonne_binee": nom_bin,
-        }
-        variables_binees.append(nom_bin)
+        # % d'effectif calculé DANS l'année quand la ventilation est active
+        fenetre = cles_groupe_base if cles_groupe_base else None
+        if fenetre:
+            agg = agg.with_columns(
+                (pl.col("effectif") / pl.col("effectif").sum().over(fenetre) * 100)
+                .alias("pct_effectif")
+            )
+        else:
+            agg = agg.with_columns(
+                (pl.col("effectif") / pl.col("effectif").sum() * 100).alias("pct_effectif")
+            )
 
-    lf_binned = lf.with_columns(expressions) if expressions else lf
+        agg = (
+            agg.with_columns([
+                pl.lit(var).alias("variable"),
+                pl.lit(type_variable).alias("type_variable"),
+                pl.col(var).cast(pl.Utf8).alias("modalite"),
+            ])
+            .drop(var)
+        )
+        resultats.append(agg)
 
-    print(f"CART : {len(variables_binees)} variables découpées, {len(ignorees)} ignorées")
-    for col, motif in ignorees[:10]:
-        print(f"   - {col} : {motif}")
-    if len(ignorees) > 10:
-        print(f"   ... et {len(ignorees) - 10} autres")
+    if not resultats:
+        return pl.DataFrame()
 
-    if dossier_sortie is not None:
-        dossier = Path(dossier_sortie) / "decoupCART"
-        dossier.mkdir(parents=True, exist_ok=True)
-        with open(dossier / "seuils_cart.json", "w", encoding="utf-8") as f:
-            json.dump(dict_seuils, f, indent=2, ensure_ascii=False)
-        pd.DataFrame([
-            {"variable": k, "nb_classes": v["nb_classes"],
-             "bins": " | ".join("-inf" if b is None and i == 0 else
-                                "+inf" if b is None else f"{b:.4f}"
-                                for i, b in enumerate(v["bins"]))}
-            for k, v in dict_seuils.items()
-        ]).to_csv(dossier / "seuils_cart.csv", index=False)
-        print(f"Seuils sauvegardés : {dossier}")
+    colonnes_finales = (
+        ["variable", "type_variable", "modalite"]
+        + ([colonne_annee] if colonne_annee else [])
+        + ["effectif", "pct_effectif", "target_moyenne",
+           "target_ecart_type", "target_min", "target_max"]
+    )
 
-    return lf_binned, dict_seuils, variables_binees
+    return (
+        pl.concat(resultats, how="vertical")
+          .collect()
+          .select(colonnes_finales)
+          .sort(["variable"] + ([colonne_annee] if colonne_annee else []) + ["modalite"])
+    )
+
+
+def export_brut_comptages(lf, variables, id_col, colonne_annee=None):
+    """
+    Export à plat, une ligne par variable x modalité [x année], avec count(ID).
+    Destiné à être croisé via TCD Excel côté utilisateur.
+    """
+    return stats_par_modalite(
+        lf, variables, target=id_col, id_col=id_col,
+        colonne_annee=colonne_annee, type_variable="brut",
+    ).select(
+        ["variable", "modalite"]
+        + ([colonne_annee] if colonne_annee else [])
+        + ["effectif", "pct_effectif"]
+    )
