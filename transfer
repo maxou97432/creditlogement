@@ -1,8 +1,18 @@
-export_brut = export_brut_comptages(
-    lf_binned,
-    variables=drivers_quali + drivers_quanti_bines,
-    id_col=ID_COL,
-    colonne_annee="annee",
+chemin_excel = OUTPUT_DIR / f"stat_desc_{config['pipeline_name']}.xlsx"
+
+exporter_stat_desc_excel(
+    chemin=chemin_excel,
+    correlation=correlation,
+    stats_quali=stats_quali,
+    stats_quanti=stats_quanti,
+    seuils_cart=df_seuils,
+    export_brut=export_brut,
 )
-print(f"{export_brut.height} lignes")
-export_brut.head(10)
+
+# Parquets relus par le NB07 pour l'injection dans la scorecard (option A)
+dossier = OUTPUT_DIR / "stat_desc"
+dossier.mkdir(parents=True, exist_ok=True)
+pl.from_pandas(correlation.reset_index()).write_parquet(dossier / "full_correlation.parquet")
+stats_quali.write_parquet(dossier / "stats_quali.parquet")
+stats_quanti.write_parquet(dossier / "stats_quanti.parquet")
+print(f"Parquets pour le NB07 : {dossier}")
