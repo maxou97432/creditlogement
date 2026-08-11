@@ -1,71 +1,32 @@
-# --------------------------------------------------------------------------- #
-# 3. Écriture Excel (factorisation du pattern de create_excel_scorecard)
-# --------------------------------------------------------------------------- #
-def write_formatted_sheet(writer, df, sheet_name, tab_color="#006C44",
-                          startcol=1, index=False, largeur=20):
-    """
-    Écrit un DataFrame dans un onglet en reprenant le formatage standard du pack.
-    Accepte un DataFrame pandas ou Polars.
-    """
-    if isinstance(df, pl.DataFrame):
-        df = df.to_pandas()
+import yaml
+from pathlib import Path
+import numpy as np
+import polars as pl
+import pandas as pd
 
-    df.to_excel(writer, sheet_name=sheet_name, startcol=startcol, index=index)
+from utils.stat_desc import (
+    appliquer_decoupage_cart, stats_par_modalite,
+    export_brut_comptages, exporter_stat_desc_excel,
+)
+from utils.output import cramers_v_matrix
 
-    workbook = writer.book
-    worksheet = writer.sheets[sheet_name]
-    worksheet.hide_gridlines(2)
-    worksheet.set_tab_color(tab_color)
+with open(config_path, encoding="utf-8") as f:
+    config = yaml.safe_load(f)
 
-    header_format = workbook.add_format({
-        "bold": True, "text_wrap": True, "align": "center", "valign": "vcenter",
-        "bg_color": "#00915A", "font_color": "#FFFFFF",
-        "border": 1, "border_color": "#999999",
-    })
-    row_format = workbook.add_format({
-        "bold": False, "border": 1, "border_color": "#999999",
-        "bg_color": "#FFFFFF", "text_wrap": True,
-    })
+if not config.get("run_stat_desc", False):
+    print("run_stat_desc = False -> notebook ignoré.")
+    raise SystemExit
 
-    max_row, max_col = df.shape
-    derniere_col = startcol + max_col
+TARGET       = config["target"]
+DISTRIBUTION = config.get("distribution", "continuous")
+ID_COL       = config.get("Granularity", "FACILITY")
+DATE_PHOTO   = config["Date_photo"]
+OUTPUT_DIR   = Path(config["Output"])
+RD_PATH      = Path(config["RD"])
 
-    worksheet.conditional_format(
-        0, startcol, 0, derniere_col,
-        {"type": "formula", "criteria": "=ROW()=1", "format": header_format},
-    )
-    worksheet.conditional_format(
-        1, startcol, max_row, derniere_col,
-        {"type": "formula",
-         "criteria": f'=${chr(65 + derniere_col)}2<>""',
-         "format": row_format},
-    )
-    worksheet.set_column(0, derniere_col, largeur)
-    return worksheet
+# Paramètres propres au notebook
+MAX_LEAF_NODES   = config.get("cart_max_leaf_nodes", 5)
+MIN_SAMPLES_LEAF = config.get("cart_min_samples_leaf", 0.05)
+NB_DRIVERS_MAX   = config.get("nb_drivers_max_correlation", None)  # None = tous
 
-
-def exporter_stat_desc_excel(chemin, correlation=None, stats_quali=None,
-                             stats_quanti=None, seuils_cart=None, export_brut=None):
-    """
-    Fichier Excel autonome du notebook stat desc (option B).
-    """
-    chemin = Path(chemin)
-    chemin.parent.mkdir(parents=True, exist_ok=True)
-
-    with pd.ExcelWriter(chemin, engine="xlsxwriter") as writer:
-        onglets = [
-            ("Full_correlation", correlation, "#8E44AD", True),
-            ("Stats_quali",      stats_quali, "#006C44", False),
-            ("Stats_quanti",     stats_quanti, "#006C44", False),
-            ("Seuils_CART",      seuils_cart, "#B7950B", False),
-            ("Export_brut",      export_brut, "#5D6D7E", False),
-        ]
-        ecrits = []
-        for nom, df, couleur, index in onglets:
-            if df is not None and len(df) > 0:
-                write_formatted_sheet(writer, df, nom, tab_color=couleur, index=index)
-                ecrits.append(nom)
-
-    print(f"Fichier stat desc écrit : {chemin}")
-    print(f"   Onglets : {', '.join(ecrits)}")
-    return chemin
+print(f"Target : {TARGET} ({DISTRIBUTION}) | ID : {ID_COL} | Sortie : {OUTPUT_DIR}")
