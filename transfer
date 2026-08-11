@@ -1,19 +1,15 @@
-lf = pl.scan_parquet(OUTPUT_DIR / config["RDS"])
+lf_binned, seuils_cart, drivers_quanti_bines = appliquer_decoupage_cart(
+    lf=lf,
+    variables_quanti=drivers_quanti,
+    target=TARGET,
+    distribution=DISTRIBUTION,
+    max_leaf_nodes=MAX_LEAF_NODES,
+    min_samples_leaf=MIN_SAMPLES_LEAF,
+    dossier_sortie=OUTPUT_DIR,
+)
 
-# Liste des risk drivers depuis l'Excel de référence
-rd = pd.read_excel(RD_PATH)
-colonnes_presentes = lf.collect_schema().names()
-
-# ⚠️ à adapter aux noms réels des colonnes de l'Excel RD
-COL_NOM  = "Variable"
-COL_TYPE = "Type"
-
-rd = rd[rd[COL_NOM].isin(colonnes_presentes)]
-drivers_quali  = rd.loc[rd[COL_TYPE].str.upper().str.startswith("QUAL"), COL_NOM].tolist()
-drivers_quanti = rd.loc[rd[COL_TYPE].str.upper().str.startswith("QUAN"), COL_NOM].tolist()
-
-print(f"{len(drivers_quali)} quali | {len(drivers_quanti)} quanti "
-      f"| total {len(drivers_quali) + len(drivers_quanti)}")
-
-# Colonne année dérivée de la date photo
-lf = lf.with_columns(pl.col(DATE_PHOTO).dt.year().alias("annee"))
+df_seuils = pd.DataFrame([
+    {"variable": k, "nb_classes": v["nb_classes"], "colonne_binee": v["colonne_binee"]}
+    for k, v in seuils_cart.items()
+])
+df_seuils.head(20)
