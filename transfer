@@ -1,22 +1,70 @@
-def binner_lazy_generique(lf: pl.LazyFrame, column: str, bins: list) -> pl.Expr:
+def appliquer_decoupage_cart(
+    lf: pl.LazyFrame,
+    variables_quanti: list,
+    target: str,
+    dossier_sortie: Path = None,
+    suffixe: str = "_CART",
+):
     """
-    Découpe `column` selon `bins` (bornes croissantes, encadrées par -inf/+inf)
-    et retourne le numéro de tranche (0, 1, 2, ...) correspondant à chaque valeur.
+    Calcule un CART par variable quanti via DecisionTree_decoup (fonction existante
+    du pack, features_binning.py), applique les bins via binner_lazy_generique,
+    et sauvegarde les seuils dans dossier_sortie/decoupCART.
 
-    bins doit ressembler à : [-inf, seuil1, seuil2, ..., +inf]
-    -> tranche 0 : x <= seuil1
-    -> tranche 1 : seuil1 < x <= seuil2
-    -> ...
-    -> dernière tranche : x > dernier_seuil
+    NB : DecisionTree_decoup utilise DecisionTreeRegressor(max_depth=3,
+    min_samples_leaf=10, random_state=42) — hyperparamètres fixes, cohérents
+    avec ceux utilisés ailleurs dans le pack (NB01).
+
+    Retourne (lf_binned, dict_seuils, liste_variables_binees).
     """
-    expr = pl.lit(None).cast(pl.Int64)
-    for i in range(len(bins) - 1):
-        lower, upper = bins[i], bins[i + 1]
-        if lower == -np.inf:
-            condition = pl.col(column) <= upper
-        elif upper == np.inf:
-            condition = pl.col(column) > lower
-        else:
-            condition = (pl.col(column) > lower) & (pl.col(column) <= upper)
-        expr = pl.when(condition).then(pl.lit(i)).otherwise(expr)
-    return expr
+    dict_seuils, expressions, variables_binees, ignorees = {}, [], [], []
+
+    for col in variables_quanti:
+        if col not in lf.collect_schema().names():
+            ignorees.append((col, "absente"))
+            continue
+
+        bins_bruts = DecisionTree_decoup(lf, col, target)
+        # bins_bruts = [min_observe, seuils_finis..., max_observe+1]
+        # len == 2 <=> aucun seuil trouvé (juste min/max)
+        if bins_bruts is None or len(bins_bruts) < 3:
+            ignorees.append((col, "pas de coupure trouvée"))
+            continue
+
+        # bornes infinies en remplacement de min/max observés, pour robustesse
+        # sur données hors plage (OOT, futurs runs) : sinon binner_lazy_generique
+        # renverrait null pour ces valeurs
+        seuils_finis = list(bins_bruts[1:-1])
+        bins = [-np.inf] + seuils_finis + [np.inf]
+
+        nom_bin = f"{col}{suffixe}"
+        expressions.append(binner_lazy_generique(lf, col, bins).alias(nom_bin))
+        dict_seuils[col] = {
+            "bins": [None if np.isinf(b) else float(b) for b in bins],
+            "nb_classes": len(bins) - 1,
+            "colonne_binee": nom_bin,
+        }
+        variables_binees.append(nom_bin)
+
+    lf_binned = lf.with_columns(expressions) if expressions else lf
+
+    print(f"CART : {len(variables_binees)} variables découpées, {len(ignorees)} ignorées")
+    for col, motif in ignorees[:10]:
+        print(f"   - {col} : {motif}")
+    if len(ignorees) > 10:
+        print(f"   ... et {len(ignorees) - 10} autres")
+
+    if dossier_sortie is not None:
+        dossier = Path(dossier_sortie) / "decoupCART"
+        dossier.mkdir(parents=True, exist_ok=True)
+        with open(dossier / "seuils_cart.json", "w", encoding="utf-8") as f:
+            json.dump(dict_seuils, f, indent=2, ensure_ascii=False)
+        pd.DataFrame([
+            {"variable": k, "nb_classes": v["nb_classes"],
+             "bins": " | ".join("-inf" if b is None and i == 0 else
+                                "+inf" if b is None else f"{b:.4f}"
+                                for i, b in enumerate(v["bins"]))}
+            for k, v in dict_seuils.items()
+        ]).to_csv(dossier / "seuils_cart.csv", index=False)
+        print(f"Seuils sauvegardés : {dossier}")
+
+    return lf_binned, dict_seuils, variables_binees
