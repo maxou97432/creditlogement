@@ -7,14 +7,9 @@ def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
     Onglet unique avec sélecteur de variable (quali + quanti confondues) et
     graphique dynamique de target_moyenne par modalité x année.
 
-    Les formules pointent vers Stats_quali ou Stats_quanti selon la variable
-    choisie, via une table de correspondance cachée + INDIRECT.
-
-    df_stats_quali / df_stats_quanti : structure de stats_par_modalite
-    (variable, type_variable, modalite, annee, effectif, pct_effectif,
-    target_moyenne, ...), colonnes dans cet ordre en sortie Excel
-    (A=variable, B=type_variable, C=modalite, D=annee, ..., target_moyenne
-    à la colonne G en supposant l'ordre standard -> à ajuster si différent).
+    Colonnes réelles dans Stats_quali / Stats_quanti (startcol=1, index=False) :
+    B=variable, C=type_variable, D=modalite, E=annee, F=effectif,
+    G=pct_effectif, H=target_moyenne.
     """
     variables_quali = sorted(df_stats_quali["variable"].unique())
     variables_quanti = sorted(df_stats_quanti["variable"].unique())
@@ -40,7 +35,7 @@ def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
     ws.hide_gridlines(2)
 
     # --- Table de correspondance cachée : variable -> nom de feuille source ---
-    ligne_mapping = 100  # loin en-dessous, hors zone visible utile
+    ligne_mapping = 100
     ws.write(ligne_mapping, 0, "variable")
     ws.write(ligne_mapping, 1, "feuille_source")
     for i, v in enumerate(variables_quali):
@@ -50,25 +45,19 @@ def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
     for i, v in enumerate(variables_quanti):
         ws.write(ligne_mapping + 1 + offset + i, 0, v)
         ws.write(ligne_mapping + 1 + offset + i, 1, nom_feuille_quanti)
-    plage_mapping_var = f"$A${ligne_mapping+1}:$A${ligne_mapping + len(toutes_variables)}"
-    plage_mapping_feuille = f"$B${ligne_mapping+1}:$B${ligne_mapping + len(toutes_variables)}"
 
     # --- Sélecteur de variable ---
     ws.write("B2", "Variable :")
     ws.write("C2", var_defaut)
     ws.data_validation("C2", {"validate": "list", "source": toutes_variables})
 
-    # Feuille source résolue dynamiquement, affichée en aide/debug
-    ws.write_formula("C3", f'=VLOOKUP($C$2,{plage_mapping_var.replace("$A$","$A$")}:{plage_mapping_feuille[1:]},2,FALSE)')
-    # NB : formule VLOOKUP simplifiée ci-dessous, corrigée pour référencer la
-    # plage complète correctement :
+    ws.write("B3", "Feuille source (debug) :")
     ws.write_formula(
         "C3",
         f'=VLOOKUP($C$2,$A${ligne_mapping+1}:$B${ligne_mapping+len(toutes_variables)},2,FALSE)'
     )
-    ws.write("B3", "Feuille source (debug) :")
 
-    # --- Table calculée : modalités x années ---
+    # --- Table calculée : modalités (colonne D des feuilles sources) x années (E) ---
     startrow = 4
     ws.write(startrow, 1, "Modalité")
     for j, annee in enumerate(annees):
@@ -79,7 +68,7 @@ def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
 
         formule_modalite = (
             f'=IFERROR(INDEX(SORT(UNIQUE('
-            f'FILTER(INDIRECT($C$3&"!C:C"),INDIRECT($C$3&"!A:A")=$C$2))),{i+1}),"")'
+            f'FILTER(INDIRECT($C$3&"!D:D"),INDIRECT($C$3&"!B:B")=$C$2))),{i+1}),"")'
         )
         ws.write_formula(row, 1, formule_modalite)
 
@@ -87,10 +76,10 @@ def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
             col = 2 + j
             col_lettre_annee = col_lettre(col)
             formule_moyenne = (
-                f'=IFERROR(AVERAGEIFS(INDIRECT($C$3&"!G:G"),'
-                f'INDIRECT($C$3&"!A:A"),$C$2,'
-                f'INDIRECT($C$3&"!C:C"),$B{row+1},'
-                f'INDIRECT($C$3&"!D:D"),{col_lettre_annee}${startrow+1}),"")'
+                f'=IFERROR(AVERAGEIFS(INDIRECT($C$3&"!H:H"),'
+                f'INDIRECT($C$3&"!B:B"),$C$2,'
+                f'INDIRECT($C$3&"!D:D"),$B{row+1},'
+                f'INDIRECT($C$3&"!E:E"),{col_lettre_annee}${startrow+1}),"")'
             )
             ws.write_formula(row, col, formule_moyenne)
 
@@ -119,3 +108,51 @@ def col_lettre(col_idx_0based):
         col_idx_0based, reste = divmod(col_idx_0based - 1, 26)
         lettre = chr(65 + reste) + lettre
     return lettre
+
+def colorer_matrice_correlation(worksheet, df, startcol=1, startrow=1):
+    """Dégradé 3 couleurs sur la matrice V de Cramér (0 à 1)."""
+    nb_lignes, nb_cols = df.shape
+    worksheet.conditional_format(
+        startrow, startcol, startrow + nb_lignes - 1, startcol + nb_cols - 1,
+        {
+            "type": "3_color_scale",
+            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
+            "mid_type": "num", "mid_value": 0.5, "mid_color": "#FDBE85",
+            "max_type": "num", "max_value": 1, "max_color": "#D7301F",
+        },
+    )
+
+
+def exporter_stat_desc_excel(chemin, correlation=None, stats_quali=None,
+                             stats_quanti=None, seuils_cart=None, export_brut=None):
+    chemin = Path(chemin)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(chemin, engine="xlsxwriter") as writer:
+        onglets = [
+            ("Full_correlation", correlation, "#8E44AD", True),
+            ("Stats_quali",      stats_quali, "#006C44", False),
+            ("Stats_quanti",     stats_quanti, "#006C44", False),
+            ("Seuils_CART",      seuils_cart, "#B7950B", False),
+            ("Export_brut",      export_brut, "#5D6D7E", False),
+        ]
+        ecrits = []
+        for nom, df, couleur, index in onglets:
+            if df is not None and len(df) > 0:
+                ws = write_formatted_sheet(writer, df, nom, tab_color=couleur, index=index)
+                if nom == "Full_correlation":
+                    # startrow=1 (header en ligne 0), startcol dépend de index=True
+                    # (colonne des labels de lignes en plus)
+                    colorer_matrice_correlation(ws, df, startcol=2, startrow=1)
+                ecrits.append(nom)
+
+        if stats_quali is not None and stats_quanti is not None \
+           and len(stats_quali) > 0 and len(stats_quanti) > 0:
+            df_quali_pd = stats_quali.to_pandas() if isinstance(stats_quali, pl.DataFrame) else stats_quali
+            df_quanti_pd = stats_quanti.to_pandas() if isinstance(stats_quanti, pl.DataFrame) else stats_quanti
+            ajouter_pivot_combine(writer.book, df_quali_pd, df_quanti_pd)
+            ecrits.append("Pivot_target_annee")
+
+    print(f"Fichier stat desc écrit : {chemin}")
+    print(f"   Onglets : {', '.join(ecrits)}")
+    return chemin
