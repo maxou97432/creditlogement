@@ -1,32 +1,55 @@
-def ajouter_pivot_combine(workbook, df_stats_quali, df_stats_quanti,
-                            sheet_name="Pivot_target_annee",
-                            nom_feuille_quali="Stats_quali",
-                            nom_feuille_quanti="Stats_quanti",
-                            variable_defaut=None):
-    variables_quali = sorted(df_stats_quali["variable"].dropna().unique())
-    variables_quanti = sorted(df_stats_quanti["variable"].dropna().unique())
-    toutes_variables = variables_quali + variables_quanti
-    var_defaut = variable_defaut or (toutes_variables[0] if toutes_variables else "")
-
-    annees = sorted(
-        {a for a in df_stats_quali["annee"].unique() if pd.notna(a)}
-        | {a for a in df_stats_quanti["annee"].unique() if pd.notna(a)}
+def colorer_matrice_correlation(worksheet, df, startcol=1, startrow=1):
+    """Dégradé 3 couleurs sur la matrice V de Cramér (valeurs entre 0 et 1)."""
+    nb_lignes, nb_cols = df.shape
+    worksheet.conditional_format(
+        startrow, startcol, startrow + nb_lignes - 1, startcol + nb_cols - 1,
+        {
+            "type": "3_color_scale",
+            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
+            "mid_type": "num", "mid_value": 0.5, "mid_color": "#FDBE85",
+            "max_type": "num", "max_value": 1, "max_color": "#D7301F",
+        },
     )
 
-    modalites_par_var = {
-        v: sorted(
-            m for m in df_stats_quali.loc[df_stats_quali["variable"] == v, "modalite"].unique()
-            if pd.notna(m)
-        )
-        for v in variables_quali
-    }
-    modalites_par_var.update({
-        v: sorted(
-            m for m in df_stats_quanti.loc[df_stats_quanti["variable"] == v, "modalite"].unique()
-            if pd.notna(m)
-        )
-        for v in variables_quanti
-    })
-    nb_modalites_max = max((len(m) for m in modalites_par_var.values()), default=0)
 
-    # ... reste de la fonction inchangé
+def exporter_stat_desc_excel(chemin, correlation=None, stats_quali=None,
+                             stats_quanti=None, seuils_cart=None, export_brut=None):
+    """
+    Fichier Excel autonome du notebook stat desc (option B).
+    """
+    chemin = Path(chemin)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(chemin, engine="xlsxwriter") as writer:
+        onglets = [
+            ("Full_correlation", correlation, "#8E44AD", True),
+            ("Stats_quali",      stats_quali, "#006C44", False),
+            ("Stats_quanti",     stats_quanti, "#006C44", False),
+            ("Seuils_CART",      seuils_cart, "#B7950B", False),
+            ("Export_brut",      export_brut, "#5D6D7E", False),
+        ]
+        ecrits = []
+        for nom, df, couleur, index in onglets:
+            if df is not None and len(df) > 0:
+                if nom == "Full_correlation":
+                    # cast défensif en numérique avant écriture, pour garantir
+                    # que le conditional_format 3_color_scale s'applique
+                    # correctement (certaines colonnes peuvent arriver en
+                    # object après un reset_index/reload parquet)
+                    df_pd = df.to_pandas() if isinstance(df, pl.DataFrame) else df.copy()
+                    colonnes_valeurs = df_pd.columns
+                    df_pd[colonnes_valeurs] = df_pd[colonnes_valeurs].apply(
+                        pd.to_numeric, errors="coerce"
+                    )
+                    df = df_pd
+
+                ws = write_formatted_sheet(writer, df, nom, tab_color=couleur, index=index)
+
+                if nom == "Full_correlation":
+                    colorer_matrice_correlation(ws, df, startcol=2, startrow=1)
+
+                ecrits.append(nom)
+
+    print(f"Fichier stat desc écrit : {chemin}")
+    print(f"   Onglets : {', '.join(ecrits)}")
+    return chemin
