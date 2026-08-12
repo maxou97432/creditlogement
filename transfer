@@ -1,23 +1,16 @@
-def detecter_distribution(lf: pl.LazyFrame, target: str, tol: float = 1e-9) -> str:
-    """
-    Détecte automatiquement la distribution de la target à partir de ses valeurs
-    observées, plutôt que de dépendre d'un nom/clé de config potentiellement
-    ambigu ou mal renseigné.
+rd = rd[rd[COL_NOM].isin(colonnes_presentes)]
 
-    Retourne "bernoulli" si la target ne prend que des valeurs dans {0, 1}
-    (à tol près, pour tolérer d'éventuels flottants du type 0.0/1.0),
-    "continuous" sinon.
-    """
-    valeurs_uniques = (
-        lf.select(pl.col(target).drop_nulls().unique())
-          .collect()
-          .to_series()
-    )
+# Exclusion des identifiants (ID_RC, Obligor_ID, etc.) : la colonne Risk_drivers
+# de l'Excel les tague explicitement, pour ne pas les traiter comme de vrais
+# risk drivers quali/quanti
+COL_RISK_DRIVERS = "Risk_drivers"  # à ajuster si le nom exact diffère
+if COL_RISK_DRIVERS in rd.columns:
+    avant = len(rd)
+    rd = rd[rd[COL_RISK_DRIVERS] == "RISK_DRIVER"]
+    print(f"Filtre Risk_drivers : {avant} -> {len(rd)} lignes conservées")
+else:
+    print(f"⚠️ Colonne '{COL_RISK_DRIVERS}' absente de l'Excel — "
+          f"filtre ID non appliqué, vérifier manuellement drivers_quali/drivers_quanti")
 
-    est_binaire = valeurs_uniques.is_in([0, 1]).all() and valeurs_uniques.len() <= 2
-
-    distribution = "bernoulli" if est_binaire else "continuous"
-    print(f"Distribution détectée pour '{target}' : {distribution} "
-          f"({valeurs_uniques.len()} valeur(s) unique(s) : {sorted(valeurs_uniques.to_list())[:5]}"
-          f"{'...' if valeurs_uniques.len() > 5 else ''})")
-    return distribution
+drivers_quali  = rd.loc[rd[COL_TYPE].str.upper().str.startswith("C"), COL_NOM].tolist()
+drivers_quanti = rd.loc[rd[COL_TYPE].str.upper().str.startswith("Q"), COL_NOM].tolist()
