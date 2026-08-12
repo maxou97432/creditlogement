@@ -1,38 +1,77 @@
+def _decoupage_cart_variable(lf: pl.LazyFrame, feature: str, target: str, distribution: str = "continuous"):
+    """
+    Réplique exactement la logique de DecisionTree_decoup (features_binning.py),
+    en ajoutant la sélection de l'estimateur selon la distribution de la target :
+    - "bernoulli" (PD) -> DecisionTreeClassifier
+    - autre (LGD, continue) -> DecisionTreeRegressor (comportement de DecisionTree_decoup)
+
+    Mêmes hyperparamètres que DecisionTree_decoup : max_depth=3, min_samples_leaf=10,
+    random_state=42, pour rester cohérent avec le reste du pack.
+
+    TODO : si DecisionTree_decoup est un jour étendue nativement pour gérer la PD,
+    remplacer cette fonction par un appel direct avec le paramètre distribution.
+    """
+    pdf = lf.filter(pl.col(feature).is_not_null() & pl.col(target).is_not_null()) \
+            .select([feature, target]).collect().to_pandas()
+
+    X = pdf[[feature]].values
+    y = pdf[target].values
+
+    Estimateur = DecisionTreeClassifier if distribution == "bernoulli" else DecisionTreeRegressor
+    model = Estimateur(max_depth=3, min_samples_leaf=10, random_state=42)
+    model.fit(X, y)
+
+    raw_thresh = model.tree_.threshold[model.tree_.feature != -2]
+    thresholds = np.sort(np.unique(raw_thresh))
+
+    finite_thresholds = thresholds[np.isfinite(thresholds)]
+    if len(finite_thresholds) == 0:
+        return None
+
+    min_val = pdf[feature].min()
+    max_val = pdf[feature].max() + 1
+    bins = np.concatenate(([min_val], finite_thresholds, [max_val]))
+    return bins
+
+
 def appliquer_decoupage_cart(
     lf: pl.LazyFrame,
     variables_quanti: list,
     target: str,
+    distribution: str = "continuous",
     dossier_sortie: Path = None,
     suffixe: str = "_CART",
 ):
     """
-    Calcule un CART par variable quanti via DecisionTree_decoup (fonction existante
-    du pack, features_binning.py), applique les bins via binner_lazy_generique,
-    et sauvegarde les seuils dans dossier_sortie/decoupCART.
+    Calcule un CART par variable quanti et applique les bins via binner_lazy_generique.
 
-    NB : DecisionTree_decoup utilise DecisionTreeRegressor(max_depth=3,
-    min_samples_leaf=10, random_state=42) — hyperparamètres fixes, cohérents
-    avec ceux utilisés ailleurs dans le pack (NB01).
+    Pour distribution="continuous" (LGD), utilise DecisionTree_decoup telle quelle
+    (fonction existante du pack, features_binning.py) — comportement inchangé,
+    conforme à la consigne d'utiliser le CART déjà en place.
+
+    Pour distribution="bernoulli" (PD), utilise _decoupage_cart_variable, qui réplique
+    la même logique avec un DecisionTreeClassifier à la place du Regressor — nécessaire
+    car DecisionTree_decoup ne gère pas nativement les cibles binaires.
 
     Retourne (lf_binned, dict_seuils, liste_variables_binees).
     """
     dict_seuils, expressions, variables_binees, ignorees = {}, [], [], []
+    colonnes_presentes = lf.collect_schema().names()
 
     for col in variables_quanti:
-        if col not in lf.collect_schema().names():
+        if col not in colonnes_presentes:
             ignorees.append((col, "absente"))
             continue
 
-        bins_bruts = DecisionTree_decoup(lf, col, target)
-        # bins_bruts = [min_observe, seuils_finis..., max_observe+1]
-        # len == 2 <=> aucun seuil trouvé (juste min/max)
+        if distribution == "bernoulli":
+            bins_bruts = _decoupage_cart_variable(lf, col, target, distribution)
+        else:
+            bins_bruts = DecisionTree_decoup(lf, col, target)
+
         if bins_bruts is None or len(bins_bruts) < 3:
             ignorees.append((col, "pas de coupure trouvée"))
             continue
 
-        # bornes infinies en remplacement de min/max observés, pour robustesse
-        # sur données hors plage (OOT, futurs runs) : sinon binner_lazy_generique
-        # renverrait null pour ces valeurs
         seuils_finis = list(bins_bruts[1:-1])
         bins = [-np.inf] + seuils_finis + [np.inf]
 
@@ -47,7 +86,7 @@ def appliquer_decoupage_cart(
 
     lf_binned = lf.with_columns(expressions) if expressions else lf
 
-    print(f"CART : {len(variables_binees)} variables découpées, {len(ignorees)} ignorées")
+    print(f"CART ({distribution}) : {len(variables_binees)} variables découpées, {len(ignorees)} ignorées")
     for col, motif in ignorees[:10]:
         print(f"   - {col} : {motif}")
     if len(ignorees) > 10:
