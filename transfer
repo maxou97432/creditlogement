@@ -1,109 +1,23 @@
-def _decoupage_cart_variable(lf: pl.LazyFrame, feature: str, target: str, distribution: str = "continuous"):
+def detecter_distribution(lf: pl.LazyFrame, target: str, tol: float = 1e-9) -> str:
     """
-    Réplique exactement la logique de DecisionTree_decoup (features_binning.py),
-    en ajoutant la sélection de l'estimateur selon la distribution de la target :
-    - "bernoulli" (PD) -> DecisionTreeClassifier
-    - autre (LGD, continue) -> DecisionTreeRegressor (comportement de DecisionTree_decoup)
+    Détecte automatiquement la distribution de la target à partir de ses valeurs
+    observées, plutôt que de dépendre d'un nom/clé de config potentiellement
+    ambigu ou mal renseigné.
 
-    Mêmes hyperparamètres que DecisionTree_decoup : max_depth=3, min_samples_leaf=10,
-    random_state=42, pour rester cohérent avec le reste du pack.
-
-    TODO : si DecisionTree_decoup est un jour étendue nativement pour gérer la PD,
-    remplacer cette fonction par un appel direct avec le paramètre distribution.
+    Retourne "bernoulli" si la target ne prend que des valeurs dans {0, 1}
+    (à tol près, pour tolérer d'éventuels flottants du type 0.0/1.0),
+    "continuous" sinon.
     """
-    pdf = lf.filter(pl.col(feature).is_not_null() & pl.col(target).is_not_null()) \
-            .select([feature, target]).collect().to_pandas()
+    valeurs_uniques = (
+        lf.select(pl.col(target).drop_nulls().unique())
+          .collect()
+          .to_series()
+    )
 
-    X = pdf[[feature]].values
-    y = pdf[target].values
+    est_binaire = valeurs_uniques.is_in([0, 1]).all() and valeurs_uniques.len() <= 2
 
-    Estimateur = DecisionTreeClassifier if distribution == "bernoulli" else DecisionTreeRegressor
-    model = Estimateur(max_depth=3, min_samples_leaf=10, random_state=42)
-    model.fit(X, y)
-
-    raw_thresh = model.tree_.threshold[model.tree_.feature != -2]
-    thresholds = np.sort(np.unique(raw_thresh))
-
-    finite_thresholds = thresholds[np.isfinite(thresholds)]
-    if len(finite_thresholds) == 0:
-        return None
-
-    min_val = pdf[feature].min()
-    max_val = pdf[feature].max() + 1
-    bins = np.concatenate(([min_val], finite_thresholds, [max_val]))
-    return bins
-
-
-def appliquer_decoupage_cart(
-    lf: pl.LazyFrame,
-    variables_quanti: list,
-    target: str,
-    distribution: str = "continuous",
-    dossier_sortie: Path = None,
-    suffixe: str = "_CART",
-):
-    """
-    Calcule un CART par variable quanti et applique les bins via binner_lazy_generique.
-
-    Pour distribution="continuous" (LGD), utilise DecisionTree_decoup telle quelle
-    (fonction existante du pack, features_binning.py) — comportement inchangé,
-    conforme à la consigne d'utiliser le CART déjà en place.
-
-    Pour distribution="bernoulli" (PD), utilise _decoupage_cart_variable, qui réplique
-    la même logique avec un DecisionTreeClassifier à la place du Regressor — nécessaire
-    car DecisionTree_decoup ne gère pas nativement les cibles binaires.
-
-    Retourne (lf_binned, dict_seuils, liste_variables_binees).
-    """
-    dict_seuils, expressions, variables_binees, ignorees = {}, [], [], []
-    colonnes_presentes = lf.collect_schema().names()
-
-    for col in variables_quanti:
-        if col not in colonnes_presentes:
-            ignorees.append((col, "absente"))
-            continue
-
-        if distribution == "bernoulli":
-            bins_bruts = _decoupage_cart_variable(lf, col, target, distribution)
-        else:
-            bins_bruts = DecisionTree_decoup(lf, col, target)
-
-        if bins_bruts is None or len(bins_bruts) < 3:
-            ignorees.append((col, "pas de coupure trouvée"))
-            continue
-
-        seuils_finis = list(bins_bruts[1:-1])
-        bins = [-np.inf] + seuils_finis + [np.inf]
-
-        nom_bin = f"{col}{suffixe}"
-        expressions.append(binner_lazy_generique(lf, col, bins).alias(nom_bin))
-        dict_seuils[col] = {
-            "bins": [None if np.isinf(b) else float(b) for b in bins],
-            "nb_classes": len(bins) - 1,
-            "colonne_binee": nom_bin,
-        }
-        variables_binees.append(nom_bin)
-
-    lf_binned = lf.with_columns(expressions) if expressions else lf
-
-    print(f"CART ({distribution}) : {len(variables_binees)} variables découpées, {len(ignorees)} ignorées")
-    for col, motif in ignorees[:10]:
-        print(f"   - {col} : {motif}")
-    if len(ignorees) > 10:
-        print(f"   ... et {len(ignorees) - 10} autres")
-
-    if dossier_sortie is not None:
-        dossier = Path(dossier_sortie) / "decoupCART"
-        dossier.mkdir(parents=True, exist_ok=True)
-        with open(dossier / "seuils_cart.json", "w", encoding="utf-8") as f:
-            json.dump(dict_seuils, f, indent=2, ensure_ascii=False)
-        pd.DataFrame([
-            {"variable": k, "nb_classes": v["nb_classes"],
-             "bins": " | ".join("-inf" if b is None and i == 0 else
-                                "+inf" if b is None else f"{b:.4f}"
-                                for i, b in enumerate(v["bins"]))}
-            for k, v in dict_seuils.items()
-        ]).to_csv(dossier / "seuils_cart.csv", index=False)
-        print(f"Seuils sauvegardés : {dossier}")
-
-    return lf_binned, dict_seuils, variables_binees
+    distribution = "bernoulli" if est_binaire else "continuous"
+    print(f"Distribution détectée pour '{target}' : {distribution} "
+          f"({valeurs_uniques.len()} valeur(s) unique(s) : {sorted(valeurs_uniques.to_list())[:5]}"
+          f"{'...' if valeurs_uniques.len() > 5 else ''})")
+    return distribution
