@@ -1,2 +1,10 @@
-print(lf_binned.select(["PRD_VB001_CART", "PRD_VB002_CART"]).collect().null_count())
-print(lf_binned.select("PRD_VB001_CART").collect()["PRD_VB001_CART"].unique())
+test = (
+    lf_binned.select(["annee", "PRD_VB001_CART", TARGET])
+    .collect()
+    .group_by(["annee", "PRD_VB001_CART"])
+    .agg([
+        pl.col(TARGET).mean().alias("target_moyenne"),
+        pl.len().alias("effectif"),
+    ])
+)
+print(test)
