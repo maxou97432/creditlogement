@@ -1,2 +1,46 @@
-print(trend_df["variable"].isna().sum())
-print(trend_df["variable"].unique()[:20])
+def prepare_trend_data(lf_decoup, features_used, target, distribution):
+    """
+    Prépare le DataFrame pour l'onglet Trend_Modalities.
+    features_used : liste de noms de variables réelles (drivers_quali +
+    drivers_quanti_bines), PAS des colonnes one-hot/dummy — chaque colonne
+    contient directement sa modalité/valeur binée en valeur de cellule.
+    Filtre le Top 15 des modalités les plus représentées par variable.
+    """
+    COL_ANNEE = "annee"
+    all_trends = []
+
+    for feat in features_used:
+        temp_df = lf_decoup.select([COL_ANNEE, feat, target]).collect()
+
+        agg = (
+            temp_df.group_by([COL_ANNEE, feat])
+            .agg([
+                pl.col(target).mean().alias("target_moyenne"),
+                pl.len().alias("effectif"),
+            ])
+            .sort(COL_ANNEE)
+            .rename({feat: "modality"})
+            .with_columns([
+                pl.col("modality").cast(pl.Utf8),
+                pl.lit(feat).alias("variable"),
+            ])
+        )
+        all_trends.append(agg.to_pandas())
+
+    full_df = pd.concat(all_trends, ignore_index=True)
+
+    # --- Logique Top 15 (inchangée) ---
+    total_counts = full_df.groupby("variable")["effectif"].sum().reset_index()
+
+    def filter_top_15(group):
+        if len(group) > 15:
+            return group.sort_values("effectif", ascending=False).head(15)
+        return group
+
+    trend_df = full_df.groupby("variable").apply(filter_top_15).reset_index(drop=True)
+
+    total_per_var = full_df.groupby("variable")["modality"].nunique().reset_index(name="total_modalities")
+    trend_df = trend_df.merge(total_per_var, on="variable")
+    trend_df["has_more"] = trend_df["total_modalities"] > 15
+
+    return trend_df
