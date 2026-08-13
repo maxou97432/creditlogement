@@ -1,47 +1,8 @@
-# --- BLOC TREND MODALITIES (repris de injecter_dashboard_trend) ---
-if trend_df is not None and len(trend_df) > 0:
-    print("Injection du Dashboard Trend dans la scorecard...")
-    ws_trend = wb.Sheets("Trend_Modalities")
-
-    n_rows, n_cols = trend_df.shape
-    premiere_col = 2  # startcol=1 -> colonne B
-    derniere_col = premiere_col + n_cols - 1
-    col_destination = derniere_col + 2
-
-    source_range = ws_trend.Range(
-        ws_trend.Cells(1, premiere_col),
-        ws_trend.Cells(n_rows + 1, derniere_col)
-    )
-
-    pivot_cache_trend = wb.PivotCaches().Create(
-        SourceType=1, SourceData=source_range,
-        Version=win32.constants.xlPivotTableVersion15
-    )
-    pivot_table_trend = pivot_cache_trend.CreatePivotTable(
-        TableDestination=ws_trend.Cells(1, col_destination),
-        TableName="TrendPivot"
-    )
-
-    pivot_table_trend.PivotFields("annee").Orientation = win32.constants.xlRowField
-    pivot_table_trend.PivotFields("modality").Orientation = win32.constants.xlColumnField
-    pivot_table_trend.PivotFields("variable").Orientation = win32.constants.xlPageField
-    pivot_table_trend.PivotFields("variable").CurrentPage = str(trend_df["variable"].iloc[0])
-
-    pivot_table_trend.AddDataField(
-        pivot_table_trend.PivotFields("target_moyenne"),
-        f"Moyenne {target_name}",
-        win32.constants.xlAverage
-    )
-    pivot_table_trend.RefreshTable()
-    pivot_table_trend.Update()
-
-    left_g = pivot_table_trend.TableRange2.Left + pivot_table_trend.TableRange2.Width + 20
-    top_g = pivot_table_trend.TableRange2.Top
-    chart_trend = ws_trend.Shapes.AddChart2(201, 4, left_g, top_g, 480, 320).Chart
-    chart_trend.SetSourceData(pivot_table_trend.TableRange2)
-    try:
-        chart_trend.ChartTitle.Text = f"Évolution {target_name} par année et modalité"
-    except Exception:
-        pass
-    chart_trend.HasLegend = True
-    chart_trend.Legend.Position = win32.constants.xlLegendPositionRight
+if config.get("run_stat_desc", False):
+    dossier_stat_desc = OUTPUT_DIR / "stat_desc"
+    full_correlation = pl.read_parquet(dossier_stat_desc / "full_correlation.parquet").to_pandas()
+    stats_quali = pl.read_parquet(dossier_stat_desc / "stats_quali.parquet").to_pandas()
+    stats_quanti = pl.read_parquet(dossier_stat_desc / "stats_quanti.parquet").to_pandas()
+    trend_df = pl.read_parquet(dossier_stat_desc / "trend_modalities.parquet").to_pandas()
+else:
+    full_correlation = stats_quali = stats_quanti = trend_df = None
