@@ -1,93 +1,47 @@
-def injecter_dashboard_trend(chemin, trend_df, target_name="Target",
-                             nom_feuille="Trend_Modalities", startcol=1):
-    if os.name != "nt" or trend_df is None or len(trend_df) == 0:
-        return
+# --- BLOC TREND MODALITIES (repris de injecter_dashboard_trend) ---
+if trend_df is not None and len(trend_df) > 0:
+    print("Injection du Dashboard Trend dans la scorecard...")
+    ws_trend = wb.Sheets("Trend_Modalities")
 
-    import win32com.client as win32
-    import pythoncom
-    import time
+    n_rows, n_cols = trend_df.shape
+    premiere_col = 2  # startcol=1 -> colonne B
+    derniere_col = premiere_col + n_cols - 1
+    col_destination = derniere_col + 2
 
+    source_range = ws_trend.Range(
+        ws_trend.Cells(1, premiere_col),
+        ws_trend.Cells(n_rows + 1, derniere_col)
+    )
+
+    pivot_cache_trend = wb.PivotCaches().Create(
+        SourceType=1, SourceData=source_range,
+        Version=win32.constants.xlPivotTableVersion15
+    )
+    pivot_table_trend = pivot_cache_trend.CreatePivotTable(
+        TableDestination=ws_trend.Cells(1, col_destination),
+        TableName="TrendPivot"
+    )
+
+    pivot_table_trend.PivotFields("annee").Orientation = win32.constants.xlRowField
+    pivot_table_trend.PivotFields("modality").Orientation = win32.constants.xlColumnField
+    pivot_table_trend.PivotFields("variable").Orientation = win32.constants.xlPageField
+    pivot_table_trend.PivotFields("variable").CurrentPage = str(trend_df["variable"].iloc[0])
+
+    pivot_table_trend.AddDataField(
+        pivot_table_trend.PivotFields("target_moyenne"),
+        f"Moyenne {target_name}",
+        win32.constants.xlAverage
+    )
+    pivot_table_trend.RefreshTable()
+    pivot_table_trend.Update()
+
+    left_g = pivot_table_trend.TableRange2.Left + pivot_table_trend.TableRange2.Width + 20
+    top_g = pivot_table_trend.TableRange2.Top
+    chart_trend = ws_trend.Shapes.AddChart2(201, 4, left_g, top_g, 480, 320).Chart
+    chart_trend.SetSourceData(pivot_table_trend.TableRange2)
     try:
-        pythoncom.CoInitialize()
-        os.system('taskkill /f /im excel.exe >nul 2>&1')
-        time.sleep(1)
-
-        excel = win32.gencache.EnsureDispatch('Excel.Application')
-        excel.Visible = False
-        excel.DisplayAlerts = False
-        wb = excel.Workbooks.Open(str(Path(chemin).absolute()))
-
-        # Étiquette de confidentialité BNP — sans ça, wb.Save() peut échouer
-        # silencieusement selon la politique de sensibilité du tenant
-        # (mêmes SiteId/LabelId que create_excel_scorecard, output.py)
-        try:
-            label_info = wb.SensitivityLabel.CreateLabelInfo()
-            label_info.AssignmentMethod = 1
-            label_info.SiteId = '614f9c25-bffa-42c7-86d8-964101f55fa2'
-            label_info.LabelId = '56a12554-321c-45c3-b2fd-7e3f55c509d9'
-            label_info.LabelName = '56a12554-321c-45c3-b2fd-7e3f55c509d9'
-            wb.SensitivityLabel.SetLabel(label_info, label_info)
-        except Exception as e_label:
-            print(f"Étiquette de confidentialité non posée : {e_label}")
-
-        ws = wb.Sheets(nom_feuille)
-
-        n_rows, n_cols = trend_df.shape
-        premiere_col = startcol + 1
-        derniere_col = premiere_col + n_cols - 1
-        col_destination = derniere_col + 2
-
-        source_range = ws.Range(
-            ws.Cells(1, premiere_col),
-            ws.Cells(n_rows + 1, derniere_col)
-        )
-
-        pivot_cache = wb.PivotCaches().Create(
-            SourceType=1,
-            SourceData=source_range,
-            Version=win32.constants.xlPivotTableVersion15
-        )
-        pivot_table = pivot_cache.CreatePivotTable(
-            TableDestination=ws.Cells(1, col_destination),
-            TableName="TrendPivot"
-        )
-
-        pivot_table.PivotFields("annee").Orientation = win32.constants.xlRowField
-        pivot_table.PivotFields("modality").Orientation = win32.constants.xlColumnField
-        pivot_table.PivotFields("variable").Orientation = win32.constants.xlPageField
-        pivot_table.PivotFields("variable").CurrentPage = str(trend_df["variable"].iloc[0])
-
-        pivot_table.AddDataField(
-            pivot_table.PivotFields("target_moyenne"),
-            f"Moyenne {target_name}",
-            win32.constants.xlAverage
-        )
-
-        pivot_table.RefreshTable()
-        pivot_table.Update()
-
-        left_graphique = pivot_table.TableRange2.Left + pivot_table.TableRange2.Width + 20
-        top_graphique = pivot_table.TableRange2.Top
-
-        chart = ws.Shapes.AddChart2(201, 4, left_graphique, top_graphique, 480, 320).Chart
-        chart.SetSourceData(pivot_table.TableRange2)
-        try:
-            chart.ChartTitle.Text = f"Évolution {target_name} par année et modalité"
-        except Exception:
-            pass
-        chart.HasLegend = True
-        chart.Legend.Position = win32.constants.xlLegendPositionRight
-
-        wb.Save()
-        print(f"Dashboard Trend injecté et sauvegardé : {wb.FullName}")
-        wb.Close()
-        excel.Quit()
-
-    except Exception as e:
-        print(f"Erreur lors de l'injection du Dashboard : {e}")
-        try:
-            excel.Quit()
-        except Exception:
-            pass
-    finally:
-        pythoncom.CoUninitialize()
+        chart_trend.ChartTitle.Text = f"Évolution {target_name} par année et modalité"
+    except Exception:
+        pass
+    chart_trend.HasLegend = True
+    chart_trend.Legend.Position = win32.constants.xlLegendPositionRight
