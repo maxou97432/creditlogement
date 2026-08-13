@@ -1,3 +1,7 @@
-print(f"Chart position: Left={chart.Parent.Left}, Top={chart.Parent.Top}")
-print(f"Chart type: {chart.ChartType}")
-print(f"Nb séries: {chart.SeriesCollection().Count}")
+# Position du graphique calculée depuis la fin réelle du TCD, pas un pixel fixe
+left_graphique = pivot_table.TableRange2.Left + pivot_table.TableRange2.Width + 20
+top_graphique = pivot_table.TableRange2.Top
+
+chart_obj = ws.Shapes.AddChart2(201, 4, left_graphique, top_graphique, 480, 320)
+chart = chart_obj.Chart
+chart.SetSourceData(pivot_table.TableRange2)
