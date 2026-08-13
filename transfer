@@ -1,10 +1,325 @@
-test = (
-    lf_binned.select(["annee", "PRD_VB001_CART", TARGET])
-    .collect()
-    .group_by(["annee", "PRD_VB001_CART"])
-    .agg([
-        pl.col(TARGET).mean().alias("target_moyenne"),
-        pl.len().alias("effectif"),
-    ])
-)
-print(test)
+# =========================================================================== #
+# Excel du notebook 01B - Stat Desc
+# =========================================================================== #
+import os
+from pathlib import Path
+import numpy as np
+import polars as pl
+import pandas as pd
+
+LABEL_MANQUANT = "Manquant"
+
+
+def col_lettre(col_idx_0based: int) -> str:
+    """Index de colonne 0-based -> lettre Excel (0 -> A, 1 -> B, ...)."""
+    lettre = ""
+    col_idx_0based += 1
+    while col_idx_0based > 0:
+        col_idx_0based, reste = divmod(col_idx_0based - 1, 26)
+        lettre = chr(65 + reste) + lettre
+    return lettre
+
+
+# --------------------------------------------------------------------------- #
+# 1. Préparation des données de tendance (onglet Trend_Modalities)
+# --------------------------------------------------------------------------- #
+def prepare_trend_data(lf_decoup, features_used, target, top_n=15,
+                       colonne_annee="annee"):
+    """
+    Prépare le DataFrame de l'onglet Trend_Modalities.
+
+    features_used : noms de variables réels (drivers_quali + drivers_quanti_bines).
+    Chaque colonne contient directement sa modalité en valeur de cellule
+    (texte pour les quali, numéro de tranche pour les quanti binées) — ce ne
+    sont PAS des colonnes one-hot.
+
+    Les valeurs nulles (variable source manquante, non binée par le CART) sont
+    matérialisées en modalité "Manquant" au lieu d'être agrégées silencieusement
+    dans un groupe vide.
+
+    Retourne un DataFrame pandas : annee | modality | target_moyenne | effectif
+    | variable | total_modalities | has_more, limité au top_n modalités par
+    variable (classées par effectif décroissant).
+    """
+    colonnes_dispo = lf_decoup.collect_schema().names()
+    all_trends, ignorees = [], []
+
+    for feat in features_used:
+        if feat not in colonnes_dispo:
+            ignorees.append(feat)
+            continue
+
+        agg = (
+            lf_decoup
+            .select([colonne_annee, feat, target])
+            .with_columns(
+                pl.col(feat).cast(pl.Utf8).fill_null(LABEL_MANQUANT).alias("modality")
+            )
+            .group_by([colonne_annee, "modality"])
+            .agg([
+                pl.col(target).mean().alias("target_moyenne"),
+                pl.len().alias("effectif"),
+            ])
+            .with_columns(pl.lit(feat).alias("variable"))
+            .sort([colonne_annee, "modality"])
+            .collect()
+        )
+        all_trends.append(agg.to_pandas())
+
+    if ignorees:
+        print(f"Trend : {len(ignorees)} variable(s) absente(s) ignorée(s) : {ignorees[:5]}")
+
+    if not all_trends:
+        return pd.DataFrame()
+
+    full_df = pd.concat(all_trends, ignore_index=True)
+
+    # Nombre total de modalités par variable (avant troncature au top_n)
+    total_par_var = (
+        full_df.groupby("variable")["modality"]
+        .nunique()
+        .reset_index(name="total_modalities")
+    )
+
+    # Top N modalités par variable, classées sur l'effectif cumulé toutes années
+    effectif_par_modalite = (
+        full_df.groupby(["variable", "modality"])["effectif"]
+        .sum()
+        .reset_index(name="effectif_total")
+    )
+    top_modalites = (
+        effectif_par_modalite
+        .sort_values(["variable", "effectif_total"], ascending=[True, False])
+        .groupby("variable")
+        .head(top_n)[["variable", "modality"]]
+    )
+
+    trend_df = (
+        full_df.merge(top_modalites, on=["variable", "modality"], how="inner")
+               .merge(total_par_var, on="variable", how="left")
+    )
+    trend_df["has_more"] = trend_df["total_modalities"] > top_n
+
+    colonnes = [colonne_annee, "modality", "target_moyenne", "effectif",
+                "variable", "total_modalities", "has_more"]
+    trend_df = trend_df[colonnes].sort_values(["variable", colonne_annee, "modality"])
+
+    print(f"Trend : {trend_df['variable'].nunique()} variable(s), "
+          f"{len(trend_df)} ligne(s), top {top_n} modalités par variable")
+    return trend_df.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# 2. Écriture Excel (factorisation du pattern de create_excel_scorecard)
+# --------------------------------------------------------------------------- #
+def write_formatted_sheet(writer, df, sheet_name, tab_color="#006C44",
+                          startcol=1, index=False, largeur=20):
+    """
+    Écrit un DataFrame dans un onglet avec le formatage standard du pack.
+    Le format de corps ne définit PAS de bg_color, pour ne pas écraser un
+    éventuel dégradé de couleur appliqué par-dessus.
+    """
+    if isinstance(df, pl.DataFrame):
+        df = df.to_pandas()
+
+    df.to_excel(writer, sheet_name=sheet_name, startcol=startcol, index=index)
+
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+    worksheet.hide_gridlines(2)
+    worksheet.set_tab_color(tab_color)
+
+    header_format = workbook.add_format({
+        "bold": True, "text_wrap": True, "align": "center", "valign": "vcenter",
+        "bg_color": "#00915A", "font_color": "#FFFFFF",
+        "border": 1, "border_color": "#999999",
+    })
+    cell_border_format = workbook.add_format({
+        "border": 1, "border_color": "#999999", "text_wrap": True,
+    })
+
+    max_row, max_col = df.shape
+    col_offset = 1 if index else 0
+    derniere_col = startcol + max_col + col_offset - 1
+
+    worksheet.conditional_format(
+        0, startcol, 0, derniere_col,
+        {"type": "formula", "criteria": "=ROW()=1", "format": header_format},
+    )
+    worksheet.conditional_format(
+        1, startcol, max_row, derniere_col,
+        {"type": "formula",
+         "criteria": f'={col_lettre(startcol)}2<>""',
+         "format": cell_border_format},
+    )
+    worksheet.set_column(0, derniere_col, largeur)
+    return worksheet
+
+
+def colorer_matrice_correlation(worksheet, df, startcol=1, startrow=1):
+    """Dégradé 3 couleurs sur la matrice V de Cramér (valeurs 0 -> 1)."""
+    nb_lignes, nb_cols = df.shape
+    worksheet.conditional_format(
+        startrow, startcol, startrow + nb_lignes - 1, startcol + nb_cols - 1,
+        {
+            "type": "3_color_scale",
+            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
+            "mid_type": "num", "mid_value": 0.5, "mid_color": "#FDBE85",
+            "max_type": "num", "max_value": 1, "max_color": "#D7301F",
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 3. Injection du TCD + graphique via win32com (calqué sur create_excel_scorecard)
+# --------------------------------------------------------------------------- #
+def injecter_dashboard_trend(chemin, trend_df, target_name="Target",
+                             nom_feuille="Trend_Modalities", startcol=1):
+    """
+    Ouvre le classeur déjà écrit et injecte un vrai TCD Excel + graphique
+    dans l'onglet Trend_Modalities.
+
+    Deux points calqués sur create_excel_scorecard, et qui sont la raison pour
+    laquelle un TCD "maison" échoue :
+      - la plage source est calculée depuis trend_df.shape (pas UsedRange),
+        en tenant compte du startcol : les données commencent en colonne B ;
+      - CurrentPage est explicitement positionné sur la première variable,
+        sinon le filtre reste sur "(Tous)" et le TCD agrège toutes les
+        variables ensemble.
+    """
+    if os.name != "nt" or trend_df is None or len(trend_df) == 0:
+        return
+
+    import win32com.client as win32
+    import pythoncom
+    import time
+
+    try:
+        pythoncom.CoInitialize()
+        os.system('taskkill /f /im excel.exe >nul 2>&1')
+        time.sleep(1)
+
+        excel = win32.gencache.EnsureDispatch('Excel.Application')
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        wb = excel.Workbooks.Open(str(Path(chemin).absolute()))
+
+        ws = wb.Sheets(nom_feuille)
+
+        n_rows, n_cols = trend_df.shape
+        premiere_col = startcol + 1          # 1-indexé côté Excel : B si startcol=1
+        derniere_col = premiere_col + n_cols - 1
+        col_destination = derniere_col + 2   # TCD posé après les données
+
+        source_range = ws.Range(
+            ws.Cells(1, premiere_col),
+            ws.Cells(n_rows + 1, derniere_col)
+        )
+
+        pivot_cache = wb.PivotCaches().Create(
+            SourceType=1,
+            SourceData=source_range,
+            Version=win32.constants.xlPivotTableVersion15
+        )
+        pivot_table = pivot_cache.CreatePivotTable(
+            TableDestination=ws.Cells(1, col_destination),
+            TableName="TrendPivot"
+        )
+
+        pivot_table.PivotFields("annee").Orientation = win32.constants.xlRowField
+        pivot_table.PivotFields("modality").Orientation = win32.constants.xlColumnField
+
+        pivot_table.PivotFields("variable").Orientation = win32.constants.xlPageField
+        pivot_table.PivotFields("variable").CurrentPage = str(trend_df["variable"].iloc[0])
+
+        pivot_table.AddDataField(
+            pivot_table.PivotFields("target_moyenne"),
+            f"Moyenne {target_name}",
+            win32.constants.xlAverage
+        )
+
+        pivot_table.RefreshTable()
+        pivot_table.Update()
+
+        chart = ws.Shapes.AddChart2(201, 4, 900, 40, 480, 320).Chart
+        chart.SetSourceData(pivot_table.TableRange2)
+        try:
+            chart.ChartTitle.Text = f"Évolution {target_name} par année et modalité"
+        except Exception:
+            pass
+        chart.HasLegend = True
+        chart.Legend.Position = win32.constants.xlLegendPositionRight
+
+        wb.Save()
+        wb.Close()
+        excel.Quit()
+        print("Dashboard Trend injecté avec succès.")
+
+    except Exception as e:
+        print(f"Erreur lors de l'injection du Dashboard : {e}")
+        try:
+            excel.Quit()
+        except Exception:
+            pass
+    finally:
+        pythoncom.CoUninitialize()
+
+
+# --------------------------------------------------------------------------- #
+# 4. Export Excel complet (option B)
+# --------------------------------------------------------------------------- #
+def exporter_stat_desc_excel(chemin, correlation=None, stats_quali=None,
+                             stats_quanti=None, seuils_cart=None,
+                             export_brut=None, trend_df=None,
+                             target_name="Target"):
+    """
+    Fichier Excel autonome du notebook stat desc (option B).
+    Écrit les onglets, applique le dégradé sur la matrice de corrélation,
+    puis injecte le TCD + graphique via win32com.
+    """
+    chemin = Path(chemin)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+    STARTCOL = 1
+
+    with pd.ExcelWriter(
+        chemin, engine="xlsxwriter",
+        engine_kwargs={'options': {'strings_to_numbers': True}}
+    ) as writer:
+        onglets = [
+            ("Full_correlation", correlation,  "#8E44AD", True),
+            ("Trend_Modalities", trend_df,     "#3498DB", False),
+            ("Stats_quali",      stats_quali,  "#006C44", False),
+            ("Stats_quanti",     stats_quanti, "#006C44", False),
+            ("Seuils_CART",      seuils_cart,  "#B7950B", False),
+            ("Export_brut",      export_brut,  "#5D6D7E", False),
+        ]
+
+        ecrits = []
+        for nom, df, couleur, index in onglets:
+            if df is None or len(df) == 0:
+                continue
+
+            if nom == "Full_correlation":
+                # cast numérique défensif : sans ça le 3_color_scale ne
+                # s'applique pas si des colonnes sont arrivées en object
+                df = df.to_pandas() if isinstance(df, pl.DataFrame) else df.copy()
+                df[df.columns] = df[df.columns].apply(pd.to_numeric, errors="coerce")
+
+            ws = write_formatted_sheet(writer, df, nom, tab_color=couleur,
+                                       startcol=STARTCOL, index=index)
+
+            if nom == "Full_correlation":
+                # index=True -> les labels de lignes occupent une colonne
+                # supplémentaire, les valeurs commencent donc à STARTCOL + 1
+                colorer_matrice_correlation(ws, df, startcol=STARTCOL + 1, startrow=1)
+
+            ecrits.append(nom)
+
+    print(f"Fichier stat desc écrit : {chemin}")
+    print(f"   Onglets : {', '.join(ecrits)}")
+
+    if "Trend_Modalities" in ecrits:
+        injecter_dashboard_trend(chemin, trend_df, target_name=target_name,
+                                 startcol=STARTCOL)
+
+    return chemin
