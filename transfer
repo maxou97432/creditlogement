@@ -1,8 +1,11 @@
-if config.get("run_stat_desc", False):
-    dossier_stat_desc = OUTPUT_DIR / "stat_desc"
-    full_correlation = pl.read_parquet(dossier_stat_desc / "full_correlation.parquet").to_pandas()
-    stats_quali = pl.read_parquet(dossier_stat_desc / "stats_quali.parquet").to_pandas()
-    stats_quanti = pl.read_parquet(dossier_stat_desc / "stats_quanti.parquet").to_pandas()
-    trend_df = pl.read_parquet(dossier_stat_desc / "trend_modalities.parquet").to_pandas()
-else:
-    full_correlation = stats_quali = stats_quanti = trend_df = None
+os.system('taskkill /f /im excel.exe >nul 2>&1')
+time.sleep(2)
+
+excel = win32.gencache.EnsureDispatch('Excel.Application')
+excel.DisplayAlerts = False
+time.sleep(3)  # laisser Excel s'initialiser avant d'ouvrir
+
+try:
+    wb = excel.Workbooks.Open(path)
+    ws_data = wb.Sheets("Stability")
+    ...
