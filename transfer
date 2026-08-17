@@ -1,11 +1,6 @@
-os.system('taskkill /f /im excel.exe >nul 2>&1')
-time.sleep(2)
+from pathlib import Path
 
-excel = win32.gencache.EnsureDispatch('Excel.Application')
-excel.DisplayAlerts = False
-time.sleep(3)  # laisser Excel s'initialiser avant d'ouvrir
-
-try:
-    wb = excel.Workbooks.Open(path)
-    ws_data = wb.Sheets("Stability")
-    ...
+for seg in segments:
+    rd = seg.get("RD_path")
+    print(f"{seg['Nom']:20} | {rd}")
+    print(f"{'':20} | existe : {Path(rd).exists() if rd else 'RD_path est None'}")
