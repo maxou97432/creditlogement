@@ -1,58 +1,56 @@
-Je vais te transmettre l’intégralité d’un notebook Python sous forme de cellules copiées-collées.
+Je vais te transmettre un notebook Python exporté en script `.py`.
 
-Je veux une documentation **par blocs fonctionnels cohérents**, et non une documentation cellule par cellule. Regroupe les cellules qui participent à la même étape du traitement, même si elles ne sont pas consécutives.
+Les cellules sont séparées par :
 
-Analyse tout le contenu avant de répondre, puis produis :
+```python
+# %%
+```
 
-# Objectif du notebook
+Les cellules Markdown existantes sont signalées par :
 
-# Prérequis et dépendances
-Bibliothèques, fichiers, données, paramètres de configuration, variables d’environnement et hypothèses nécessaires.
+```python
+# %% [markdown]
+```
 
-# Vue d’ensemble du flux
-Explique le déroulé global en quelques étapes logiques.
+Ta mission est de revoir et améliorer uniquement la documentation Markdown du notebook.
 
-# Documentation fonctionnelle
+Objectif :
+- Conserver la structure et la logique du notebook.
+- Réécrire, compléter ou créer les cellules Markdown nécessaires pour expliquer les grands blocs fonctionnels.
+- Ne pas documenter chaque cellule de code individuellement.
+- Produire une documentation concise, mais suffisamment claire pour comprendre l’objectif, les données manipulées et l’enchaînement des traitements.
 
-Pour chaque bloc fonctionnel :
-
-## [Nom explicite du bloc]
-
-**Rôle**  
-Objectif métier ou technique du bloc.
-
-**Cellules concernées**  
-Indique les numéros ou repères des cellules incluses.
-
-**Entrées**  
-Données, variables, fichiers ou résultats utilisés.
-
-**Traitements**  
-Explique les transformations, calculs, règles métier ou appels importants.
-
-**Sorties**  
-Variables, fichiers, tableaux, graphiques, modèles ou résultats produits.
-
-**Dépendances et enchaînement**  
-Indique ce qui doit avoir été exécuté avant et ce que ce bloc alimente ensuite.
-
-**Points d’attention**  
-Hypothèses, cas limites, données sensibles, performance, reproductibilité et risques d’erreur.
-
-# Résultats finaux et livrables
-
-# Limites et éléments à confirmer
-
-# Markdown prêt à insérer dans le notebook
-Propose ensuite uniquement les cellules Markdown à insérer avant chaque **grand bloc fonctionnel**. Ne documente jamais chaque cellule individuellement.
-
-Règles :
-- Ne modifie pas le code.
-- N’invente pas d’information absente : écris « à confirmer » si nécessaire.
-- Ne suppose pas que l’ordre des cellules est toujours logique ; signale les dépendances croisées ou cellules à exécuter dans un autre ordre.
-- Utilise le vocabulaire métier du notebook.
+Consignes de fond :
+- Analyse l’ensemble du script avant de répondre.
+- Utilise les cellules Markdown existantes comme point de départ : corrige-les si elles sont imprécises, incomplètes ou mal placées.
+- Ajoute une cellule Markdown uniquement lorsqu’elle apporte une vraie compréhension.
+- Ne modifie pas le code et ne propose pas de correction de code.
+- N’invente aucune information : indique « à confirmer » si le contexte métier ou une source de données manque.
+- Garde le vocabulaire métier et technique déjà utilisé dans le notebook.
 - Réponds en français.
 
-Voici le notebook :
+Consignes de mise en forme :
+- Renvoie uniquement les cellules Markdown finales, dans leur ordre d’insertion.
+- Chaque cellule doit être fournie dans ce format exact :
 
-[COLLER ICI TOUTES LES CELLULES, EN LES SÉPARANT CLAIREMENT PAR `# Cellule 1`, `# Cellule 2`, ETC.]
+```python
+# %% [markdown]
+# Titre principal si nécessaire
+
+Texte explicatif.
+```
+
+- Utilise `#` uniquement pour le titre global éventuel du notebook.
+- Utilise `##` pour les grands blocs fonctionnels.
+- Utilise `###` seulement pour des sous-parties utiles.
+- Utilise des listes Markdown lorsque cela améliore la lisibilité.
+- Ne mets pas de titres pour des détails mineurs.
+- Évite les paragraphes longs : privilégie 2 à 5 phrases ou quelques puces par cellule.
+- Place chaque cellule Markdown juste avant le bloc de code qu’elle introduit.
+- Si une cellule Markdown existante doit être supprimée ou déplacée, indique-le explicitement avant de fournir les cellules finales.
+
+Voici le script complet :
+
+```python
+[COLLER ICI LE SCRIPT EXPORTÉ]
+```
