@@ -1,6 +1,42 @@
-from pathlib import Path
+Je vais te transmettre une ou plusieurs cellules d’un notebook Python.
 
-for seg in segments:
-    rd = seg.get("RD_path")
-    print(f"{seg['Nom']:20} | {rd}")
-    print(f"{'':20} | existe : {Path(rd).exists() if rd else 'RD_path est None'}")
+Ta mission est de produire une documentation segmentée, directement réutilisable dans un notebook, sans modifier le code.
+
+Pour chaque cellule, réponds selon ce format :
+
+### Cellule [numéro ou nom]
+
+**Objectif**  
+Explique en une ou deux phrases ce que fait la cellule et son rôle dans le flux global.
+
+**Entrées et dépendances**  
+- Variables, fonctions, fichiers, bibliothèques ou résultats de cellules précédentes nécessaires.
+- Indique explicitement les hypothèses importantes.
+
+**Traitement**  
+Décris les étapes principales du code, de façon claire et proportionnée à sa complexité.
+
+**Sorties et effets de bord**  
+- Variables, tableaux, graphiques, fichiers ou modèles créés/modifiés.
+- Effets éventuels : écriture de fichier, appel réseau, modification d’état, affichage.
+
+**Points d’attention**  
+- Risques d’erreur, cas limites, paramètres sensibles, performance, reproductibilité ou confidentialité.
+- Si rien ne pose problème, écris « Aucun point d’attention majeur identifié ».
+
+**Texte Markdown prêt à insérer**  
+Fournis ensuite une version courte, rédigée en Markdown, à coller juste avant la cellule dans le notebook.
+
+Règles :
+- Ne suppose pas d’informations absentes du code : indique « à confirmer » si nécessaire.
+- Garde le vocabulaire métier présent dans le code.
+- N’invente ni résultats, ni fichiers, ni valeurs.
+- Si une cellule dépend d’un contexte antérieur non fourni, liste précisément ce qui manque.
+- Réponds en français.
+- Ne propose pas de réécriture du code sauf si je le demande explicitement.
+
+Voici la cellule à documenter :
+
+```python
+[COLLER LA CELLULE ICI]
+```
