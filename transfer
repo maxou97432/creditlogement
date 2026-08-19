@@ -1,42 +1,58 @@
-Je vais te transmettre une ou plusieurs cellules d’un notebook Python.
+Je vais te transmettre l’intégralité d’un notebook Python sous forme de cellules copiées-collées.
 
-Ta mission est de produire une documentation segmentée, directement réutilisable dans un notebook, sans modifier le code.
+Je veux une documentation **par blocs fonctionnels cohérents**, et non une documentation cellule par cellule. Regroupe les cellules qui participent à la même étape du traitement, même si elles ne sont pas consécutives.
 
-Pour chaque cellule, réponds selon ce format :
+Analyse tout le contenu avant de répondre, puis produis :
 
-### Cellule [numéro ou nom]
+# Objectif du notebook
 
-**Objectif**  
-Explique en une ou deux phrases ce que fait la cellule et son rôle dans le flux global.
+# Prérequis et dépendances
+Bibliothèques, fichiers, données, paramètres de configuration, variables d’environnement et hypothèses nécessaires.
 
-**Entrées et dépendances**  
-- Variables, fonctions, fichiers, bibliothèques ou résultats de cellules précédentes nécessaires.
-- Indique explicitement les hypothèses importantes.
+# Vue d’ensemble du flux
+Explique le déroulé global en quelques étapes logiques.
 
-**Traitement**  
-Décris les étapes principales du code, de façon claire et proportionnée à sa complexité.
+# Documentation fonctionnelle
 
-**Sorties et effets de bord**  
-- Variables, tableaux, graphiques, fichiers ou modèles créés/modifiés.
-- Effets éventuels : écriture de fichier, appel réseau, modification d’état, affichage.
+Pour chaque bloc fonctionnel :
+
+## [Nom explicite du bloc]
+
+**Rôle**  
+Objectif métier ou technique du bloc.
+
+**Cellules concernées**  
+Indique les numéros ou repères des cellules incluses.
+
+**Entrées**  
+Données, variables, fichiers ou résultats utilisés.
+
+**Traitements**  
+Explique les transformations, calculs, règles métier ou appels importants.
+
+**Sorties**  
+Variables, fichiers, tableaux, graphiques, modèles ou résultats produits.
+
+**Dépendances et enchaînement**  
+Indique ce qui doit avoir été exécuté avant et ce que ce bloc alimente ensuite.
 
 **Points d’attention**  
-- Risques d’erreur, cas limites, paramètres sensibles, performance, reproductibilité ou confidentialité.
-- Si rien ne pose problème, écris « Aucun point d’attention majeur identifié ».
+Hypothèses, cas limites, données sensibles, performance, reproductibilité et risques d’erreur.
 
-**Texte Markdown prêt à insérer**  
-Fournis ensuite une version courte, rédigée en Markdown, à coller juste avant la cellule dans le notebook.
+# Résultats finaux et livrables
+
+# Limites et éléments à confirmer
+
+# Markdown prêt à insérer dans le notebook
+Propose ensuite uniquement les cellules Markdown à insérer avant chaque **grand bloc fonctionnel**. Ne documente jamais chaque cellule individuellement.
 
 Règles :
-- Ne suppose pas d’informations absentes du code : indique « à confirmer » si nécessaire.
-- Garde le vocabulaire métier présent dans le code.
-- N’invente ni résultats, ni fichiers, ni valeurs.
-- Si une cellule dépend d’un contexte antérieur non fourni, liste précisément ce qui manque.
+- Ne modifie pas le code.
+- N’invente pas d’information absente : écris « à confirmer » si nécessaire.
+- Ne suppose pas que l’ordre des cellules est toujours logique ; signale les dépendances croisées ou cellules à exécuter dans un autre ordre.
+- Utilise le vocabulaire métier du notebook.
 - Réponds en français.
-- Ne propose pas de réécriture du code sauf si je le demande explicitement.
 
-Voici la cellule à documenter :
+Voici le notebook :
 
-```python
-[COLLER LA CELLULE ICI]
-```
+[COLLER ICI TOUTES LES CELLULES, EN LES SÉPARANT CLAIREMENT PAR `# Cellule 1`, `# Cellule 2`, ETC.]
