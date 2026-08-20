@@ -1,32 +1,154 @@
-def resoudre_entree_effective(index, catalogue, selection, config):
-    """
-    ...
-    """
-    nb = catalogue[index]
-    entree_declaree = nb.get("input_file")
+from utils.sharedQuant import resoudre_entree_effective, resoudre_sortie, chemins_a_plat, noms_a_plat, serialiser
 
-    if entree_declaree is None:
-        return None
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+resultats = {}
+plans = {}
 
-    intermediate_dir = Path(config["intermediate_dir"])  # cast une seule fois
+for nom_modele in modeles_actifs:
+    print(f"\n{'='*70}\nMODÈLE {nom_modele}\n{'='*70}")
 
-    if isinstance(entree_declaree, dict):
-        return {k: intermediate_dir / config[v] for k, v in entree_declaree.items()}
+    segments_modele = [
+        s for s in segments_tous
+        if str(s.get(COLONNE_MODELE, "")).strip() == nom_modele
+    ]
+    print(f"{len(segments_modele)} segments : {[s['Nom'] for s in segments_modele]}")
 
-    producteur_normal = next(
-        (n for n in catalogue[:index] if n.get("output_file") == entree_declaree),
-        None
-    )
-    if producteur_normal and producteur_normal["name"] in selection:
-        return intermediate_dir / config[entree_declaree]
+    try:
+        # --- 1. Chemins de base : Output / All / {RUN_ID} / ... ---
+        model_output_base = Path(CHEMINS["output_dir"]) / nom_modele
+        version_dir = model_output_base / RUN_ID
+        version_dir.mkdir(parents=True, exist_ok=True)
 
-    for n in reversed(catalogue[:index]):
-        if n["name"] in selection and isinstance(n.get("output_file"), str):
-            print(f"  [repli] {nb['name']} lira la sortie de {n['name']} "
-                  f"({n['output_file']}) au lieu de {entree_declaree}")
-            return intermediate_dir / config[n["output_file"]]
+        # --- 2. config.yaml propre au modèle ---
+        chemins_modele = dict(CHEMINS)
+        # Tous les dossiers de travail pointent désormais vers version_dir.
+        # notebooks_dir n'est PAS modifié : c'est là où vivent les .ipynb sources,
+        # pas un dossier de sortie.
+        chemins_modele["output_dir"]       = str(version_dir / "notebook_executes")
+        chemins_modele["report_dir"]       = str(version_dir / "reports")
+        chemins_modele["intermediate_dir"] = str(version_dir / "Fichiers intermédiaires")
+        chemins_modele["output_excel_dir"] = str(version_dir / "reports_excel")
 
-    raise ValueError(
-        f"{nb['name']} : aucune entrée disponible dans la sélection actuelle "
-        f"(attendait '{entree_declaree}')"
-    )
+        config_source = {
+            **chemins_modele,
+            **FICHIERS_SOURCES,
+            **FICHIERS_INTERMEDIAIRES,
+            **VARIABLES_METIER,
+            "modele": nom_modele,
+            "pipeline": {
+                "name": f"Pipeline_LGD_RiskQuant_{nom_modele}",
+                "notebooks": [
+                    {"name": nb["name"], "nom_metier": nb["nom_metier"],
+                     "actif": nb.get("actif", True),
+                     "input_file": nb["input_file"], "output_file": nb["output_file"]}
+                    for nb in CATALOGUE_NOTEBOOKS
+                ],
+            },
+            "execution": EXECUTION,
+        }
+
+        with open("config.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(config_source, f, sort_keys=False, allow_unicode=True)
+
+        config = load_config("config.yaml")
+
+        # --- 2. JSON des segments filtrés (lu par le NB0) ---
+        chemin_segments = Path(config["intermediate_dir"]) / config["segments_file"]
+        chemin_segments.parent.mkdir(parents=True, exist_ok=True)
+        with open(chemin_segments, "w", encoding="utf-8") as f:
+            json.dump(
+                [{k: str(v) for k, v in s.items()} for s in segments_modele],
+                f, indent=2, ensure_ascii=False
+            )
+        print(f"Segments écrits : {chemin_segments.name}")
+
+        # --- 3. Résolution de la chaîne ---
+        catalogue = config["pipeline"]["notebooks"]
+        selection = [nb["name"] for nb in catalogue if nb.get("actif", True)]
+
+        notebooks_actifs = []
+        for index, nb in enumerate(catalogue):
+            if nb["name"] not in selection:
+                continue
+            notebooks_actifs.append({
+                **nb,
+                "input_path":  resoudre_entree_effective(index, catalogue, selection, config),
+                "output_path": resoudre_sortie(nb, config),
+            })
+
+        # --- 4. Contrôle des entrées ---
+        produits, alertes = set(), []
+        for nb in notebooks_actifs:
+            for entree in chemins_a_plat(nb.get("input_path")):
+                if entree in produits:
+                    continue
+                if entree.exists():
+                    alertes.append(
+                        f"{nb['name']} : lit un fichier préexistant ({entree.name}, "
+                        f"modifié le {datetime.fromtimestamp(entree.stat().st_mtime):%d/%m/%Y %H:%M})"
+                    )
+                else:
+                    raise FileNotFoundError(f"{nb['name']} : entrée introuvable ({entree})")
+            for sortie in chemins_a_plat(nb.get("output_path")):
+                produits.add(sortie)
+
+        for a in alertes:
+            print(f"  [!] {a}")
+
+        plans[nom_modele] = pd.DataFrame([{
+            "notebook": nb["name"],
+            "entrée":   noms_a_plat(nb.get("input_path")),
+            "sortie":   noms_a_plat(nb.get("output_path")),
+        } for nb in notebooks_actifs])
+
+        # --- 5. Exécution ---
+        notebooks_orchestrateur = [{
+            "name": nb["name"],
+            "timeout": nb.get("timeout", 9000),
+            "parameters": {
+                "nom_notebook":    nb["nom_metier"],
+                "chemin_entree":   serialiser(nb.get("input_path")),
+                "chemin_sortie":   serialiser(nb.get("output_path")),
+                "chemin_segments": str(chemin_segments),
+                "modele":          nom_modele,
+                "run_id":          RUN_ID,
+            },
+        } for nb in notebooks_actifs]
+
+        config_run = {
+            "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
+            "working_path":  str(config["working_path"]) if "working_path" in config else str(version_dir),
+            "notebooks_dir": str(config["notebooks_dir"]),
+            "output_dir":    str(config["output_dir"]),
+            "report_dir":    str(config["report_dir"]),
+            "pipeline":      {"name": config["pipeline"]["name"], "notebooks": notebooks_orchestrateur},
+            "execution":     config["execution"],
+        }
+
+        orchestrator = PipelineOrchestrator(config=config_run)
+        succes = orchestrator.execute_pipeline()
+
+        # --- 6. Archivage ---
+        archive = Path(config["report_dir"]) / f"config_executee_{nom_modele}_{RUN_ID}.yaml"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with open(archive, "w", encoding="utf-8") as f:
+            yaml.dump(config_run, f, sort_keys=False, allow_unicode=True)
+
+        plans[nom_modele].to_csv(
+            Path(config["report_dir"]) / f"plan_run_{nom_modele}_{RUN_ID}.csv", index=False
+        )
+
+        resultats[nom_modele] = "OK" if succes else "ÉCHEC"
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        resultats[nom_modele] = f"ERREUR : {type(e).__name__}"
+
+# --- Récapitulatif ---
+print(f"\n{'='*70}\nRÉCAPITULATIF — RUN {RUN_ID}\n{'='*70}")
+for nom_modele, statut in resultats.items():
+    icone = "✅" if statut == "OK" else ("⬜" if "ignoré" in str(statut) else "❌")
+    print(f"  {icone}  Modèle {nom_modele:<6} {statut}")
+
+pd.DataFrame([{"modele": k, "statut": v} for k, v in resultats.items()])
