@@ -1,19 +1,32 @@
-config_run = {
-    "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
-    "working_path": str(version_dir),
-    "notebooks_dir": str(config["notebooks_dir"]),
+def resoudre_entree_effective(index, catalogue, selection, config):
+    """
+    ...
+    """
+    nb = catalogue[index]
+    entree_declaree = nb.get("input_file")
 
-    "output_dir":       str(version_dir / "notebook_executes"),
-    "report_dir":       str(version_dir / config["report_dir"]),
-    "intermediate_dir": str(version_dir / config["sortie_nb"]),
-    "output_excel_dir": str(version_dir / config["output_excel_dir"]),
+    if entree_declaree is None:
+        return None
 
-    # Nécessaire : resoudre_sortie / resoudre_entree_effective font des
-    # lookups directs (config[v], config.get(sortie_declaree, ...)) sur
-    # les noms symboliques de fichiers intermédiaires/sources
-    **FICHIERS_SOURCES,
-    **FICHIERS_INTERMEDIAIRES,
+    intermediate_dir = Path(config["intermediate_dir"])  # cast une seule fois
 
-    "pipeline":  {"name": config["pipeline"]["name"], "notebooks": []},
-    "execution": config["execution"],
-}
+    if isinstance(entree_declaree, dict):
+        return {k: intermediate_dir / config[v] for k, v in entree_declaree.items()}
+
+    producteur_normal = next(
+        (n for n in catalogue[:index] if n.get("output_file") == entree_declaree),
+        None
+    )
+    if producteur_normal and producteur_normal["name"] in selection:
+        return intermediate_dir / config[entree_declaree]
+
+    for n in reversed(catalogue[:index]):
+        if n["name"] in selection and isinstance(n.get("output_file"), str):
+            print(f"  [repli] {nb['name']} lira la sortie de {n['name']} "
+                  f"({n['output_file']}) au lieu de {entree_declaree}")
+            return intermediate_dir / config[n["output_file"]]
+
+    raise ValueError(
+        f"{nb['name']} : aucune entrée disponible dans la sélection actuelle "
+        f"(attendait '{entree_declaree}')"
+    )
