@@ -1,56 +1,222 @@
-Je vais te transmettre un notebook Python exporté en script `.py`.
+import pandas as pd
+import polars as pl
+import xlsxwriter
 
-Les cellules sont séparées par :
+# --------------------------------------------------------------------------- #
+# Palette BNP Paribas
+# --------------------------------------------------------------------------- #
+BNP_VERT         = "#00915A"   # vert principal (en-têtes)
+BNP_VERT_FONCE   = "#006C44"   # vert foncé (titres, onglets)
+BNP_GRIS_BORD    = "#999999"
+BNP_GRIS_CLAIR   = "#F7F7F7"   # lignes alternées
+BNP_PALETTE = [                # séries de graphiques
+    "#00915A", "#006C44", "#5FBF9F", "#2E86AB", "#B7950B",
+    "#8E44AD", "#D7301F", "#5D6D7E", "#E67E22", "#16A085",
+]
 
-```python
-# %%
-```
 
-Les cellules Markdown existantes sont signalées par :
+def _nom_onglet(nom, existants):
+    """Nettoie un nom pour en faire un nom d'onglet Excel valide et unique."""
+    interdits = set('[]:*?/\\')
+    propre = "".join("_" if c in interdits else c for c in str(nom)).strip()[:31]
+    propre = propre or "Feuille"
+    base, i = propre, 1
+    while propre in existants:
+        suffixe = f"_{i}"
+        propre = base[:31 - len(suffixe)] + suffixe
+        i += 1
+    existants.add(propre)
+    return propre
 
-```python
-# %% [markdown]
-```
 
-Ta mission est de revoir et améliorer uniquement la documentation Markdown du notebook.
+def export_risk_report(df_summary: pl.DataFrame,
+                       df_annual_details: pl.DataFrame,
+                       filename: str,
+                       col_classe: str = "HLC",
+                       col_annee: str = "year",
+                       max_series_graphique: int = 12):
+    """
+    Génère la cartographie LGD :
+      - Feuille 1 "Synthese" : stats globales par classe HLC.
+      - Une feuille par métrique : classes HLC en lignes, années en colonnes,
+        avec un graphique d'évolution annuelle par classe.
 
-Objectif :
-- Conserver la structure et la logique du notebook.
-- Réécrire, compléter ou créer les cellules Markdown nécessaires pour expliquer les grands blocs fonctionnels.
-- Ne pas documenter chaque cellule de code individuellement.
-- Produire une documentation concise, mais suffisamment claire pour comprendre l’objectif, les données manipulées et l’enchaînement des traitements.
+    max_series_graphique : au-delà, le graphique est tronqué aux N premières
+    classes (un graphique à 20 lignes est illisible) — le tableau reste complet.
+    """
+    df_sum_pd = df_summary.to_pandas()
+    df_ann_pd = df_annual_details.to_pandas()
 
-Consignes de fond :
-- Analyse l’ensemble du script avant de répondre.
-- Utilise les cellules Markdown existantes comme point de départ : corrige-les si elles sont imprécises, incomplètes ou mal placées.
-- Ajoute une cellule Markdown uniquement lorsqu’elle apporte une vraie compréhension.
-- Ne modifie pas le code et ne propose pas de correction de code.
-- N’invente aucune information : indique « à confirmer » si le contexte métier ou une source de données manque.
-- Garde le vocabulaire métier et technique déjà utilisé dans le notebook.
-- Réponds en français.
+    metriques = [c for c in df_ann_pd.columns if c not in (col_classe, col_annee)]
+    noms_pris, feuilles = set(), []
 
-Consignes de mise en forme :
-- Renvoie uniquement les cellules Markdown finales, dans leur ordre d’insertion.
-- Chaque cellule doit être fournie dans ce format exact :
+    with pd.ExcelWriter(filename, engine="xlsxwriter") as writer:
+        wb = writer.book
 
-```python
-# %% [markdown]
-# Titre principal si nécessaire
+        fmt_titre = wb.add_format({
+            "bold": True, "font_size": 14, "font_color": BNP_VERT_FONCE,
+        })
+        fmt_soustitre = wb.add_format({
+            "italic": True, "font_size": 9, "font_color": "#666666",
+        })
+        fmt_header = wb.add_format({
+            "bold": True, "bg_color": BNP_VERT, "font_color": "#FFFFFF",
+            "border": 1, "border_color": BNP_GRIS_BORD,
+            "align": "center", "valign": "vcenter", "text_wrap": True,
+        })
+        fmt_classe = wb.add_format({
+            "bold": True, "bg_color": BNP_GRIS_CLAIR, "border": 1,
+            "border_color": BNP_GRIS_BORD, "align": "center",
+        })
+        fmt_num = wb.add_format({
+            "num_format": "#,##0.0000", "border": 1, "border_color": BNP_GRIS_BORD,
+        })
+        fmt_num_alt = wb.add_format({
+            "num_format": "#,##0.0000", "border": 1, "border_color": BNP_GRIS_BORD,
+            "bg_color": BNP_GRIS_CLAIR,
+        })
 
-Texte explicatif.
-```
+        # ------------------------------------------------------------------- #
+        # Feuille 1 : synthèse globale
+        # ------------------------------------------------------------------- #
+        nom_synth = _nom_onglet("Synthese", noms_pris)
+        ws = wb.add_worksheet(nom_synth)
+        writer.sheets[nom_synth] = ws
+        ws.hide_gridlines(2)
+        ws.set_tab_color(BNP_VERT_FONCE)
 
-- Utilise `#` uniquement pour le titre global éventuel du notebook.
-- Utilise `##` pour les grands blocs fonctionnels.
-- Utilise `###` seulement pour des sous-parties utiles.
-- Utilise des listes Markdown lorsque cela améliore la lisibilité.
-- Ne mets pas de titres pour des détails mineurs.
-- Évite les paragraphes longs : privilégie 2 à 5 phrases ou quelques puces par cellule.
-- Place chaque cellule Markdown juste avant le bloc de code qu’elle introduit.
-- Si une cellule Markdown existante doit être supprimée ou déplacée, indique-le explicitement avant de fournir les cellules finales.
+        ws.write(0, 0, "CARTOGRAPHIE FINALE DES PARAMÈTRES LGD", fmt_titre)
+        ws.write(1, 0, "Moyennes toutes années confondues, par classe de risque",
+                 fmt_soustitre)
 
-Voici le script complet :
+        ligne_header = 3
+        for j, col in enumerate(df_sum_pd.columns):
+            ws.write(ligne_header, j, str(col), fmt_header)
+        for i, (_, row) in enumerate(df_sum_pd.iterrows()):
+            fmt = fmt_num_alt if i % 2 else fmt_num
+            for j, col in enumerate(df_sum_pd.columns):
+                val = row[col]
+                if j == 0:
+                    ws.write(ligne_header + 1 + i, j, val, fmt_classe)
+                else:
+                    ws.write(ligne_header + 1 + i, j, val, fmt)
 
-```python
-[COLLER ICI LE SCRIPT EXPORTÉ]
-```
+        ws.set_column(0, 0, 12)
+        ws.set_column(1, len(df_sum_pd.columns) - 1, 18)
+        ws.freeze_panes(ligne_header + 1, 1)
+        feuilles.append(nom_synth)
+
+        # ------------------------------------------------------------------- #
+        # Une feuille par métrique
+        # ------------------------------------------------------------------- #
+        for metrique in metriques:
+            pivot = (
+                df_ann_pd
+                .pivot_table(index=col_classe, columns=col_annee,
+                             values=metrique, aggfunc="mean")
+                .sort_index()
+            )
+            if pivot.empty:
+                continue
+
+            annees = list(pivot.columns)
+            classes = list(pivot.index)
+
+            nom = _nom_onglet(metrique, noms_pris)
+            ws = wb.add_worksheet(nom)
+            writer.sheets[nom] = ws
+            ws.hide_gridlines(2)
+            ws.set_tab_color(BNP_VERT)
+
+            ws.write(0, 0, f"ÉVOLUTION ANNUELLE — {metrique}", fmt_titre)
+            ws.write(1, 0, f"Moyenne de « {metrique} » par classe {col_classe} "
+                           f"et par année", fmt_soustitre)
+
+            r_head = 3
+            ws.write(r_head, 0, col_classe, fmt_header)
+            for j, an in enumerate(annees):
+                ws.write(r_head, 1 + j, an, fmt_header)
+
+            for i, cl in enumerate(classes):
+                r = r_head + 1 + i
+                fmt = fmt_num_alt if i % 2 else fmt_num
+                ws.write(r, 0, cl, fmt_classe)
+                for j, an in enumerate(annees):
+                    val = pivot.loc[cl, an]
+                    if pd.notna(val):
+                        ws.write_number(r, 1 + j, float(val), fmt)
+                    else:
+                        ws.write_blank(r, 1 + j, None, fmt)
+
+            ws.set_column(0, 0, 12)
+            ws.set_column(1, len(annees), 14)
+            ws.freeze_panes(r_head + 1, 1)
+
+            # --- Graphique : une série par classe, années en abscisse ---
+            chart = wb.add_chart({"type": "line"})
+            n_series = min(len(classes), max_series_graphique)
+
+            for i in range(n_series):
+                r = r_head + 1 + i
+                chart.add_series({
+                    "name":       [nom, r, 0],
+                    "categories": [nom, r_head, 1, r_head, len(annees)],
+                    "values":     [nom, r, 1, r, len(annees)],
+                    "line":       {"color": BNP_PALETTE[i % len(BNP_PALETTE)],
+                                   "width": 1.75},
+                    "marker":     {"type": "circle", "size": 4},
+                })
+
+            titre_graph = f"{metrique} par année et par classe"
+            if n_series < len(classes):
+                titre_graph += f" ({n_series} premières classes sur {len(classes)})"
+
+            chart.set_title({"name": titre_graph,
+                             "name_font": {"color": BNP_VERT_FONCE, "size": 12}})
+            chart.set_x_axis({"name": "Année", "num_font": {"rotation": -45}})
+            chart.set_y_axis({"name": metrique, "major_gridlines":
+                              {"visible": True, "line": {"color": "#E0E0E0"}}})
+            chart.set_legend({"position": "right"})
+            chart.set_size({"width": 900, "height": 420})
+            chart.set_chartarea({"border": {"none": True}})
+
+            ws.insert_chart(r_head + len(classes) + 3, 0, chart)
+            feuilles.append(nom)
+
+    print(f"Rapport généré : {filename}")
+    print(f"   Feuilles : {', '.join(feuilles)}")
+    return filename
+
+tr = (
+    lra_complete3.group_by(pl.col("HLC"))
+    .agg([
+        pl.col(CFG["param_CALC"]).mean().alias(CFG["param_CALC"]),
+        pl.col(PARAM_COL).mean().alias(PARAM_COL),
+        pl.col("Downturn (marge)").mean().alias("Downturn (marge)"),
+        pl.col("INDIRECT_COST").mean().alias("INDIRECT_COST"),
+        pl.col("MoC_C").mean().alias("MoC_C"),
+        (pl.col(PARAM_COL) + pl.col("Downturn (marge)")
+         + pl.col("INDIRECT_COST") + pl.col("MoC_C")).mean().alias("LGD finale"),
+    ])
+    .sort("HLC")
+)
+
+df_annual_details = (
+    lra_complete3.group_by(["HLC", "year"])
+    .agg([
+        pl.col(CFG["param_CALC"]).mean(),
+        pl.col(PARAM_COL).mean(),
+        pl.col("Downturn (marge)").mean(),
+        pl.col("INDIRECT_COST").mean(),
+        pl.col("MoC_C").mean(),
+        (pl.col(PARAM_COL) + pl.col("Downturn (marge)")
+         + pl.col("INDIRECT_COST") + pl.col("MoC_C")).mean().alias("LGD finale"),
+    ])
+    .sort(["HLC", "year"])
+)
+
+export_risk_report(
+    df_summary=tr,
+    df_annual_details=df_annual_details,
+    filename="Cartographie_LGD_Finale.xlsx",
+)
