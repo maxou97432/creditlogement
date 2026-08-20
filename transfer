@@ -1,222 +1,164 @@
-import pandas as pd
-import polars as pl
-import xlsxwriter
+from utils.sharedQuant import (
+    resoudre_entree_effective, resoudre_sortie,
+    chemins_a_plat, noms_a_plat, serialiser,
+)
 
-# --------------------------------------------------------------------------- #
-# Palette BNP Paribas
-# --------------------------------------------------------------------------- #
-BNP_VERT         = "#00915A"   # vert principal (en-têtes)
-BNP_VERT_FONCE   = "#006C44"   # vert foncé (titres, onglets)
-BNP_GRIS_BORD    = "#999999"
-BNP_GRIS_CLAIR   = "#F7F7F7"   # lignes alternées
-BNP_PALETTE = [                # séries de graphiques
-    "#00915A", "#006C44", "#5FBF9F", "#2E86AB", "#B7950B",
-    "#8E44AD", "#D7301F", "#5D6D7E", "#E67E22", "#16A085",
-]
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+resultats = {}
+plans = {}
 
+for nom_modele in modeles_actifs:
+    print(f"\n{'='*70}\nMODÈLE {nom_modele}\n{'='*70}")
 
-def _nom_onglet(nom, existants):
-    """Nettoie un nom pour en faire un nom d'onglet Excel valide et unique."""
-    interdits = set('[]:*?/\\')
-    propre = "".join("_" if c in interdits else c for c in str(nom)).strip()[:31]
-    propre = propre or "Feuille"
-    base, i = propre, 1
-    while propre in existants:
-        suffixe = f"_{i}"
-        propre = base[:31 - len(suffixe)] + suffixe
-        i += 1
-    existants.add(propre)
-    return propre
+    segments_modele = [
+        s for s in segments_tous
+        if str(s.get(COLONNE_MODELE, "")).strip() == nom_modele
+    ]
 
+    print(f"{len(segments_modele)} segments : {[s['Nom'] for s in segments_modele]}")
 
-def export_risk_report(df_summary: pl.DataFrame,
-                       df_annual_details: pl.DataFrame,
-                       filename: str,
-                       col_classe: str = "HLC",
-                       col_annee: str = "year",
-                       max_series_graphique: int = 12):
-    """
-    Génère la cartographie LGD :
-      - Feuille 1 "Synthese" : stats globales par classe HLC.
-      - Une feuille par métrique : classes HLC en lignes, années en colonnes,
-        avec un graphique d'évolution annuelle par classe.
+    try:
+        # --- 1. Chemins de base du modèle ---
+        # NB : on part de CHEMINS (constante globale) et non de `config`,
+        # qui n'est construit qu'à l'étape 2 ci-dessous.
+        # Output / All / {RUN_ID} / ...
+        model_output_base = Path(CHEMINS["output_dir"]) / nom_modele
+        version_dir = model_output_base / RUN_ID
+        version_dir.mkdir(parents=True, exist_ok=True)
 
-    max_series_graphique : au-delà, le graphique est tronqué aux N premières
-    classes (un graphique à 20 lignes est illisible) — le tableau reste complet.
-    """
-    df_sum_pd = df_summary.to_pandas()
-    df_ann_pd = df_annual_details.to_pandas()
+        # --- 2. Préparation de la config source ---
+        chemins_modele = dict(CHEMINS)
+        chemins_modele["output_dir"] = str(model_output_base)
 
-    metriques = [c for c in df_ann_pd.columns if c not in (col_classe, col_annee)]
-    noms_pris, feuilles = set(), []
+        config_source = {
+            **chemins_modele,
+            **FICHIERS_SOURCES,
+            **FICHIERS_INTERMEDIAIRES,
+            **VARIABLES_METIER,
+            "modele": nom_modele,
+            "pipeline": {
+                "name": f"Pipeline_LGD_RiskQuant_{nom_modele}",
+                "notebooks": [
+                    {"name": nb["name"], "nom_metier": nb["nom_metier"],
+                     "actif": nb.get("actif", True),
+                     "input_file": nb.get("input_file"),
+                     "output_file": nb.get("output_file")}
+                    for nb in CATALOGUE_NOTEBOOKS
+                ],
+            },
+            "execution": EXECUTION,
+        }
 
-    with pd.ExcelWriter(filename, engine="xlsxwriter") as writer:
-        wb = writer.book
+        # Sauvegarde de la config source dans le dossier de la version
+        with open(version_dir / "config_source.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(config_source, f, sort_keys=False, allow_unicode=True)
 
-        fmt_titre = wb.add_format({
-            "bold": True, "font_size": 14, "font_color": BNP_VERT_FONCE,
-        })
-        fmt_soustitre = wb.add_format({
-            "italic": True, "font_size": 9, "font_color": "#666666",
-        })
-        fmt_header = wb.add_format({
-            "bold": True, "bg_color": BNP_VERT, "font_color": "#FFFFFF",
-            "border": 1, "border_color": BNP_GRIS_BORD,
-            "align": "center", "valign": "vcenter", "text_wrap": True,
-        })
-        fmt_classe = wb.add_format({
-            "bold": True, "bg_color": BNP_GRIS_CLAIR, "border": 1,
-            "border_color": BNP_GRIS_BORD, "align": "center",
-        })
-        fmt_num = wb.add_format({
-            "num_format": "#,##0.0000", "border": 1, "border_color": BNP_GRIS_BORD,
-        })
-        fmt_num_alt = wb.add_format({
-            "num_format": "#,##0.0000", "border": 1, "border_color": BNP_GRIS_BORD,
-            "bg_color": BNP_GRIS_CLAIR,
-        })
+        # Config de travail pour les étapes suivantes
+        config = config_source
 
-        # ------------------------------------------------------------------- #
-        # Feuille 1 : synthèse globale
-        # ------------------------------------------------------------------- #
-        nom_synth = _nom_onglet("Synthese", noms_pris)
-        ws = wb.add_worksheet(nom_synth)
-        writer.sheets[nom_synth] = ws
-        ws.hide_gridlines(2)
-        ws.set_tab_color(BNP_VERT_FONCE)
-
-        ws.write(0, 0, "CARTOGRAPHIE FINALE DES PARAMÈTRES LGD", fmt_titre)
-        ws.write(1, 0, "Moyennes toutes années confondues, par classe de risque",
-                 fmt_soustitre)
-
-        ligne_header = 3
-        for j, col in enumerate(df_sum_pd.columns):
-            ws.write(ligne_header, j, str(col), fmt_header)
-        for i, (_, row) in enumerate(df_sum_pd.iterrows()):
-            fmt = fmt_num_alt if i % 2 else fmt_num
-            for j, col in enumerate(df_sum_pd.columns):
-                val = row[col]
-                if j == 0:
-                    ws.write(ligne_header + 1 + i, j, val, fmt_classe)
-                else:
-                    ws.write(ligne_header + 1 + i, j, val, fmt)
-
-        ws.set_column(0, 0, 12)
-        ws.set_column(1, len(df_sum_pd.columns) - 1, 18)
-        ws.freeze_panes(ligne_header + 1, 1)
-        feuilles.append(nom_synth)
-
-        # ------------------------------------------------------------------- #
-        # Une feuille par métrique
-        # ------------------------------------------------------------------- #
-        for metrique in metriques:
-            pivot = (
-                df_ann_pd
-                .pivot_table(index=col_classe, columns=col_annee,
-                             values=metrique, aggfunc="mean")
-                .sort_index()
+        # --- 3. JSON des segments (dans le dossier de la version) ---
+        chemin_segments = version_dir / "segments_modele.json"
+        with open(chemin_segments, "w", encoding="utf-8") as f:
+            json.dump(
+                [{k: str(v) for k, v in s.items()} for s in segments_modele],
+                f, indent=2, ensure_ascii=False
             )
-            if pivot.empty:
+        print(f"Segments écrits : {chemin_segments.name}")
+
+        # --- 4. Résolution de la chaîne de notebooks ---
+        catalogue = config["pipeline"]["notebooks"]
+        selection = [nb["name"] for nb in catalogue if nb.get("actif", True)]
+
+        # config_run est nécessaire dès la résolution des chemins :
+        # on le construit ici, avant la boucle de résolution.
+        config_run = {
+            "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
+            "working_path": str(version_dir),
+            "notebooks_dir": str(config["notebooks_dir"]),
+
+            # Tous les chemins de sortie sont sous version_dir
+            "output_dir":       str(version_dir / "notebook_executes"),
+            "report_dir":       str(version_dir / config["report_dir"]),
+            "intermediate_dir": str(version_dir / config["sortie_nb"]),
+            "output_excel_dir": str(version_dir / config["output_excel_dir"]),
+
+            "pipeline":  {"name": config["pipeline"]["name"], "notebooks": []},
+            "execution": config["execution"],
+        }
+
+        notebooks_actifs = []
+        for index, nb in enumerate(catalogue):
+            if nb["name"] not in selection:
                 continue
+            notebooks_actifs.append({
+                **nb,
+                "input_path":  resoudre_entree_effective(index, catalogue, selection, config_run),
+                "output_path": resoudre_sortie(nb, config_run),
+            })
 
-            annees = list(pivot.columns)
-            classes = list(pivot.index)
+        # --- 5. Contrôle des entrées ---
+        produits, alertes = set(), []
+        for nb in notebooks_actifs:
+            for entree in chemins_a_plat(nb.get("input_path")):
+                if entree in produits:
+                    continue
+                if entree.exists():
+                    alertes.append(
+                        f"{nb['name']} : lit un fichier préexistant ({entree.name}, "
+                        f"modifié le {datetime.fromtimestamp(entree.stat().st_mtime):%d/%m/%Y %H:%M})"
+                    )
+                else:
+                    raise FileNotFoundError(f"{nb['name']} : entrée introuvable ({entree})")
+            for sortie in chemins_a_plat(nb.get("output_path")):
+                produits.add(sortie)
 
-            nom = _nom_onglet(metrique, noms_pris)
-            ws = wb.add_worksheet(nom)
-            writer.sheets[nom] = ws
-            ws.hide_gridlines(2)
-            ws.set_tab_color(BNP_VERT)
+        for a in alertes:
+            print(f"  [!] {a}")
 
-            ws.write(0, 0, f"ÉVOLUTION ANNUELLE — {metrique}", fmt_titre)
-            ws.write(1, 0, f"Moyenne de « {metrique} » par classe {col_classe} "
-                           f"et par année", fmt_soustitre)
+        plans[nom_modele] = pd.DataFrame([{
+            "notebook": nb["name"],
+            "entrée":   noms_a_plat(nb.get("input_path")),
+            "sortie":   noms_a_plat(nb.get("output_path")),
+        } for nb in notebooks_actifs])
 
-            r_head = 3
-            ws.write(r_head, 0, col_classe, fmt_header)
-            for j, an in enumerate(annees):
-                ws.write(r_head, 1 + j, an, fmt_header)
+        # --- 6. Préparation de l'orchestrateur ---
+        notebooks_orchestrateur = [{
+            "name": nb["name"],
+            "timeout": nb.get("timeout", 9000),
+            "parameters": {
+                "nom_notebook":    nb["nom_metier"],
+                "chemin_entree":   serialiser(nb.get("input_path")),
+                "chemin_sortie":   serialiser(nb.get("output_path")),
+                "chemin_segments": str(chemin_segments),
+                "modele":          nom_modele,
+                "run_id":          RUN_ID,
+            },
+        } for nb in notebooks_actifs]
 
-            for i, cl in enumerate(classes):
-                r = r_head + 1 + i
-                fmt = fmt_num_alt if i % 2 else fmt_num
-                ws.write(r, 0, cl, fmt_classe)
-                for j, an in enumerate(annees):
-                    val = pivot.loc[cl, an]
-                    if pd.notna(val):
-                        ws.write_number(r, 1 + j, float(val), fmt)
-                    else:
-                        ws.write_blank(r, 1 + j, None, fmt)
+        config_run["pipeline"]["notebooks"] = notebooks_orchestrateur
 
-            ws.set_column(0, 0, 12)
-            ws.set_column(1, len(annees), 14)
-            ws.freeze_panes(r_head + 1, 1)
+        orchestrator = PipelineOrchestrator(config=config_run)
+        succes = orchestrator.execute_pipeline()
 
-            # --- Graphique : une série par classe, années en abscisse ---
-            chart = wb.add_chart({"type": "line"})
-            n_series = min(len(classes), max_series_graphique)
+        # --- 7. Archivage ---
+        archive_config = version_dir / f"config_executee_{nom_modele}_{RUN_ID}.yaml"
+        with open(archive_config, "w", encoding="utf-8") as f:
+            yaml.dump(config_run, f, sort_keys=False, allow_unicode=True)
 
-            for i in range(n_series):
-                r = r_head + 1 + i
-                chart.add_series({
-                    "name":       [nom, r, 0],
-                    "categories": [nom, r_head, 1, r_head, len(annees)],
-                    "values":     [nom, r, 1, r, len(annees)],
-                    "line":       {"color": BNP_PALETTE[i % len(BNP_PALETTE)],
-                                   "width": 1.75},
-                    "marker":     {"type": "circle", "size": 4},
-                })
+        plan_file = version_dir / f"plan_run_{nom_modele}_{RUN_ID}.csv"
+        plans[nom_modele].to_csv(plan_file, index=False)
 
-            titre_graph = f"{metrique} par année et par classe"
-            if n_series < len(classes):
-                titre_graph += f" ({n_series} premières classes sur {len(classes)})"
+        resultats[nom_modele] = "OK" if succes else "ÉCHEC"
 
-            chart.set_title({"name": titre_graph,
-                             "name_font": {"color": BNP_VERT_FONCE, "size": 12}})
-            chart.set_x_axis({"name": "Année", "num_font": {"rotation": -45}})
-            chart.set_y_axis({"name": metrique, "major_gridlines":
-                              {"visible": True, "line": {"color": "#E0E0E0"}}})
-            chart.set_legend({"position": "right"})
-            chart.set_size({"width": 900, "height": 420})
-            chart.set_chartarea({"border": {"none": True}})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        resultats[nom_modele] = f"ERREUR : {type(e).__name__}"
 
-            ws.insert_chart(r_head + len(classes) + 3, 0, chart)
-            feuilles.append(nom)
+# --- Récapitulatif ---
+print(f"\n{'='*70}\nRÉCAPITULATIF — RUN {RUN_ID}\n{'='*70}")
+for nom_modele, statut in resultats.items():
+    icone = "✅" if statut == "OK" else ("⬜" if "ignoré" in str(statut) else "❌")
+    print(f"  {icone}  Modèle {nom_modele:<6} {statut}")
 
-    print(f"Rapport généré : {filename}")
-    print(f"   Feuilles : {', '.join(feuilles)}")
-    return filename
-
-tr = (
-    lra_complete3.group_by(pl.col("HLC"))
-    .agg([
-        pl.col(CFG["param_CALC"]).mean().alias(CFG["param_CALC"]),
-        pl.col(PARAM_COL).mean().alias(PARAM_COL),
-        pl.col("Downturn (marge)").mean().alias("Downturn (marge)"),
-        pl.col("INDIRECT_COST").mean().alias("INDIRECT_COST"),
-        pl.col("MoC_C").mean().alias("MoC_C"),
-        (pl.col(PARAM_COL) + pl.col("Downturn (marge)")
-         + pl.col("INDIRECT_COST") + pl.col("MoC_C")).mean().alias("LGD finale"),
-    ])
-    .sort("HLC")
-)
-
-df_annual_details = (
-    lra_complete3.group_by(["HLC", "year"])
-    .agg([
-        pl.col(CFG["param_CALC"]).mean(),
-        pl.col(PARAM_COL).mean(),
-        pl.col("Downturn (marge)").mean(),
-        pl.col("INDIRECT_COST").mean(),
-        pl.col("MoC_C").mean(),
-        (pl.col(PARAM_COL) + pl.col("Downturn (marge)")
-         + pl.col("INDIRECT_COST") + pl.col("MoC_C")).mean().alias("LGD finale"),
-    ])
-    .sort(["HLC", "year"])
-)
-
-export_risk_report(
-    df_summary=tr,
-    df_annual_details=df_annual_details,
-    filename="Cartographie_LGD_Finale.xlsx",
-)
+pd.DataFrame([{"modele": k, "statut": v} for k, v in resultats.items()])
