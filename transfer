@@ -76,16 +76,18 @@ for nom_modele in modeles_actifs:
         # --- 5. Contrôle des entrées ---
         # Une entrée manquante n'est une erreur que si elle n'est ni déjà
         # présente sur disque, ni prévue en sortie d'un notebook actif de ce
-        # même run (comparaison sur chemins résolus pour éviter les faux
-        # négatifs relatif/absolu).
+        # même run. chemins_a_plat peut renvoyer un mélange de str/Path selon
+        # les cas (dict Cure/NonCure vs chemin simple) : on force Path()
+        # partout avant toute comparaison ou résolution.
         sorties_prevues_ce_run = {
-            s.resolve() for nb in notebooks_actifs
+            Path(s).resolve() for nb in notebooks_actifs
             for s in chemins_a_plat(nb.get("output_path"))
         }
 
         produits, alertes = set(), []
         for nb in notebooks_actifs:
             for entree in chemins_a_plat(nb.get("input_path")):
+                entree = Path(entree)
                 if entree in produits:
                     continue
                 if entree.exists():
@@ -96,11 +98,11 @@ for nom_modele in modeles_actifs:
                 elif entree.resolve() in sorties_prevues_ce_run:
                     pass  # sera produit par un notebook actif plus tôt dans ce run
                 else:
-                    print(f"DEBUG — entree cherchée   : {entree!r} -> {entree.resolve()!r}")
-                    print(f"DEBUG — sorties prévues   : {sorted(str(s) for s in sorties_prevues_ce_run)}")
+                    print(f"DEBUG — entree cherchée : {entree!r} -> {entree.resolve()!r}")
+                    print(f"DEBUG — sorties prévues : {sorted(str(s) for s in sorties_prevues_ce_run)}")
                     raise FileNotFoundError(f"{nb['name']} : entrée introuvable ({entree})")
             for sortie in chemins_a_plat(nb.get("output_path")):
-                produits.add(sortie)
+                produits.add(Path(sortie))
 
         for a in alertes:
             print(f"  [!] {a}")
