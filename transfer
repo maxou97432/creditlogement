@@ -1,11 +1,19 @@
-config_run = {
-    "pipeline_name": f"{config['pipeline']['name']}_{RUN_ID}",
-    "working_path":     str(version_dir),
-    "notebooks_dir":    str(config["notebooks_dir"]),
-    "output_dir":       str(config["output_dir"]),
-    "report_dir":       str(config["report_dir"]),
-    "intermediate_dir": str(config["intermediate_dir"]),
-    "output_excel_dir": str(config["output_excel_dir"]),
-    "pipeline":  {"name": config["pipeline"]["name"], "notebooks": notebooks_orchestrateur},
-    "execution": config["execution"],
-}
+def _resoudre_chemins(config: Dict[str, Any]) -> None:
+    config["root"] = ROOT
+    config["input_dir"]      = ROOT / config["input_dir"]
+    config["output_dir"]     = ROOT / config["output_dir"]
+    config["notebooks_dir"]  = ROOT / config["notebooks_dir"]
+
+    # Ces 4 chemins sont déjà écrits comme chemins complets (relatifs à ROOT,
+    # ou absolus) dans config.yaml — on ne les recombine plus avec output_dir.
+    config["output_excel_dir"] = ROOT / config["output_excel_dir"]
+    config["intermediate_dir"] = ROOT / config["intermediate_dir"]
+    config["report_dir"]       = ROOT / config["report_dir"]
+
+    config["segmentation_path"] = config["input_dir"] / config["segmentation_file"]
+    config["working_path"]      = config["output_dir"]
+
+    for p in (config["input_dir"], config["output_dir"],
+              config["intermediate_dir"], config["report_dir"],
+              config["output_excel_dir"]):
+        p.mkdir(parents=True, exist_ok=True)
