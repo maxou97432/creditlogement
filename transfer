@@ -1,26 +1,115 @@
-def label_intervalle(bins: list, i: int, decimales: int = 2) -> str:
+def prepare_trend_data(lf_decoup, features_used, target, top_n=15,
+                        colonne_annee="annee", labels_bornes: dict = None):
     """
-    Construit le label textuel de la tranche i à partir de la liste `bins`
-    (bornes, avec None aux extrémités pour -inf/+inf), telle que stockée
-    dans dict_seuils[col]["bins"].
-    """
-    lower, upper = bins[i], bins[i + 1]
-    lower_str = "-∞" if lower is None else f"{lower:.{decimales}f}"
-    upper_str = "+∞" if upper is None else f"{upper:.{decimales}f}"
-    return f"]{lower_str} ; {upper_str}]"
+    Prépare le DataFrame de l'onglet Trend_Modalities.
 
+    features_used : noms de variables réels (drivers_quali + drivers_quanti_bines).
+    Chaque colonne contient directement sa modalité en valeur de cellule
+    (texte pour les quali, numéro de tranche pour les quanti binées) — ce ne
+    sont PAS des colonnes one-hot.
 
-def construire_labels_bornes(dict_seuils: dict, decimales: int = 2) -> dict:
+    labels_bornes : dict optionnel {colonne_binee: {indice: label_borne}}
+    (voir construire_labels_bornes). Pour les colonnes quanti binées présentes
+    dans ce dict, la modalité affichée est la borne d'intervalle (ex.
+    "]0.34 ; 1.20]") plutôt que l'indice de tranche brut. Le tri reste basé
+    sur l'indice numérique d'origine pour préserver l'ordre croissant des
+    tranches (le tri alphabétique sur le label casserait l'ordre avec des
+    bornes négatives).
+
+    Les valeurs nulles (variable source manquante, non binée par le CART) sont
+    matérialisées en modalité "Manquant" au lieu d'être agrégées silencieusement
+    dans un groupe vide.
+
+    Retourne un DataFrame pandas : annee | modality | target_moyenne | effectif
+    | variable | total_modalities | has_more, limité au top_n modalités par
+    variable (classées par effectif décroissant).
     """
-    À partir de dict_seuils (retourné par appliquer_decoupage_cart), construit
-    {colonne_binee: {indice_tranche: label_borne}} pour remapper les indices
-    CART en intervalles lisibles.
-    """
-    labels = {}
-    for info in dict_seuils.values():
-        bins = info["bins"]
-        col_binee = info["colonne_binee"]
-        labels[col_binee] = {
-            i: label_intervalle(bins, i, decimales) for i in range(len(bins) - 1)
-        }
-    return labels
+    colonnes_dispo = lf_decoup.collect_schema().names()
+    labels_bornes = labels_bornes or {}
+    all_trends, ignorees = [], []
+
+    for feat in features_used:
+        if feat not in colonnes_dispo:
+            ignorees.append(feat)
+            continue
+
+        est_bine = feat in labels_bornes
+
+        if est_bine:
+            # modality_order : indice CART brut (ou -1 pour "Manquant", trié en premier)
+            # modality : label texte de l'intervalle correspondant
+            expr_order = pl.col(feat).fill_null(-1).cast(pl.Int64).alias("modality_order")
+            expr_modality = (
+                pl.col(feat)
+                  .cast(pl.Int64)
+                  .replace(labels_bornes[feat], default=None)
+                  .fill_null(LABEL_MANQUANT)
+                  .alias("modality")
+            )
+        else:
+            expr_order = pl.lit(None).cast(pl.Int64).alias("modality_order")
+            expr_modality = (
+                pl.col(feat).cast(pl.Utf8).fill_null(LABEL_MANQUANT).alias("modality")
+            )
+
+        agg = (
+            lf_decoup
+            .select([colonne_annee, feat, target])
+            .with_columns([expr_modality, expr_order])
+            .group_by([colonne_annee, "modality", "modality_order"])
+            .agg([
+                pl.col(target).mean().alias("target_moyenne"),
+                pl.len().alias("effectif"),
+            ])
+            .with_columns(pl.lit(feat).alias("variable"))
+            .sort([colonne_annee, "modality_order", "modality"])
+            .collect()
+        )
+        all_trends.append(agg.to_pandas())
+
+    if ignorees:
+        print(f"Trend : {len(ignorees)} variable(s) absente(s) ignorée(s) : {ignorees[:5]}")
+
+    if not all_trends:
+        return pd.DataFrame()
+
+    full_df = pd.concat(all_trends, ignore_index=True)
+
+    # Nombre total de modalités par variable (avant troncature au top_n)
+    total_par_var = (
+        full_df.groupby("variable")["modality"]
+        .nunique()
+        .reset_index(name="total_modalities")
+    )
+
+    # Top N modalités par variable, classées sur l'effectif cumulé toutes années
+    effectif_par_modalite = (
+        full_df.groupby(["variable", "modality"])["effectif"]
+        .sum()
+        .reset_index(name="effectif_total")
+    )
+
+    top_modalites = (
+        effectif_par_modalite
+        .sort_values(["variable", "effectif_total"], ascending=[True, False])
+        .groupby("variable")
+        .head(top_n)[["variable", "modality"]]
+    )
+
+    trend_df = (
+        full_df.merge(top_modalites, on=["variable", "modality"], how="inner")
+               .merge(total_par_var, on="variable", how="left")
+    )
+    trend_df["has_more"] = trend_df["total_modalities"] > top_n
+
+    colonnes = [colonne_annee, "modality", "modality_order", "target_moyenne",
+                "effectif", "variable", "total_modalities", "has_more"]
+    trend_df = (
+        trend_df[colonnes]
+        .sort_values(["variable", colonne_annee, "modality_order", "modality"])
+        .drop(columns="modality_order")
+    )
+
+    print(f"Trend : {trend_df['variable'].nunique()} variable(s), "
+          f"{len(trend_df)} ligne(s), top {top_n} modalités par variable")
+    return trend_df.reset_index(drop=True)
