@@ -1,21 +1,26 @@
-def resoudre_sortie(nb, config):
-    sortie_declaree = nb.get("output_file")
-    if sortie_declaree is None:
-        return None
+def label_intervalle(bins: list, i: int, decimales: int = 2) -> str:
+    """
+    Construit le label textuel de la tranche i à partir de la liste `bins`
+    (bornes, avec None aux extrémités pour -inf/+inf), telle que stockée
+    dans dict_seuils[col]["bins"].
+    """
+    lower, upper = bins[i], bins[i + 1]
+    lower_str = "-∞" if lower is None else f"{lower:.{decimales}f}"
+    upper_str = "+∞" if upper is None else f"{upper:.{decimales}f}"
+    return f"]{lower_str} ; {upper_str}]"
 
-    intermediate_dir = Path(config["intermediate_dir"])  # au lieu de base_dir + "Fichiers intermédiaires"
-    base_dir = Path(config["working_path"])
 
-    if isinstance(sortie_declaree, dict):
-        resolved_dict = {}
-        for k, v in sortie_declaree.items():
-            file_name = config[v]
-            resolved_dict[k] = str(intermediate_dir / file_name)
-        return resolved_dict
-
-    file_name = config.get(sortie_declaree, sortie_declaree)
-
-    if sortie_declaree in config:
-        return str(intermediate_dir / file_name)
-
-    return str(base_dir / sortie_declaree)
+def construire_labels_bornes(dict_seuils: dict, decimales: int = 2) -> dict:
+    """
+    À partir de dict_seuils (retourné par appliquer_decoupage_cart), construit
+    {colonne_binee: {indice_tranche: label_borne}} pour remapper les indices
+    CART en intervalles lisibles.
+    """
+    labels = {}
+    for info in dict_seuils.values():
+        bins = info["bins"]
+        col_binee = info["colonne_binee"]
+        labels[col_binee] = {
+            i: label_intervalle(bins, i, decimales) for i in range(len(bins) - 1)
+        }
+    return labels
