@@ -1,6 +1,21 @@
-print("DEBUG — entree cherchée   :")
-print(repr(entree))
-print(repr(entree.resolve()))
-print("DEBUG — sorties prévues (une par ligne) :")
-for s in sorted(sorties_prevues_ce_run, key=str):
-    print(repr(s))
+def resoudre_sortie(nb, config):
+    sortie_declaree = nb.get("output_file")
+    if sortie_declaree is None:
+        return None
+
+    intermediate_dir = Path(config["intermediate_dir"])  # au lieu de base_dir + "Fichiers intermédiaires"
+    base_dir = Path(config["working_path"])
+
+    if isinstance(sortie_declaree, dict):
+        resolved_dict = {}
+        for k, v in sortie_declaree.items():
+            file_name = config[v]
+            resolved_dict[k] = str(intermediate_dir / file_name)
+        return resolved_dict
+
+    file_name = config.get(sortie_declaree, sortie_declaree)
+
+    if sortie_declaree in config:
+        return str(intermediate_dir / file_name)
+
+    return str(base_dir / sortie_declaree)
