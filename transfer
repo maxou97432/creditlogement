@@ -1,170 +1,304 @@
-# README — Pipeline RiskQuant
+def optimiser_cart_variable(
+    lf: pl.LazyFrame,
+    feature: str,
+    target: str,
+    distribution: str = "continuous",
+    max_depths: list = None,
+    min_samples_leaf_pct: float = 0.05,
+    cv: int = 5,
+    max_classes: int = 8,
+    random_state: int = 42,
+):
+    """
+    Recherche le max_depth optimal pour `feature`, par validation croisée,
+    à min_samples_leaf fixé (contrainte structurelle en % de la population).
 
-## Vue d'ensemble
+    Critère de sélection :
+      - bernoulli  -> AUC moyenne en CV (maximisée)
+      - continuous -> R² ajusté moyen en CV (maximisé) ; RMSE moyen calculé
+        dans la même boucle CV (un seul passage fit/predict par fold, au lieu
+        de deux séparés) et reporté à titre indicatif.
 
-Cette pipeline exécute la chaîne complète de calcul LGD RiskQuant (chargement, scoring, CHR, extrapolation, rassemblement, obligor, tests d'hétérogénéité, MoC) pour un ou plusieurs modèles (A, B, C...), définis dans l'Excel de segmentation.
+    criterion fixé : "gini" (Classifier) / "squared_error" (Regressor).
 
-**Principe central : `Run Pipeline.ipynb` est l'unique point d'entrée.** Toute la configuration (chemins, variables métier, ordre des notebooks) est déclarée en Python dans ce notebook. `config.yaml` est un fichier généré automatiquement — **ne jamais l'éditer à la main**, il sera écrasé au prochain run.
+    max_classes agit en garde-fou : les max_depth produisant plus de
+    max_classes feuilles sont écartés avant le calcul CV.
 
----
+    Garde-fous anti-crash : la variable est ignorée si n_obs < cv*2, ou pour
+    bernoulli si la classe minoritaire a moins de `cv` individus.
 
-## Démarrage rapide
+    Retourne toujours un dict (jamais None) avec au minimum les clés
+    feature, best_max_depth (None en cas d'échec), motif_echec, historique.
+    """
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+    from sklearn.model_selection import StratifiedKFold, KFold
+    from sklearn.metrics import roc_auc_score, mean_squared_error, r2_score
 
-1. Vérifier/mettre à jour l'Excel de segmentation (`Segmentation_LGD.xlsx`) — c'est lui qui pilote quels segments et quels modèles sont traités.
-2. Ouvrir `Run Pipeline.ipynb`.
-3. Vérifier la cellule des constantes (généralement rien à changer d'un run à l'autre).
-4. `Restart` le kernel, puis `Run All`.
-5. Lire le récapitulatif final : statut par modèle (`OK` / `ÉCHEC` / `ignoré`).
+    max_depths = max_depths or [2, 3, 4, 5]
 
----
+    pdf = (
+        lf.filter(pl.col(feature).is_not_null() & pl.col(target).is_not_null())
+          .select([feature, target])
+          .collect()
+          .to_pandas()
+    )
+    n_obs = len(pdf)
 
-## Structure du projet
+    if n_obs < cv * 2:
+        return {
+            "feature": feature, "best_max_depth": None, "historique": pd.DataFrame(),
+            "motif_echec": f"n_obs={n_obs} insuffisant pour cv={cv}",
+        }
 
-```
-RiskQuant/
-├── Run Pipeline.ipynb          <- SEUL fichier à piloter/éditer
-├── config.yaml                 <- généré automatiquement, ne pas éditer
-├── run_pipeline.py             <- moteur d'exécution (PipelineOrchestrator)
-├── utils/
-│   └── config.py                <- load_config(), get_notebook_io()
-├── Input/
-│   └── Segmentation_LGD.xlsx    <- pilote les segments et les modèles
-├── 0 - Chargement.ipynb
-├── 1 - Calcul_LGD.ipynb
-├── ... (autres notebooks métier, renommés automatiquement)
-└── OutputNI/
-    ├── A/
-    │   ├── Fichiers intermédiaires/
-    │   ├── notebooks_executes/{RUN_ID}/
-    │   ├── reports/
-    │   └── reports_excel/
-    ├── B/ ...
-    └── C/ ...
-```
+    if distribution == "bernoulli":
+        effectifs_classes = pdf[target].value_counts()
+        if effectifs_classes.min() < cv:
+            return {
+                "feature": feature, "best_max_depth": None, "historique": pd.DataFrame(),
+                "motif_echec": f"classe minoritaire={effectifs_classes.min()} < cv={cv}",
+            }
 
----
+    X = pdf[[feature]].values
+    y = pdf[target].values
+    min_leaf = max(int(n_obs * min_samples_leaf_pct), 5)
 
-## Configurer un run
+    if distribution == "bernoulli":
+        Estimateur = DecisionTreeClassifier
+        kwargs_fixes = {"criterion": "gini"}
+        splitter = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+    else:
+        Estimateur = DecisionTreeRegressor
+        kwargs_fixes = {"criterion": "squared_error"}
+        splitter = KFold(n_splits=cv, shuffle=True, random_state=random_state)
 
-Tout se passe dans les premières cellules de `Run Pipeline.ipynb`.
+    # Découpage des folds une seule fois, réutilisé pour toutes les profondeurs
+    folds = list(splitter.split(X, y))
 
-### Variables métier
-```python
-VARIABLES_METIER = {
-    "target": "LGD_MAX_EBA_DIRECT_2ANS",
-    "lgd_calc": "Score_LGD_calc",
-    "segment_col": "Seg",
-    ...
-}
-```
-À modifier uniquement si un nom de colonne source change.
+    historique = []
+    for depth in max_depths:
+        model_full = Estimateur(
+            max_depth=depth, min_samples_leaf=min_leaf,
+            random_state=random_state, **kwargs_fixes,
+        )
 
-### Ordre et activation des notebooks — `CATALOGUE_NOTEBOOKS`
-C'est l'endroit central pour tout ce qui touche à la chaîne :
+        try:
+            model_full.fit(X, y)
+            nb_classes = int((model_full.tree_.feature != -2).sum()) + 1
+            if nb_classes > max_classes:
+                historique.append({
+                    "max_depth": depth, "nb_classes": nb_classes,
+                    "score_moyen": None, "rmse_moyen": None,
+                    "motif_exclusion": f"> max_classes ({max_classes})",
+                })
+                continue
 
-```python
-CATALOGUE_NOTEBOOKS = [
-    {"nom_metier": "Chargement", "actif": True,
-     "input_file": None,
-     "output_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"}},
+            # Une seule boucle CV : un fit/predict par fold, sert à la fois
+            # au score de sélection et (si continuous) au RMSE.
+            scores_fold, rmses_fold = [], []
+            for train_idx, test_idx in folds:
+                m = Estimateur(max_depth=depth, min_samples_leaf=min_leaf,
+                                random_state=random_state, **kwargs_fixes)
+                m.fit(X[train_idx], y[train_idx])
 
-    {"nom_metier": "Calcul_LGD", "actif": True,
-     "input_file": {"curerate": "loaded_file_curerate", "noncure": "loaded_file_noncure"},
-     "output_file": "score_file"},
+                if distribution == "bernoulli":
+                    proba = m.predict_proba(X[test_idx])[:, 1]
+                    scores_fold.append(roc_auc_score(y[test_idx], proba))
+                else:
+                    pred = m.predict(X[test_idx])
+                    scores_fold.append(r2_score(y[test_idx], pred))
+                    rmses_fold.append(mean_squared_error(y[test_idx], pred) ** 0.5)
 
-    ...
-]
-```
+            if distribution == "bernoulli":
+                historique.append({
+                    "max_depth": depth, "nb_classes": nb_classes,
+                    "score_moyen": np.mean(scores_fold), "score_std": np.std(scores_fold),
+                    "rmse_moyen": None, "motif_exclusion": None,
+                })
+            else:
+                r2_adj = _r2_ajuste(np.mean(scores_fold), n_obs, nb_classes)
+                historique.append({
+                    "max_depth": depth, "nb_classes": nb_classes,
+                    "score_moyen": r2_adj, "score_std": np.std(scores_fold),
+                    "rmse_moyen": np.mean(rmses_fold), "motif_exclusion": None,
+                })
+        except Exception as e:
+            historique.append({
+                "max_depth": depth, "nb_classes": None,
+                "score_moyen": None, "rmse_moyen": None,
+                "motif_exclusion": f"erreur: {e}",
+            })
+            continue
 
-- **Réordonner** : déplacer un bloc dans la liste. Les fichiers `.ipynb` sont renommés automatiquement au prochain run pour refléter le nouvel ordre — inutile de les renommer soi-même.
-- **Désactiver un notebook** : passer `"actif": False`. Les notebooks suivants s'adaptent automatiquement (repli sur la dernière sortie disponible).
-- **Ajouter un notebook** : insérer un bloc à la position voulue, avec un `nom_metier` unique et sa dépendance (`input_file`/`output_file`, qui référence une clé de `FICHIERS_INTERMEDIAIRES`).
+    df_hist = pd.DataFrame(historique)
+    candidats = df_hist.dropna(subset=["score_moyen"]) if not df_hist.empty else df_hist
 
-### Fichiers intermédiaires
-```python
-FICHIERS_INTERMEDIAIRES = {
-    "score_file": "score_lgd.parquet",
-    "chr_file": "chr_jenks.parquet",
-    ...
-}
-```
-Chaque nouvelle sortie de notebook doit avoir une entrée ici avant d'être référencée dans le catalogue.
+    if candidats.empty:
+        return {
+            "feature": feature, "best_max_depth": None, "historique": df_hist,
+            "motif_echec": "aucune profondeur valide (voir historique)",
+        }
 
-### Modèles
-Rien à configurer : les modèles actifs sont détectés automatiquement depuis la colonne **`Modèle final`** de l'Excel de segmentation. Pour exclure un modèle, retirer/désactiver ses lignes directement dans l'Excel (colonne `Générer`).
+    ligne = candidats.sort_values("score_moyen", ascending=False).iloc[0]
 
----
+    return {
+        "feature": feature,
+        "best_max_depth": int(ligne["max_depth"]),
+        "best_min_samples_leaf": min_leaf,
+        "best_min_samples_leaf_pct": min_samples_leaf_pct,
+        "best_score": float(ligne["score_moyen"]),
+        "best_rmse": None if pd.isna(ligne.get("rmse_moyen")) else float(ligne["rmse_moyen"]),
+        "best_nb_classes": int(ligne["nb_classes"]),
+        "historique": df_hist,
+        "motif_echec": None,
+    }
 
-## Ce qui se passe à l'exécution
+def appliquer_decoupage_cart_optimise(
+    lf: pl.LazyFrame,
+    variables_quanti: list,
+    target: str,
+    distribution: str = "continuous",
+    dossier_sortie: Path = None,
+    suffixe: str = "_CART",
+    max_depths: list = None,
+    min_samples_leaf_pct: float = 0.05,
+    cv: int = 5,
+    max_classes: int = 8,
+    checkpoint_tous_les: int = 20,
+    n_jobs: int = -1,
+):
+    """
+    Calcule, par variable quanti, un CART dont max_depth est choisi par grid
+    search + validation croisée (optimiser_cart_variable), à
+    min_samples_leaf_pct fixé, puis applique les bins via binner_lazy_generique.
 
-1. **Synchronisation** des noms de fichiers `.ipynb` selon l'ordre du catalogue.
-2. **Génération de `config.yaml`** à partir des constantes.
-3. **Lecture de l'Excel** de segmentation, détection des modèles.
-4. **Boucle par modèle** (A, B, C...) :
-   - Segments filtrés, écrits dans un JSON dédié.
-   - Dossier de sortie isolé : `OutputNI/{modele}/`.
-   - Résolution de la chaîne entrée/sortie de chaque notebook actif.
-   - Exécution via papermill (`PipelineOrchestrator`).
-   - Un échec sur un modèle n'empêche pas les autres modèles de tourner.
-5. **Archivage** : config exécutée + plan CSV, horodatés, dans `reports/`.
+    L'étape d'optimisation (la plus coûteuse) est parallélisée par variable
+    via joblib (n_jobs=-1 -> tous les cœurs disponibles). Le fit final +
+    l'extraction des seuils restent séquentiels (rapides, un seul arbre par
+    variable).
 
----
+    dict_seuils garde les vraies bornes -inf/+inf (np.inf) ; l'export sur
+    disque se fait en parquet/CSV.
 
-## Lire les résultats
+    Retourne (lf_binned, dict_seuils, variables_binees, df_historique_optim,
+    df_variables_ignorees).
+    """
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+    from joblib import Parallel, delayed
 
-- **Sorties finales** : `OutputNI/{modele}/`
-- **Notebooks exécutés** (avec tous les outputs, graphiques, prints) : `OutputNI/{modele}/notebooks_executes/{RUN_ID}/`
-- **Config réellement utilisée pour ce run** : `reports/config_executee_{modele}_{RUN_ID}.yaml`
-- **Plan d'exécution** (quel notebook a lu/écrit quoi) : `reports/plan_run_{modele}_{RUN_ID}.csv`
-- **Récapitulatif dans la sortie du notebook** : statut par modèle (`✅ OK` / `❌ ÉCHEC` / `⏭️ ignoré`)
+    colonnes_presentes = lf.collect_schema().names()
+    variables_valides = [c for c in variables_quanti if c in colonnes_presentes]
+    variables_absentes = [c for c in variables_quanti if c not in colonnes_presentes]
 
----
+    dossier_cart = None
+    if dossier_sortie is not None:
+        dossier_cart = Path(dossier_sortie) / "decoupCART"
+        dossier_cart.mkdir(parents=True, exist_ok=True)
 
-## Repli automatique — comment le lire
+    # --- Étape 1 : optimisation par variable, en parallèle ------------------
+    def _optimiser_une_variable(col):
+        try:
+            return col, optimiser_cart_variable(
+                lf, col, target, distribution=distribution,
+                max_depths=max_depths, min_samples_leaf_pct=min_samples_leaf_pct,
+                cv=cv, max_classes=max_classes,
+            )
+        except Exception as e:
+            return col, {"best_max_depth": None, "motif_echec": f"erreur inattendue: {e}"}
 
-Si un notebook est désactivé et qu'un autre en dépendait, un message apparaît dans les logs :
-```
-[repli] Calcul_obligor lira la sortie de Rassemblement niveau Modèle
-        (rassemblement_file) au lieu de survival_rate_file
-```
-C'est normal et volontaire — pas une erreur. Ça permet de sauter un notebook non prêt sans casser toute la chaîne.
+    resultats = Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(_optimiser_une_variable)(col)
+        for col in tqdm(variables_valides, desc=f"CART optimisé ({distribution}) — grid search")
+    )
 
-Si un fichier attendu n'existe nulle part (ni produit dans ce run, ni déjà présent sur disque), le run s'arrête avec un message clair indiquant quel notebook et quel fichier posent problème.
+    # --- Étape 2 : fit final + binning, séquentiel (rapide) ------------------
+    dict_seuils, expressions, variables_binees = {}, [], []
+    historique_optim = []
+    variables_ignorees = [{"variable": c, "motif": "absente"} for c in variables_absentes]
 
----
+    Estimateur = DecisionTreeClassifier if distribution == "bernoulli" else DecisionTreeRegressor
+    criterion = "gini" if distribution == "bernoulli" else "squared_error"
 
-## Relancer un seul notebook (debug)
+    for i, (col, resultat) in enumerate(tqdm(resultats, desc="Binning final")):
+        if resultat.get("best_max_depth") is None:
+            variables_ignorees.append({
+                "variable": col, "motif": resultat.get("motif_echec", "optimisation échouée"),
+            })
+            continue
 
-Chaque notebook métier peut tourner seul, sans passer par `Run Pipeline.ipynb` :
+        pdf = (
+            lf.filter(pl.col(col).is_not_null() & pl.col(target).is_not_null())
+              .select([col, target]).collect().to_pandas()
+        )
+        X, y = pdf[[col]].values, pdf[target].values
+        model = Estimateur(
+            max_depth=resultat["best_max_depth"],
+            min_samples_leaf=resultat["best_min_samples_leaf"],
+            criterion=criterion,
+            random_state=42,
+        )
+        model.fit(X, y)
 
-1. Ouvrir le notebook directement.
-2. Vérifier la cellule d'en-tête :
-   ```python
-   chemin_entree = None
-   chemin_sortie = None
-   nom_notebook  = "NomMetier"   # doit correspondre au nom_metier du catalogue
-   ```
-3. `Restart` + `Run All`.
+        raw_thresh = model.tree_.threshold[model.tree_.feature != -2]
+        thresholds = np.sort(np.unique(raw_thresh))
+        finite_thresholds = thresholds[np.isfinite(thresholds)]
+        if len(finite_thresholds) == 0:
+            variables_ignorees.append({"variable": col, "motif": "pas de coupure trouvée"})
+            continue
 
-Le notebook rechargera `config.yaml` (celui du dernier run) et retrouvera ses propres chemins d'entrée/sortie automatiquement.
+        min_val, max_val = pdf[col].min(), pdf[col].max() + 1
+        bins_bruts = np.concatenate(([min_val], finite_thresholds, [max_val]))
+        seuils_finis = list(bins_bruts[1:-1])
+        bins = [-np.inf] + seuils_finis + [np.inf]
 
-⚠️ Ce mode ne fonctionne correctement que si `config.yaml` est à jour — s'il date d'un run avec une configuration différente, relancer `Run Pipeline.ipynb` d'abord pour le régénérer.
+        nom_bin = f"{col}{suffixe}"
+        expressions.append(binner_lazy_generique(lf, col, bins).alias(nom_bin))
+        dict_seuils[col] = {
+            "bins": bins,
+            "nb_classes": len(bins) - 1,
+            "colonne_binee": nom_bin,
+        }
+        variables_binees.append(nom_bin)
 
----
+        historique_optim.append({
+            "variable": col,
+            "max_depth": resultat["best_max_depth"],
+            "min_samples_leaf_pct": resultat["best_min_samples_leaf_pct"],
+            "min_samples_leaf_abs": resultat["best_min_samples_leaf"],
+            "score_cv": resultat["best_score"],
+            "rmse_cv": resultat["best_rmse"],
+            "nb_classes": resultat["best_nb_classes"],
+        })
 
-## Erreurs fréquentes
+        if (dossier_cart is not None and checkpoint_tous_les
+                and (i + 1) % checkpoint_tous_les == 0):
+            pd.DataFrame(historique_optim).to_csv(
+                dossier_cart / "hyperparametres_optimises_partiel.csv", index=False,
+            )
+            pd.DataFrame(variables_ignorees).to_csv(
+                dossier_cart / "variables_ignorees_partiel.csv", index=False,
+            )
 
-| Symptôme | Cause probable |
-|---|---|
-| `KeyError: Notebook 'X' absent de config.yaml` | `nom_notebook` dans le notebook ne correspond pas exactement au `nom_metier` du catalogue (attention aux accents, à la casse, à l'absence de numéro/`.ipynb`) |
-| `FileNotFoundError: entrée introuvable` | Le notebook producteur n'a pas encore tourné, ou son fichier de sortie n'a pas été écrit sur `CHEMIN_SORTIE` |
-| Notebook manquant après renommage | Vérifier qu'aucun onglet du notebook concerné n'est resté ouvert dans VSCode pendant le run (fermer avant de lancer) |
-| Deux fichiers pour un même `nom_metier` | Un ancien fichier renommé traîne encore — supprimer le doublon |
+    lf_binned = lf.with_columns(expressions) if expressions else lf
 
----
+    df_historique_optim = pd.DataFrame(historique_optim)
+    df_variables_ignorees = pd.DataFrame(variables_ignorees)
 
-## Points de vigilance
+    print(f"CART optimisé ({distribution}) : {len(variables_binees)} variables découpées, "
+          f"{len(df_variables_ignorees)} ignorées (min_samples_leaf_pct={min_samples_leaf_pct:.0%})")
+    if not df_variables_ignorees.empty:
+        print(df_variables_ignorees["motif"].value_counts().to_string())
 
-- **`config.yaml` est jetable.** Il est régénéré à chaque run — toute modification manuelle sera perdue.
-- **`stop_on_error`** dans `EXECUTION` : `True` en usage normal (arrête la chaîne dès qu'un notebook plante), `False` uniquement pour du debug où l'on veut voir tous les problèmes d'un coup avant de corriger.
-- **Cas Cure/NonCure** : les notebooks Chargement et Calcul_LGD manipulent deux fichiers (`CHEMIN_ENTREE`/`CHEMIN_SORTIE` sont alors des `dict`, pas des chemins simples) — ne pas confondre avec le cas standard.
+    if dossier_cart is not None:
+        table_seuils = construire_table_seuils(dict_seuils)
+        table_seuils.to_parquet(dossier_cart / "seuils_cart.parquet", index=False)
+        table_seuils.to_csv(dossier_cart / "seuils_cart.csv", index=False)
+
+        df_historique_optim.to_csv(dossier_cart / "hyperparametres_optimises.csv", index=False)
+        df_variables_ignorees.to_csv(dossier_cart / "variables_ignorees.csv", index=False)
+        for f_partiel in ["hyperparametres_optimises_partiel.csv", "variables_ignorees_partiel.csv"]:
+            p = dossier_cart / f_partiel
+            if p.exists():
+                p.unlink()
+        print(f"Seuils + hyperparamètres + variables ignorées sauvegardés : {dossier_cart}")
+
+    return lf_binned, dict_seuils, variables_binees, df_historique_optim, df_variables_ignorees
