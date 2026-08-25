@@ -1,3 +1,51 @@
+def _map_dict_to_expr(col: str, mapping: dict, default) -> pl.Expr:
+    """
+    Construit une expression pl.when/then/otherwise à partir d'un dict
+    {code: label}, en castant la colonne en Int64. Remplace .replace(dict),
+    dont le comportement sur des clés int s'est révélé instable selon la
+    version de Polars installée (mapping silencieusement ignoré dans
+    certains cas plutôt que de lever une erreur).
+    """
+    expr = pl.lit(default)
+    col_expr = pl.col(col).cast(pl.Int64, strict=False)
+    for code, label in mapping.items():
+        expr = pl.when(col_expr == int(code)).then(pl.lit(label)).otherwise(expr)
+    return expr
+
+
+def charger_encoding_dict(chemin: str) -> dict:
+    """Charge encoding_dict.json : {variable: {label_original: code}}."""
+    with open(chemin, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def construire_labels_quali(encoding_dict: dict) -> dict:
+    """
+    Inverse encoding_dict ({variable: {label: code}}) en
+    {variable: {code: label}} pour ré-afficher les modalités quali encodées
+    en leur libellé d'origine. Les codes sont castés en int (clés JSON
+    toujours strings) pour matcher les colonnes Int des DataFrames polars.
+
+    En cas de collision (deux labels différents mappés au même code), le
+    dernier rencontré gagne et un avertissement est affiché.
+    """
+    labels_quali = {}
+    for var, mapping in encoding_dict.items():
+        inverse, vus = {}, {}
+        for label, code in mapping.items():
+            code_int = int(code)
+            if code_int in vus and vus[code_int] != label:
+                print(f"   ATTENTION collision sur {var} : code {code_int} "
+                      f"mappé à la fois à '{vus[code_int]}' et '{label}'")
+            inverse[code_int] = label
+            vus[code_int] = label
+        labels_quali[var] = inverse
+    return labels_quali
+
+
+# --------------------------------------------------------------------------- #
+# Statistiques descriptives
+# --------------------------------------------------------------------------- #
 def stats_par_modalite(
     lf: pl.LazyFrame,
     variables: list,
@@ -18,8 +66,7 @@ def stats_par_modalite(
 
     labels_quali : dict {variable: {code: label}} pour les variables quali
     déjà encodées (voir construire_labels_quali) — la modalité affichée est
-    le libellé d'origine. Le tri utilise le code numérique (ordre stable,
-    reproductible), pas le libellé texte.
+    le libellé d'origine. Le tri utilise le code numérique, pas le libellé.
     """
     labels_bornes = labels_bornes or {}
     labels_quali = labels_quali or {}
@@ -52,17 +99,15 @@ def stats_par_modalite(
             )
 
         if var in labels_bornes:
-            expr_ordre = pl.col(var).fill_null(-1).cast(pl.Int64).alias("modalite_ordre")
-            expr_modalite = (
-                pl.col(var).cast(pl.Int64).replace(labels_bornes[var], default=None)
-                  .fill_null(LABEL_MANQUANT)
+            expr_ordre = (
+                pl.col(var).fill_null(-1).cast(pl.Int64, strict=False).alias("modalite_ordre")
             )
+            expr_modalite = _map_dict_to_expr(var, labels_bornes[var], LABEL_MANQUANT)
         elif var in labels_quali:
-            expr_ordre = pl.col(var).fill_null(-999999).cast(pl.Int64).alias("modalite_ordre")
-            expr_modalite = (
-                pl.col(var).cast(pl.Int64).replace(labels_quali[var], default=None)
-                  .fill_null(LABEL_MANQUANT)
+            expr_ordre = (
+                pl.col(var).fill_null(-999999).cast(pl.Int64, strict=False).alias("modalite_ordre")
             )
+            expr_modalite = _map_dict_to_expr(var, labels_quali[var], LABEL_MANQUANT)
         else:
             expr_ordre = pl.lit(None).cast(pl.Int64).alias("modalite_ordre")
             expr_modalite = pl.col(var).cast(pl.Utf8).fill_null(LABEL_MANQUANT)
@@ -95,3 +140,117 @@ def stats_par_modalite(
                 + ["modalite_ordre", "modalite"])
           .select(colonnes_finales)
     )
+
+
+def export_brut_comptages(
+    lf, variables, id_col, colonne_annee=None,
+    labels_bornes: dict = None, labels_quali: dict = None,
+):
+    """
+    Export à plat, une ligne par variable x modalité [x année], avec
+    count(ID). Destiné à être croisé via TCD Excel côté utilisateur.
+    Les modalités sont déjà déchiffrées si labels_bornes/labels_quali sont
+    fournis (mêmes règles que stats_par_modalite).
+    """
+    return stats_par_modalite(
+        lf, variables, target=id_col, id_col=id_col,
+        colonne_annee=colonne_annee, type_variable="brut",
+        labels_bornes=labels_bornes, labels_quali=labels_quali,
+    ).select(
+        ["variable", "modalite"]
+        + ([colonne_annee] if colonne_annee else [])
+        + ["effectif", "pct_effectif"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Préparation des tendances par modalité (onglet Trend_Modalities)
+# --------------------------------------------------------------------------- #
+def prepare_trend_data(
+    lf_decoup, features_used, target, top_n=15,
+    colonne_annee="annee", labels_bornes: dict = None, labels_quali: dict = None,
+):
+    """
+    Prépare le DataFrame de l'onglet Trend_Modalities.
+
+    labels_bornes : dict {colonne_binee: {indice: label}} pour les quanti
+    binées CART. labels_quali : dict {variable: {code: label}} pour les
+    quali déjà encodées. Les valeurs nulles sont matérialisées en "Manquant".
+    """
+    colonnes_dispo = lf_decoup.collect_schema().names()
+    labels_bornes = labels_bornes or {}
+    labels_quali = labels_quali or {}
+    all_trends, ignorees = [], []
+
+    for feat in features_used:
+        if feat not in colonnes_dispo:
+            ignorees.append(feat)
+            continue
+
+        if feat in labels_bornes:
+            expr_order = (
+                pl.col(feat).fill_null(-1).cast(pl.Int64, strict=False).alias("modality_order")
+            )
+            expr_modality = _map_dict_to_expr(feat, labels_bornes[feat], LABEL_MANQUANT).alias("modality")
+        elif feat in labels_quali:
+            expr_order = (
+                pl.col(feat).fill_null(-999999).cast(pl.Int64, strict=False).alias("modality_order")
+            )
+            expr_modality = _map_dict_to_expr(feat, labels_quali[feat], LABEL_MANQUANT).alias("modality")
+        else:
+            expr_order = pl.lit(None).cast(pl.Int64).alias("modality_order")
+            expr_modality = pl.col(feat).cast(pl.Utf8).fill_null(LABEL_MANQUANT).alias("modality")
+
+        agg = (
+            lf_decoup
+            .select([colonne_annee, feat, target])
+            .with_columns([expr_modality, expr_order])
+            .group_by([colonne_annee, "modality", "modality_order"])
+            .agg([
+                pl.col(target).mean().alias("target_moyenne"),
+                pl.len().alias("effectif"),
+            ])
+            .with_columns(pl.lit(feat).alias("variable"))
+            .sort([colonne_annee, "modality_order", "modality"])
+            .collect()
+        )
+        all_trends.append(agg.to_pandas())
+
+    if ignorees:
+        print(f"Trend : {len(ignorees)} variable(s) absente(s) ignorée(s) : {ignorees[:5]}")
+    if not all_trends:
+        return pd.DataFrame()
+
+    full_df = pd.concat(all_trends, ignore_index=True)
+
+    total_par_var = (
+        full_df.groupby("variable")["modality"].nunique()
+        .reset_index(name="total_modalities")
+    )
+    effectif_par_modalite = (
+        full_df.groupby(["variable", "modality"])["effectif"].sum()
+        .reset_index(name="effectif_total")
+    )
+    top_modalites = (
+        effectif_par_modalite
+        .sort_values(["variable", "effectif_total"], ascending=[True, False])
+        .groupby("variable").head(top_n)[["variable", "modality"]]
+    )
+
+    trend_df = (
+        full_df.merge(top_modalites, on=["variable", "modality"], how="inner")
+               .merge(total_par_var, on="variable", how="left")
+    )
+    trend_df["has_more"] = trend_df["total_modalities"] > top_n
+
+    colonnes = [colonne_annee, "modality", "modality_order", "target_moyenne",
+                "effectif", "variable", "total_modalities", "has_more"]
+    trend_df = (
+        trend_df[colonnes]
+        .sort_values(["variable", colonne_annee, "modality_order", "modality"])
+        .drop(columns="modality_order")
+    )
+
+    print(f"Trend : {trend_df['variable'].nunique()} variable(s), "
+          f"{len(trend_df)} ligne(s), top {top_n} modalités par variable")
+    return trend_df.reset_index(drop=True)
