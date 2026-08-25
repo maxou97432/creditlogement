@@ -1,29 +1,97 @@
-def charger_encoding_dict(chemin: str) -> dict:
-    """Charge encoding_dict.json : {variable: {label_original: code}}."""
-    with open(chemin, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def construire_labels_quali(encoding_dict: dict) -> dict:
+def stats_par_modalite(
+    lf: pl.LazyFrame,
+    variables: list,
+    target: str,
+    id_col: str,
+    colonne_annee: str = None,
+    type_variable: str = "quali",
+    labels_bornes: dict = None,
+    labels_quali: dict = None,
+):
     """
-    Inverse encoding_dict ({variable: {label: code}}) en
-    {variable: {code: label}} pour ré-afficher les modalités quali encodées
-    en leur libellé d'origine. Les codes sont castés en int (clés JSON
-    toujours strings) pour matcher les colonnes Int des DataFrames polars.
+    Pour chaque variable et chaque modalité : effectif, % effectif, target
+    moyenne. Si colonne_annee est fourni, ventile également par année.
 
-    En cas de collision (deux labels différents mappés au même code, ce qui
-    ne devrait pas arriver mais on ne sait jamais avec un encodage externe),
-    le dernier rencontré gagne et un avertissement est affiché.
+    labels_bornes : dict {colonne_binee: {indice: label}} pour les variables
+    quanti binées par CART (voir construire_labels_bornes) — la modalité
+    affichée est la borne d'intervalle.
+
+    labels_quali : dict {variable: {code: label}} pour les variables quali
+    déjà encodées (voir construire_labels_quali) — la modalité affichée est
+    le libellé d'origine. Le tri utilise le code numérique (ordre stable,
+    reproductible), pas le libellé texte.
     """
-    labels_quali = {}
-    for var, mapping in encoding_dict.items():
-        inverse, vus = {}, {}
-        for label, code in mapping.items():
-            code_int = int(code)
-            if code_int in vus and vus[code_int] != label:
-                print(f"   ATTENTION collision sur {var} : code {code_int} "
-                      f"mappé à la fois à '{vus[code_int]}' et '{label}'")
-            inverse[code_int] = label
-            vus[code_int] = label
-        labels_quali[var] = inverse
-    return labels_quali
+    labels_bornes = labels_bornes or {}
+    labels_quali = labels_quali or {}
+    cles_groupe_base = [] if colonne_annee is None else [colonne_annee]
+    resultats = []
+
+    for var in variables:
+        cles = cles_groupe_base + [var]
+
+        agg = (
+            lf.group_by(cles)
+              .agg([
+                  pl.col(id_col).n_unique().alias("effectif"),
+                  pl.col(target).mean().alias("target_moyenne"),
+                  pl.col(target).std().alias("target_ecart_type"),
+                  pl.col(target).min().alias("target_min"),
+                  pl.col(target).max().alias("target_max"),
+              ])
+        )
+
+        fenetre = cles_groupe_base if cles_groupe_base else None
+        if fenetre:
+            agg = agg.with_columns(
+                (pl.col("effectif") / pl.col("effectif").sum().over(fenetre) * 100)
+                .alias("pct_effectif")
+            )
+        else:
+            agg = agg.with_columns(
+                (pl.col("effectif") / pl.col("effectif").sum() * 100).alias("pct_effectif")
+            )
+
+        if var in labels_bornes:
+            expr_ordre = pl.col(var).fill_null(-1).cast(pl.Int64).alias("modalite_ordre")
+            expr_modalite = (
+                pl.col(var).cast(pl.Int64).replace(labels_bornes[var], default=None)
+                  .fill_null(LABEL_MANQUANT)
+            )
+        elif var in labels_quali:
+            expr_ordre = pl.col(var).fill_null(-999999).cast(pl.Int64).alias("modalite_ordre")
+            expr_modalite = (
+                pl.col(var).cast(pl.Int64).replace(labels_quali[var], default=None)
+                  .fill_null(LABEL_MANQUANT)
+            )
+        else:
+            expr_ordre = pl.lit(None).cast(pl.Int64).alias("modalite_ordre")
+            expr_modalite = pl.col(var).cast(pl.Utf8).fill_null(LABEL_MANQUANT)
+
+        agg = (
+            agg.with_columns([
+                pl.lit(var).alias("variable"),
+                pl.lit(type_variable).alias("type_variable"),
+                expr_modalite.alias("modalite"),
+                expr_ordre,
+            ])
+            .drop(var)
+        )
+        resultats.append(agg)
+
+    if not resultats:
+        return pl.DataFrame()
+
+    colonnes_finales = (
+        ["variable", "type_variable", "modalite"]
+        + ([colonne_annee] if colonne_annee else [])
+        + ["effectif", "pct_effectif", "target_moyenne",
+           "target_ecart_type", "target_min", "target_max"]
+    )
+
+    return (
+        pl.concat(resultats, how="vertical")
+          .collect()
+          .sort(["variable"] + ([colonne_annee] if colonne_annee else [])
+                + ["modalite_ordre", "modalite"])
+          .select(colonnes_finales)
+    )
