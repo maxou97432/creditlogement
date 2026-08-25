@@ -1,115 +1,138 @@
-def prepare_trend_data(lf_decoup, features_used, target, top_n=15,
-                        colonne_annee="annee", labels_bornes: dict = None):
+def _r2_ajuste(r2: float, n: int, p: int) -> float:
     """
-    Prépare le DataFrame de l'onglet Trend_Modalities.
-
-    features_used : noms de variables réels (drivers_quali + drivers_quanti_bines).
-    Chaque colonne contient directement sa modalité en valeur de cellule
-    (texte pour les quali, numéro de tranche pour les quanti binées) — ce ne
-    sont PAS des colonnes one-hot.
-
-    labels_bornes : dict optionnel {colonne_binee: {indice: label_borne}}
-    (voir construire_labels_bornes). Pour les colonnes quanti binées présentes
-    dans ce dict, la modalité affichée est la borne d'intervalle (ex.
-    "]0.34 ; 1.20]") plutôt que l'indice de tranche brut. Le tri reste basé
-    sur l'indice numérique d'origine pour préserver l'ordre croissant des
-    tranches (le tri alphabétique sur le label casserait l'ordre avec des
-    bornes négatives).
-
-    Les valeurs nulles (variable source manquante, non binée par le CART) sont
-    matérialisées en modalité "Manquant" au lieu d'être agrégées silencieusement
-    dans un groupe vide.
-
-    Retourne un DataFrame pandas : annee | modality | target_moyenne | effectif
-    | variable | total_modalities | has_more, limité au top_n modalités par
-    variable (classées par effectif décroissant).
+    R² ajusté = 1 - (1-R²)*(n-1)/(n-p-1).
+    p = nombre de classes (feuilles) produites par l'arbre, utilisé comme proxy
+    du nombre de paramètres effectifs — un découpage plus fin doit démontrer un
+    vrai gain de R² pour compenser la pénalité de complexité, ce qui décourage
+    naturellement les micro-tranches à faible pouvoir explicatif.
     """
-    colonnes_dispo = lf_decoup.collect_schema().names()
-    labels_bornes = labels_bornes or {}
-    all_trends, ignorees = [], []
+    if n - p - 1 <= 0:
+        return float("nan")
+    return 1 - (1 - r2) * (n - 1) / (n - p - 1)
 
-    for feat in features_used:
-        if feat not in colonnes_dispo:
-            ignorees.append(feat)
+
+def optimiser_cart_variable(
+    lf: pl.LazyFrame,
+    feature: str,
+    target: str,
+    distribution: str = "continuous",
+    max_depths: list = None,
+    min_samples_leaf_pct: float = 0.05,
+    cv: int = 5,
+    max_classes: int = 8,
+    random_state: int = 42,
+):
+    """
+    Recherche le max_depth optimal pour `feature`, par validation croisée,
+    à min_samples_leaf fixé (contrainte structurelle en % de la population,
+    garantissant qu'aucune classe produite n'est anecdotique).
+
+    Critère de sélection :
+      - bernoulli  -> AUC moyenne en CV (maximisée)
+      - continuous -> R² ajusté moyen en CV (maximisé) ; RMSE moyen également
+        calculé et reporté (non utilisé pour la sélection, mais plus lisible
+        pour un rapport LGD que le R²).
+
+    criterion fixé : "gini" (Classifier) / "squared_error" (Regressor) — non
+    inclus dans la grille pour limiter le nombre de combinaisons testées.
+
+    max_classes agit en garde-fou : les max_depth produisant plus de
+    max_classes feuilles sont écartés avant même le calcul CV (pas de coupure
+    hasardeuse à filtrer a posteriori, puisque min_samples_leaf empêche déjà
+    les classes trop petites).
+
+    Retourne un dict {best_max_depth, best_min_samples_leaf, best_score,
+    best_nb_classes, historique} où historique liste toutes les profondeurs
+    testées, pour audit/justification du choix.
+    """
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+    from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+    from sklearn.metrics import mean_squared_error
+
+    max_depths = max_depths or [2, 3, 4, 5]
+
+    pdf = (
+        lf.filter(pl.col(feature).is_not_null() & pl.col(target).is_not_null())
+          .select([feature, target])
+          .collect()
+          .to_pandas()
+    )
+    X = pdf[[feature]].values
+    y = pdf[target].values
+    n_obs = len(pdf)
+    min_leaf = max(int(n_obs * min_samples_leaf_pct), 5)  # plancher de sécurité
+
+    if distribution == "bernoulli":
+        Estimateur = DecisionTreeClassifier
+        kwargs_fixes = {"criterion": "gini"}
+        splitter = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+    else:
+        Estimateur = DecisionTreeRegressor
+        kwargs_fixes = {"criterion": "squared_error"}
+        splitter = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    historique = []
+    for depth in max_depths:
+        model = Estimateur(
+            max_depth=depth,
+            min_samples_leaf=min_leaf,
+            random_state=random_state,
+            **kwargs_fixes,
+        )
+
+        # Nombre de classes produites (fit complet), garde-fou avant le coût CV
+        model.fit(X, y)
+        nb_classes = int((model.tree_.feature != -2).sum()) + 1
+        if nb_classes > max_classes:
+            historique.append({
+                "max_depth": depth, "nb_classes": nb_classes,
+                "score_moyen": None, "rmse_moyen": None,
+                "motif_exclusion": f"> max_classes ({max_classes})",
+            })
             continue
 
-        est_bine = feat in labels_bornes
-
-        if est_bine:
-            # modality_order : indice CART brut (ou -1 pour "Manquant", trié en premier)
-            # modality : label texte de l'intervalle correspondant
-            expr_order = pl.col(feat).fill_null(-1).cast(pl.Int64).alias("modality_order")
-            expr_modality = (
-                pl.col(feat)
-                  .cast(pl.Int64)
-                  .replace(labels_bornes[feat], default=None)
-                  .fill_null(LABEL_MANQUANT)
-                  .alias("modality")
-            )
+        if distribution == "bernoulli":
+            scores = cross_val_score(model, X, y, cv=splitter, scoring="roc_auc")
+            historique.append({
+                "max_depth": depth, "nb_classes": nb_classes,
+                "score_moyen": scores.mean(), "score_std": scores.std(),
+                "rmse_moyen": None, "motif_exclusion": None,
+            })
         else:
-            expr_order = pl.lit(None).cast(pl.Int64).alias("modality_order")
-            expr_modality = (
-                pl.col(feat).cast(pl.Utf8).fill_null(LABEL_MANQUANT).alias("modality")
-            )
+            scores_r2 = cross_val_score(model, X, y, cv=splitter, scoring="r2")
+            # RMSE en CV manuel (cross_val_score ne fait pas nativement RMSE pré-1.4 proprement signé)
+            rmses = []
+            for train_idx, test_idx in splitter.split(X, y):
+                m = Estimateur(max_depth=depth, min_samples_leaf=min_leaf,
+                                random_state=random_state, **kwargs_fixes)
+                m.fit(X[train_idx], y[train_idx])
+                pred = m.predict(X[test_idx])
+                rmses.append(mean_squared_error(y[test_idx], pred) ** 0.5)
 
-        agg = (
-            lf_decoup
-            .select([colonne_annee, feat, target])
-            .with_columns([expr_modality, expr_order])
-            .group_by([colonne_annee, "modality", "modality_order"])
-            .agg([
-                pl.col(target).mean().alias("target_moyenne"),
-                pl.len().alias("effectif"),
-            ])
-            .with_columns(pl.lit(feat).alias("variable"))
-            .sort([colonne_annee, "modality_order", "modality"])
-            .collect()
-        )
-        all_trends.append(agg.to_pandas())
+            r2_adj = _r2_ajuste(scores_r2.mean(), n_obs, nb_classes)
+            historique.append({
+                "max_depth": depth, "nb_classes": nb_classes,
+                "score_moyen": r2_adj, "score_std": scores_r2.std(),
+                "rmse_moyen": np.mean(rmses), "motif_exclusion": None,
+            })
 
-    if ignorees:
-        print(f"Trend : {len(ignorees)} variable(s) absente(s) ignorée(s) : {ignorees[:5]}")
+    df_hist = pd.DataFrame(historique)
+    candidats = df_hist.dropna(subset=["score_moyen"])
 
-    if not all_trends:
-        return pd.DataFrame()
+    if candidats.empty:
+        print(f"   {feature} : aucune profondeur valide (toutes > max_classes={max_classes})"
+              f" — élargir max_depths ou max_classes.")
+        return None
 
-    full_df = pd.concat(all_trends, ignore_index=True)
+    ligne = candidats.sort_values("score_moyen", ascending=False).iloc[0]
 
-    # Nombre total de modalités par variable (avant troncature au top_n)
-    total_par_var = (
-        full_df.groupby("variable")["modality"]
-        .nunique()
-        .reset_index(name="total_modalities")
-    )
-
-    # Top N modalités par variable, classées sur l'effectif cumulé toutes années
-    effectif_par_modalite = (
-        full_df.groupby(["variable", "modality"])["effectif"]
-        .sum()
-        .reset_index(name="effectif_total")
-    )
-
-    top_modalites = (
-        effectif_par_modalite
-        .sort_values(["variable", "effectif_total"], ascending=[True, False])
-        .groupby("variable")
-        .head(top_n)[["variable", "modality"]]
-    )
-
-    trend_df = (
-        full_df.merge(top_modalites, on=["variable", "modality"], how="inner")
-               .merge(total_par_var, on="variable", how="left")
-    )
-    trend_df["has_more"] = trend_df["total_modalities"] > top_n
-
-    colonnes = [colonne_annee, "modality", "modality_order", "target_moyenne",
-                "effectif", "variable", "total_modalities", "has_more"]
-    trend_df = (
-        trend_df[colonnes]
-        .sort_values(["variable", colonne_annee, "modality_order", "modality"])
-        .drop(columns="modality_order")
-    )
-
-    print(f"Trend : {trend_df['variable'].nunique()} variable(s), "
-          f"{len(trend_df)} ligne(s), top {top_n} modalités par variable")
-    return trend_df.reset_index(drop=True)
+    return {
+        "feature": feature,
+        "best_max_depth": int(ligne["max_depth"]),
+        "best_min_samples_leaf": min_leaf,
+        "best_min_samples_leaf_pct": min_samples_leaf_pct,
+        "best_score": float(ligne["score_moyen"]),
+        "best_rmse": None if pd.isna(ligne.get("rmse_moyen")) else float(ligne["rmse_moyen"]),
+        "best_nb_classes": int(ligne["nb_classes"]),
+        "historique": df_hist,
+    }
