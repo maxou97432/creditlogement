@@ -1,57 +1,32 @@
-import re
-import pickle
+# Colonnes en conflit de type à trancher (force vs drop)
+# ---------------------------------------------------------------
+cols_a_verifier = ["PRD_VHR32", "PRD_VS37", "PRD_VS35", "PRD_TYPECONTRAT"]
 
-def lire_variables_modele(seg: dict) -> set[str]:
-    """
-    Charge le pickle du modèle (résultats statsmodels OLS) et extrait
-    les noms de variables sources utilisées (sans le suffixe _groupN).
-    """
-    model_path = seg.get("Model_path")
-    if not model_path:
-        return set()
+resultats_usage = check_variables_utilisees(cols_a_verifier, segments)
 
-    with open(model_path, "rb") as f:
-        results = pickle.load(f)
+print(" Analyse d'usage des colonnes en conflit de type :")
+for col, usage in resultats_usage.items():
+    detail = ", ".join(f"{t}={'✅' if u else '❌'}" for t, u in usage.items())
+    verdict = "🔧 force" if any(usage.values()) else "🗑️ drop"
+    print(f"  - {col:20s} [{detail}] -> {verdict}")
 
-    params_index = getattr(results, "params", results).index
+column_actions_auto = deriver_column_actions(resultats_usage)
 
-    pattern = re.compile(r"_group\d+.*$")
-    vars_sources = {
-        pattern.sub("", nom) for nom in params_index
-        if nom != "Intercept"
-    }
-    return vars_sources
+column_actions = {
+    # "RET_CORP": "drop",      # on la supprime partout
+    **column_actions_auto,
+}
 
+# Définir le type cible pour les colonnes en mode "force"
+# ---------------------------------------------------------------
+force_map = {"Jenks_class": pl.Int64}  # à compléter si une colonne ressort en "force"
 
-def check_variables_utilisees(
-    cols_a_verifier: list[str],
-    segments: list[dict],
-) -> dict[str, dict[str, bool]]:
-    """
-    Pour chaque colonne à vérifier, indique si elle est utilisée
-    dans le modèle de chaque type de segment (CURERATE / NONCURE).
-    """
-    resultats: dict[str, dict[str, bool]] = {col: {} for col in cols_a_verifier}
-
-    vars_par_type: dict[str, set[str]] = {}
-    for seg in segments:
-        type_seg = seg["Type"]
-        if type_seg not in vars_par_type:
-            vars_par_type[type_seg] = lire_variables_modele(seg)
-
-    for col in cols_a_verifier:
-        for type_seg, vars_modele in vars_par_type.items():
-            resultats[col][type_seg] = col in vars_modele
-
-    return resultats
-
-
-def deriver_column_actions(resultats: dict[str, dict[str, bool]]) -> dict[str, str]:
-    """
-    force si utilisée dans au moins un modèle, drop sinon.
-    """
-    actions = {}
-    for col, usage in resultats.items():
-        utilisee = any(usage.values())
-        actions[col] = "force" if utilisee else "drop"
-    return actions
+# Appliquer le traitement
+# ---------------------------------------------------------------
+lazy_cleaned = handle_type_conflict_per_column(
+    lazy_by_name=lazy_by_name,
+    type_mismatch_by_type=type_mismatch_by_type,
+    default_action="force",
+    column_actions=column_actions,
+    force_map=force_map,
+)
