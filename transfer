@@ -1,27 +1,57 @@
-def construire_table_seuils(dict_seuils: dict, decimales: int = 2) -> pd.DataFrame:
+import re
+import pickle
+
+def lire_variables_modele(seg: dict) -> set[str]:
     """
-    Table plate, une ligne par tranche CART : variable, colonne_binee,
-    indice_tranche, borne_inf, borne_sup, label, effectif, pct_effectif.
-    effectif = nombre d'observations non-nulles tombées dans la tranche au
-    moment du fit CART (population utilisée pour le découpage, pas
-    nécessairement identique à la population complète en cas de nulls).
+    Charge le pickle du modèle (résultats statsmodels OLS) et extrait
+    les noms de variables sources utilisées (sans le suffixe _groupN).
     """
-    rows = []
-    for var, info in dict_seuils.items():
-        bins = info["bins"]
-        effectifs = info.get("effectifs")
-        total = sum(effectifs) if effectifs else None
-        for i in range(len(bins) - 1):
-            lower, upper = bins[i], bins[i + 1]
-            effectif = effectifs[i] if effectifs else None
-            rows.append({
-                "variable": var,
-                "colonne_binee": info["colonne_binee"],
-                "indice_tranche": i,
-                "borne_inf": lower,
-                "borne_sup": upper,
-                "label": label_intervalle(lower, upper, decimales),
-                "effectif": effectif,
-                "pct_effectif": (100 * effectif / total) if (effectif is not None and total) else None,
-            })
-    return pd.DataFrame(rows)
+    model_path = seg.get("Model_path")
+    if not model_path:
+        return set()
+
+    with open(model_path, "rb") as f:
+        results = pickle.load(f)
+
+    params_index = getattr(results, "params", results).index
+
+    pattern = re.compile(r"_group\d+.*$")
+    vars_sources = {
+        pattern.sub("", nom) for nom in params_index
+        if nom != "Intercept"
+    }
+    return vars_sources
+
+
+def check_variables_utilisees(
+    cols_a_verifier: list[str],
+    segments: list[dict],
+) -> dict[str, dict[str, bool]]:
+    """
+    Pour chaque colonne à vérifier, indique si elle est utilisée
+    dans le modèle de chaque type de segment (CURERATE / NONCURE).
+    """
+    resultats: dict[str, dict[str, bool]] = {col: {} for col in cols_a_verifier}
+
+    vars_par_type: dict[str, set[str]] = {}
+    for seg in segments:
+        type_seg = seg["Type"]
+        if type_seg not in vars_par_type:
+            vars_par_type[type_seg] = lire_variables_modele(seg)
+
+    for col in cols_a_verifier:
+        for type_seg, vars_modele in vars_par_type.items():
+            resultats[col][type_seg] = col in vars_modele
+
+    return resultats
+
+
+def deriver_column_actions(resultats: dict[str, dict[str, bool]]) -> dict[str, str]:
+    """
+    force si utilisée dans au moins un modèle, drop sinon.
+    """
+    actions = {}
+    for col, usage in resultats.items():
+        utilisee = any(usage.values())
+        actions[col] = "force" if utilisee else "drop"
+    return actions
