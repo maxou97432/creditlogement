@@ -1,32 +1,36 @@
-# Colonnes en conflit de type à trancher (force vs drop)
 # ---------------------------------------------------------------
-cols_a_verifier = ["PRD_VHR32", "PRD_VS37", "PRD_VS35", "PRD_TYPECONTRAT"]
-
-resultats_usage = check_variables_utilisees(cols_a_verifier, segments)
-
-print(" Analyse d'usage des colonnes en conflit de type :")
-for col, usage in resultats_usage.items():
-    detail = ", ".join(f"{t}={'✅' if u else '❌'}" for t, u in usage.items())
-    verdict = "🔧 force" if any(usage.values()) else "🗑️ drop"
-    print(f"  - {col:20s} [{detail}] -> {verdict}")
-
-column_actions_auto = deriver_column_actions(resultats_usage)
-
-column_actions = {
-    # "RET_CORP": "drop",      # on la supprime partout
-    **column_actions_auto,
-}
-
-# Définir le type cible pour les colonnes en mode "force"
+# Étape 6bis. Calcul du target pour la population NonCure pure
 # ---------------------------------------------------------------
-force_map = {"Jenks_class": pl.Int64}  # à compléter si une colonne ressort en "force"
+# Contrairement à la population Cure, un compte NonCure n'a pas besoin
+# de blend contrefactuel : P(Cure) = 0 par construction, donc
+# param_CALC = param_OBSERVED directement (LGD réellement observée).
 
-# Appliquer le traitement
+lf_noncure_final = lf_NonCure.with_columns(
+    pl.col(CFG['param_OBSERVED']).alias(CFG['param_CALC'])
+)
+
+# Version lissée par classe Jenks, pour rester cohérent avec le lissage
+# appliqué côté Cure (avg_param_CALC = moyenne réelle par classe)
+lf_noncure_final = lf_noncure_final.with_columns(
+    pl.col(CFG['param_OBSERVED'])
+      .mean()
+      .over("Jenks_class")
+      .alias(f'avg_{CFG["param_CALC"]}')
+)
+
+print("Vérification population NonCure :")
+print(
+    lf_noncure_final
+    .select([CFG['param_OBSERVED'], CFG['param_CALC'], f'avg_{CFG["param_CALC"]}'])
+    .describe()
+)
+
 # ---------------------------------------------------------------
-lazy_cleaned = handle_type_conflict_per_column(
-    lazy_by_name=lazy_by_name,
-    type_mismatch_by_type=type_mismatch_by_type,
-    default_action="force",
-    column_actions=column_actions,
-    force_map=force_map,
+# Fusion Cure (avec blend) + NonCure (brut) avant nettoyage/standardisation
+# ---------------------------------------------------------------
+lf_lgd_full = pl.concat([lf_lgd, lf_noncure_final], how="diagonal_relaxed")
+
+print("Répartition Cure / NonCure dans la base finale :")
+print(
+    lf_lgd_full.select("Sous_modele").collect().to_series().value_counts()
 )
