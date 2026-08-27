@@ -1,8 +1,74 @@
-c = lf_lgd.filter(pl.col("Seg").is_in(["IMMO", "PROFESSIONNEL"])).collect()
-print(c.group_by("Seg").agg([
-    pl.col(CFG['param_CALC']).mean().alias("calc_mean"),
-    pl.col(CFG['param_OBSERVED']).mean().alias("obs_mean"),
-    pl.col('p_CURE').mean().alias("p_cure_mean"),
-    pl.col('avg_param_Cure').mean().alias("avg_cure_mean"),
-    pl.col('score_NonCure').mean().alias("score_nc_mean"),  # déjà /100 si tu regardes après le fix
-]))
+def _diagnostiquer_absence_coupure(pdf: pd.DataFrame, col: str, min_leaf: int) -> str:
+    """
+    Diagnostique pourquoi un CART n'a produit aucune coupure sur `col`,
+    à partir des données déjà chargées (pdf). Retourne un motif détaillé
+    plutôt que le générique "pas de coupure trouvée".
+    """
+    valeurs = pdf[col]
+    n_obs = len(valeurs)
+    n_uniques = valeurs.nunique()
+
+    if n_uniques <= 1:
+        valeur_unique = valeurs.iloc[0] if n_obs > 0 else None
+        return f"variable constante (valeur unique={valeur_unique}, n_obs={n_obs})"
+
+    if n_uniques < 2 * min_leaf / n_obs * n_uniques:  # garde simple, remplacé ci-dessous
+        pass
+
+    # Rapport entre l'effectif du plus petit groupe de valeurs identiques et
+    # min_leaf : si même la modalité la plus fréquente ne suffit pas à
+    # constituer un groupe minoritaire viable des deux côtés d'une coupure,
+    # l'arbre ne peut structurellement rien découper.
+    effectifs_valeurs = valeurs.value_counts()
+    variance = valeurs.var()
+
+    if n_uniques < 3:
+        return (f"trop peu de valeurs distinctes pour couper (n_uniques={n_uniques}, "
+                f"n_obs={n_obs})")
+
+    if variance is not None and (pd.isna(variance) or variance == 0):
+        return f"variance nulle malgré {n_uniques} valeurs distinctes (n_obs={n_obs})"
+
+    # Cas le plus fréquent en pratique : min_samples_leaf (en % pop) est trop
+    # élevé pour la distribution de la variable — ex. une valeur concentre
+    # à elle seule > (n_obs - min_leaf) individus, rendant toute coupure
+    # asymétrique impossible sous la contrainte.
+    effectif_max_modalite = effectifs_valeurs.iloc[0]
+    if effectif_max_modalite > n_obs - min_leaf:
+        pct_modalite = 100 * effectif_max_modalite / n_obs
+        return (f"une modalité concentre {effectif_max_modalite} obs ({pct_modalite:.1f}% "
+                f"de n_obs={n_obs}), incompatible avec min_samples_leaf={min_leaf}")
+
+    return (f"aucune coupure valide sous contrainte min_samples_leaf={min_leaf} "
+            f"(n_obs={n_obs}, n_uniques={n_uniques})")
+
+def _diagnostiquer_absence_coupure(pdf: pd.DataFrame, col: str, min_leaf: int) -> str:
+    """
+    Diagnostique pourquoi un CART n'a produit aucune coupure sur `col`,
+    à partir des données déjà chargées (pdf). Retourne un motif détaillé
+    plutôt que le générique "pas de coupure trouvée".
+    """
+    valeurs = pdf[col]
+    n_obs = len(valeurs)
+    n_uniques = valeurs.nunique()
+
+    if n_uniques <= 1:
+        valeur_unique = valeurs.iloc[0] if n_obs > 0 else None
+        return f"variable constante (valeur unique={valeur_unique}, n_obs={n_obs})"
+
+    if n_uniques < 3:
+        return f"trop peu de valeurs distinctes pour couper (n_uniques={n_uniques}, n_obs={n_obs})"
+
+    variance = valeurs.var()
+    if variance is not None and (pd.isna(variance) or variance == 0):
+        return f"variance nulle malgré {n_uniques} valeurs distinctes (n_obs={n_obs})"
+
+    effectifs_valeurs = valeurs.value_counts()
+    effectif_max_modalite = effectifs_valeurs.iloc[0]
+    if effectif_max_modalite > n_obs - min_leaf:
+        pct_modalite = 100 * effectif_max_modalite / n_obs
+        return (f"une modalité concentre {effectif_max_modalite} obs ({pct_modalite:.1f}% "
+                f"de n_obs={n_obs}), incompatible avec min_samples_leaf={min_leaf}")
+
+    return (f"aucune coupure valide sous contrainte min_samples_leaf={min_leaf} "
+            f"(n_obs={n_obs}, n_uniques={n_uniques})")
