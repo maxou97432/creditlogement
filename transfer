@@ -1,2 +1,8 @@
-c = lf_cure_w_nc_p.collect()
-print(c.select(["score_NonCure", "avg_param_Cure", "p_CURE"]).describe())
+c = lf_lgd.filter(pl.col("Seg").is_in(["IMMO", "PROFESSIONNEL"])).collect()
+print(c.group_by("Seg").agg([
+    pl.col(CFG['param_CALC']).mean().alias("calc_mean"),
+    pl.col(CFG['param_OBSERVED']).mean().alias("obs_mean"),
+    pl.col('p_CURE').mean().alias("p_cure_mean"),
+    pl.col('avg_param_Cure').mean().alias("avg_cure_mean"),
+    pl.col('score_NonCure').mean().alias("score_nc_mean"),  # déjà /100 si tu regardes après le fix
+]))
